@@ -248,7 +248,9 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
   - collect.cjs는 Herdr 터미널 목록, 각 저장소의 git 워크트리, Claude Code 세션 기록(`~/.claude`)을 로컬에서 읽습니다.
   - GitHub 이슈·PR·리뷰·CI는 `gh`로 GraphQL 한 번에 읽습니다. 쓰기는 하지 않습니다.
   - 캐시는 로컬 30초, GitHub 3분입니다. 처음 읽을 때는 5~15초쯤 걸립니다.
-- 받은편지함은 오른쪽 패널에 작은 요약 칸으로 놓이고, 누르면 채팅 전체가 떠 있는 창(키 `inbox`, 위치 기억)으로 열립니다. 요약 칸과 창이 각자 `mods/inbox/inbox.cjs`를 5초마다 불러 `~/.herdr-inbox/<리더>.jsonl`(리더 보고 기록)을 읽습니다. 읽기만 하고 쓰지 않습니다.
+- 받은편지함은 오른쪽 패널에 작은 요약 칸으로 놓이고, 누르면 채팅 전체가 떠 있는 창(키 `inbox`, 위치 기억)으로 열립니다. 요약 칸은 30초, 창은 열려 있는 동안 5초마다 `mods/inbox/inbox.cjs`를 불러 `~/.herdr-inbox/<리더>.jsonl`(리더 보고 기록)을 읽습니다. 읽기만 하고 쓰지 않습니다.
+  - 탭 줄 `받은편지함` 숫자는 `tabs-mine`이 `wait` 표시가 붙은 `lead-*` 터미널을 직접 세어, 패널이 닫혀 있어도 맞습니다.
+  - 답은 클립보드에 담아 PO 칸(리더 터미널의 부모, `role=po` 라벨 필수)에 붙여 넣고 Enter는 직접 누릅니다.
 - 예약 패널은 `mods/schedules/schedules.cjs`를 30초마다 불러 때가 된 예약을 실행합니다.
   - 실행은 `hc run --bg`로 세션을 띄운 뒤 `hc send`로 프롬프트를 보내는 방식입니다.
 
