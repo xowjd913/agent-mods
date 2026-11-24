@@ -293,6 +293,7 @@ export default class Schedules extends View {
       if (d.needsConfirm) this.syncAsk = { kind: "public", args, text: d.error };
       else if (d.ok) this.setMsg(cx, d.changed === false ? "저장소의 기록과 같아서 바뀐 것이 없습니다." : `${d.count}개를 저장소에 기록하고 push했습니다.`);
       else this.setMsg(cx, d.error || "기록하지 못했습니다.", true);
+      this.loadRepo(cx); // 이메일을 고친 뒤 안내가 남지 않게 저장소 상태를 다시 읽는다
       cx.notify();
     });
   }
@@ -855,7 +856,7 @@ export default class Schedules extends View {
       .when(ready && !this.repo.emailOk && !this.repo.emailBlock, (el) => el.child(this.note(t, "비공개 저장소(또는 원격 없음)라 커밋 이메일을 바꾸지 않아도 기록할 수 있습니다.")))
       .when(!ready && !this.repo?.error, (el) => el.child(this.note(t, "저장소를 고르면 예약을 그 저장소의 herdr-schedules/에 기록할 수 있습니다. 비공개 저장소를 권장합니다.")))
       .child(h_flex().gap(6).items_center().flex_wrap()
-        .child(this.button(t, "sync-all", "모두 기록", (cx) => this.record(["--all"], cx), { disabled: !ready || this.repo.emailBlock || this.syncBusy || !(this.items ?? []).length }))
+        .child(this.button(t, "sync-all", "모두 기록", (cx) => this.record(["--all"], cx), { disabled: !ready || this.syncBusy || !(this.items ?? []).length }))
         .child(this.button(t, "sync-import", "저장소에서 불러오기", (cx) => this.importRepo(cx), { disabled: !ready || this.syncBusy }))
         .when(this.syncBusy, (el) => el.child(div().text_size(11).text_color(t.dim).child("처리 중…"))))
       .when(Boolean(ask), (el) => el.child(v_flex().gap(5).pt(2)

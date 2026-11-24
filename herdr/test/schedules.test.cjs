@@ -806,7 +806,7 @@ test("기록 저장소: noreply 이메일이면 상태를 읽을 때 gh를 부�
   assert.deepEqual([st.emailOk, st.emailBlock, ghCalls], [true, false, 0]);
 });
 
-test("기록 저장소: 이메일이 막힌 기록도 공개 여부는 gh로 한 번만 묻는다", () => {
+test("기록 저장소: noreply가 아닌 비공개 저장소 기록은 공개 여부를 gh로 한 번만 묻는다", () => {
   const f = syncFixture("true");
   seed([worktreeAuto(f.work)]);
   git(f.repo, "config", "user.email", "me@company.com");
