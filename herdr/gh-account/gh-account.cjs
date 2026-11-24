@@ -998,10 +998,11 @@ function loginRun(ctx, prev, opts = {}) {
       }
       const now = activeLogin(ghLogins(ctx));
       const back = restoreActive(ctx, st.prev, now);
-      // 진짜 gh 를 바로 돌렸으므로 래퍼의 다시 맞추기가 돌지 않는다. 새 계정의 커밋 신원을 여기서 맞춘다(설치·매핑이 있을 때만).
+      // 진짜 gh 를 바로 돌렸으므로 래퍼의 다시 맞추기가 돌지 않는다. 새 계정의 커밋 신원을 여기서 맞춘다.
+      // 설치돼 있을 때만: 되돌린 뒤(매핑 파일은 남는다)나 설치 전에 git 블록과 신원 파일을 새로 쓰면 안 된다.
       let synced = null;
       const P = paths(ctx);
-      if (readState(P.state) || fs.existsSync(P.map)) { try { synced = sync(ctx); } catch { synced = false; } }
+      if (readState(P.state)) { try { synced = sync(ctx); } catch { synced = false; } }
       const note = synced === false ? "커밋 신원을 다시 맞추지 못했습니다. gh-account sync 를 실행하세요." : null;
       st = { ...st, state: "done", added: now, restored: back.ok, switched: back.switched, synced, message: [back.message, note].filter(Boolean).join(" ") || null };
       writeLogin(ctx, st);

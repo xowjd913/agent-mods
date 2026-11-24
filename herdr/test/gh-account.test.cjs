@@ -893,7 +893,9 @@ function fakeChild() {
 }
 
 test("loginRun: 코드와 주소를 적고, 성공하면 원래 활성 계정으로 한 번 되돌린다", async () => {
-  const { ctx, g, app } = panelSetup();
+  const { ctx, g, app, home } = panelSetup();
+  ctx.env.GH_ACCOUNT_BIN = path.join(home, "bin");
+  assert.equal(ga.install(ctx, { src: CLI }, () => {}), 0);
   const child = fakeChild();
   const spawned = [];
   ctx.spawn = (cmd, args, opts) => { spawned.push({ cmd, args, env: opts.env }); return child; };
@@ -920,6 +922,32 @@ test("loginRun: 코드와 주소를 적고, 성공하면 원래 활성 계정으
   assert.equal(st.synced, true);
   const logins = JSON.parse(fs.readFileSync(path.join(app, "gh-account", "logins.json"), "utf8")).logins;
   assert.ok(logins.includes("acct-c"), logins.join(","));
+});
+
+test("loginRun: 매핑 파일만 있고 설치돼 있지 않으면(설치 전·되돌린 뒤) git 블록과 신원 파일을 쓰지 않는다", async () => {
+  const { ctx, app, home } = panelSetup();
+  // 설치했다가 되돌린 상태: 매핑 파일은 남고 state.json 은 없다.
+  ctx.env.GH_ACCOUNT_BIN = path.join(home, "bin");
+  assert.equal(ga.install(ctx, { src: CLI }, () => {}), 0);
+  assert.equal(ga.uninstall(ctx, {}, () => {}), 0);
+  assert.ok(fs.existsSync(path.join(app, "gh-accounts.json")), "되돌려도 매핑 파일은 남는다");
+  const before = fs.existsSync(ctx.env.GIT_CONFIG_GLOBAL) ? fs.readFileSync(ctx.env.GIT_CONFIG_GLOBAL, "utf8") : null;
+  for (const run of [0, 1]) {
+    if (run === 1) assert.equal(fs.existsSync(path.join(app, "gh-account")), false, "되돌리면 폴더가 없다");
+    const child = fakeChild();
+    ctx.spawn = () => child;
+    const p = ga.loginRun(ctx, "acct-a");
+    child.emit("close", 0);
+    assert.equal(await p, 0);
+    assert.equal(ga.loginStatus(ctx).synced, null);
+    const now = fs.existsSync(ctx.env.GIT_CONFIG_GLOBAL) ? fs.readFileSync(ctx.env.GIT_CONFIG_GLOBAL, "utf8") : null;
+    assert.equal(now, before, "git 설정이 그대로");
+    assert.ok(!now || !now.includes("gh-account"), "gh-account 블록이 없다");
+    assert.equal(fs.existsSync(path.join(app, "gh-account", "identity")), false, "신원 파일을 쓰지 않는다");
+    assert.equal(fs.existsSync(path.join(app, "gh-account", "logins.json")), false);
+    assert.equal(ga.statusInfo(ctx).block, false);
+    fs.rmSync(path.join(app, "gh-account"), { recursive: true, force: true });
+  }
 });
 
 test("loginRun: 성공해도 설치·매핑이 없으면 git 설정을 건드리지 않는다", async () => {
