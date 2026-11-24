@@ -1,7 +1,7 @@
 #!/bin/sh
 # Herdr 모드를 설치·갱신한다(macOS·Linux). 다시 실행해도 된다.
 #   기본 모드: tabs-mine, work, prs, wt-menu, schedules
-#   추가 모드(--extras): usage-status, agent-groups, leader-tabs, path-menu
+#   추가 모드(--extras): usage-status, agent-groups, leader-tabs, path-menu, inbox
 #   인자 없이 실행하면 설치된 모드만 갱신한다(처음이면 기본 모드를 설치한다).
 #   --only work,prs / --add usage-status / --remove leader-tabs / --list 로 모드를 고를 수 있다.
 # 저장소를 받지 않고 바로 실행할 수도 있다.
@@ -33,7 +33,7 @@ while [ $# -gt 0 ]; do
     -h|--help)
       echo "사용법: sh install.sh [--extras | --only 모드,.. | --add 모드,.. | --remove 모드,.. | --list]"
       echo "  (인자 없음)  설치된 모드만 갱신한다. 처음이면 기본 모드를 설치한다."
-      echo "  --extras     모든 모드(추가 모드 usage-status, agent-groups, leader-tabs, path-menu 포함)를 설치한다."
+      echo "  --extras     모든 모드(추가 모드 usage-status, agent-groups, leader-tabs, path-menu, inbox 포함)를 설치한다."
       echo "  --only       고른 모드만 설치·갱신한다. 다른 설치된 모드는 그대로 둔다."
       echo "  --add        설치된 모드에 고른 모드를 더한다."
       echo "  --remove     고른 모드를 지우고 그 모드가 바꾼 레이아웃 블록을 되돌린다."

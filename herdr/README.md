@@ -35,6 +35,7 @@
 | 작업별 묶음 (`agent-groups`) | 사이드바에서 터미널을 리더별로 묶고 리더 아래에 팀원을 둡니다 | 추가 | [agent-groups](../docs/mods/agent-groups.md) |
 | 리더 탭 (`leader-tabs`) | 리더 세션이 둘 이상이면 칸 머리줄에 리더 탭을 띄웁니다 | 추가 | [leader-tabs](../docs/mods/leader-tabs.md) |
 | 경로 메뉴 (`path-menu`) | 터미널의 파일 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄웁니다 | 추가 | [path-menu](../docs/mods/path-menu.md) |
+| 받은편지함 (`inbox`) | 리더 결과 보고를 채팅처럼 보여 주고, 결정이 필요한 보고에 답하면 PO 터미널에 입력으로 전해 줍니다 | 추가 | [inbox](../docs/mods/inbox.md) |
 
 <!-- 새 모드: docs/mods/<모드>.md를 같은 틀(제목, 한 줄 소개, 스크린샷, 사용법, 필요한 것, 설치, 돌아가기 링크)로 만들고 위 표와 ../README.md 모드 표에 한 줄씩 더합니다. -->
 
@@ -154,6 +155,7 @@ Windows는 `.\agent-mods\herdr\install.ps1 -Only usage-status`입니다.
   - `work`: `tabs-mine`, `wt-menu`
   - `prs`: `work`, `tabs-mine`, `wt-menu`
   - `schedules`: `tabs-mine`
+  - `inbox`: `tabs-mine`
 - 남은 모드가 쓰는 모드는 지우지 않습니다.
   - 예: `work`가 설치돼 있으면 `--remove wt-menu`는 아무것도 지우지 않고, 함께 지울 이름을 알려 줍니다.
 - `--remove`(Windows는 `-Remove`)는 고른 모드 폴더를 지우고, 그 모드가 바꾼 레이아웃 블록을 되돌립니다.
@@ -229,7 +231,7 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
    - `main`을 복제하고, 그 레이아웃으로 바꿉니다.
 3. **블록 넣기**: `dashboard`에 설치된 모드의 블록을 넣습니다.
    - `tabs-mine`: 탭 줄 `tabs`를 `tabs-mine`으로 바꿉니다.
-   - `work`·`prs`·`schedules`: 오른쪽 패널에 `work-board`, `pr-board`, `schedules-board`를 더합니다.
+   - `work`·`prs`·`schedules`·`inbox`: 오른쪽 패널에 `work-board`, `pr-board`, `schedules-board`, `inbox-board`를 더합니다.
    - `agent-groups`: `agents`를 `agent-groups`로 바꿉니다.
    - `usage-status`: `workspace-status`를 `usage-status`로 바꿉니다.
    - `leader-tabs`: 칸 머리줄 `pane`을 `leader-tabs`로 바꿉니다.
@@ -246,6 +248,11 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
   - collect.cjs는 Herdr 터미널 목록, 각 저장소의 git 워크트리, Claude Code 세션 기록(`~/.claude`)을 로컬에서 읽습니다.
   - GitHub 이슈·PR·리뷰·CI는 `gh`로 GraphQL 한 번에 읽습니다. 쓰기는 하지 않습니다.
   - 캐시는 로컬 30초, GitHub 3분입니다. 처음 읽을 때는 5~15초쯤 걸립니다.
+- 받은편지함은 오른쪽 패널에 한 목록(기다리는 결정·확인이 붉게 맨 위, 그 아래 보고가 새 것부터 한 줄씩, 보고는 최대 20줄)으로 놓입니다. 줄이나 `창 열기`를 누르면 채팅 전체가 떠 있는 창(키 `inbox`, 위치 기억)으로 열리고, 줄을 눌렀다면 그 건이 맨 위에 펼쳐진 채 나옵니다. 목록은 30초, 창은 열려 있는 동안 5초마다 `mods/inbox/inbox.cjs`를 불러 `~/.herdr-inbox/<리더>.jsonl`(리더 보고 기록)을 읽습니다. 읽기만 하고 쓰지 않습니다.
+  - 탭 줄 `받은편지함` 숫자는 `tabs-mine`이 `wait` 라벨이 `decision`·`verify`인 `lead-*` 터미널을 직접 셉니다. 목록 머리줄과 앱 아이콘 숫자도 같은 규칙이라 서로 같고, 패널이 닫혀 있어도 맞습니다.
+  - 카드는 접힌 채 시작하고(`자세히`/`접기` 버튼으로 펼침, 상태 저장), 펼친 본문은 목록·소제목으로 풀어 보여 줍니다. 백틱 코드·`$ ` 줄·줄 전체가 명령인 이름표 줄만 `복사` 버튼이 있는 고정폭 상자에 담고, 링크는 `PR #26`처럼 짧은 이름으로 앱 안 `open_url`로 엽니다. 카드 글자는 모두 드래그로 골라 `Cmd+C`로 복사할 수 있습니다.
+  - 창의 `결정 필요`·`결과 보고` 칸은 머리줄(`▾`/`▸`)을 눌러 접고 펼 수 있고 상태가 저장됩니다. 답을 이미 보낸 결정·확인은 `결과 보고`에 중립색 `결정 · 답함` 표시로 남고, 붉은 표시는 기다리는 건에만 붙습니다. 제목·소제목은 본문보다 큰 글자로 보입니다.
+  - 답은 클립보드에 담아 PO 칸(리더 터미널의 부모, `role=po` 라벨 필수)에 붙여 넣고 Enter는 직접 누릅니다.
 - 예약 패널은 `mods/schedules/schedules.cjs`를 30초마다 불러 때가 된 예약을 실행합니다.
   - 실행은 `hc run --bg`로 세션을 띄운 뒤 `hc send`로 프롬프트를 보내는 방식입니다.
 
@@ -261,5 +268,6 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
 | `<설정 폴더>/schedules/` | 예약(`automations.json`)과 실행 기록(`runs.json`) | 지우면 예약이 사라집니다 |
 | `<설정 폴더>/data/prs/` | PRs `옆에 열기` 상태 | 언제든 |
 | `~/.claude/usage-limits.json` | usage-status가 읽는 파일(다른 도구가 씀) | 이 저장소가 만들지 않습니다 |
+| `~/.herdr-inbox/<리더>.jsonl` | inbox가 읽는 리더 보고 기록(`report`가 씀) | 이 저장소가 만들지 않습니다. 지우면 그 리더의 보고가 사라집니다 |
 
 패널 선택이나 토글 같은 화면 설정은 Herdr가 모드마다 따로 보관합니다.

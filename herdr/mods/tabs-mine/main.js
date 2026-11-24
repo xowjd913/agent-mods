@@ -28,6 +28,9 @@ function label(tab, lead) {
   return (tab.name === prog || !tab.named) && telling ? live : base;
 }
 
+// Which terminal is a waiting leader. Copied verbatim from inbox/inbox.cjs (a test keeps them identical).
+const waitingKind = (t) => (/^lead-/.test(String(t?.name ?? "")) ? (["decision", "verify"].find((k) => k === String(t.labels?.wait ?? "").trim().toLowerCase()) ?? "") : "");
+
 export default class Tabs extends View {
   init(_props, cx) {
     this.attention = 0;
@@ -167,6 +170,9 @@ export default class Tabs extends View {
     });
   }
 
+  // 답을 기다리는 리더 수: 대기 라벨(decision|verify)이 붙은 lead-* 터미널(받은편지함 요약 칸과 같은 규칙, inbox.cjs의 waitingKind). 받은편지함 칸이 닫혀 있어도 터미널 라벨만 보므로 늘 맞다.
+  inboxWaiting() { return (terminals() ?? []).filter((t) => waitingKind(t)).length; }
+
   // One tab per wheel notch. A touchpad or smooth-scrolling mouse sends many
   // small events per gesture: a short swipe or one smoothed notch (about
   // 25 px) switches one tab, a longer swipe keeps going a tab per 60 px, at
@@ -263,7 +269,7 @@ export default class Tabs extends View {
     // Another mod may set workspace.panels without our ids: always offer the panels this layout actually has,
     // and drop the ones it doesn't (the stock list names Files, which this layout replaced).
     const have = (body?.children ?? []).map(c => c.id);
-    const listed = shared("workspace.panels") ?? ["files", "changes", "work-board", "pr-board", "schedules-board"];
+    const listed = shared("workspace.panels") ?? ["files", "changes", "work-board", "pr-board", "schedules-board", "inbox-board"];
     const enabled = [...new Set([...listed.filter(id => !have.length || have.includes(id)), ...have])];
     this.syncPanel(space, panel, body, enabled);
     const panelButton = (id, label, icon, badge) => {
@@ -276,7 +282,7 @@ export default class Tabs extends View {
           else { run("layout.select", { stack: "panel-body", child: id }); run("layout.show", { id: "panel" }); }
         }).child(svg(icon).size(14)).child(label)
         .when(badge > 0, (el) => el.child(div().flex_none().min_w(16).h(16).px(4).rounded(8).bg(t.blocked).flex().items_center().justify_center().text_size(10.5).font_semibold().text_color("#ffffff")
-          .tooltip("내 확인이 필요한 PR (내 PR 중 CI 실패·수정 요청, 내게 온 리뷰 요청)").child(String(badge))));
+          .tooltip("알림 수: PRs는 내 확인이 필요한 PR(내 PR 중 CI 실패·수정 요청, 내게 온 리뷰 요청), 받은편지함은 답을 기다리는 리더").child(String(badge))));
     };
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
@@ -290,6 +296,7 @@ export default class Tabs extends View {
       .when(enabled.includes("work-board"), el => el.child(panelButton("work-board", "Work", "mods/workspace-chrome/layers.svg")))
       .when(enabled.includes("pr-board"), el => el.child(panelButton("pr-board", "PRs", "mods/workspace-chrome/git-compare.svg", this.attention)))
       .when(enabled.includes("schedules-board"), el => el.child(panelButton("schedules-board", "예약", "mods/workspace-chrome/clock.svg")))
+      .when(enabled.includes("inbox-board"), el => el.child(panelButton("inbox-board", "받은편지함", "mods/workspace-chrome/archive.svg", this.inboxWaiting())))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/tabs/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));
