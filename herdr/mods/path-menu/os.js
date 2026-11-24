@@ -45,6 +45,24 @@ export async function kindOf(path) {
   return kind === "dir" || kind === "file" ? kind : "missing";
 }
 
+// Kinds of several local paths in one quiet command (no toasts): used to test the joined guesses
+// for a split path, where most guesses are expected not to exist. null when the check failed.
+export async function kindsOf(paths, { timeout = 5000 } = {}) {
+  if (!paths.length) return [];
+  let r;
+  try {
+    r = platform() === "windows"
+      ? await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+        `$ErrorActionPreference = 'Stop'; foreach ($p in @(${paths.map((x) => psText(String(x))).join(",")})) { try { if (Test-Path -LiteralPath $p -PathType Container) {'dir'} elseif (Test-Path -LiteralPath $p) {'file'} else {'missing'} } catch {'missing'} }`], { timeout })
+      : await exec("sh", ["-c", 'for p in "$@"; do if [ -d "$p" ]; then echo dir; elif [ -e "$p" ]; then echo file; else echo missing; fi; done', "sh", ...paths], { timeout });
+  } catch {
+    return null;
+  }
+  if (r.code !== 0) return null;
+  const kinds = r.stdout.split(/\r?\n/).map((k) => k.trim()).filter(Boolean);
+  return kinds.length === paths.length ? kinds.map((k) => (k === "dir" || k === "file" ? k : "missing")) : null;
+}
+
 // A folder opens itself; a file opens its folder with the file selected (Linux: just the parent folder).
 export function openFolder(path, isDir) {
   const p = platform();
