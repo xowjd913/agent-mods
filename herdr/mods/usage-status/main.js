@@ -8,13 +8,15 @@ const REFRESH_MS = 60 * 1000; // 1분마다 다시 읽는다.
 const STALE_MS = 10 * 60 * 1000; // 10분 넘게 갱신되지 않으면 Unknown으로 본다.
 const WARN = 80; // 이 값 이상이면 경고 색으로 보여 준다.
 const LABEL = { five_hour: "5h", seven_day: "7d" };
-const BAR_WIDTH = 8; // 아래 상태 줄이 좁아서 막대는 8칸으로 줄였다(model-badge는 더 길다).
+const TRACK_W = 44; // 선 막대 전체 폭(px). 아래 상태 줄이 좁아서 짧게 잡았다.
+const TRACK_H = 3; // 선 두께(px)
+const MIN_FILL = 2; // 0보다 크면 최소 이만큼은 보이게 한다(px).
 
-// 사용률 막대. 채움 ▰·빈칸 ▱는 model-badge 모델 상태 막대와 같은 글자 쌍이다(얇은 선 ━·─는 모양 차이가 작아 구분이 어려웠다). 0보다 크면 최소 1칸, 100%를 넘어도 칸은 넘치지 않는다.
-export function barOf(percent, width = BAR_WIDTH) {
+// 채운 선의 폭(px). 0 이하·NaN은 0, 0보다 크면 최소 MIN_FILL, 100%를 넘어도 track을 넘치지 않는다.
+export function fillWidth(percent, track = TRACK_W) {
   const p = Number.isFinite(percent) ? Math.max(0, percent) : 0;
-  const filled = Math.min(width, Math.max(p > 0 ? 1 : 0, Math.round((p / 100) * width)));
-  return { filled: "▰".repeat(filled), empty: "▱".repeat(width - filled) };
+  if (p === 0) return 0;
+  return Math.min(track, Math.max(MIN_FILL, Math.round((p / 100) * track)));
 }
 
 // usage-limits.json 내용을 [{label, percent}] 또는 null(Unknown)로 바꾼다.
@@ -61,11 +63,11 @@ export default class UsageStatus extends View {
     return this.usage.reduce((el, u) => {
       const warn = u.percent >= WARN;
       const color = warn ? t.blocked : t.muted; // 라벨·퍼센트 색
-      const fill = warn ? t.blocked : t.foreground; // 채운 칸은 테마에서 가장 또렷한 글자색(foreground), 빈칸은 t.dim
-      const bar = barOf(u.percent);
+      const fill = warn ? t.blocked : t.foreground; // 채운 선은 테마에서 가장 또렷한 글자색(foreground), 빈 선(track)은 훨씬 어두운 t.border
       return el.child(h_flex().gap(5).items_center()
         .child(div().text_color(t.dim).child(u.label))
-        .child(h_flex().items_center().child(div().text_color(fill).child(bar.filled)).child(div().text_color(t.dim).child(bar.empty)))
+        .child(div().flex_none().w(TRACK_W).h(TRACK_H).rounded(TRACK_H).bg(t.border)
+          .child(div().h(TRACK_H).w(fillWidth(u.percent)).rounded(TRACK_H).bg(fill)))
         .child(div().text_color(color).child(`${u.percent}%`)));
     }, row);
   }
