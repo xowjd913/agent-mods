@@ -136,3 +136,71 @@ test("main.js: 보고 기록이 없어도 라벨만으로 카드를 만들고 �
   assert.ok(!/this\.sent\b/.test(src)); // 창 안에만 있던 표시는 없다
   assert.match(src, /다른 것을 복사하기 전에/);
 });
+
+// ---- 읽기 쉬운 본문(parseBody)
+const flat = (segs) => segs.map((g) => (g.k === "l" ? `<${g.label}>` : g.k === "c" ? `\`${g.v}\`` : g.v)).join("");
+const shape = (bl) => bl.filter((b) => b.t !== "gap").map((b) => (b.t === "code" ? `code:${b.text}` : `${b.t}${b.mark ? b.mark : ""}:${flat(b.segs)}`));
+
+test("linkLabel: PR·이슈·댓글은 짧은 이름, 나머지는 줄인 호스트/경로", () => {
+  assert.equal(I.linkLabel("https://github.com/xowjd913/agent-mods/pull/26"), "PR #26");
+  assert.equal(I.linkLabel("https://github.com/xowjd913/agent-mods/pull/26/files"), "PR #26");
+  assert.equal(I.linkLabel("https://github.com/xowjd913/agent-mods/issues/25"), "issue #25");
+  assert.equal(I.linkLabel("https://github.com/xowjd913/agent-mods/pull/26#issuecomment-123"), "comment");
+  assert.equal(I.linkLabel("https://example.com/a/"), "example.com/a");
+  assert.ok(I.linkLabel("https://example.com/" + "x".repeat(80)).length <= 28);
+  assert.equal(I.linkLabel("not a url"), "not a url");
+});
+
+test("parseBody: 제목·목록·번호 목록·문단을 나누고 줄바꿈과 빈 줄 간격을 지킨다", () => {
+  const bl = I.parseBody("## 요약\n첫 줄\n- 하나\n  - 안쪽\n1. 일\n2) 이\n\n끝");
+  assert.deepEqual(shape(bl), ["h:요약", "p:첫 줄", "li•:하나", "li•:안쪽", "li1.:일", "li2.:이", "p:끝"]);
+  assert.equal(bl.find((b) => b.t === "li" && flat(b.segs) === "안쪽").depth, 1);
+  assert.ok(bl.some((b) => b.t === "gap"));
+});
+
+test("parseBody: 짧은 '라벨:' 줄과 '되돌리기: 내용' 줄은 소제목이 된다", () => {
+  const bl = I.parseBody("따라 하기(새 터미널에 붙여 넣기):\n1. 해 본다\n\n아직 못 해 본 것: 마우스 클릭");
+  assert.deepEqual(shape(bl), ["h:따라 하기(새 터미널에 붙여 넣기)", "li1.:해 본다", "h:아직 못 해 본 것", "p:마우스 클릭"]);
+  const cmd = I.parseBody("되돌리기: cd ~/x && sh a.sh --remove inbox, 그다음 git checkout main && sh a.sh");
+  assert.deepEqual(shape(cmd), ["h:되돌리기", "code:cd ~/x && sh a.sh --remove inbox", "p:그다음", "code:git checkout main && sh a.sh"]);
+});
+
+test("parseBody: 명령은 코드 블록으로 빼고(전체가 복사됨), 일반 `코드`는 인라인으로 둔다", () => {
+  const bl = I.parseBody("1. 설치: [ -d ~/a ] || git clone https://x.y/z ~/a; cd ~/a && sh i.sh --add inbox\n2. `받은편지함` 버튼을 누릅니다\n3. 실행 `hc label t1 role=po` 하세요\n$ ls -la\n```\na\nb\n```");
+  assert.deepEqual(shape(bl), [
+    "li1.:설치:",
+    "code:[ -d ~/a ] || git clone https://x.y/z ~/a; cd ~/a && sh i.sh --add inbox",
+    "li2.:`받은편지함` 버튼을 누릅니다",
+    "li3.:실행 ",
+    "code:hc label t1 role=po",
+    "p: 하세요",
+    "code:ls -la",
+    "code:a\nb",
+  ]);
+});
+
+test("parseBody: URL은 짧은 링크로, 끝의 문장부호는 링크에서 뺀다. 모르는 문법은 글자 그대로 둔다", () => {
+  const bl = I.parseBody("보기 https://github.com/o/r/pull/7). 그리고 *굵게* | 표 | `짝 없는 백틱");
+  assert.equal(flat(bl[0].segs), "보기 <PR #7>). 그리고 *굵게* | 표 | `짝 없는 백틱");
+  const l = bl[0].segs.find((g) => g.k === "l");
+  assert.equal(l.v, "https://github.com/o/r/pull/7");
+  assert.deepEqual(I.parseBody(""), []);
+  assert.deepEqual(I.parseBody(null), []);
+  // HTML은 해석하지 않는다: 글자일 뿐이다
+  assert.equal(flat(I.parseBody("<b>x</b>")[0].segs), "<b>x</b>");
+});
+
+test("summarize: 카드마다 blocks·head·lead·long을 붙인다(진짜 확인 보고 모양)", () => {
+  const body = "받은편지함 PR #26이 통과했습니다.\n- PR: https://github.com/xowjd913/agent-mods/pull/26\n\n되돌리기: cd ~/a && sh i.sh --remove inbox";
+  const s = I.summarize("lead-a", text({ ts: "2026-01-01T00:00:00Z", kind: "verify", title: "[lead-a] 최종 확인 요청", body }));
+  const it = s.open;
+  assert.equal(it.head, "최종 확인 요청");
+  assert.equal(it.lead, "받은편지함 PR #26이 통과했습니다.");
+  assert.equal(it.long, true);
+  assert.ok(it.blocks.some((b) => b.t === "h") && it.blocks.some((b) => b.t === "code"));
+  assert.equal(s.items[0].blocks, it.blocks); // 같은 카드는 한 번만 풀어 쓴다
+  const short = I.summarize("lead-a", text({ ts: "2026-01-01T00:00:00Z", kind: "done", title: "끝", body: "" }));
+  assert.equal(short.items[0].long, false);
+  const longLead = I.summarize("lead-a", text({ ts: "2026-01-01T00:00:00Z", kind: "done", title: "", body: "가".repeat(300) }));
+  assert.ok(longLead.items[0].lead.length <= 110 && longLead.items[0].long);
+});
