@@ -3,7 +3,7 @@
 
 import { hc, home, notify, openOverlay } from "herdr";
 import { kindOf, kindsOf, platform } from "./os.js";
-import { MAX_GUESSES, joinedPaths, pickJoined } from "./wrap.js";
+import { MAX_GUESSES, ancestors, joinedPaths, pickJoined } from "./wrap.js";
 
 // A path the terminal program broke over several rows arrives as just the clicked piece.
 // Read the screen and return the longest joined path that exists, or null (then link.path is used).
@@ -11,18 +11,17 @@ import { MAX_GUESSES, joinedPaths, pickJoined } from "./wrap.js";
 // Any failure here (no hc, odd output, slow check) just means "no joined path": the click keeps working.
 async function joinedPath(link, source) {
   try {
-    const [screen, info] = await Promise.all([hc(["read", source.terminal, "--json"]), hc(["get", source.terminal])]);
-    if (screen.code !== 0 || info.code !== 0) return null;
+    const screen = await hc(["read", source.terminal, "--json"]);
+    if (screen.code !== 0) return null;
     const text = JSON.parse(screen.stdout)?.text;
-    const cols = JSON.parse(info.stdout)?.cols;
-    if (typeof text !== "string" || !(cols > 0)) return null;
+    if (typeof text !== "string") return null;
     // One list of guesses per place the piece appears; link.path itself is the "not joined" answer.
-    const places = joinedPaths(text.split("\n"), link.raw, cols, {
+    const places = joinedPaths(text.split("\n"), link.raw, {
       cwd: source.cwd,
       home: home(),
       windows: platform() === "windows",
     }).map((guesses) => guesses.filter((p) => p !== link.path));
-    // A place where the piece isn't cut by the edge means it may stand alone: keep link.path, check nothing.
+    // A place where the piece sits inside its row's text means it may stand alone: keep link.path, check nothing.
     if (!places.length || places.some((g) => !g.length)) return null;
     const all = [...new Set(places.flat())];
     if (all.length > MAX_GUESSES) return null;
@@ -31,6 +30,13 @@ async function joinedPath(link, source) {
   } catch {
     return null;
   }
+}
+
+// The nearest existing folder above a missing path, or null.
+async function nearestFolder(path) {
+  const ups = ancestors(path, { windows: platform() === "windows" });
+  const kinds = ups.length ? await kindsOf(ups) : null;
+  return kinds ? ups.find((_, i) => kinds[i] === "dir") ?? null : null;
 }
 
 export async function handleLink({ link, source }) {
@@ -46,7 +52,12 @@ export async function handleLink({ link, source }) {
     // A failed check already showed an error toast; still offer copying.
     const found = await kindOf(link.path);
     kind = found ?? "missing";
-    if (found === "missing") notify({ title: "경로를 찾을 수 없음", body: link.path, level: "warning" });
+    if (found === "missing") {
+      // Still offer 폴더 열기 for the nearest folder that exists; the header shows that folder.
+      const folder = await nearestFolder(link.path);
+      notify({ title: "경로를 찾을 수 없음", body: folder ? `${link.path}\n가까운 폴더: ${folder}` : link.path, level: "warning" });
+      if (folder) [path, kind] = [folder, "dir"];
+    }
   }
   openOverlay({
     mod: "path-menu",

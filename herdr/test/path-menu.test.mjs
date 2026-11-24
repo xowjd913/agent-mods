@@ -26,7 +26,7 @@ register(hooks);
 const { handleLink } = await import("../mods/path-menu/link.js");
 await import("../mods/path-menu/main.js"); // 화면 모듈도 불러와지는지만 본다.
 const { kindOf, kindsOf, openFolder, openFile, copyText, psText } = await import("../mods/path-menu/os.js");
-const { cellWidth, joinCandidates, joinedPaths, pickJoined } = await import("../mods/path-menu/wrap.js");
+const { ancestors, cellWidth, joinCandidates, joinedPaths, pickJoined } = await import("../mods/path-menu/wrap.js");
 
 const local = { terminal: "t1", machine: null, cwd: "/work", pane: null, tab: null, space: null };
 function fake(platform, stdout = "", fail = null) {
@@ -215,7 +215,7 @@ function claudeRows(text, cols, { first = "⏺ ", indent = "  ", gutter = 2 } = 
 }
 // Herdr가 한 줄에서 찾아 넘기는 조각: 줄 속 경로처럼 보이는 낱말(괄호·따옴표·조사 바깥은 뺀다).
 const pieceOf = (row, from) => row.trim().split(" ").find((w) => w.includes(from)).replace(/^[(`'"]+|[)`'".,가-힣]+$/g, "");
-// hc read/get 대답: 화면 글과 칸 수.
+// hc read 대답: 화면 글(get에는 칸 수를 답하지만 이어 붙이기는 칸 수를 쓰지 않는다).
 const screen = (rows, cols) => (a) => a[0] === "read"
   ? { code: 0, stdout: JSON.stringify({ complete: true, how: "screen", text: rows.join("\n") }), stderr: "" }
   : { code: 0, stdout: JSON.stringify({ address: a[1], cols, rows: 40 }), stderr: "" };
@@ -260,7 +260,7 @@ test("두 줄로 나뉜 경로: 윗줄·아랫줄 어느 쪽을 눌러도 이어
       assert.deepEqual(opened(calls), { path, kind: "file" }, `cols ${cols} raw ${raw}`);
       assert.deepEqual(of(calls, "notify"), []);
       assert.equal(of(calls, "exec").length, 1); // 후보 확인 한 번으로 끝난다
-      assert.deepEqual(of(calls, "hc").map((c) => c[0]), [["read", "t1", "--json"], ["get", "t1"]]);
+      assert.deepEqual(of(calls, "hc").map((c) => c[0]), [["read", "t1", "--json"]]);
     }
   }
 });
@@ -294,11 +294,22 @@ test("다음 줄이 글이면 이어 붙인 경로가 없어서 원래 경로를
   }
 });
 
-test("가장자리에 닿지 않은 줄은 붙이지 않는다", () => {
+test("줄 글 가운데 있는 조각은 붙이지 않는다", () => {
+  const rows = ["⏺ 짧은 줄 /home/dev/a 그리고", "  끝 b/c.txt 다음"];
+  assert.deepEqual(joinCandidates(rows, "/home/dev/a"), [[]]);
+  assert.deepEqual(joinCandidates(rows, "b/c.txt"), [[]]);
+  assert.deepEqual(joinCandidates(rows, "없는 조각"), []);
+});
+
+test("오른쪽 끝에 닿지 않아도 줄 글의 끝 조각이면 후보로 내고, 있는지 확인해서 고른다", async () => {
   const rows = ["⏺ 짧은 줄 /home/dev/a", "  b/c.txt 다음"];
-  assert.deepEqual(joinCandidates(rows, "/home/dev/a", 100), [[]]);
-  assert.deepEqual(joinCandidates(rows, "b/c.txt", 100), [[]]);
-  assert.deepEqual(joinCandidates(rows, "없는 조각", 100), []);
+  assert.deepEqual(joinCandidates(rows, "/home/dev/a"), [[{ before: "", after: "b/c.txt" }]]);
+  assert.deepEqual(joinCandidates(rows, "b/c.txt"), [[{ before: "/home/dev/a", after: "" }]]);
+  for (const [exist, want] of [[{ "/home/dev/ab/c.txt": "file" }, "/home/dev/ab/c.txt"], [{ "/home/dev/a": "file" }, "/home/dev/a"]]) {
+    const calls = fakeFs("macos", rows, 100, exist);
+    await click("/home/dev/a", "/home/dev/a");
+    assert.deepEqual(opened(calls), { path: want, kind: "file" });
+  }
 });
 
 test("한글 글 뒤에서 잘린 경로도 칸 너비로 가장자리를 잰다", async () => {
@@ -322,12 +333,12 @@ test("상대 경로는 cwd 기준으로 풀고, 바깥 따옴표·조사·문장
     const rows = claudeRows(`앞 문장을 조금 길게 써서 경로가 잘리게 한다 ${shape.replace("{p}", rel)}`, 90);
     assert.equal(rows.length, 2, rows.join("\n"));
     const bottomRaw = rows[1].trim().split(" ")[0].replace(/[)`'".,가-힣]+$/g, "").replace(/(:\d+)+$/, "");
-    const [guesses] = joinedPaths(rows, bottomRaw, 90, { cwd: "/work", home: "/home/dev" });
+    const [guesses] = joinedPaths(rows, bottomRaw, { cwd: "/work", home: "/home/dev" });
     assert.ok(guesses.includes(`/work/${rel}`), `${shape}\n${guesses.join("\n")}`);
   }
   // ~/ 는 홈 폴더로
   const rows = ["⏺ " + "x".repeat(70) + " ~/notes/a-long-folder", "  -name/today.md 입니다"];
-  assert.ok(joinedPaths(rows, "-name/today.md", cellWidth(rows[0]) + 2, { cwd: "/work", home: "/home/dev" })[0]
+  assert.ok(joinedPaths(rows, "-name/today.md", { cwd: "/work", home: "/home/dev" })[0]
     .includes("/home/dev/notes/a-long-folder-name/today.md"));
 });
 
@@ -336,8 +347,8 @@ test("도구 미리보기(⎿)의 5칸 들여쓰기도 이어 붙인다", () => 
   const rows = claudeRows(path, 64, { first: "  ⎿  ", indent: "     " });
   assert.equal(rows.length, 2);
   const top = rows[0].trim().slice(3).trim();
-  assert.equal(joinedPaths(rows, top, 64, { cwd: "/work" })[0][0], path);
-  assert.equal(joinedPaths(rows, rows[1].trim(), 64, { cwd: "/work" })[0][0], path);
+  assert.equal(joinedPaths(rows, top, { cwd: "/work" })[0][0], path);
+  assert.equal(joinedPaths(rows, rows[1].trim(), { cwd: "/work" })[0][0], path);
 });
 
 test("Windows 경로도 이어 붙이고, 확인 스크립트에는 경로를 글자로 넣지 않는다", async () => {
@@ -355,7 +366,7 @@ test("Windows 경로도 이어 붙이고, 확인 스크립트에는 경로를 �
   assert.ok(!script.includes("’") && !script.includes(path));
   assert.ok(unpsAll(script).includes(path));
   // 상대 경로는 cwd 아래로, 역슬래시로 잇는다
-  const [rel] = joinedPaths(["⏺ " + "x".repeat(60) + " src\\a-long-folder", "  -name\\b.cs 끝"], "src\\a-long-folder", 82,
+  const [rel] = joinedPaths(["⏺ " + "x".repeat(60) + " src\\a-long-folder", "  -name\\b.cs 끝"], "src\\a-long-folder",
     { cwd: "C:\\work\\", windows: true });
   assert.ok(rel.includes("C:\\work\\src\\a-long-folder-name\\b.cs"), rel.join("\n"));
 });
@@ -368,15 +379,18 @@ test("같은 조각이 화면 여러 곳에 있으면 곳마다 따로 붙이고
   const rows = ["⏺ 변경한 파일:", "  - README.md", long + " ".repeat(Math.max(0, cols - 2 - cellWidth(long))), "  README.md 를 보세요."];
   assert.ok(cellWidth(rows[2].trimEnd()) >= cols - 3);
   const source = { ...local, cwd: "/home/dev/proj" };
-  const places = joinedPaths(rows, "README.md", cols, { cwd: "/home/dev/proj", home: "/home/dev" });
+  const places = joinedPaths(rows, "README.md", { cwd: "/home/dev/proj", home: "/home/dev" });
   assert.equal(places.length, 2);
-  assert.deepEqual(places[0], []); // 목록 쪽은 잘리지 않았다
+  assert.ok(places[0].every((p) => !p.startsWith(dir))); // 목록 쪽은 다음 줄 글과만 붙어 없는 경로가 된다
   assert.ok(places[1].includes(`${dir}README.md`));
   const calls = fakeFs("macos", rows, cols, { [`${dir}README.md`]: "file", "/home/dev/proj/README.md": "file" });
   await click("README.md", "/home/dev/proj/README.md", source);
   assert.deepEqual(opened(calls), { path: "/home/dev/proj/README.md", kind: "file" });
-  // 붙인 후보는 확인하지 않고 원래 경로만 본다
-  assert.deepEqual(of(calls, "exec").map((c) => c[1].slice(3)), [["/home/dev/proj/README.md"]]);
+  // 후보를 한 번에 확인하고, 목록 쪽에 맞는 후보가 없으니 원래 경로를 본다
+  const execs = of(calls, "exec").map((c) => c[1].slice(3));
+  assert.equal(execs.length, 2);
+  assert.ok(execs[0].includes(`${dir}README.md`));
+  assert.deepEqual(execs[1], ["/home/dev/proj/README.md"]);
 });
 
 test("같은 경로가 똑같이 두 번 잘려 있으면 그대로 이어 붙인다", async () => {
@@ -405,7 +419,7 @@ test("같은 조각이 서로 다른 경로로 이어지면 어느 것인지 모
   const calls = fakeFs("macos", rows, cols, exist);
   await click("README.md", "/work/README.md");
   assert.deepEqual(opened(calls), { path: "/work/README.md", kind: "missing" });
-  assert.equal(of(calls, "exec").length, 2); // 두 후보를 한 번에 확인, 그다음 원래 경로
+  assert.equal(of(calls, "exec").length, 3); // 두 후보를 한 번에 확인, 원래 경로, 그 위 폴더들
 });
 
 test("화면을 못 읽거나 확인이 실패해도 원래 경로로 메뉴를 연다", async () => {
@@ -440,4 +454,77 @@ test("kindsOf는 경로를 인자로 넘기고 시간 제한을 둔다", async (
   fake("linux", "", "spawn");
   assert.equal(await kindsOf(["/a"]), null);
   assert.deepEqual(await kindsOf([]), []);
+});
+
+// ---- 실제 화면에서 본 두 모양(프로젝트 이름은 중립적인 이름으로 바꿈) ----
+const tmpPath = "/private/tmp/claude-501/-Users-dev-GitProjects-sample/0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d/scratchpad/rewrite-guide.md";
+const tmpBottom = "d/scratchpad/rewrite-guide.md";
+const tmpTop = tmpPath.slice(0, -tmpBottom.length);
+const proj = { ...local, cwd: "/work/proj" };
+
+test("실제 모양 1: 옆 패널 없는 화면에서 경로만 두 줄로 나뉘면 위·아래 어느 조각이든 전체 경로를 연다", async () => {
+  // 68칸 화면: 경로가 들여쓰기 뒤 67칸까지 차고 다음 줄에 이어진다.
+  const cut = 65;
+  const rows = ["⏺ 고쳐 쓴 안내서는 여기 있습니다:", "", `  ${tmpPath.slice(0, cut)}`, `  ${tmpPath.slice(cut)}`, "", "⏺ 다음 단계로 넘어갑니다."];
+  assert.equal(cellWidth(rows[2]), 67);
+  for (const [raw, path] of [[tmpPath.slice(0, cut), tmpPath.slice(0, cut)], [tmpPath.slice(cut), `/work/proj/${tmpPath.slice(cut)}`]]) {
+    const calls = fakeFs("macos", rows, 68, { [tmpPath]: "file" });
+    await click(raw, path, proj);
+    assert.deepEqual(opened(calls), { path: tmpPath, kind: "file" }, raw);
+    assert.deepEqual(of(calls, "notify"), []);
+  }
+});
+
+// 142칸 화면: 왼쪽 글 영역은 공백으로 채운 뒤 │, 그 뒤는 오른쪽 패널. 글이 경계에 바로 붙은 줄과 상자 안 입력 줄도 섞는다.
+function panelRows(left, right, width = 100) {
+  return left.map((r, i) => r + " ".repeat(Math.max(0, width - cellWidth(r))) + "│" + (right[i] ?? ""));
+}
+const panelRight = [" main ↑1 ●2", " ├ src/", " │ ├ index.ts", " │ └ util.ts", " └ README.md", "", " 12:04 빌드 끝", " 12:05 테스트"];
+
+test("실제 모양 2: 오른쪽 패널(│) 앞에서 잘린 경로도 위·아래 어느 조각이든 전체 경로를 연다", async () => {
+  const prose = "⏺ 안내서를 고쳐 썼습니다. 경로가 길어서 다음 줄로 넘어가는데, 이 줄은 패널 경계까지 꽉 차 있을 수";
+  const left = [prose, "  있음. 아래 경로를 여세요:", `  ${tmpTop}`, `  ${tmpBottom}`, "", "│ ❯ 다음 지시를 기다립니다", ""];
+  const rows = panelRows(left, panelRight);
+  rows[0] = prose + "│" + panelRight[0]; // 글이 경계에 바로 붙은 줄
+  rows[5] = panelRows([left[5]], [""], 99)[0].replace(/│$/, "││") + panelRight[5];
+  assert.ok(rows[2].endsWith("│ │ ├ index.ts") && rows[3].includes(`${tmpBottom}  `));
+  for (const [raw, path] of [[tmpTop, tmpTop], [tmpBottom, `/work/proj/${tmpBottom}`]]) {
+    const calls = fakeFs("macos", rows, 142, { [tmpPath]: "file", "/work/proj": "dir" });
+    await click(raw, path, proj);
+    assert.deepEqual(opened(calls), { path: tmpPath, kind: "file" }, raw);
+    assert.deepEqual(of(calls, "notify"), []);
+  }
+  // 상자(│ … │) 안에서 잘려도 같다
+  const boxed = panelRows([`│ ${tmpTop}`, `│ ${tmpBottom}`].map((r) => r + " ".repeat(98 - cellWidth(r)) + "│"), panelRight, 99);
+  for (const raw of [tmpTop, tmpBottom]) {
+    assert.deepEqual(joinedPaths(boxed, raw, { cwd: "/work/proj" })[0][0], tmpPath, raw);
+  }
+});
+
+test("열 경로가 없으면 가장 가까운 있는 폴더를 머리에 보여 주고 폴더 열기를 준다, 아무것도 없으면 경로 복사만", async () => {
+  const rows = panelRows(["⏺ 경로:", `  ${tmpTop}`, `  ${tmpBottom}`], panelRight);
+  // 아래 조각: 이어 붙인 경로도 cwd 기준 경로도 없다 → cwd 아래에서 있는 가장 가까운 폴더
+  let calls = fakeFs("macos", rows, 142, { "/work/proj": "dir", "/work": "dir" });
+  await click(tmpBottom, `/work/proj/${tmpBottom}`, proj);
+  assert.deepEqual(opened(calls), { path: "/work/proj", kind: "dir" });
+  const [[toast]] = of(calls, "notify");
+  assert.equal(toast.title, "경로를 찾을 수 없음");
+  assert.match(toast.body, /가까운 폴더: \/work\/proj$/);
+  assert.deepEqual(of(calls, "exec").at(-1)[1].slice(3), ["/work/proj/d/scratchpad", "/work/proj/d", "/work/proj", "/work", "/"]);
+  // 위 조각: 잘린 경로 위로 올라가며 처음 있는 폴더
+  calls = fakeFs("macos", rows, 142, { "/private/tmp/claude-501": "dir", "/private/tmp": "dir" });
+  await click(tmpTop, tmpTop, proj);
+  assert.deepEqual(opened(calls), { path: "/private/tmp/claude-501", kind: "dir" });
+  // 위 폴더도 하나도 없으면 원래 경로와 경로 복사만
+  calls = fakeFs("macos", rows, 142, {});
+  await click(tmpBottom, `/work/proj/${tmpBottom}`, proj);
+  assert.deepEqual(opened(calls), { path: `/work/proj/${tmpBottom}`, kind: "missing" });
+});
+
+test("ancestors: 가까운 위 폴더부터 뿌리까지", () => {
+  assert.deepEqual(ancestors("/a/b/c.md"), ["/a/b", "/a", "/"]);
+  assert.deepEqual(ancestors("/a"), ["/"]);
+  assert.deepEqual(ancestors("C:\\x\\y\\z.txt", { windows: true }), ["C:\\x\\y", "C:\\x", "C:\\"]);
+  assert.deepEqual(ancestors("\\\\srv\\share\\d\\f", { windows: true }), ["\\\\srv\\share\\d", "\\\\srv\\share"]);
+  assert.deepEqual(ancestors(""), []);
 });

@@ -1,5 +1,6 @@
 // Popup opened by link.js for a clicked terminal path: open its folder, open the file, or copy the path.
-// Missing, remote or unresolved paths only offer copying.
+// A missing path arrives as its nearest existing folder (kind "dir"); remote, unresolved or wholly missing
+// paths only offer copying.
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";

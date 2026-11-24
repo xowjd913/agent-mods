@@ -1,8 +1,10 @@
 // Rejoin a path that the program in the terminal split with its own line breaks.
-// Claude Code (and other full-screen apps) wrap text themselves: a long path is cut at the right edge and
-// continues on the next row after an indent. Herdr then sees two separate links, one per row, and the
-// click only tells us the clicked piece (link.raw), not its row. So we look the piece up in the screen text
-// and glue on the neighbouring rows' tokens, as long as the cut row reaches the right edge.
+// Claude Code (and other full-screen apps) wrap text themselves: a long path is cut and continues on the
+// next row after an indent. Herdr then sees two separate links, one per row, and the click only tells us
+// the clicked piece (link.raw), not its row. So we look the piece up in the screen text and glue on the
+// neighbouring rows' tokens. Where the cut happens can't be told from the row width: a side panel or a box
+// border may follow the text, and rows are padded with spaces. So any piece that ends (or starts) its row's
+// text is a candidate, and the caller keeps a joined path only if it exists.
 // Pure functions: no Herdr imports, so tests can load this file directly.
 
 // Cells a string takes on screen: wide (CJK, Hangul, fullwidth, emoji) characters take 2.
@@ -19,32 +21,59 @@ export function cellWidth(s) {
   return w;
 }
 
-// A row "reaches the edge" when its text ends within EDGE_MARGIN cells of the terminal width.
-// Measured on a Claude Code screen: text rows end at most at cols - 2 (it keeps a 2-cell right gutter),
-// and a wide character that doesn't fit the last cell moves to the next row, leaving one more cell empty.
-// A cut row that stops earlier was broken at a space on purpose, so it isn't a split path.
-export const EDGE_MARGIN = 3;
 // Rows to follow in each direction; a path longer than this many rows is unlikely and costs more checks.
 export const MAX_ROWS = 4;
 
-const reaches = (line, cols, margin) => cellWidth(line.trimEnd()) >= cols - margin;
+// Box-drawing borders split a row into areas: the text, a box around it, a side panel after it.
+const BORDER = /[│┃║]/;
+// What may sit around a row's text inside its area: indent, padding, a "|" border, a tool row's "⎿".
+const LEAD = /^[\s|⎿]*/;
+const TRAIL = /[\s|]*$/;
+
+// A row's areas: { col, from, text }, col = screen column of the area's left border (0 for the first),
+// from = string index where its text starts. The text leaves the borders out.
+function areas(line) {
+  const out = [];
+  let col = 0, i = 0, from = 0, start = 0;
+  for (const ch of line) {
+    if (BORDER.test(ch)) {
+      out.push({ col: start, from, text: line.slice(from, i) });
+      from = i + ch.length;
+      start = col;
+    }
+    col += cellWidth(ch);
+    i += ch.length;
+  }
+  out.push({ col: start, from, text: line.slice(from) });
+  return out;
+}
+
+// A neighbour row's text in the area at the same column as the clicked piece's area, without its indent and padding.
+function textAt(line, col) {
+  let pick = "";
+  for (const a of areas(line)) if (a.col <= col) pick = a.text;
+  return pick.replace(LEAD, "").replace(TRAIL, "");
+}
 
 // Ways to extend `raw` at each place it appears on screen, one list per place (top to bottom):
 // [[{ before, after }, ...], ...], each a string to put in front of / behind raw. Both empty (raw alone)
-// is left out, so a place where raw isn't cut by the edge gets []. Each list: shortest join first.
+// is left out, so a place where raw sits inside its row's text gets []. Each list: shortest join first.
 // Places stay apart: the click doesn't say which one was clicked, so the caller must not mix them.
-export function joinCandidates(lines, raw, cols, { margin = EDGE_MARGIN, maxRows = MAX_ROWS } = {}) {
+export function joinCandidates(lines, raw, { maxRows = MAX_ROWS } = {}) {
   const places = [];
-  if (!raw || !(cols > 0)) return places;
+  if (!raw) return places;
   for (let i = 0; i < lines.length; i++) {
     for (let idx = lines[i].indexOf(raw); idx !== -1; idx = lines[i].indexOf(raw, idx + 1)) {
+      let area = areas(lines[i])[0];
+      for (const a of areas(lines[i])) if (a.from <= idx) area = a;
+      const end = area.from + area.text.length;
       const afters = [""];
-      // raw ends its row and the row reaches the edge: take the next row's first token, and keep going
-      // while that token fills its whole row (after the indent) and that row reaches the edge too.
-      if (lines[i].slice(idx + raw.length).trim() === "") {
+      // raw ends its row's text: take the next row's first token, and keep going while that token is
+      // the whole text of its row.
+      if (TRAIL.exec(lines[i].slice(idx + raw.length, end))[0].length === end - idx - raw.length) {
         let acc = "";
-        for (let j = i; j + 1 < lines.length && afters.length <= maxRows && reaches(lines[j], cols, margin); j++) {
-          const m = lines[j + 1].match(/^\s*(\S+)(.*)$/);
+        for (let j = i; j + 1 < lines.length && afters.length <= maxRows; j++) {
+          const m = textAt(lines[j + 1], area.col).match(/^(\S+)(.*)$/);
           if (!m) break;
           acc += m[1];
           afters.push(acc);
@@ -52,11 +81,11 @@ export function joinCandidates(lines, raw, cols, { margin = EDGE_MARGIN, maxRows
         }
       }
       const befores = [""];
-      // raw starts its row (after the indent): take the previous row's last token if that row reaches the edge.
-      if (lines[i].slice(0, idx).trim() === "") {
+      // raw starts its row's text: take the previous row's last token, the same way upward.
+      if (LEAD.exec(lines[i].slice(area.from, idx))[0].length === idx - area.from) {
         let acc = "";
-        for (let j = i; j > 0 && befores.length <= maxRows && reaches(lines[j - 1], cols, margin); j--) {
-          const m = lines[j - 1].trimEnd().match(/^(.*?)(\S+)$/);
+        for (let j = i; j > 0 && befores.length <= maxRows; j--) {
+          const m = textAt(lines[j - 1], area.col).match(/^(.*?)(\S+)$/);
           if (!m) break;
           acc = m[2] + acc;
           befores.push(acc);
@@ -93,7 +122,7 @@ export const MAX_GUESSES = 16;
 
 // Absolute paths the clicked piece may belong to, one list per place on screen, each longest first.
 // `cwd` resolves relative text; `home` expands "~/"; `windows` switches to drive letters and "\\".
-export function joinedPaths(lines, raw, cols, { cwd, home, windows = false, margin, maxRows } = {}) {
+export function joinedPaths(lines, raw, { cwd, home, windows = false, maxRows } = {}) {
   const abs = (t) => {
     if (windows) {
       if (/^[A-Za-z]:[\\/]/.test(t) || t.startsWith("\\\\")) return t;
@@ -102,7 +131,7 @@ export function joinedPaths(lines, raw, cols, { cwd, home, windows = false, marg
     if (!cwd || t.startsWith("~")) return null;
     return cwd.replace(/[\\/]+$/, "") + (windows ? "\\" : "/") + t.replace(/^\.[\\/]/, "");
   };
-  return joinCandidates(lines, raw, cols, { margin, maxRows }).map((joins) => {
+  return joinCandidates(lines, raw, { maxRows }).map((joins) => {
     const out = new Set();
     for (const { before, after } of joins) {
       const text = trimJoined(before + raw + after, { start: before !== "", end: true });
@@ -127,4 +156,25 @@ export function pickJoined(places, kinds) {
     pick = found;
   }
   return pick && { path: pick, kind: kinds.get(pick) };
+}
+
+// Folders above `path`, nearest first, up to the root ("/", "C:\\" or a "\\\\server\\share" share).
+// Used when neither the clicked piece nor a joined path exists: the menu then opens the nearest one that does.
+export function ancestors(path, { windows = false } = {}) {
+  const out = [];
+  if (!path) return out;
+  const sep = windows ? /[\\/]/ : /\//;
+  let p = path;
+  while (out.length < 64) {
+    let k = p.length - 1;
+    while (k >= 0 && !sep.test(p[k])) k--;
+    if (k < 0) break;
+    const parent = p.slice(0, k).replace(windows ? /[\\/]+$/ : /\/+$/, "");
+    if (!windows && !parent) { out.push("/"); break; }
+    if (windows && /^[A-Za-z]:$/.test(parent)) { out.push(parent + "\\"); break; }
+    if (windows && /^\\\\[^\\/]*$/.test(parent)) break;
+    out.push(parent);
+    p = parent;
+  }
+  return out;
 }
