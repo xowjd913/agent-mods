@@ -23,6 +23,7 @@ function runCmd(cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, {
     encoding: "utf8", timeout: opts.timeout || 20000, windowsHide: true,
     env: opts.env, cwd: opts.cwd, input: opts.input,
+    stdio: ["pipe", "pipe", opts.inheritErr ? "inherit" : "pipe"],
   });
   return { status: r.error ? -1 : r.status, stdout: r.stdout || "", stderr: r.stderr || "" };
 }
@@ -226,6 +227,7 @@ function repoFromGhArgs(args, env = {}) {
 }
 
 // 래퍼·도우미가 고른 PATH 위의 진짜 gh. 우리 래퍼(표시 문자열이 든 파일)는 건너뛴다.
+// PATH 에 없으면(GUI git 클라이언트, launchd 처럼 PATH 가 짧은 곳) 설치할 때 기록한 경로를 쓴다.
 function realGh(ctx) {
   if (ctx.env.GH_ACCOUNT_GH) return ctx.env.GH_ACCOUNT_GH;
   const exts = ctx.platform === "win32" ? [".exe", ".cmd", ""] : [""];
@@ -244,6 +246,8 @@ function realGh(ctx) {
       } catch { /* 없는 파일 */ }
     }
   }
+  const state = readState(paths(ctx).state);
+  if (state && typeof state.gh === "string" && path.isAbsolute(state.gh) && fs.existsSync(state.gh)) return state.gh;
   return "gh";
 }
 
@@ -262,6 +266,8 @@ function gitEnv(ctx) {
 
 function tokenFor(ctx, login) {
   const r = ctx.run(realGh(ctx), ["auth", "token", "--hostname", HOST, "--user", login], { env: cleanEnv(ctx.env) });
+  // gh 를 실행하지 못함: ENOENT(-1) 또는 PATH 의 우리 래퍼가 진짜 gh 를 못 찾음(127)
+  if (r.status === -1 || r.status === 127) return { ok: false, missing: true };
   const token = r.stdout.trim();
   if (r.status !== 0 || !token || /\s/.test(token)) return { ok: false };
   return { ok: true, token };
@@ -307,6 +313,16 @@ function parseCredInput(text) {
   return a;
 }
 
+// 자격 증명 요청의 저장소. git 이 넘긴 path(useHttpPath)가 먼저고, 없으면 지금 저장소의 원격.
+// path 는 o/r.git 이나 o/r.git/info/lfs 처럼 올 수 있어 앞 두 칸만 본다.
+function credRepo(ctx, a) {
+  if (a.path) {
+    const r = parseRepo(String(a.path).split("/").filter(Boolean).slice(0, 2).join("/"));
+    if (r) return r;
+  }
+  return repoFromDir(ctx, ctx.cwd);
+}
+
 // git 자격 증명 도우미. 매핑이 없거나 오류면 빈 문자열(다음 도우미가 맡는다).
 function credential(ctx, op, input) {
   if (op !== "get" || ctx.env.GH_ACCOUNT_OFF) return { out: "" };
@@ -315,16 +331,60 @@ function credential(ctx, op, input) {
     if (a.protocol !== "https" || String(a.host || "").toLowerCase() !== HOST) return { out: "" };
     const m = readMap(paths(ctx).map);
     if (!m.ok) return { out: "" };
-    const repo = (a.path && parseRepo(a.path)) || repoFromDir(ctx, ctx.cwd);
+    const repo = credRepo(ctx, a);
     const hit = matchAccount(m.map, repo);
     if (!hit) return { out: "" };
     if (a.username && a.username.toLowerCase() !== hit.account.toLowerCase()) return { out: "" };
     const t = tokenFor(ctx, hit.account);
+    if (t.missing) return { out: "", message: GH_MISSING };
     if (!t.ok) return { out: "quit=1\n", message: notLoggedIn(repo, hit) };
     return { out: `username=${hit.account}\npassword=${t.token}\n` };
   } catch {
     return { out: "" };
   }
+}
+
+const GH_MISSING = "gh-account: gh 를 찾지 못해 이 요청은 원래 자격 증명 도우미에 넘깁니다. gh 를 설치했다면 sh herdr/install.sh --gh-account 를 다시 실행하세요.";
+
+// 이 도구가 내준 자격 증명인가: 사용자 이름이 매핑에 쓰인 계정이고, 지금 저장소가 그 계정에 매핑됐거나 비밀번호가 그 계정 토큰과 같다.
+function ourCredential(ctx, a) {
+  const user = String(a.username || "").toLowerCase();
+  if (!user) return false;
+  const m = readMap(paths(ctx).map);
+  if (!m.ok) return false;
+  const account = [m.map.default, ...m.map.rules.map((r) => r.account)].find((x) => x && x.toLowerCase() === user);
+  if (!account) return false;
+  const hit = matchAccount(m.map, credRepo(ctx, a));
+  if (hit && hit.account.toLowerCase() === user) return true;
+  if (!a.password) return false;
+  const t = tokenFor(ctx, account);
+  return t.ok && t.token === a.password;
+}
+
+// 원래 도우미 명령. git 과 같은 규칙: ! 로 시작하면 셸 명령, 절대 경로면 그대로, 아니면 git credential-<이름>.
+function priorCommand(helper, op) {
+  const h = String(helper);
+  const cmd = h.startsWith("!") ? h.slice(1) : path.isAbsolute(h) ? h : `git credential-${h}`;
+  return `${cmd} ${op}`;
+}
+
+// 원래 도우미를 감싸 부른다. 이 도구가 내준 자격 증명의 store·erase 는 넘기지 않는다
+// (git 은 인증에 성공하면 모든 도우미에 store 를 보내므로, 감싸지 않으면 키체인 등에 매핑 계정 토큰이 남는다).
+// path 줄은 빼서 넘긴다. 이 블록이 useHttpPath 를 켜도 원래 도우미는 전처럼 호스트 기준으로 저장·조회한다.
+function priorHelper(ctx, helper, op, input) {
+  if (!helper || !["get", "store", "erase"].includes(op)) return { out: "" };
+  const text = String(input || "");
+  if (op !== "get" && !ctx.env.GH_ACCOUNT_OFF) {
+    let drop = false;
+    try {
+      const a = parseCredInput(text);
+      drop = a.protocol === "https" && String(a.host || "").toLowerCase() === HOST && ourCredential(ctx, a);
+    } catch { drop = false; }
+    if (drop) return { out: "" };
+  }
+  const stripped = text.split("\n").filter((l) => !l.startsWith("path=")).join("\n");
+  const r = ctx.run("/bin/sh", ["-c", priorCommand(helper, op)], { input: stripped, env: ctx.env, cwd: ctx.cwd, timeout: 600000, inheritErr: true });
+  return { out: op === "get" ? r.stdout : "" };
 }
 
 // ---- git 설정: 커밋 신원 includeIf 와 자격 증명 도우미 블록 ----
@@ -410,12 +470,15 @@ function helperValue(file) {
   return /^[A-Za-z0-9_./-]+$/.test(file) ? file : `!'${file.replace(/'/g, "'\\''")}'`;
 }
 
+// 원래 도우미는 우리 도우미로 감싸(prior '<원래 값>') store 를 거른다. useHttpPath 로 git 이 저장소 path 를 넘기게 한다.
 function buildBlock({ helper, prior, includes }) {
   if (!helper && !includes.length) return null;
   const L = [BEGIN, "# gh-account 가 관리하는 블록입니다. 직접 고치지 말고 gh-account 명령을 쓰세요."];
   if (helper) {
-    L.push('[credential "https://github.com"]', "\thelper =", `\thelper = ${quoteValue(helperValue(helper))}`);
-    for (const h of prior) L.push(`\thelper = ${quoteValue(h)}`);
+    const ours = helperValue(helper);
+    L.push('[credential "https://github.com"]', "\thelper =", `\thelper = ${quoteValue(ours)}`);
+    for (const h of prior) L.push(`\thelper = ${quoteValue(`${ours} prior ${shQuote(h)}`)}`);
+    L.push("\tuseHttpPath = true");
   }
   // git 설정은 뒤에 온 값이 이기므로 default 를 먼저, 규칙은 거꾸로 써서 첫 규칙이 이기게 한다.
   for (const inc of includes) {
@@ -494,26 +557,37 @@ function sync(ctx, log = () => {}) {
 
 function shQuote(s) { return `'${String(s).replace(/'/g, "'\\''")}'`; }
 
-function scripts({ app, node, binDir }) {
-  const head = (what) => `#!/bin/sh\n# ${MARK}: ${what}\n# 지우기: gh-account uninstall   잠깐 끄기: GH_ACCOUNT_OFF=1\nAPP=${shQuote(app)}\nNODE_BIN=${shQuote(node)}\n`;
+function scripts({ app, node, binDir, home, gh }) {
+  const head = (what) => `#!/bin/sh\n# ${MARK}: ${what}\n# 지우기: gh-account uninstall   잠깐 끄기: GH_ACCOUNT_OFF=1\nAPP=${shQuote(app)}\nNODE_BIN=${shQuote(node)}\nAPP_HOME=${shQuote(home)}\n`;
+  const runApp = `HERDR_APP_HOME="$APP_HOME" "$NODE" "$APP"`;
   const pickNode = `NODE=$(command -v node 2>/dev/null) || NODE=""\n[ -n "$NODE" ] || NODE="$NODE_BIN"\n`;
   return {
     gh: head("저장소에 매핑된 계정 토큰을 GH_TOKEN 으로 넘겨 진짜 gh 를 실행한다.")
       + `SELF_DIR=${shQuote(binDir)}\nREAL=""\nset -f\nOLD_IFS=$IFS\nIFS=:\n`
       + `for d in $PATH; do\n  [ -n "$d" ] && [ "$d" != "$SELF_DIR" ] || continue\n  [ -f "$d/gh" ] && [ -x "$d/gh" ] || continue\n  [ "$d/gh" -ef "$0" ] && continue\n  REAL="$d/gh"\n  break\ndone\nIFS=$OLD_IFS\nset +f\n`
+      + `GH_FALLBACK=${shQuote(gh || "")}\n`
+      + `[ -z "$REAL" ] && [ -n "$GH_FALLBACK" ] && [ -x "$GH_FALLBACK" ] && REAL=$GH_FALLBACK\n`
       + `if [ -z "$REAL" ]; then echo "gh-account: PATH 에서 진짜 gh 를 찾지 못했습니다." >&2; exit 127; fi\n`
-      + `[ "$1" = "auth" ] && exec "$REAL" "$@"\n`
+      + `# 저장소와 상관없는 명령은 계정을 고르지 않고 그대로 넘긴다\n`
+      + `case "\${1-}" in ""|-h|--help|help|--version|version|auth|completion|config|extension|extensions|ext|alias) exec "$REAL" "$@" ;; esac\n`
       + `[ -n "$GH_TOKEN$GITHUB_TOKEN$GH_ACCOUNT_OFF" ] && exec "$REAL" "$@"\n`
       + pickNode
       + `{ [ -x "$NODE" ] && [ -f "$APP" ]; } || exec "$REAL" "$@"\n`
-      + `TOKEN=$(GH_ACCOUNT_GH="$REAL" "$NODE" "$APP" gh-token -- "$@" </dev/null)\nCODE=$?\n`
+      + `TOKEN=$(GH_ACCOUNT_GH="$REAL" ${runApp} gh-token -- "$@" </dev/null)\nCODE=$?\n`
       + `[ "$CODE" -eq 3 ] && exit 1\n`
       + `if [ "$CODE" -eq 0 ] && [ -n "$TOKEN" ]; then GH_TOKEN=$TOKEN; export GH_TOKEN; fi\n`
       + `exec "$REAL" "$@"\n`,
     "git-credential-gh-account": head("git 자격 증명 도우미. 매핑이 없거나 오류면 아무것도 출력하지 않는다.")
-      + `[ -n "$GH_ACCOUNT_OFF" ] && exit 0\n` + pickNode
-      + `{ [ -x "$NODE" ] && [ -f "$APP" ]; } || exit 0\n"$NODE" "$APP" credential "$@"\nexit 0\n`,
-    "gh-account": head("매핑 보기·바꾸기 명령.") + pickNode + `exec "$NODE" "$APP" "$@"\n`,
+      + pickNode
+      // prior '<원래 도우미>' <op>: 원래 도우미를 감싸 부른다. node 가 없거나 꺼져 있으면 path 줄만 빼고 그대로 부른다.
+      + `if [ "\${1-}" = "prior" ]; then\n`
+      + `  if [ -z "$GH_ACCOUNT_OFF" ] && [ -x "$NODE" ] && [ -f "$APP" ]; then ${runApp} credential "$@"; exit 0; fi\n`
+      + `  case "\${3-}" in get|store|erase) ;; *) exit 0 ;; esac\n`
+      + `  case "$2" in "!"*) C=\${2#!} ;; /*) C=$2 ;; *) C="git credential-$2" ;; esac\n`
+      + `  grep -v '^path=' | sh -c "$C $3"\n  exit 0\nfi\n`
+      + `[ -n "$GH_ACCOUNT_OFF" ] && exit 0\n`
+      + `{ [ -x "$NODE" ] && [ -f "$APP" ]; } || exit 0\n${runApp} credential "$@"\nexit 0\n`,
+    "gh-account": head("매핑 보기·바꾸기 명령.") + pickNode + `exec ${runApp} "$@"\n`,
   };
 }
 
@@ -538,18 +612,19 @@ function install(ctx, opts, log) {
     if (fs.existsSync(t) && !isOurs(t)) { log(`${t} 에 다른 파일이 있어 설치를 멈춥니다. 그 파일을 옮긴 뒤 다시 실행하세요.`); return 1; }
   }
   const gh = realGh({ ...ctx, env: { ...ctx.env, GH_ACCOUNT_GH: "" } });
-  if (gh === "gh") log("PATH 에서 gh 를 찾지 못했습니다. GitHub CLI 를 설치하고 로그인해야 계정을 고를 수 있습니다.");
+  if (!path.isAbsolute(gh)) log("PATH 에서 gh 를 찾지 못했습니다. GitHub CLI 를 설치하고 로그인해야 계정을 고를 수 있습니다.");
   fs.mkdirSync(P.dir, { recursive: true });
   const src = opts.src || __filename;
   if (path.resolve(src) !== path.resolve(P.app)) fs.copyFileSync(src, P.app);
   fs.mkdirSync(binDir, { recursive: true });
-  const files = scripts({ app: P.app, node: opts.node || process.execPath, binDir });
+  const ghPath = path.isAbsolute(gh) ? gh : null;
+  const files = scripts({ app: P.app, node: opts.node || process.execPath, binDir, home: P.home, gh: ghPath });
   for (const f of BIN_FILES) {
     fs.writeFileSync(path.join(binDir, f), files[f]);
     fs.chmodSync(path.join(binDir, f), 0o755);
   }
   const prior = priorHelpers(ctx, globalConfigPath(ctx));
-  fs.writeFileSync(P.state, JSON.stringify({ binDir, prior }, null, 2) + "\n");
+  fs.writeFileSync(P.state, JSON.stringify({ binDir, prior, gh: ghPath }, null, 2) + "\n");
   sync(ctx, log);
   log(`설치: ${binDir} 에 gh, git-credential-gh-account, gh-account`);
   log(`git 전역 설정(${globalConfigPath(ctx)})에 gh-account 블록을 썼습니다. 원래 자격 증명 도우미 ${prior.length}개는 그 뒤에 그대로 둡니다.`);
@@ -621,6 +696,11 @@ function main(argv, ctx, io) {
   const P = paths(ctx);
   switch (cmd) {
     case "credential": {
+      if (args[0] === "prior") {
+        const r = priorHelper(ctx, args[1], args[2], io.stdin());
+        io.raw(r.out);
+        return 0;
+      }
       const r = credential(ctx, args[0], io.stdin());
       if (r.message) io.err(r.message);
       io.raw(r.out);
@@ -788,7 +868,8 @@ if (require.main === module) {
 
 module.exports = {
   HOST, MARK, BEGIN, END, paths, parseRepo, readMap, writeMap, emptyMap, matchAccount, setRule, unsetRule,
-  repoFromDir, spaceOwners, assignOwners, repoFromGhArgs, realGh, tokenFor, resolve, ghToken, credential, parseCredInput,
+  repoFromDir, spaceOwners, assignOwners, repoFromGhArgs, realGh, tokenFor, resolve, ghToken, credential, parseCredInput, credRepo,
+  ourCredential, priorCommand, priorHelper,
   globalConfigPath, stripBlock, writeBlock, buildBlock, urlPatterns, priorHelpers, identityFor, sync,
   scripts, install, uninstall, main, makeCtx,
 };
