@@ -1,6 +1,6 @@
 # agent-mods
 
-AI 에이전트(Claude Code, Codex 등) 여러 개를 동시에 돌릴 때 누가 무엇을 하는지, 손봐야 할 PR, 예약 작업을 터미널 작업 공간 앱 [Herdr](https://github.com/herdrdev/herdr) 화면 안에서 바로 보여 주는 모드(mod) 모음입니다.
+AI 에이전트(Claude Code, Codex 등) 여러 개를 동시에 돌릴 때 누가 무엇을 하는지와 손봐야 할 PR을 터미널 작업 공간 앱 [Herdr](https://github.com/herdrdev/herdr) 화면 안에서 바로 보여 주고, 정해진 시각에 에이전트를 띄워 실행해 주는 모드(mod) 모음입니다.
 
 ![탭 줄 오른쪽의 Files·Changes·Work·PRs·예약 버튼과, 예약 패널을 연 화면](docs/images/herdr-overview.png)
 
