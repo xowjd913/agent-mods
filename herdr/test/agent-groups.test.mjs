@@ -84,6 +84,8 @@ test("paneless + taskPlan: 창 없는 리더도 섹션이 되고 loose·중복 �
   const ghosts = paneless(real, all2, new Map());
   assert.deepEqual(ghosts.map((g) => g.address), ["t14r", "t14x", "t14d", "t14p", "t14t", "t14w", "t14y", "t150"]);
   assert.ok(ghosts.every((g) => g.ghost && g.space === "s1"));
+  // 행 제목은 진짜 리더처럼 "리더 · ..." 꼴이다. 머리줄 제목은 그대로다.
+  assert.deepEqual(ghosts.slice(0, 2).map((g) => g.title), ["리더 · 예약 계정", "리더 · agent groups"]);
   const [sp] = taskPlan([...real, ...ghosts], all2);
   const secs = sp.poTiers[0].sections;
   assert.deepEqual(secs.map((s) => s.leader.address), ["t137", "t14r", "t14x"]);

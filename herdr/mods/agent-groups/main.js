@@ -144,8 +144,9 @@ export function paneless(real, all, listed = new Map()) {
     if (!leader && !memberOf(t.name, session)) return;
     const home = seat(t);
     if (!home) return;
-    // A leader's title drops the "리더 ·" prefix; its tab name stays empty so taskPlan reads the label itself.
-    const title = leader ? session.replace(/^\s*리더\s*·\s*/, "").trim() || String(t.name ?? "").replace(LEAD, "").replace(/-/g, " ").trim() : session;
+    // A leader's row reads like a real leader's: the full `session` label ("리더 · ..."), else "리더 · " + the
+    // hc name without "lead-". Its tab name stays empty so taskPlan builds the section header itself.
+    const title = leader ? session || `리더 · ${String(t.name ?? "").replace(LEAD, "").replace(/-/g, " ").trim()}` : session;
     out.push({
       address: t.address,
       pane: null,
