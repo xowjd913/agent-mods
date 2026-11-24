@@ -14,6 +14,7 @@
   - [필요한 것](#필요한-것)
   - [설치 명령](#설치-명령)
   - [모드 골라 설치](#모드-골라-설치)
+- [저장소별 GitHub 계정](#저장소별-github-계정)
 - [업데이트와 제거](#업데이트와-제거)
 - [동작 방식](#동작-방식)
 - [데이터가 저장되는 곳](#데이터가-저장되는-곳)
@@ -161,6 +162,25 @@ Windows는 `.\agent-mods\herdr\install.ps1 -Only usage-status`입니다.
 
 ---
 
+## 저장소별 GitHub 계정
+
+gh에 계정을 여러 개 로그인해 두고 저장소 주인(owner)마다 쓸 계정을 정하는 도구(`gh-account`)입니다.
+Herdr 모드가 아니라서 따로 설치하며, 모든 터미널의 `gh` 명령, `git push`의 HTTPS 인증, 커밋 작성자에 함께 쓰입니다.
+
+```sh
+sh herdr/install.sh --gh-account            # 설치 (~/.local/bin)
+gh-account set example-org/* acct-b         # example-org 저장소는 acct-b 계정
+gh-account resolve                          # 지금 폴더에서 쓸 계정 확인
+sh herdr/install.sh --gh-account-uninstall  # 제거
+```
+
+- gh 활성 계정은 바꾸지 않고, 토큰은 저장하지 않습니다.
+- 매핑이 없거나 깨졌으면 `gh`와 `git`은 원래대로 동작합니다.
+- macOS·Linux만 지원하고, HTTPS 원격만 인증합니다.
+- 자세한 사용법과 한계: [gh-account](../docs/gh-account.md)
+
+---
+
 ## 업데이트와 제거
 
 ### 업데이트
@@ -260,6 +280,8 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
 | `<설정 폴더>/cache/collect.json` | Work·PRs 캐시 | 언제든. 다시 만들어집니다 |
 | `<설정 폴더>/schedules/` | 예약(`automations.json`)과 실행 기록(`runs.json`) | 지우면 예약이 사라집니다 |
 | `<설정 폴더>/data/prs/` | PRs `옆에 열기` 상태 | 언제든 |
+| `<설정 폴더>/gh-accounts.json` | gh-account 저장소별 계정 매핑 | 지우면 매핑이 사라집니다. 제거해도 남습니다 |
+| `<설정 폴더>/gh-account/` | gh-account 프로그램, 설치 상태, 계정별 커밋 신원 파일 | gh-account 제거할 때 지웁니다 |
 | `~/.claude/usage-limits.json` | usage-status가 읽는 파일(다른 도구가 씀) | 이 저장소가 만들지 않습니다 |
 
 패널 선택이나 토글 같은 화면 설정은 Herdr가 모드마다 따로 보관합니다.
