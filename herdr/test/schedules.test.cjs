@@ -652,3 +652,222 @@ test("알림: OS 알림 명령은 제목·본문을 인자나 환경 변수로�
   assert.equal(win.env.SCHED_TITLE, evil);
   assert.ok(!win.args.join(" ").includes("rm -rf"));
 });
+
+// ---- 문서 저장소에 기록·불러오기(진짜 git으로 임시 저장소를 만들어 확인)
+const { spawnSync } = require("child_process");
+const NOREPLY_MAIL = "25768804+xowjd913@users.noreply.github.com";
+const git = (dir, ...args) => {
+  const r = spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
+  assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
+  return r.stdout.trim();
+};
+function syncFixture(visibility = "true") {
+  reset();
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "schedules-sync-"));
+  const bare = path.join(base, "remote.git"), repo = path.join(base, "notes"), work = path.join(base, "project");
+  spawnSync("git", ["init", "-q", "--bare", "-b", "main", bare]);
+  spawnSync("git", ["init", "-q", "-b", "main", repo]);
+  git(repo, "config", "user.name", "xowjd913");
+  git(repo, "config", "user.email", NOREPLY_MAIL);
+  // GitHub 주소처럼 보이게 하고 실제 push는 로컬 bare로 보낸다(pushInsteadOf).
+  git(repo, "remote", "add", "origin", "https://github.com/xowjd913/notes.git");
+  git(repo, "config", `url.${bare}.pushInsteadOf`, "https://github.com/xowjd913/notes.git");
+  fs.writeFileSync(path.join(repo, "README.md"), "notes\n");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-q", "-m", "init");
+  git(repo, "push", "-q", "origin", "HEAD");
+  spawnSync("git", ["init", "-q", "-b", "main", work]);
+  git(work, "remote", "add", "origin", "git@github.com:xowjd913/project.git");
+  const deps = { ...S.defaultDeps(), gh: () => ({ code: 0, stdout: `${visibility}\n`, stderr: "" }), now: () => utc("2026-03-02T09:05:00Z") };
+  return { base, bare, repo, work, deps };
+}
+const worktreeAuto = (work, over = {}) => ({
+  id: "a1b2c3d4", createdAt: utc("2026-01-15T03:00:00Z"), cursor: utc("2026-03-01T00:00:00Z"), ...auto({ name: "주간 점검", folder: { mode: "worktree", path: work, base: "develop" }, notify: "all", ...over }),
+});
+
+test("기록 저장소: 기록→새 PC 복원이 createdAt·기준 브랜치를 보존하고 꺼진 채 연결된다", () => {
+  const f = syncFixture();
+  seed([worktreeAuto(f.work), worktreeAuto(f.work, { id: "e5f6a7b8", name: "재사용", folder: { mode: "existing", path: f.work }, reuseSession: true })], { a1b2c3d4: [{ id: "r1" }] });
+  assert.equal(S.setSyncRepo(f.repo, f.deps).ok, true);
+  const rec = S.record({ all: true }, f.deps);
+  assert.deepEqual([rec.ok, rec.pushed, rec.count], [true, true, 2]);
+  const file = path.join(f.repo, "herdr-schedules", "주간-점검-a1b2c3d4.json");
+  const text = fs.readFileSync(file, "utf8");
+  assert.ok(!text.includes(f.work) && !text.includes(f.base), "절대경로 없음");
+  assert.ok(!text.includes("r1"), "실행 기록 없음");
+  assert.equal(JSON.parse(text).folder.remote, "git@github.com:xowjd913/project.git");
+  assert.equal(git(f.bare, "log", "-1", "--format=%ae", "main"), NOREPLY_MAIL);
+  // 새 PC: 저장소만 남고 예약이 없다. 같은 원격을 가진 폴더를 넘기면 연결된다.
+  reset();
+  assert.equal(S.setSyncRepo(f.repo, f.deps).ok, true);
+  const imported = S.importFromRepo({ folders: [f.work] }, f.deps);
+  assert.deepEqual([imported.ok, imported.added, imported.unlinked.length], [true, 2, 0]);
+  const autos = JSON.parse(fs.readFileSync(S.paths.AUTOS_FILE, "utf8")).automations;
+  const one = autos.find((x) => x.id === "a1b2c3d4");
+  assert.equal(one.enabled, false);
+  assert.equal(one.createdAt, utc("2026-01-15T03:00:00Z"));
+  assert.deepEqual(one.folder, { mode: "worktree", path: f.work, base: "develop" });
+  assert.equal(autos.find((x) => x.id === "e5f6a7b8").reuseSession, true);
+  // 이미 있는 예약은 다시 추가하지 않는다.
+  assert.equal(S.importFromRepo({ folders: [f.work] }, f.deps).added, 0);
+});
+
+test("기록 저장소: 맞는 폴더가 없으면 경로를 비운 채 가져오고 폴더를 고르기 전엔 켤 수 없다", () => {
+  const f = syncFixture();
+  seed([worktreeAuto(f.work)]);
+  S.setSyncRepo(f.repo, f.deps);
+  S.record({ all: true }, f.deps);
+  reset();
+  S.setSyncRepo(f.repo, f.deps);
+  const imported = S.importFromRepo({}, f.deps);
+  assert.deepEqual(imported.unlinked, ["주간 점검"]);
+  assert.equal(JSON.parse(fs.readFileSync(S.paths.AUTOS_FILE, "utf8")).automations[0].folder.path, "");
+  assert.match(S.toggle("a1b2c3d4", true, f.deps).error, /작업 폴더/);
+});
+
+test("기록 저장소: push가 막히면 커밋은 남기고 이유를 알려준다", () => {
+  const f = syncFixture();
+  seed([worktreeAuto(f.work)]);
+  S.setSyncRepo(f.repo, f.deps);
+  git(f.repo, "config", `url.${path.join(f.base, "missing.git")}.pushInsteadOf`, "https://github.com/xowjd913/notes.git");
+  git(f.repo, "config", "--unset", `url.${f.bare}.pushInsteadOf`);
+  const rec = S.record({ id: "a1b2c3d4" }, f.deps);
+  assert.deepEqual([rec.ok, rec.committed, rec.pushed], [false, true, false]);
+  assert.match(rec.error, /push하지 못했습니다/);
+  assert.match(git(f.repo, "log", "-1", "--format=%s"), /예약 기록/);
+});
+
+test("기록 저장소: 공개 저장소에서 커밋 이메일이 noreply가 아니면 기록을 막는다", () => {
+  const f = syncFixture("false");
+  seed([worktreeAuto(f.work)]);
+  S.setSyncRepo(f.repo, f.deps);
+  git(f.repo, "config", "user.email", "me@company.com");
+  const rec = S.record({ id: "a1b2c3d4" }, f.deps);
+  assert.deepEqual([rec.ok, rec.code], [false, "email"]);
+  assert.ok(!fs.existsSync(path.join(f.repo, "herdr-schedules")));
+});
+
+test("기록 저장소: 비공개 저장소는 회사 이메일이어도 기록하고, 막지 않는다", () => {
+  const f = syncFixture("true");
+  seed([worktreeAuto(f.work)]);
+  git(f.repo, "config", "user.email", "me@company.com");
+  const st = S.setSyncRepo(f.repo, f.deps);
+  assert.deepEqual([st.emailOk, st.emailBlock], [false, false]);
+  const rec = S.record({ id: "a1b2c3d4" }, f.deps);
+  assert.deepEqual([rec.ok, rec.pushed], [true, true]);
+  assert.equal(git(f.bare, "log", "-1", "--format=%ae", "main"), "me@company.com");
+});
+
+test("기록 저장소: 원격이 없는 저장소는 회사 이메일이어도 기록한다", () => {
+  const f = syncFixture();
+  seed([worktreeAuto(f.work)]);
+  git(f.repo, "remote", "remove", "origin");
+  git(f.repo, "config", "user.email", "me@company.com");
+  const st = S.setSyncRepo(f.repo, f.deps);
+  assert.deepEqual([st.emailOk, st.emailBlock], [false, false]);
+  const rec = S.record({ id: "a1b2c3d4" }, f.deps);
+  assert.deepEqual([rec.ok, rec.committed, rec.pushed], [false, true, false]); // 커밋까지 되고 push할 원격이 없을 뿐
+  assert.notEqual(rec.code, "email");
+  assert.ok(fs.existsSync(path.join(f.repo, "herdr-schedules")));
+});
+
+test("기록 저장소: 공개 저장소 + 회사 이메일은 막고, 메시지에 한 줄 해결 명령을 준다", () => {
+  const f = syncFixture("false");
+  seed([worktreeAuto(f.work)]);
+  git(f.repo, "config", "user.email", "me@company.com");
+  const st = S.setSyncRepo(f.repo, f.deps);
+  assert.deepEqual([st.emailOk, st.emailBlock], [false, true]);
+  assert.equal(st.emailFix, `git -C ${st.repo} config user.email <noreply 주소>`);
+  const rec = S.record({ id: "a1b2c3d4", confirmPublic: true }, f.deps);
+  assert.deepEqual([rec.ok, rec.code], [false, "email"]);
+  assert.ok(rec.error.includes(st.emailFix), rec.error);
+  assert.match(rec.error, /me@company\.com/);
+  assert.ok(!fs.existsSync(path.join(f.repo, "herdr-schedules")));
+});
+
+test("기록 저장소: 공개 여부를 모르면(gh 실패) 회사 이메일을 막는다", () => {
+  const f = syncFixture();
+  seed([worktreeAuto(f.work)]);
+  git(f.repo, "config", "user.email", "me@company.com");
+  const deps = { ...f.deps, gh: () => ({ code: 1, stdout: "", stderr: "no gh" }) };
+  const st = S.setSyncRepo(f.repo, deps);
+  assert.deepEqual([st.emailOk, st.emailBlock], [false, true]);
+  const rec = S.record({ id: "a1b2c3d4", confirmPublic: true }, deps);
+  assert.deepEqual([rec.ok, rec.code], [false, "email"]);
+  assert.ok(rec.error.includes(`git -C ${st.repo} config user.email`), rec.error);
+});
+
+test("기록 저장소: noreply 이메일이면 상태를 읽을 때 gh를 부르지 않는다", () => {
+  const f = syncFixture("false");
+  seed([worktreeAuto(f.work)]);
+  let ghCalls = 0;
+  const deps = { ...f.deps, gh: (...a) => { ghCalls++; return f.deps.gh(...a); } };
+  const st = S.setSyncRepo(f.repo, deps);
+  assert.deepEqual([st.emailOk, st.emailBlock, ghCalls], [true, false, 0]);
+});
+
+test("기록 저장소: noreply가 아닌 비공개 저장소 기록은 공개 여부를 gh로 한 번만 묻는다", () => {
+  const f = syncFixture("true");
+  seed([worktreeAuto(f.work)]);
+  git(f.repo, "config", "user.email", "me@company.com");
+  S.setSyncRepo(f.repo, f.deps);
+  let ghCalls = 0;
+  const deps = { ...f.deps, gh: (...a) => { ghCalls++; return f.deps.gh(...a); } };
+  assert.equal(S.record({ id: "a1b2c3d4" }, deps).ok, true);
+  assert.equal(ghCalls, 1);
+});
+
+test("기록 저장소: 공개 저장소에서 author·committer 이메일이 noreply가 아니어도 기록을 막고, 둘 다 noreply면 기록한다", () => {
+  for (const key of ["author.email", "committer.email"]) {
+    const f = syncFixture("false");
+    seed([worktreeAuto(f.work)]);
+    S.setSyncRepo(f.repo, f.deps);
+    git(f.repo, "config", key, "me@company.com");
+    assert.equal(S.syncStatus(f.deps).emailOk, false, key);
+    const rec = S.record({ id: "a1b2c3d4" }, f.deps);
+    assert.deepEqual([rec.ok, rec.code], [false, "email"], key);
+    assert.match(rec.error, /me@company\.com/);
+    assert.ok(!fs.existsSync(path.join(f.repo, "herdr-schedules")), key);
+    git(f.repo, "config", key, NOREPLY_MAIL);
+    assert.equal(S.syncStatus(f.deps).emailOk, true, key);
+    assert.equal(S.record({ id: "a1b2c3d4", confirmPublic: true }, f.deps).ok, true, key);
+  }
+});
+
+test("기록 저장소: 공개 저장소에서 GIT_AUTHOR_EMAIL 환경 변수로 바꾼 이메일도 막는다", () => {
+  const f = syncFixture("false");
+  seed([worktreeAuto(f.work)]);
+  S.setSyncRepo(f.repo, f.deps);
+  const old = process.env.GIT_AUTHOR_EMAIL;
+  process.env.GIT_AUTHOR_EMAIL = "me@company.com";
+  try {
+    assert.equal(S.record({ id: "a1b2c3d4" }, f.deps).code, "email");
+  } finally {
+    if (old === undefined) delete process.env.GIT_AUTHOR_EMAIL; else process.env.GIT_AUTHOR_EMAIL = old;
+  }
+});
+
+test("기록 저장소: 공개 저장소는 한 번 더 확인해야 기록한다", () => {
+  const f = syncFixture("false");
+  seed([worktreeAuto(f.work)]);
+  S.setSyncRepo(f.repo, f.deps);
+  const blocked = S.record({ id: "a1b2c3d4" }, f.deps);
+  assert.deepEqual([blocked.ok, blocked.needsConfirm, blocked.visibility], [false, "public", "public"]);
+  assert.ok(!fs.existsSync(path.join(f.repo, "herdr-schedules")));
+  assert.equal(S.record({ id: "a1b2c3d4", confirmPublic: true }, f.deps).ok, true);
+});
+
+test("기록 저장소: 사전 확인 명령은 확인(ack) 전에는 가져오지 않고 실행도 하지 않는다", () => {
+  const f = syncFixture();
+  seed([worktreeAuto(f.work, { precheck: { command: "echo hi" } })]);
+  S.setSyncRepo(f.repo, f.deps);
+  S.record({ all: true }, f.deps);
+  reset();
+  S.setSyncRepo(f.repo, f.deps);
+  let ran = 0;
+  const deps = { ...f.deps, shell: () => { ran++; return { code: 0 }; } };
+  const first = S.importFromRepo({ folders: [f.work] }, deps);
+  assert.deepEqual([first.ok, first.needsConfirm.map((x) => x.command)], [false, ["echo hi"]]);
+  assert.equal(S.importFromRepo({ folders: [f.work], ack: true }, deps).added, 1);
+  assert.equal(ran, 0);
+});

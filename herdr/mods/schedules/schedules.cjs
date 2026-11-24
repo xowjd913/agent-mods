@@ -19,6 +19,7 @@ const APP_HOME = process.env.HERDR_APP_HOME || path.join(os.homedir(), ".config"
 const STORE_DIR = process.env.SCHEDULES_HOME || path.join(APP_HOME, "schedules");
 const AUTOS_FILE = path.join(STORE_DIR, "automations.json");
 const RUNS_FILE = path.join(STORE_DIR, "runs.json");
+const SETTINGS_FILE = path.join(STORE_DIR, "settings.json"); // 이 PC 설정(기록 저장소 위치). 저장소 파일에는 넣지 않는다
 const LOCK_FILE = path.join(STORE_DIR, "store.lock");
 const TICK_LOCK_FILE = path.join(STORE_DIR, "tick.lock");
 const KEEP_RUNS = 50;
@@ -430,6 +431,10 @@ function defaultDeps() {
     },
     git: (dir, args, timeout = 60000) => {
       const r = spawnSync("git", ["-C", dir, ...args], { encoding: "utf8", timeout, windowsHide: true });
+      return { code: r.error ? 127 : r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr || (r.error ? String(r.error.message) : "") };
+    },
+    gh: (args, timeout = 30000) => {
+      const r = spawnSync("gh", args, { encoding: "utf8", timeout, windowsHide: true });
       return { code: r.error ? 127 : r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr || (r.error ? String(r.error.message) : "") };
     },
     shell: (command, cwd, timeoutMs) => {
@@ -930,6 +935,7 @@ function toggle(id, on, deps = defaultDeps()) {
     const store = loadAutos();
     const a = store.automations.find((x) => x.id === id);
     if (!a) return { ok: false, error: `예약을 찾지 못했습니다: ${id}` };
+    if (on && !a.folder.path) return { ok: false, error: "작업 폴더를 먼저 고르세요. 편집에서 폴더를 지정해야 켤 수 있습니다." };
     if (a.enabled !== on) { a.enabled = on; a.cursor = now; writeJson(AUTOS_FILE, store); }
     return { ok: true, enabled: a.enabled };
   });
@@ -946,6 +952,176 @@ function nextCmd({ id, spec, count }, deps = defaultDeps()) {
     if (e instanceof ScheduleError) return { ok: false, error: e.message };
     throw e;
   }
+}
+
+// ---------------------------------------------------------------- 문서 저장소에 기록·불러오기
+// 사용자가 고른 git 저장소의 herdr-schedules/에 예약 하나당 JSON 하나를 둔다(PC를 옮겨도 복원). 실행 기록·토큰·절대경로는 쓰지 않는다.
+const SYNC_DIR = "herdr-schedules";
+const NOREPLY = /@users\.noreply\.github\.com$/i;
+const readSettings = () => readJson(SETTINGS_FILE, {});
+// 실제로 커밋에 박힐 작성자·커미터 이메일(user.email·author.email·committer.email·GIT_*_EMAIL 반영)을 git에게 직접 묻는다.
+function identityEmails(deps, root) {
+  return ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"].map((v) => {
+    const r = deps.git(root, ["var", v]);
+    const m = r.code === 0 ? r.stdout.match(/<([^>]*)>/) : null;
+    return m ? m[1].trim() : "";
+  });
+}
+const identityOk = (emails) => emails.every((e) => NOREPLY.test(e));
+// noreply는 공개(public)·확인 못 한(unknown) 저장소에만 요구한다. 비공개(private)·원격 없는(local) 저장소는 이메일을 그대로 둔다.
+// noreply가 아닐 때만 공개 여부를 물어(gh 호출) 화면을 그릴 때마다 gh를 부르지 않는다.
+const emailPolicy = (deps, root, emails) => {
+  if (identityOk(emails)) return { ok: true, block: false, visibility: null };
+  const visibility = repoVisibility(deps, root);
+  return { ok: false, block: visibility !== "private" && visibility !== "local", visibility };
+};
+const shellArg = (s) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
+const emailFix = (root) => `git -C ${shellArg(root)} config user.email <noreply 주소>`;
+// 비교용 정규화(계정 정보·.git·scp/ssh 표기 차이 제거)와 저장용 정리(URL의 계정:토큰 제거).
+function normRemote(url) {
+  let u = String(url ?? "").trim();
+  const m = u.match(/^[\w.-]+@([^:\/]+):(.+)$/);
+  u = m ? `${m[1]}/${m[2]}` : u.replace(/^[a-z+]+:\/\//i, "").replace(/^[^@\/]*@/, "");
+  return u.replace(/\.git$/i, "").replace(/\/+$/, "").toLowerCase();
+}
+const cleanRemote = (url) => String(url ?? "").trim().replace(/^([a-z+]+:\/\/)[^@\/]*@/i, "$1");
+// remote.origin.url 원문(insteadOf 치환 전)을 쓴다.
+const originUrl = (deps, dir) => { const r = deps.git(dir, ["config", "--get", "remote.origin.url"]); return r.code === 0 ? cleanRemote(r.stdout) : ""; };
+
+function syncRoot(deps) {
+  const saved = readSettings().syncRepo;
+  if (!saved) return { error: "기록 저장소를 먼저 고르세요." };
+  const top = deps.git(saved, ["rev-parse", "--show-toplevel"]);
+  if (top.code !== 0 || !top.stdout.trim()) return { error: `기록 저장소를 열지 못했습니다(git 저장소가 맞나요?): ${saved}` };
+  return { root: top.stdout.trim() };
+}
+function syncStatus(deps = defaultDeps()) {
+  const r = syncRoot(deps);
+  if (r.error) return { ok: true, repo: null, error: readSettings().syncRepo ? r.error : "" };
+  const policy = emailPolicy(deps, r.root, identityEmails(deps, r.root));
+  return { ok: true, repo: r.root, name: path.basename(r.root), emailOk: policy.ok, emailBlock: policy.block, ...(policy.block ? { emailFix: emailFix(r.root) } : {}) };
+}
+function setSyncRepo(dir, deps = defaultDeps()) {
+  const want = String(dir ?? "").trim();
+  if (!want || !isDir(want)) return { ok: false, error: `폴더를 찾지 못했습니다: ${want}` };
+  const top = deps.git(want, ["rev-parse", "--show-toplevel"]);
+  if (top.code !== 0 || !top.stdout.trim()) return { ok: false, error: "git 저장소 폴더가 아닙니다." };
+  withLock(() => writeJson(SETTINGS_FILE, { ...readSettings(), syncRepo: top.stdout.trim() }));
+  return syncStatus(deps);
+}
+// 공개 여부: private | public | local(원격 없음) | unknown(GitHub가 아니거나 gh로 확인 못 함)
+function repoVisibility(deps, root) {
+  const url = originUrl(deps, root);
+  if (!url) return "local";
+  const m = normRemote(url).match(/^github\.com\/([^\/]+\/[^\/]+)$/);
+  if (!m) return "unknown";
+  const g = deps.gh(["repo", "view", m[1], "--json", "isPrivate", "--jq", ".isPrivate"]);
+  const t = g.code === 0 ? g.stdout.trim() : "";
+  return t === "true" ? "private" : t === "false" ? "public" : "unknown";
+}
+
+// 저장소 파일 한 개의 내용. 작업 폴더는 "폴더 이름 + 원격 URL"로만 적는다.
+function recordOf(a, deps) {
+  const f = a.folder;
+  const where = f.path ? { name: f.path.split(/[\\/]/).filter(Boolean).pop() ?? "", remote: originUrl(deps, f.path) } : { name: f.hint?.name ?? "", remote: f.hint?.remote ?? "" };
+  return {
+    version: 1, id: a.id, name: a.name, program: a.program, model: a.model || "", effort: a.effort || "", prompt: a.prompt,
+    schedule: a.schedule, timezone: a.timezone || localZone(), createdAt: a.createdAt, graceMinutes: a.graceMinutes ?? DEFAULT_GRACE,
+    notify: a.notify || DEFAULT_NOTIFY, precheck: a.precheck ?? null,
+    folder: { mode: f.mode, ...where, ...(f.base ? { base: f.base } : {}) }, reuseSession: !!a.reuseSession,
+  };
+}
+
+// 예약 하나(id) 또는 전부를 기록 → 커밋 → 일반 push. push가 막히면 커밋은 남기고 이유를 돌려준다.
+function record({ id, all = false, confirmPublic = false } = {}, deps = defaultDeps()) {
+  const r = syncRoot(deps);
+  if (r.error) return { ok: false, error: r.error };
+  const emails = identityEmails(deps, r.root);
+  const policy = emailPolicy(deps, r.root, emails);
+  if (policy.block) {
+    const bad = [...new Set(emails.filter((e) => !NOREPLY.test(e)))].map((e) => e || "설정 없음").join(", ");
+    const why = policy.visibility === "public" ? "공개 저장소라" : "저장소의 공개 여부를 확인하지 못해";
+    return { ok: false, code: "email", error: `기록 저장소의 커밋 작성자·커미터 이메일이 GitHub noreply 주소가 아니고 ${why} 기록하지 않았습니다(${bad}). 해결: ${emailFix(r.root)} (author.email·committer.email도 설정했다면 같이 맞추세요.)` };
+  }
+  const autos = loadAutos().automations;
+  const picks = all ? autos : autos.filter((x) => x.id === id);
+  if (!picks.length) return { ok: false, error: all ? "기록할 예약이 없습니다." : `예약을 찾지 못했습니다: ${id}` };
+  const visibility = policy.visibility ?? repoVisibility(deps, r.root);
+  if (!confirmPublic && visibility !== "private" && visibility !== "local") {
+    return { ok: false, needsConfirm: "public", visibility, error: visibility === "public" ? "공개 저장소입니다. 프롬프트가 누구에게나 보입니다. 비공개 저장소를 권장합니다." : "저장소의 공개 여부를 확인하지 못했습니다. 공개 저장소면 프롬프트가 누구에게나 보입니다." };
+  }
+  const dir = path.join(r.root, SYNC_DIR);
+  fs.mkdirSync(dir, { recursive: true });
+  for (const a of picks) {
+    const file = `${slugOf(a.name)}-${a.id}.json`;
+    for (const old of fs.readdirSync(dir)) if (old !== file && old.endsWith(`-${a.id}.json`)) fs.unlinkSync(path.join(dir, old)); // 이름을 바꿨으면 옛 파일은 지운다
+    fs.writeFileSync(path.join(dir, file), `${JSON.stringify(recordOf(a, deps), null, 2)}\n`);
+  }
+  const added = deps.git(r.root, ["add", "-A", "--", SYNC_DIR]);
+  if (added.code !== 0) return { ok: false, error: `git add 실패: ${oneLine(added.stderr, 200)}` };
+  if (deps.git(r.root, ["diff", "--cached", "--quiet", "--", SYNC_DIR]).code === 0) return { ok: true, count: picks.length, changed: false };
+  const msg = picks.length === 1 ? `📝[Docs]: 예약 기록 — ${picks[0].name}` : `📝[Docs]: 예약 ${picks.length}개 기록`;
+  const committed = deps.git(r.root, ["commit", "-m", msg, "--", SYNC_DIR]);
+  if (committed.code !== 0) return { ok: false, error: `git commit 실패: ${oneLine(committed.stderr || committed.stdout, 200)}` };
+  const pushed = deps.git(r.root, ["push", "origin", "HEAD"], 120000);
+  if (pushed.code !== 0) return { ok: false, committed: true, pushed: false, count: picks.length, error: `커밋은 남겼지만 push하지 못했습니다: ${oneLine(pushed.stderr, 200)}` };
+  return { ok: true, committed: true, pushed: true, changed: true, count: picks.length };
+}
+
+// 저장소 파일 → 예약. 항상 꺼진 채로 만들고, 작업 폴더는 같은 원격 URL을 가진 이 PC 폴더에 연결한다(없으면 path를 비우고 hint만 둔다).
+function fromRecord(rec, now, findFolder) {
+  if (!rec || typeof rec !== "object" || !/^[0-9a-f]{8}$/.test(String(rec.id)) || !Number.isFinite(rec.createdAt)) return { error: "id·createdAt이 올바르지 않습니다." };
+  const f = rec.folder && typeof rec.folder === "object" ? rec.folder : {};
+  const hint = { name: String(f.name ?? ""), remote: cleanRemote(f.remote) };
+  const linked = findFolder(hint);
+  const auto = {
+    id: rec.id, createdAt: rec.createdAt, cursor: now, name: String(rec.name ?? "").trim(), enabled: false, program: rec.program, prompt: rec.prompt,
+    model: rec.model ? String(rec.model) : "", effort: rec.effort ? String(rec.effort) : "", schedule: rec.schedule, timezone: rec.timezone || localZone(),
+    graceMinutes: rec.graceMinutes ?? DEFAULT_GRACE, notify: rec.notify || DEFAULT_NOTIFY,
+    precheck: rec.precheck && String(rec.precheck.command ?? "").trim() ? { command: String(rec.precheck.command), timeoutSec: rec.precheck.timeoutSec ?? DEFAULT_PRECHECK_TIMEOUT } : null,
+    folder: { mode: f.mode, path: linked || "", ...(f.mode === "worktree" && f.base ? { base: String(f.base) } : {}), ...(linked ? {} : { hint }) },
+    reuseSession: f.mode === "existing" && !!rec.reuseSession,
+  };
+  const errors = validateAutomation({ ...auto, folder: { ...auto.folder, path: auto.folder.path || "-" } }, { checkFolder: false });
+  return errors.length ? { error: errors[0] } : { auto, linked: Boolean(linked) };
+}
+
+// 아직 없는 예약만 추가한다. 사전 확인 명령이 있으면 ack 없이는 아무것도 추가하지 않고 명령을 돌려준다(가져올 때 실행하지 않는다).
+function importFromRepo({ ack = false, folders = [] } = {}, deps = defaultDeps()) {
+  const r = syncRoot(deps);
+  if (r.error) return { ok: false, error: r.error };
+  const dir = path.join(r.root, SYNC_DIR);
+  let files = [];
+  try { files = fs.readdirSync(dir).filter((x) => x.endsWith(".json")).sort(); } catch {}
+  if (!files.length) return { ok: false, error: `저장소에 ${SYNC_DIR}/ 기록이 없습니다.` };
+  const now = deps.now();
+  const known = new Set(loadAutos().automations.map((x) => x.id));
+  const candidates = [...new Set([...loadAutos().automations.map((x) => x.folder && x.folder.path), ...folders])].filter((p) => typeof p === "string" && p && isDir(p));
+  const remotes = new Map(candidates.map((p) => [p, normRemote(originUrl(deps, p))]));
+  const findFolder = (hint) => {
+    const want = normRemote(hint.remote);
+    return candidates.find((p) => (want ? remotes.get(p) === want : hint.name && path.basename(p) === hint.name));
+  };
+  const items = [], skipped = [];
+  let existing = 0;
+  for (const file of files) {
+    let rec = null;
+    try { rec = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8")); } catch { skipped.push({ file, reason: "JSON을 읽지 못했습니다." }); continue; }
+    if (known.has(rec && rec.id)) { existing++; continue; }
+    const one = fromRecord(rec, now, findFolder);
+    if (one.error) skipped.push({ file, reason: one.error });
+    else items.push(one);
+  }
+  const needsConfirm = items.filter((x) => x.auto.precheck).map((x) => ({ id: x.auto.id, name: x.auto.name, command: x.auto.precheck.command }));
+  if (needsConfirm.length && !ack) return { ok: false, needsConfirm, error: "사전 확인 명령이 들어 있습니다. 명령을 확인한 뒤 불러오세요." };
+  const added = withLock(() => {
+    const store = loadAutos();
+    const fresh = items.filter((x) => !store.automations.some((y) => y.id === x.auto.id));
+    store.automations.push(...fresh.map((x) => x.auto));
+    if (fresh.length) writeJson(AUTOS_FILE, store);
+    return fresh;
+  });
+  return { ok: true, added: added.length, existing, skipped, unlinked: added.filter((x) => !x.linked).map((x) => x.auto.name) };
 }
 
 // ---------------------------------------------------------------- CLI
@@ -1005,7 +1181,7 @@ function parseArgs(argv) {
     const v = argv[i];
     if (v.startsWith("--")) {
       const key = v.slice(2);
-      if (["manual", "wait"].includes(key)) flags[key] = true;
+      if (["manual", "wait", "all", "confirm-public", "ack"].includes(key)) flags[key] = true;
       else flags[key] = argv[++i];
     } else rest.push(v);
   }
@@ -1029,8 +1205,12 @@ function main(argv) {
     else if (cmd === "delete") out = remove(rest[0]);
     else if (cmd === "toggle") out = toggle(rest[0], rest[1] === "on");
     else if (cmd === "options") out = options({ path: flags.path });
+    else if (cmd === "repo") out = syncStatus();
+    else if (cmd === "repo-set") out = setSyncRepo(rest[0]);
+    else if (cmd === "record") { process.env.GIT_TERMINAL_PROMPT = "0"; out = record({ id: rest[0], all: !!flags.all, confirmPublic: !!flags["confirm-public"] }); }
+    else if (cmd === "import") { process.env.GIT_TERMINAL_PROMPT = "0"; out = importFromRepo({ ack: !!flags.ack, folders: flags.folders ? decodeSpec(flags.folders) : [] }); }
     else if (cmd === "_worker") { execute(rest[0]); out = { ok: true }; }
-    else out = { ok: false, error: "사용법: schedules.cjs tick | run <id> [--manual] | next | validate | list | runs <id> | save | delete <id> | toggle <id> on|off | options [--path <폴더>]" };
+    else out = { ok: false, error: "사용법: schedules.cjs tick | run <id> [--manual] | next | validate | list | runs <id> | save | delete <id> | toggle <id> on|off | options [--path <폴더>] | repo | repo-set <폴더> | record <id>|--all [--confirm-public] | import [--ack] [--folders <b64>]" };
     process.stdout.write(`${JSON.stringify(out)}\n`);
     process.exitCode = out && out.ok === false ? 1 : 0;
   } catch (e) {
@@ -1042,6 +1222,7 @@ function main(argv) {
 module.exports = {
   ScheduleError, compile, nextAfter, nextTimes, latestIn, describe, validateAutomation, zonedToUtc, partsOf, localZone,
   tick, collectNotices, osNotifyCommand, execute, runNow, refreshRun, launchArgs, slugOf, stamp, claimRun, list, validate, save, remove, toggle, nextCmd, options, codexModels, branchOptions,
-  paths: { STORE_DIR, AUTOS_FILE, RUNS_FILE },
+  defaultDeps, syncStatus, setSyncRepo, record, importFromRepo, normRemote,
+  paths: { STORE_DIR, AUTOS_FILE, RUNS_FILE, SETTINGS_FILE },
 };
 if (require.main === module) main(process.argv.slice(2));
