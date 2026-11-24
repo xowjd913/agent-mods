@@ -2,34 +2,30 @@
 //  - "결정 필요": leaders whose terminal has a wait label (decision|verify): their last decision/verify report, with
 //    "링크 열기", "확인 완료" (verify only) and "답 쓰기".
 //  - "결과 보고": every other report (done, stop, ...) as per-leader bubbles, newest first.
-// A leader's name opens `terminal.peek` on its terminal. An answer is typed into the PO terminal (the claude-code terminal the
-// lead-* terminals hang under) with `hc send` run by this app, which has no calling terminal and so no <hc from> tag: the PO sees
-// it as the person's own input. Files are read by inbox.cjs; this mod only reads them and types the answer.
+// A leader's name opens `terminal.peek` on its terminal. An answer is delivered as real user input: the line goes on the clipboard,
+// the PO pane (the leader terminal's parent, only when it has the label role=po) is focused and the clipboard is pasted into it
+// (terminal.paste). Enter is NOT pressed: the person submits it in the PO terminal, which doubles as a last check. Files are read
+// by inbox.cjs; this mod only reads them.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { theme, exec, hc, appHome, checking, window, run, terminals, shared, setShared, setBadge, props, openOverlay, closeOverlay } from "herdr";
+import { theme, exec, appHome, checking, window, run, terminals, panes, setBadge, props, openOverlay, closeOverlay } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
 const ICON = (name) => `mods/workspace-chrome/${name}.svg`;
-const LOAD_TIMEOUT = 20000, LOAD_STALL_MS = 30000, REFRESH_MS = 5000, MAX_BUBBLES = 40;
+const LOAD_TIMEOUT = 20000, LOAD_STALL_MS = 30000, WINDOW_REFRESH_MS = 5000, PANE_REFRESH_MS = 30000, MAX_BUBBLES = 40;
 const KIND = { done: ["완료", "working"], decision: ["결정", "blocked"], verify: ["확인", "blocked"], stop: ["중단", "idle"], resume: ["재개", "dim"], other: ["알림", "dim"], start: ["시작", "dim"] };
 const WINDOW = { mod: "inbox", kind: "window", key: "inbox", keep: true, width: 480, height: 680, props: { mode: "window" } };
-const WAIT = { decision: "결정", verify: "확인" };
+const NO_PO = "이 리더의 PO 터미널을 찾지 못했습니다(리더 터미널의 부모가 role=po 라벨이어야 합니다).";
+const CLIP = "답을 클립보드에 담아 PO 터미널에 붙여 넣습니다(Enter는 직접 누르세요). 클립보드 내용이 바뀝니다.";
 
-// The PO terminal: the parent the lead-* terminals share (a leader's own parent first). Same rule as inbox.cjs findPo; kept here
-// because the mod cannot require a .cjs file.
-function findPo(terms, leaderName) {
+// The PO of a leader: its terminal's parent, only when that parent has the label role=po (no guessing). Same rule as inbox.cjs
+// findPo; kept here because the mod cannot require a .cjs file.
+function findPo(terms, leaderName, address) {
   const list = terms ?? [];
-  const byAddr = new Map(list.map((t) => [t.address, t]));
-  const own = list.find((t) => leaderName && t.name === leaderName)?.parent;
-  if (own && byAddr.has(own)) return own;
-  const count = new Map();
-  for (const t of list) {
-    if (!/^lead-/.test(String(t.name ?? "")) || !t.parent || !byAddr.has(t.parent)) continue;
-    count.set(t.parent, (count.get(t.parent) ?? 0) + 1);
-  }
-  return [...count.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+  const leader = (leaderName && list.find((t) => t.name === leaderName)) || (address && list.find((t) => t.address === address)) || null;
+  const parent = leader?.parent ? list.find((t) => t.address === leader.parent) : null;
+  return parent && String(parent.labels?.role ?? "").trim().toLowerCase() === "po" ? parent.address : null;
 }
 
 function answerLine(kind, leader, text, link) {
@@ -87,13 +83,15 @@ export default class Inbox extends View {
     this.msg = null; // {text, bad}
     if (checking()) return;
     this.load(cx);
-    cx.timer.every(REFRESH_MS, (cx) => { this.load(cx); this.badge(); });
+    // The always-on summary pane owns the slow refresh and the badge; the window refreshes faster while it is open.
+    cx.timer.every(this.windowed ? WINDOW_REFRESH_MS : PANE_REFRESH_MS, (cx) => this.load(cx));
   }
 
-  // The number of leaders that wait on a decision: on the panel button (shared with tabs-mine) and the app icon badge.
+  // The number of leaders that wait on a decision, on the app icon badge. Only the summary pane sets it (the window would repeat
+  // the same number); tabs-mine counts the wait labels itself for the tab-row button (even with the panel closed).
   badge() {
+    if (this.windowed) return;
     const n = this.asks().length;
-    if (shared("inbox.waiting") !== n) setShared("inbox.waiting", n);
     const text = n > 0 ? String(n) : "";
     if (text !== this.badged) { this.badged = text; try { setBadge(text || null); } catch {} }
   }
@@ -135,7 +133,7 @@ export default class Inbox extends View {
       const kind = String(term?.labels?.wait ?? "").trim().toLowerCase();
       if (kind !== "decision" && kind !== "verify") continue;
       const item = s.ask ?? s.open;
-      out.push({ s, term, kind, item, link: String(term?.labels?.["wait-link"] ?? "").trim() || item?.link || "" });
+      out.push({ s, term, kind, item, po: findPo(terminals(), s.leader, s.terminal), link: String(term?.labels?.["wait-link"] ?? "").trim() || item?.link || "" });
     }
     return out.sort((a, b) => (b.item?.ms ?? 0) - (a.item?.ms ?? 0));
   }
@@ -161,24 +159,34 @@ export default class Inbox extends View {
 
   say(text, bad = false) { this.msg = { text, bad }; }
 
-  // Types the answer into the PO terminal. hc runs without a terminal of its own, so nothing marks it as a message from an agent.
+  // Delivers the answer as the person's own input: clipboard -> focus the PO pane -> paste. Enter is left to the person.
   send(a, text, cx) {
     const body = String(text ?? "").trim();
     if (!body) { this.say("답을 먼저 적어 주세요.", true); cx.notify(); return; }
-    const po = findPo(terminals(), a.s.leader);
-    if (!po) { this.say("PO 터미널을 찾지 못했습니다(lead-* 터미널의 부모).", true); cx.notify(); return; }
+    const po = a.po;
+    if (!po) { this.say(NO_PO, true); cx.notify(); return; }
     const line = answerLine(a.kind, a.s.leader, body, a.link);
-    cx.spawn(async (cx) => {
-      try {
-        const r = await hc(["send", po, line, "--json"]);
-        if (r.code !== 0) throw new Error((r.stderr || r.stdout || `종료 코드 ${r.code}`).trim().slice(0, 160));
-        this.sent.set(a.s.leader, a.item?.ts ?? "");
-        this.inputs.get(a.s.leader)?.set_value("");
-        if (this.writing === a.s.leader) this.writing = null;
-        this.say(`${shortName(a.s.leader)} 건 답을 PO(${po})에 입력했습니다.`);
-      } catch (e) { this.say(`보내지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
-      cx.notify();
-    });
+    try {
+      cx.write_to_clipboard(line);
+      if (!(panes() ?? []).some((p) => p.terminal === po)) {
+        run("terminal.keep", { terminal: po }); // finishes in the background: the person focuses the pane and pastes
+        this.markSent(a);
+        this.say(`PO(${po})에 창이 없어 열었습니다. 글은 클립보드에 있으니 PO 터미널에서 붙여넣고 Enter를 누르세요.`);
+      } else {
+        run("pane.focus", { terminal: po });
+        try { run("terminal.paste", {}); this.say(`PO(${po})에 붙여 넣었습니다. PO 터미널에서 Enter를 눌러 보내세요.`); }
+        catch { this.say(`PO(${po})를 열었습니다. 글은 클립보드에 있으니 붙여넣고 Enter를 누르세요.`); }
+        this.markSent(a);
+        if (this.windowed) { try { closeOverlay(safeProps().overlay); } catch {} } // the PO pane takes the keyboard
+      }
+    } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
+    cx.notify();
+  }
+
+  markSent(a) {
+    this.sent.set(a.s.leader, a.item?.ts ?? "");
+    this.inputs.get(a.s.leader)?.set_value("");
+    if (this.writing === a.s.leader) this.writing = null;
   }
 
   box(leader, cx) {
@@ -193,10 +201,14 @@ export default class Inbox extends View {
 
   // ---- parts
   button(t, id, label, onClick, o = {}) {
+    if (o.disabled) {
+      return div().id(id).flex_none().h(24).px(10).rounded(12).flex().items_center().text_size(11.5).on_mouse_down("left", stop)
+        .bg(t.raised).border(1).border_color(t.border).text_color(t.dim).opacity(0.5).tooltip(o.disabled).child(label);
+    }
     return div().id(id).flex_none().h(24).px(10).rounded(12).flex().items_center().text_size(11.5).cursor_pointer()
       .on_mouse_down("left", stop).bg(o.primary ? t.selected : t.raised).border(1).border_color(o.primary ? t.foreground + "40" : t.border)
       .text_color(o.primary ? t.foreground : t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
-      .on_click((_e, cx) => onClick(cx)).child(label);
+      .on_click((_e, cx) => onClick(cx)).when(Boolean(o.tip), (el) => el.tooltip(o.tip)).child(label);
   }
 
   tag(t, text, color) {
@@ -246,15 +258,16 @@ export default class Inbox extends View {
         .child(item ? this.bubble(t, item, t.blocked) : div().text_size(12).text_color(t.dim).child("이 리더의 보고 내용을 찾지 못했습니다. 터미널을 들여다보세요.")));
     const actions = h_flex().gap(6).pl(this.compact ? 0 : 36).items_center().flex_wrap()
       .when(Boolean(link), (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", () => openUrl(link))))
-      .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c), { primary: true })))
-      .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); c.notify(); }))
-      .when(done, (el) => el.child(div().text_size(11).text_color(t.working).child("답을 PO에 입력함 · 리더가 받으면 사라집니다")));
+      .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c), { primary: true, disabled: a.po ? "" : NO_PO, tip: CLIP })))
+      .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); c.notify(); }, { disabled: a.po ? "" : NO_PO }))
+      .when(done, (el) => el.child(div().text_size(11).text_color(t.working).child("PO에 붙여 넣음 · Enter로 보내면 리더가 받고 사라집니다")));
     card.child(head).child(actions);
+    if (!a.po) card.child(div().pl(this.compact ? 0 : 36).text_size(11).text_color(t.dim).child(NO_PO));
     if (writing) {
       const input = this.box(s.leader, cx);
       card.child(h_flex().gap(6).pl(this.compact ? 0 : 36).items_center()
         .child(div().flex_1().min_w(0).on_mouse_down("left", stop).child(Input.new(input).h(30).px(10).items_center().rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
-        .child(this.button(t, `send-${s.leader}`, "보내기", (c) => this.send(a, input.value(), c), { primary: true })));
+        .child(this.button(t, `send-${s.leader}`, "보내기", (c) => this.send(a, input.value(), c), { primary: true, disabled: a.po ? "" : NO_PO, tip: CLIP })));
     }
     return card;
   }

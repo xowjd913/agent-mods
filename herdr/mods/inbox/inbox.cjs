@@ -90,23 +90,17 @@ function collect(dir = inboxDir()) {
   return { at: new Date().toISOString(), leaders };
 }
 
-// The PO: the terminal that the lead-* terminals hang under. `terms` are Herdr's terminals() entries ({address, name, parent}).
-// Prefer the parent shared by most leaders; ties go to the claude-code one. null when no lead-* terminal has a live parent.
-function findPo(terms, leaderName) {
+// The PO of a leader: that leader's terminal's parent, accepted only when the parent carries the label role=po. No guessing from
+// sibling lead-* terminals: a wrong guess would put an answer into some other agent's prompt. null when there is none.
+// `terms` are Herdr's terminals() entries ({address, name, parent, labels}); the leader is found by name, else by `address`.
+function findPo(terms, leaderName, address) {
   const list = terms ?? [];
-  const byAddr = new Map(list.map((t) => [t.address, t]));
-  const count = new Map();
-  for (const t of list) {
-    if (!/^lead-/.test(String(t.name ?? "")) || !t.parent || !byAddr.has(t.parent)) continue;
-    count.set(t.parent, (count.get(t.parent) ?? 0) + 1);
-  }
-  const own = list.find((t) => leaderName && t.name === leaderName)?.parent;
-  if (own && byAddr.has(own)) return byAddr.get(own).address;
-  const ranked = [...count.entries()].sort((a, b) => b[1] - a[1]);
-  return ranked[0]?.[0] ?? null;
+  const leader = (leaderName && list.find((t) => t.name === leaderName)) || (address && list.find((t) => t.address === address)) || null;
+  const parent = leader?.parent ? list.find((t) => t.address === leader.parent) : null;
+  return parent && String(parent.labels?.role ?? "").trim().toLowerCase() === "po" ? parent.address : null;
 }
 
-// The line typed into the PO terminal. One line (newlines folded to spaces) so the submit keeps it as a single user message.
+// The line pasted into the PO terminal. One line (newlines folded to spaces) so the submit keeps it as a single user message.
 function answerLine(kind, leader, text, link) {
   const body = String(text ?? "").replace(/\s*\n\s*/g, " ").trim();
   return `Panel answer (${kind}) for ${leader}: "${body}".${link ? ` Target: ${link}` : ""}`;
