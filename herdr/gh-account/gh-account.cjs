@@ -198,10 +198,17 @@ function spaceOwners(ctx, dirs, map, logins = []) {
       const rule = map.rules.find((x) => x.match.toLowerCase() === `${key}/*`);
       owners.set(key, { owner: r.owner, personal: logins.some((l) => same(l, r.owner)), rule: rule ? rule.account : null, repos: [] });
     }
-    const hit = matchAccount(map, r);
+    const hit = ownerOverDefault(matchAccount(map, r), r, logins);
     owners.get(key).repos.push({ repo: `${r.owner}/${r.repo}`, dir: r.dir, account: hit ? hit.account : null, by: hit ? hit.by : null, match: hit ? hit.match : null });
   }
   return [...owners.values()];
+}
+
+// default 를 로그인된 계정 자신의 저장소에 쓰지 않는 규칙(pickAccount)을 로그인 목록으로 미리 본다. 화면 표시용.
+function ownerOverDefault(hit, repo, logins) {
+  if (!hit || hit.by !== "default" || same(hit.account, repo.owner)) return hit;
+  const login = (logins || []).find((l) => same(l, repo.owner));
+  return login ? { account: login, by: "owner", match: null } : hit;
 }
 
 // 폴더들에서 찾은 owner 마다 owner/* 규칙을 그 계정으로 바꾼다. account 가 null 이면 그 owner/* 규칙을 지운다.
@@ -218,7 +225,7 @@ function assignOwners(map, owners, account) {
   return { changed, skipped };
 }
 
-const loginNames = (ctx) => (ghAccounts(ctx) || []).map((a) => a.login);
+const loginNames = (ctx) => (ghLogins(ctx) || []).map((a) => a.login);
 
 // gh 인자에서 대상 저장소: -R/--repo, GitHub URL, gh repo <명령> o/r, gh api repos/o/r, GH_REPO 순.
 function repoFromGhArgs(args, env = {}) {
@@ -295,6 +302,22 @@ function tokenFor(ctx, login) {
   return { ok: true, token };
 }
 
+// gh 에 로그인된 github.com 계정 목록. 읽지 못하면 null.
+function ghLogins(ctx) {
+  const r = ctx.run(realGh(ctx), ["auth", "status", "--hostname", HOST, "--json", "hosts"], { env: cleanEnv(ctx.env) });
+  try { return (JSON.parse(r.stdout).hosts[HOST] || []).map((h) => ({ login: h.login, active: !!h.active, state: h.state })); } catch { return null; }
+}
+
+// 규칙 다음에 계정을 고른다. default 는 로그인된 계정 자신의 저장소(owner 가 그 로그인 이름)에는 쓰지 않고 그 계정을 쓴다.
+// 로그인 여부는 gh auth token(로컬)으로 본다. 그 계정이 로그인돼 있지 않으면 default 를 쓴다.
+function pickAccount(ctx, map, repo) {
+  const hit = matchAccount(map, repo);
+  if (!hit || hit.by !== "default" || hit.account.toLowerCase() === repo.owner.toLowerCase() || !LOGIN.test(repo.owner)) return { hit };
+  const t = tokenFor(ctx, repo.owner);
+  if (t.ok) return { hit: { account: repo.owner, by: "owner", match: null }, token: t.token };
+  return { hit };
+}
+
 function notLoggedIn(repo, hit) {
   const how = hit.match ? `gh-account unset ${hit.match}` : "gh-account default none";
   return `gh-account: ${repo.owner}/${repo.repo} 은(는) ${hit.account} 계정으로 매핑돼 있지만 이 계정은 gh에 로그인돼 있지 않습니다.\n`
@@ -308,7 +331,7 @@ function resolve(ctx, { repo, dir } = {}) {
   if (!m.ok) return { error: m.error };
   const target = repo || repoFromDir(ctx, dir || ctx.cwd);
   if (!target) return { repo: null, hit: null };
-  return { repo: target, hit: matchAccount(m.map, target) };
+  return { repo: target, hit: pickAccount(ctx, m.map, target).hit };
 }
 
 // gh 래퍼용: 매핑된 계정 토큰을 돌려준다. code 3 은 매핑됐지만 로그인 안 됨.
@@ -319,9 +342,10 @@ function ghToken(ctx, args) {
   const m = readMap(P.map);
   if (!m.ok) return { code: 0 };
   const repo = repoFromGhArgs(args, ctx.env) || repoFromDir(ctx, ctx.cwd);
-  const hit = matchAccount(m.map, repo);
+  const pick = pickAccount(ctx, m.map, repo);
+  const hit = pick.hit;
   if (!hit) return { code: 0 };
-  const t = tokenFor(ctx, hit.account);
+  const t = pick.token ? { ok: true, token: pick.token } : tokenFor(ctx, hit.account);
   if (!t.ok) return { code: 3, message: notLoggedIn(repo, hit) };
   return { code: 0, token: t.token };
 }
@@ -354,10 +378,11 @@ function credential(ctx, op, input) {
     const m = readMap(paths(ctx).map);
     if (!m.ok) return { out: "" };
     const repo = credRepo(ctx, a);
-    const hit = matchAccount(m.map, repo);
+    const pick = pickAccount(ctx, m.map, repo);
+    const hit = pick.hit;
     if (!hit) return { out: "" };
     if (a.username && a.username.toLowerCase() !== hit.account.toLowerCase()) return { out: "" };
-    const t = tokenFor(ctx, hit.account);
+    const t = pick.token ? { ok: true, token: pick.token } : tokenFor(ctx, hit.account);
     if (t.missing) return { out: "", message: GH_MISSING };
     if (!t.ok) return { out: "quit=1\n", message: notLoggedIn(repo, hit) };
     return { out: `username=${hit.account}\npassword=${t.token}\n` };
@@ -374,10 +399,11 @@ function ourCredential(ctx, a) {
   if (!user) return false;
   const m = readMap(paths(ctx).map);
   if (!m.ok) return false;
+  const repo = credRepo(ctx, a);
+  const hit = pickAccount(ctx, m.map, repo).hit;
+  if (hit && hit.account.toLowerCase() === user) return true;
   const account = [m.map.default, ...m.map.rules.map((r) => r.account)].find((x) => x && x.toLowerCase() === user);
   if (!account) return false;
-  const hit = matchAccount(m.map, credRepo(ctx, a));
-  if (hit && hit.account.toLowerCase() === user) return true;
   if (!a.password) return false;
   const t = tokenFor(ctx, account);
   return t.ok && t.token === a.password;
@@ -539,13 +565,23 @@ function sync(ctx, log = () => {}) {
   const state = readState(P.state);
   const includes = [];
   const keep = new Set();
-  const order = [...(map.default ? [{ match: null, account: map.default }] : []), ...[...map.rules].reverse()];
+  // default 는 로그인된 계정 자신의 저장소에 쓰지 않으므로, 그 계정마다 login/* 신원을 default 뒤(규칙 앞)에 둔다.
+  // 로그인 목록을 읽지 못하면 default 신원은 넣지 않는다(개인 저장소에 다른 계정 신원이 붙지 않게).
+  let def = map.default ? [{ match: null, account: map.default }] : [];
+  const owners = [];
+  if (def.length) {
+    const logins = ghLogins(ctx);
+    if (!logins) { log("커밋 신원: gh 로그인 목록을 읽지 못해 기본 계정 신원은 건너뜁니다."); def = []; }
+    else for (const l of logins) if (l.login && LOGIN.test(l.login) && l.login.toLowerCase() !== map.default.toLowerCase()) owners.push({ match: `${l.login}/*`, account: l.login, owner: true });
+  }
+  const order = [...def, ...owners, ...[...map.rules].reverse()];
   if (order.length) {
     const v = gitVersion(ctx);
     if (!versionAtLeast(v, MIN_GIT)) {
       log(`git ${v ? v.join(".") : "(버전 모름)"} 은(는) includeIf hasconfig 를 몰라 커밋 신원은 건너뜁니다(2.36 이상 필요). 인증은 그대로 됩니다.`);
     } else {
       const done = new Map();
+      let ownerGap = false;
       for (const r of order) {
         if (!done.has(r.account)) {
           const file = path.join(P.identity, `${r.account}.gitconfig`);
@@ -563,6 +599,15 @@ function sync(ctx, log = () => {}) {
         }
         const file = done.get(r.account);
         if (file) { includes.push({ match: r.match, file }); keep.add(path.basename(file)); }
+        else if (r.owner) ownerGap = true;
+      }
+      // 로그인된 계정의 신원을 만들지 못하면 그 계정 저장소에 default 신원이 붙으므로 default 신원을 뺀다.
+      if (ownerGap && def.length) {
+        log("커밋 신원: 로그인된 계정의 신원을 만들지 못한 것이 있어 기본 계정 신원은 건너뜁니다.");
+        const defFile = done.get(map.default);
+        const i = includes.findIndex((x) => x.match === null);
+        if (i >= 0) includes.splice(i, 1);
+        if (defFile && !includes.some((x) => x.file === defFile)) keep.delete(path.basename(defFile));
       }
     }
   }
@@ -609,7 +654,7 @@ function scripts({ app, node, binDir, home, gh }) {
       + `  grep -v '^path=' | sh -c "$C $3"\n  exit 0\nfi\n`
       + `[ -n "$GH_ACCOUNT_OFF" ] && exit 0\n`
       + `{ [ -x "$NODE" ] && [ -f "$APP" ]; } || exit 0\n${runApp} credential "$@"\nexit 0\n`,
-    "gh-account": head("매핑 보기·바꾸기 명령.") + pickNode + `exec ${runApp} "$@"\n`,
+    "gh-account": head("매핑 보기·바꾸기 명령.") + pickNode + `exec env ${runApp} "$@"\n`,
   };
 }
 
@@ -711,10 +756,6 @@ function statusInfo(ctx) {
 }
 
 // gh 에 로그인된 github.com 계정. 읽지 못하면(옛 gh, gh 없음) null.
-function ghAccounts(ctx) {
-  const r = ctx.run(realGh(ctx), ["auth", "status", "--hostname", HOST, "--json", "hosts"], { env: cleanEnv(ctx.env) });
-  try { return (JSON.parse(r.stdout).hosts[HOST] || []).map((h) => ({ login: h.login, active: !!h.active, state: h.state })); } catch { return null; }
-}
 function activeLogin(accounts) {
   const a = (accounts || []).find((x) => x.active);
   return a ? a.login : null;
@@ -775,7 +816,7 @@ function check(ctx, { repo, dir, test } = {}) {
   let remote = null;
   if (!repo && dir) { try { remote = remoteFromDir(ctx, dir); } catch { remote = null; } }
   const target = repo || (remote && remote.repo) || null;
-  const accounts = ghAccounts(ctx);
+  const accounts = ghLogins(ctx);
   const active = activeLogin(accounts);
   const state = readState(P.state);
   const order = state && state.binDir ? pathOrder(ctx, state.binDir) : null;
@@ -787,7 +828,7 @@ function check(ctx, { repo, dir, test } = {}) {
     gh: null, push: null, identity: null, warn: [], test: null,
   };
   if (!target) return out;
-  const hit = m.ok ? matchAccount(m.map, target) : null;
+  const hit = m.ok ? ownerOverDefault(matchAccount(m.map, target), target, accounts && accounts.map((a) => a.login)) : null;
   if (hit) Object.assign(out, { account: hit.account, by: hit.by, match: hit.match });
   if (hit && accounts) out.loggedIn = accounts.some((a) => same(a.login, hit.account));
   const used = !!(state && hit);
@@ -841,7 +882,7 @@ function restoreActive(ctx, prev, now) {
   if (!prev) return { ok: true, switched: false };
   if (same(prev, now)) return { ok: true, switched: false };
   const r = ctx.run(realGh(ctx), ["auth", "switch", "--hostname", HOST, "--user", prev], { env: cleanEnv(ctx.env) });
-  const after = activeLogin(ghAccounts(ctx));
+  const after = activeLogin(ghLogins(ctx));
   if (r.status !== 0 || !same(after, prev)) {
     return { ok: false, switched: false, message: `gh 활성 계정을 ${prev}(으)로 되돌리지 못했습니다. 터미널에서 gh auth switch --hostname github.com --user ${prev} 를 실행하세요.` };
   }
@@ -865,7 +906,7 @@ function loginStart(ctx) {
   if (ctx.platform === "win32") return { ok: false, message: "gh-account 는 아직 Windows 를 지원하지 않습니다." };
   const cur = loginStatus(ctx);
   if (RUNNING.has(cur.state)) return { ok: false, message: "이미 계정 추가가 진행 중입니다.", login: cur };
-  const accounts = ghAccounts(ctx);
+  const accounts = ghLogins(ctx);
   if (!accounts) return { ok: false, message: "gh auth status --json 을 읽지 못했습니다. gh 2.60 이상이 설치돼 있는지 보세요." };
   const prev = activeLogin(accounts);
   const gh = realGh(ctx);
@@ -912,7 +953,7 @@ function loginRun(ctx, prev, opts = {}) {
         done(1);
         return;
       }
-      const now = activeLogin(ghAccounts(ctx));
+      const now = activeLogin(ghLogins(ctx));
       const back = restoreActive(ctx, st.prev, now);
       st = { ...st, state: "done", added: now, restored: back.ok, switched: back.switched, message: back.message || null };
       writeLogin(ctx, st);
@@ -1038,7 +1079,7 @@ function checkText(io, c) {
   if (!c.repo) { io.out(`${c.dir || "이 폴더"}: github.com 원격을 찾지 못했습니다. gh 와 git 은 원래 계정을 씁니다.`); }
   else {
     io.out(`${c.repo}${c.remote ? ` (${c.remote})` : ""}`);
-    io.out(`  매핑: ${c.account ? `${c.account} (${c.by === "rule" ? `규칙 ${c.match}` : "default"})` : "없음"}`);
+    io.out(`  매핑: ${c.account ? `${c.account} (${c.by === "rule" ? `규칙 ${c.match}` : c.by === "owner" ? "로그인된 계정의 저장소" : "default"})` : "없음"}`);
     io.out(`  gh: ${c.gh.account || "(활성 계정 없음)"}${c.gh.how === "active" ? " (gh 활성 계정)" : c.gh.how === "path" ? " (래퍼가 쓰이지 않아 gh 활성 계정)" : ""}`);
     io.out(`  git push: ${c.push.how === "ssh" ? "SSH 키" : c.push.how === "prior" ? "원래 자격 증명(키체인 등)" : c.push.account}`);
     const id = c.identity;
@@ -1105,12 +1146,12 @@ function main(argv, ctx, io) {
       if (!res.repo) { io.out("github.com 원격이 없는 폴더입니다. gh 와 git 은 원래 계정을 씁니다."); return 0; }
       const name = `${res.repo.owner}/${res.repo.repo}`;
       if (!res.hit) io.out(`${name}: 매핑 없음. gh 와 git 은 원래 계정(gh 활성 계정 등)을 씁니다.`);
-      else io.out(`${name}: ${res.hit.account} (${res.hit.by === "rule" ? `규칙 ${res.hit.match}` : "default"})`);
+      else io.out(`${name}: ${res.hit.account} (${res.hit.by === "rule" ? `규칙 ${res.hit.match}` : res.hit.by === "owner" ? "로그인된 계정의 저장소" : "default"})`);
       return 0;
     }
     case "list": {
       const json = args.includes("--json");
-      const accounts = ghAccounts(ctx);
+      const accounts = ghLogins(ctx);
       const m = readMap(P.map);
       if (json) { io.out(JSON.stringify({ accounts, map: m.ok ? m.map : null, error: m.ok ? null : m.error })); return 0; }
       if (!accounts) io.out("gh auth status --json 을 읽지 못했습니다(gh 2.60 이상 필요). gh auth status 로 직접 확인하세요.");
@@ -1145,7 +1186,7 @@ function main(argv, ctx, io) {
     case "default": {
       const a = args[0];
       if (!a || (a !== "none" && !LOGIN.test(a))) { io.err(USAGE); return 2; }
-      const code = editMap(ctx, io, (map) => { map.default = a === "none" ? null : a; return `default: ${map.default || "(없음)"}`; });
+      const code = editMap(ctx, io, (map) => { map.default = a === "none" ? null : a; return `default: ${map.default || "(없음)"}${map.default ? "\n  로그인된 계정 자신의 저장소(owner 가 그 계정 이름)는 default 가 아니라 그 계정을 씁니다." : ""}`; });
       if (code === 0 && a !== "none") warnLogin(ctx, io, a);
       return code;
     }
@@ -1162,7 +1203,7 @@ function main(argv, ctx, io) {
       if (!owners.length) { io.out("이 폴더들에서 github.com 원격을 찾지 못했습니다."); return 0; }
       for (const o of owners) {
         io.out(`${o.owner}/*: ${o.rule || "(규칙 없음)"}${o.personal ? " (로그인된 계정)" : ""}`);
-        for (const r of o.repos) io.out(`  ${r.repo} -> ${r.account || "(매핑 없음)"}${r.by === "rule" && r.match !== `${o.owner}/*` ? ` (규칙 ${r.match})` : r.by === "default" ? " (default)" : ""}`);
+        for (const r of o.repos) io.out(`  ${r.repo} -> ${r.account || "(매핑 없음)"}${r.by === "rule" && r.match !== `${o.owner}/*` ? ` (규칙 ${r.match})` : r.by === "default" ? " (default)" : r.by === "owner" ? " (로그인된 계정의 저장소)" : ""}`);
       }
       return 0;
     }
@@ -1305,5 +1346,5 @@ module.exports = {
   globalConfigPath, stripBlock, writeBlock, buildBlock, urlPatterns, priorHelpers, identityFor, sync,
   scripts, install, uninstall, main, makeCtx,
   remoteFromDir, safeUrl, isSshUrl, pathOrder, shellPath, planInstall, planUninstall, statusInfo,
-  ghAccounts, identityOf, accessTest, check, scrub, restoreActive, readLogin, writeLogin, loginStatus, loginStart, loginCancel, loginRun,
+  ghAccounts: ghLogins, ghLogins, identityOf, accessTest, check, scrub, restoreActive, readLogin, writeLogin, loginStatus, loginStart, loginCancel, loginRun,
 };

@@ -66,6 +66,7 @@ gh-account status                    # 설치·PATH·git 버전 점검
 ```
 
 - 규칙은 위에서부터 보고, 먼저 맞는 규칙이 이깁니다. 맞는 규칙이 없으면 `default`를 씁니다.
+- 단, gh 에 로그인된 계정 자신의 저장소(owner 가 그 로그인 이름, 예: `acct-b/notes`)에는 `default`를 쓰지 않고 그 계정을 씁니다. 그런 저장소도 규칙을 적으면 규칙이 이깁니다.
 - `match`는 `owner/*`나 `owner/repo` 모양입니다.
 
 ### 계정 패널
@@ -129,6 +130,7 @@ gh-account identity acct-b --off    # 이 계정은 커밋 신원을 바꾸지 �
 ## 안전 장치
 
 - 매핑 파일이 없거나 깨졌거나 맞는 규칙이 없으면 아무 일도 하지 않습니다. `gh`와 `git`은 원래대로 동작합니다.
+- 기본 계정은 로그인된 다른 계정의 개인 저장소에 쓰이지 않습니다. 인증과 커밋 신원 모두 그 저장소 주인 계정을 씁니다. 로그인 목록(`gh auth status --json`)을 읽지 못하면 기본 계정의 커밋 신원은 넣지 않습니다.
 - 매핑된 계정이 gh에 로그인돼 있지 않으면 다른 계정으로 넘어가지 않고 실패합니다. 메시지에 로그인·매핑 지우기 방법을 함께 보여 줍니다.
 - `GH_TOKEN`이나 `GITHUB_TOKEN`이 이미 있으면 래퍼는 건드리지 않습니다.
 - 저장소와 상관없는 명령(`gh auth`, `gh --version`, `gh help`, `gh config`, `gh extension`, `gh alias`, `gh completion`)은 매핑을 보지 않고 그대로 진짜 `gh`로 넘깁니다.
@@ -139,7 +141,7 @@ gh-account identity acct-b --off    # 이 계정은 커밋 신원을 바꾸지 �
 
 - HTTPS 원격만 인증합니다. SSH 원격(`git@github.com:...`)의 push 인증은 SSH 키를 따릅니다. 커밋 신원은 SSH 원격에도 적용됩니다.
 - github.com만 다룹니다. GitHub Enterprise(`GH_HOST`)에서는 래퍼가 그대로 넘깁니다.
-- 커밋 신원의 URL 비교는 대소문자를 가립니다. 원격 URL의 owner 철자를 규칙과 같게 적으세요.
+- 커밋 신원의 URL 비교는 대소문자를 가립니다. 원격 URL의 owner 철자를 규칙과 같게 적으세요. 로그인된 계정의 저장소도 원격 URL 의 owner 철자가 로그인 이름과 같아야 커밋 신원이 그 계정으로 붙습니다.
 - 원격이 여럿이고 서로 다른 계정에 맞으면, 커밋 신원은 git 설정에서 나중에 오는 규칙(목록에서 앞 규칙)이 이깁니다.
 - 설치 뒤에 `gh auth setup-git` 등으로 자격 증명 도우미를 바꿨다면 `sh herdr/install.sh --gh-account`를 다시 실행하세요.
 - Windows는 아직 지원하지 않습니다.

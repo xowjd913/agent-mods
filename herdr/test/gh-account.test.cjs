@@ -14,9 +14,13 @@ const POSIX = process.platform !== "win32";
 function tmpdir(name = "gh-account") { return fs.mkdtempSync(path.join(os.tmpdir(), `${name}-`)); }
 
 // 가짜 gh: acct-a, acct-b 만 로그인돼 있다. 그 밖의 명령은 결과를 기록만 한다.
-function fakeRun({ logged = ["acct-a", "acct-b"], remotes = {}, gitVersion = "git version 2.45.0", calls = [] } = {}) {
+function fakeRun({ logged = ["acct-a", "acct-b"], remotes = {}, gitVersion = "git version 2.45.0", calls = [], noStatus = false } = {}) {
   return (cmd, args, opts = {}) => {
     calls.push({ cmd, args, env: opts.env, opts });
+    if (cmd === "fake-gh" && args[0] === "auth" && args[1] === "status") {
+      if (noStatus) return { status: 1, stdout: "", stderr: "unknown flag: --json" };
+      return { status: 0, stdout: JSON.stringify({ hosts: { "github.com": logged.map((login, i) => ({ login, active: i === 0, state: "success" })) } }), stderr: "" };
+    }
     if (cmd === "fake-gh" && args[0] === "auth" && args[1] === "token") {
       const user = args[args.indexOf("--user") + 1];
       return logged.includes(user) ? { status: 0, stdout: `tok-${user}\n`, stderr: "" } : { status: 1, stdout: "", stderr: "no account" };
@@ -268,6 +272,60 @@ test("sync: 신원 파일은 매핑 값 또는 noreply 주소, 끈 계정과 로
   assert.doesNotMatch(g, /tok-/);
 });
 
+// 기본 계정은 로그인된 계정 자신의 저장소(owner 가 그 로그인 이름)에 쓰지 않는다. 명시한 규칙은 그대로 이긴다.
+test("기본 계정: 로그인된 계정의 저장소는 그 계정, 규칙이 있으면 규칙, 로그인 안 된 owner 는 기본 계정", () => {
+  const map = { rules: [{ match: "acct-b/special", account: "acct-a" }], default: "acct-a" };
+  const { ctx, calls } = setup(map, { remotes: { "/w/repo": "https://github.com/acct-b/notes.git" } });
+  const r = (o, n) => ga.resolve(ctx, { repo: { owner: o, repo: n } }).hit;
+  assert.deepEqual(r("acct-b", "notes"), { account: "acct-b", by: "owner", match: null });
+  assert.deepEqual(r("acct-b", "special"), { account: "acct-a", by: "rule", match: "acct-b/special" });
+  assert.equal(r("example-org", "app").account, "acct-a");
+  assert.equal(r("example-org", "app").by, "default");
+  assert.equal(r("acct-a", "x").by, "default", "기본 계정 자신의 저장소는 그대로");
+  assert.equal(r("acct-c", "x").by, "default", "로그인 안 된 owner 는 기본 계정");
+  // gh 래퍼와 git 자격 증명도 같은 계정을 쓴다
+  assert.equal(ga.ghToken(ctx, ["pr", "list"]).token, "tok-acct-b");
+  assert.equal(ga.ghToken(ctx, ["pr", "list", "-R", "example-org/app"]).token, "tok-acct-a");
+  const input = "protocol=https\nhost=github.com\n";
+  assert.equal(ga.credential(ctx, "get", input).out, "username=acct-b\npassword=tok-acct-b\n");
+  assert.equal(ga.credential(ctx, "get", input + "path=example-org/app.git\n").out, "username=acct-a\npassword=tok-acct-a\n");
+  assert.equal(ga.credential(ctx, "get", input + "path=acct-b/special.git\n").out, "username=acct-a\npassword=tok-acct-a\n");
+  // 그렇게 내준 자격 증명은 원래 도우미에 저장하지 않는다
+  assert.equal(ga.ourCredential(ctx, { username: "acct-b", password: "tok-acct-b", path: "acct-b/notes.git" }), true);
+  // 토큰은 프로세스 인자에 넣지 않는다
+  for (const c of calls) assert.ok(!c.args.some((x) => /tok-/.test(x)));
+  // resolve 출력
+  const t = io();
+  ga.main(["resolve", "-R", "acct-b/notes"], ctx, t.io);
+  assert.match(t.o.lines.join("\n"), /acct-b\/notes: acct-b \(로그인된 계정의 저장소\)/);
+});
+
+test("sync: 기본 계정 신원은 로그인된 계정의 저장소에 붙지 않고, 로그인 목록을 못 읽으면 기본 계정 신원을 뺀다", () => {
+  const map = { rules: [{ match: "example-org/*", account: "acct-b" }], default: "acct-a" };
+  const { home, ctx } = setup(map);
+  ga.sync(ctx);
+  const inc = fs.readFileSync(path.join(home, "gitconfig"), "utf8").split("\n").filter((l) => l.startsWith("[includeIf"));
+  // default(**) 다음에 acct-b/** (로그인된 acct-b 자신의 저장소), 마지막이 규칙
+  const order = inc.map((l) => (/github\.com[:/]\*\*"/.test(l) ? "default" : l.includes("acct-b/**") ? "owner" : l.includes("example-org/**") ? "rule" : "?"));
+  assert.ok(order.indexOf("default") < order.indexOf("owner") && order.lastIndexOf("owner") < order.indexOf("rule"), order.join(","));
+  assert.ok(!order.includes("?"), "기본 계정 자신(acct-a/*)은 따로 넣지 않는다");
+
+  const s2 = setup(map, { noStatus: true });
+  const logs = [];
+  ga.sync(s2.ctx, (l) => logs.push(l));
+  const g2 = fs.readFileSync(path.join(s2.home, "gitconfig"), "utf8");
+  assert.doesNotMatch(g2, /github\.com[:/]\*\*"/, "기본 계정 catch-all 신원 없음");
+  assert.match(g2, /example-org\/\*\*/);
+  assert.ok(logs.some((l) => l.includes("기본 계정 신원은 건너뜁니다")));
+
+  // 로그인된 계정 신원을 만들지 못하면(신원 끔) 기본 계정 신원도 뺀다
+  const s3 = setup({ ...map, accounts: { "acct-b": { identity: false } }, rules: [] });
+  const logs3 = [];
+  ga.sync(s3.ctx, (l) => logs3.push(l));
+  assert.equal(fs.existsSync(path.join(s3.home, "gitconfig")), false);
+  assert.ok(logs3.some((l) => l.includes("기본 계정 신원은 건너뜁니다")));
+});
+
 test("sync: git 2.36 보다 낮으면 신원을 건너뛰고 알린다", () => {
   const { home, ctx } = setup(MAP, { gitVersion: "git version 2.30.1" });
   const logs = [];
@@ -517,6 +575,26 @@ test("e2e: 래퍼가 GH_TOKEN 을 넣고 git 자격 증명·커밋 신원이 매
   assert.equal(fs.readFileSync(gconf, "utf8"), "[credential]\n\thelper = \"!f() { echo username=prior; echo password=prior-pass; }; f\"\n");
   assert.equal(fs.readFileSync(path.join(app, "gh-accounts.json"), "utf8"), "{broken");
   assert.equal(fs.existsSync(path.join(app, "gh-account")), false);
+});
+
+// 설치한 gh-account 명령 스크립트를 진짜 sh 로 실행한다(예전에는 exec VAR=... 를 명령으로 읽어 실행하지 못했다).
+test("e2e: 설치한 gh-account 명령이 HERDR_APP_HOME 을 넘겨 node 로 도구를 실행한다", { skip: !POSIX && "POSIX 전용" }, () => {
+  const { root, app, bin, sh } = e2eSetup(() => "");
+  const r = sh("sh", [path.join(bin, "gh-account"), "list"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /매핑\(/);
+  // 가짜 node 로 넘긴 환경과 인자를 확인한다
+  const fakeNode = path.join(root, "fake node");
+  fs.mkdirSync(fakeNode);
+  fs.writeFileSync(path.join(fakeNode, "node"), '#!/bin/sh\necho "home=$HERDR_APP_HOME"\nfor a in "$@"; do echo "arg=$a"; done\n');
+  fs.chmodSync(path.join(fakeNode, "node"), 0o755);
+  const env = { PATH: [fakeNode, bin, "/usr/bin", "/bin"].join(":"), HERDR_APP_HOME: "/elsewhere" };
+  const f = sh(path.join(bin, "gh-account"), ["set", "a b/*", "acct-a"], { env });
+  assert.equal(f.status, 0, f.stderr);
+  const lines = f.stdout.trim().split("\n");
+  assert.equal(lines[0], `home=${app}`);
+  assert.match(lines[1], /^arg=.*gh-account\.cjs$/);
+  assert.deepEqual(lines.slice(2), ["arg=set", "arg=a b/*", "arg=acct-a"]);
 });
 
 // 리뷰 R1: 원래 도우미에 매핑 토큰을 저장하지 않고, 요청 URL 의 저장소로 계정을 고르고, gh 가 PATH 에 없어도 push 를 막지 않는다.
