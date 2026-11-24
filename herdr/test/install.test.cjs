@@ -160,8 +160,8 @@ test("기본 설치 뒤 --extras로 다시 설치하면 추가 모드 블록만 
 
 // 예전 설치: 모든 모드에 예전 표시·기록, layouts/agent-groups.json, 레이아웃 이름 기록 없음.
 // full이면 예전 --extras 설치처럼 모든 블록이 바뀐 레이아웃을 만든다.
-// 예전 설치기에는 path-menu가 없었다.
-const LEGACY_MODS = inst.ALL.filter((m) => m !== "path-menu");
+// 예전 설치기에는 path-menu·gh-accounts가 없었다.
+const LEGACY_MODS = inst.ALL.filter((m) => m !== "path-menu" && m !== "gh-accounts");
 function legacyHome(full) {
   const home = tempHome();
   for (const m of LEGACY_MODS) {
@@ -424,4 +424,18 @@ test("path-menu만 넣은 레이아웃도 우리 것으로 보고, 사용자가 
   assert.deepEqual(readJson(file).link_handlers, ["path-menu"]);
   quiet(() => inst.removeMods(home, ["path-menu"]));
   assert.deepEqual(readJson(file), clonedMain());
+});
+
+test("--add gh-accounts는 오른쪽 패널에 accounts-board를 더하고, 제거하면 뺀다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { add: ["gh-accounts"] }));
+  assert.deepEqual(installed(home).sort(), ["gh-accounts", "tabs-mine"]);
+  const file = cloneInto(home, inst.LAYOUT_NAME);
+  quiet(() => inst.applyLayout(home, true));
+  const ids = () => JSON.stringify(readJson(file)).match(/"id":"accounts-board"/g) ?? [];
+  assert.equal(ids().length, 1);
+  assert.ok(mods(readJson(file)).includes("gh-accounts"));
+  quiet(() => inst.removeMods(home, ["gh-accounts"]));
+  assert.equal(ids().length, 0);
+  assert.ok(!fs.existsSync(path.join(home, "mods", "gh-accounts")));
 });

@@ -546,3 +546,21 @@ test("e2e: 원래 도우미 저장 거르기, URL 경로 우선, gh 가 없을 �
     fs.renameSync(away, fake);
   }
 });
+
+test("move: 규칙을 한 칸씩 옮기고, 끝이나 없는 규칙은 바꾸지 않는다", () => {
+  const rules = [{ match: "example-org/*", account: "acct-b" }, { match: "example-org/api", account: "acct-a" }, { match: "acct-a/*", account: "acct-a" }];
+  const { app, ctx } = setup({ rules, default: null });
+  const file = path.join(app, "gh-accounts.json");
+  const order = () => JSON.parse(fs.readFileSync(file, "utf8")).rules.map((r) => r.match);
+  assert.equal(ga.main(["move", "Example-Org/API", "up"], ctx, io().io), 0);
+  assert.deepEqual(order(), ["example-org/api", "example-org/*", "acct-a/*"]);
+  assert.equal(ga.main(["move", "example-org/*", "down"], ctx, io().io), 0);
+  assert.deepEqual(order(), ["example-org/api", "acct-a/*", "example-org/*"]);
+  const t = io();
+  assert.equal(ga.main(["move", "example-org/api", "up"], ctx, t.io), 0);
+  assert.ok(t.o.lines.some((l) => l.includes("옮길 수 없습니다")));
+  ga.main(["move", "nobody/*", "down"], ctx, io().io);
+  assert.deepEqual(order(), ["example-org/api", "acct-a/*", "example-org/*"]);
+  assert.equal(ga.main(["move", "acct-a/*", "sideways"], ctx, io().io), 2);
+  assert.equal(ga.main(["move"], ctx, io().io), 2);
+});

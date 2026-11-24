@@ -44,6 +44,7 @@ gh-account default acct-a            # 규칙에 없는 저장소 (none 으로 �
 gh-account resolve                   # 지금 폴더에서 쓸 계정
 gh-account resolve -R example-org/app
 gh-account unset example-org/*
+gh-account move example-org/app up    # 규칙 순서 한 칸 위로 (위가 먼저 맞음)
 gh-account status                    # 설치·PATH·git 버전 점검
 ```
 
@@ -63,6 +64,24 @@ gh-account status                    # 설치·PATH·git 버전 점검
 
 - 규칙은 위에서부터 보고, 먼저 맞는 규칙이 이깁니다. 맞는 규칙이 없으면 `default`를 씁니다.
 - `match`는 `owner/*`나 `owner/repo` 모양입니다.
+
+### 계정 패널
+
+Herdr 오른쪽 패널에서 스페이스의 저장소마다 쓸 계정을 보고 고를 수 있습니다. 같은 매핑 파일을 바꿉니다.
+
+```sh
+sh herdr/install.sh --add gh-accounts
+```
+
+- 스페이스의 owner 마다 계정을 고르면 `owner/*` 규칙을 만듭니다. 규칙 순서 바꾸기·지우기·더하기와 기본 계정도 패널에서 합니다.
+- 자세한 내용: [gh-accounts](mods/gh-accounts.md)
+
+스크립트에서 쓰는 명령:
+
+```sh
+gh-account space --json <폴더..>          # 폴더들의 저장소를 owner 별로 묶고 쓸 계정을 보여 줌
+gh-account assign acct-b <폴더..>         # 그 폴더들 저장소의 owner 마다 owner/* 규칙을 acct-b 로 (none 이면 지움)
+```
 
 ### 커밋 신원
 

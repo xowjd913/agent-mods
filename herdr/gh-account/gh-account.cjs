@@ -125,6 +125,15 @@ function unsetRule(map, pattern) {
   return before !== map.rules.length;
 }
 
+// 규칙 하나를 위(up)나 아래(down)로 한 칸 옮긴다. 먼저 맞는 규칙이 이기므로 순서가 곧 우선순위다. 옮겼으면 true.
+function moveRule(map, pattern, dir) {
+  const i = map.rules.findIndex((r) => r.match.toLowerCase() === String(pattern).toLowerCase());
+  const j = dir === "up" ? i - 1 : dir === "down" ? i + 1 : -1;
+  if (i < 0 || j < 0 || j >= map.rules.length) return false;
+  [map.rules[i], map.rules[j]] = [map.rules[j], map.rules[i]];
+  return true;
+}
+
 // 폴더의 원격 저장소. origin 이 github.com 이면 그것, 아니면 github.com 을 가리키는 첫 원격.
 function repoFromDir(ctx, dir) {
   const env = gitEnv(ctx);
@@ -660,6 +669,7 @@ const USAGE = `사용법: gh-account <명령>
   list [--json]                        gh 에 로그인된 계정과 매핑 규칙을 보여 준다
   set <owner/* | owner/repo> <계정>     규칙을 더하거나 바꾼다(먼저 적힌 규칙이 이긴다)
   unset <owner/* | owner/repo>          규칙을 지운다
+  move <owner/* | owner/repo> <up|down>  규칙 순서를 한 칸 옮긴다(위에 있을수록 먼저 맞는다)
   default <계정 | none>                  규칙에 없는 저장소에 쓸 계정
   space [--json] <폴더..>                폴더들의 저장소를 owner 별로 묶어 지금 쓰는 계정을 보여 준다
   assign <계정 | none> <폴더..>          폴더들에서 찾은 owner 마다 owner/* 규칙을 그 계정으로 정한다(none: 지움)
@@ -760,6 +770,11 @@ function main(argv, ctx, io) {
     case "unset": {
       if (!args[0]) { io.err(USAGE); return 2; }
       return editMap(ctx, io, (map) => (unsetRule(map, args[0]) ? `규칙을 지웠습니다: ${args[0]}` : `그런 규칙이 없습니다: ${args[0]}`));
+    }
+    case "move": {
+      const [pattern, dir] = args;
+      if (!pattern || (dir !== "up" && dir !== "down")) { io.err(USAGE); return 2; }
+      return editMap(ctx, io, (map) => (moveRule(map, pattern, dir) ? `규칙을 옮겼습니다: ${pattern} ${dir === "up" ? "위로" : "아래로"}` : `옮길 수 없습니다: ${pattern}`));
     }
     case "default": {
       const a = args[0];
@@ -867,7 +882,7 @@ if (require.main === module) {
 }
 
 module.exports = {
-  HOST, MARK, BEGIN, END, paths, parseRepo, readMap, writeMap, emptyMap, matchAccount, setRule, unsetRule,
+  HOST, MARK, BEGIN, END, paths, parseRepo, readMap, writeMap, emptyMap, matchAccount, setRule, unsetRule, moveRule,
   repoFromDir, spaceOwners, assignOwners, repoFromGhArgs, realGh, tokenFor, resolve, ghToken, credential, parseCredInput, credRepo,
   ourCredential, priorCommand, priorHelper,
   globalConfigPath, stripBlock, writeBlock, buildBlock, urlPatterns, priorHelpers, identityFor, sync,
