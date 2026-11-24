@@ -7,12 +7,15 @@
 //  - "결과 보고": every other report (done, stop, ...) as per-leader bubbles, newest first.
 // A leader's name opens `terminal.peek` on its terminal. An answer is delivered as real user input: the line goes on the clipboard,
 // the PO pane (the leader terminal's parent, only when it has the label role=po) is focused and the clipboard is pasted into it
-// (terminal.paste). Enter is NOT pressed: the person submits it in the PO terminal, which doubles as a last check. Files are read
-// by inbox.cjs; this mod only reads them.
+// (terminal.paste). The answer buttons leave Enter to the person, which doubles as a last check. Files are read by inbox.cjs; this mod
+// only reads them.
+// The chat box is different: Enter there sends AND submits. The text goes in the same way (clipboard, focus, terminal.paste: the PO sees
+// it as the person's own typing), then Enter is pressed with `hc keys <PO> enter` (herdr.d.ts hc(); `hc keys --help`: "Press named
+// keys", no <hc from=...> tag, which the tagged send command adds). Shift+Enter is a line break; the line breaks stay in the paste.
 
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, TextView, ScrollHandle } from "gpui-base";
-import { theme, exec, appHome, checking, window, run, terminals, panes, setBadge, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
+import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, ScrollHandle } from "gpui-base";
+import { theme, exec, appHome, checking, window, run, hc, terminals, panes, setBadge, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
 const ICON = (name) => `mods/workspace-chrome/${name}.svg`;
@@ -22,6 +25,7 @@ const WINDOW = { mod: "inbox", kind: "window", key: "inbox", keep: true, width: 
 const SENT_KEY = "inbox.sent";
 const CHAT_KEY = "inbox.chat"; // the lines the person sent through the chat box [{ts, ms, text, to}]
 const MAX_CHAT = 30, SHOW_CHAT = 6;
+const PASTE_SETTLE_MS = 350; // the PO terminal takes the paste before Enter is pressed
 const OPEN_KEY = "inbox.expanded"; // cards the person opened ("자세히"), shared so they stay open across re-renders and window reopens
 const MAX_OPEN = 60;
 const FOCUS_KEY = "inbox.focus"; // "<leader>|<report time>" the window should show first and open (set by a pane row), "" for none
@@ -87,10 +91,11 @@ function composeChat(content) {
   for (const s of [...(content?.tokens ?? [])].sort((a, b) => b.range.start - a.range.start)) text = text.slice(0, s.range.start) + String(s.token?.text ?? "") + text.slice(s.range.end);
   return text;
 }
-// What goes to the PO: one line, "@here" dropped (it only means "to the PO"), and the live leaders (`known`, hc names) it names.
-// `empty` is true when nothing is left once the mentions are taken out, so a lone "@lead-x" is not sent.
+// What goes to the PO: the text with its line breaks kept (Shift+Enter in the box), "@here" dropped (it only means "to the PO"), and the
+// live leaders (`known`, hc names) it names. `empty` is true when nothing is left once the mentions are taken out, so a lone "@lead-x"
+// is not sent. Spaces are tidied per line; runs of blank lines become one blank line; the ends are trimmed.
 function parseMention(raw, known = []) {
-  const flat = String(raw ?? "").replace(/\s*\n\s*/g, " ").trim();
+  const flat = String(raw ?? "").replace(/\r\n?/g, "\n").replace(/[ \t\f\v]+/g, " ").replace(/ ?\n ?/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   const to = [];
   let here = false;
   const empty = flat.replace(MENTION, (m, pre, name) => {
@@ -98,9 +103,15 @@ function parseMention(raw, known = []) {
     else if (known.includes(name)) { if (!to.includes(name)) to.push(name); } else return m;
     return pre;
   }).trim() === "";
-  const text = flat.replace(HERE_PUNCT, "").replace(HERE, "$1").replace(/\s+/g, " ").replace(/^[\s,.:;!?)]+/, "").trim();
+  const text = flat.replace(/(^|\n)@here[.,!?:;)]+ ?/g, "$1").replace(HERE_PUNCT, "").replace(HERE, "$1").replace(/[ \t]+/g, " ").replace(/ ?\n ?/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/^[\s,.:;!?)]+/, "").trim();
   return { text, to, here, empty };
 }
+// What an Enter does in the box: Shift+Enter is a line break, a plain Enter (or Cmd/Ctrl+Enter) sends, any other key nothing.
+const enterIntent = (key, shift) => (/^(enter|return)$/i.test(String(key ?? "")) ? (shift ? "newline" : "send") : "");
+// The widget may or may not add the line break itself for Shift+Enter, so one is added only when no edit landed around the key press
+// (`changedAt`, `at`: ms); and the stray line break a sent Enter leaves in the emptied box is cleared (`sentAt`, `now`).
+const needsNewline = (changedAt, at) => !(Number(changedAt) >= Number(at) - 25);
+const strayBreak = (value, sentAt, now) => String(value ?? "").length > 0 && String(value).trim() === "" && Number(now) - Number(sentAt) < 200;
 // The "@query" being typed right before `cursor` (offsets into the box text), or null. Not inside a chip, not in the middle of a word.
 function mentionQuery(text, cursor, tokens = []) {
   const before = String(text ?? "").slice(0, cursor);
@@ -206,10 +217,20 @@ export default class Inbox extends View {
     this.inputs = new Map(); // leader -> InputState
     this.msg = null; // {text, bad}
     this.copied = null; // key of the command whose 복사 button just ran
-    this.chat = InputState.new({ value: "", placeholder: "PO에게 말하기 — @로 리더를 부르고 Enter로 PO 입력칸에 넣기" });
+    this.chat = TextareaState.new({ value: "", rows: 1, placeholder: "PO에게 말하기 — Enter로 보내기, Shift+Enter로 줄바꿈, @로 리더 부르기" });
+    try { this.chat.set_auto_grow(1, 6); } catch {}
     this.menu = null; // the open "@" menu: {start, end, query, items, sel}
-    this.chat.on("change", (_e, c) => this.syncMenu(c));
-    this.chat.on("submit", (_e, c) => { if (this.menu) this.pickMenu(this.menu.sel, c); else if (Date.now() - this.pickedAt > 250) this.sendChat(c); });
+    this.changedAt = 0; // the last edit of the box (ms)
+    this.sentAt = 0; // the last send (ms)
+    this.nlAt = 0; // the last Shift+Enter handled (ms)
+    this.chat.on("change", (_e, c) => {
+      this.changedAt = Date.now();
+      try { if (strayBreak(this.chat.value(), this.sentAt, this.changedAt)) { this.chat.set_value(""); return; } } catch {} // the Enter that sent left a line break
+      this.syncMenu(c);
+    });
+    // The widget's own submit event: with Shift it is a line break, otherwise Enter. Both also arrive as a key press (inputKey); each
+    // handler dedupes, so whichever the widget raises, one send / one line break happens.
+    this.chat.on("submit", (e, c) => { if (this.menu) this.pickMenu(this.menu.sel, c); else this.enterBox(e?.shift ? "newline" : "send", c); });
     this.pickedAt = 0; // a menu pick just now: the Enter that made it must not also send
     this.chatScroll = null; // the chat lines' scroll handle
     try { this.chatScroll = ScrollHandle.new(); } catch {}
@@ -418,7 +439,7 @@ export default class Inbox extends View {
     return s;
   }
 
-  // ---- PO chat: the line goes to the PO's prompt the same way a panel answer does; the person presses Enter there.
+  // ---- PO chat: the text goes to the PO's prompt the same way a panel answer does, then Enter is pressed for the person (submitPo).
   liveTerms() { try { return terminals() ?? []; } catch { return []; } }
 
   // Opens, updates or closes the "@" menu from the text before the cursor.
@@ -454,6 +475,26 @@ export default class Inbox extends View {
     c.notify();
   }
 
+  // Enter in the box: "send" (once per press, never right after a menu pick) or "newline" (added only if the widget did not add it).
+  enterBox(intent, c) {
+    const now = Date.now();
+    if (intent === "send") {
+      if (now - this.pickedAt > 250 && now - this.sentAt > 250) this.sendChat(c);
+    } else if (intent === "newline" && now - this.nlAt > 80) {
+      this.nlAt = now;
+      try { c.timer.after(40, () => { if (needsNewline(this.changedAt, now)) { try { this.chat.replace("\n"); } catch {} } }); } catch {}
+    }
+  }
+
+  // Keys of the box: the open menu's keys first, then Enter / Shift+Enter.
+  inputKey(e, c) {
+    if (this.menu) { this.menuKey(e, c); return; }
+    const intent = enterIntent(e?.key, Boolean(e?.modifiers?.shift));
+    if (!intent) return;
+    if (intent === "send") { try { c.stop_propagation(); } catch {} }
+    this.enterBox(intent, c);
+  }
+
   // Keys the open menu handles stop here, so they do not also move the cursor, the focus or close the window.
   menuKey(e, c) {
     const m = this.menu;
@@ -473,7 +514,21 @@ export default class Inbox extends View {
     return [...mine.map((x) => ({ ...x, me: true })), ...(this.data?.po ?? [])].sort((a, b) => a.ms - b.ms).slice(-SHOW_CHAT);
   }
 
+  // Presses Enter in the PO terminal once the paste has landed (`hc keys`, no <hc ...> tag), and reports a failure in the box's message.
+  // The window stays open until then (closing it could drop the timer) and is closed afterwards.
+  submitPo(po, c) {
+    const fail = (cx, why) => { this.say(`PO(${po})에 글은 넣었지만 Enter를 누르지 못했습니다${why ? `(${why})` : ""}. PO 터미널에서 직접 누르세요.`, true); cx.notify(); };
+    const done = () => { if (this.windowed) { try { closeOverlay(safeProps().overlay); } catch {} } };
+    const press = (cx) => {
+      let r;
+      try { r = hc(["keys", po, "enter"]); } catch { fail(cx, ""); done(); return; }
+      Promise.resolve(r).then((o) => { if (o && o.code !== 0) fail(cx, String(o.stderr ?? "").trim().slice(0, 80)); }).catch(() => fail(cx, "")).then(done);
+    };
+    try { c.timer.after(PASTE_SETTLE_MS, press); } catch { press(c); }
+  }
+
   sendChat(c) {
+    this.sentAt = Date.now();
     const terms = this.liveTerms();
     const known = terms.map((t) => t.name).filter((n) => /^lead-/.test(String(n ?? "")));
     let p;
@@ -486,15 +541,20 @@ export default class Inbox extends View {
       return;
     }
     const po = tgt.po;
+    let later = false; // the window is closed by submitPo, after Enter
     try {
       c.write_to_clipboard(p.text);
       if (!(panes() ?? []).some((x) => x.terminal === po)) {
         run("terminal.keep", { terminal: po });
         this.say(`PO(${po})에 창이 없어 열었습니다. 다른 것을 복사하기 전에 PO 터미널에서 붙여넣고 Enter를 누르세요(글은 클립보드에 있습니다).`);
       } else {
+        const blocked = String(terms.find((t) => t.address === po)?.status ?? "").toLowerCase() === "blocked"; // a prompt waits there: Enter would answer it
         run("pane.focus", { terminal: po });
-        try { run("terminal.paste", {}); this.say(`PO(${po})에 붙여 넣었습니다. PO 터미널에서 Enter를 눌러 보내세요.`); }
-        catch { this.say(`PO(${po})를 열었습니다. 글은 클립보드에 있으니 붙여넣고 Enter를 누르세요.`); }
+        try {
+          run("terminal.paste", {});
+          if (blocked) this.say(`PO(${po})가 질문에 답을 기다리는 중이라 붙여 넣기만 했습니다. PO 터미널에서 확인하고 Enter를 누르세요.`);
+          else { this.submitPo(po, c); later = true; this.say(`PO(${po})에 보냈습니다.`); }
+        } catch { this.say(`PO(${po})를 열었습니다. 글은 클립보드에 있으니 붙여넣고 Enter를 누르세요.`); }
       }
       try {
         const now = Date.now();
@@ -502,7 +562,7 @@ export default class Inbox extends View {
       } catch {}
       this.chat.set_value("");
       this.menu = null;
-      if (this.windowed) { try { closeOverlay(safeProps().overlay); } catch {} } // the PO pane takes the keyboard
+      if (this.windowed && !later) { try { closeOverlay(safeProps().overlay); } catch {} } // the PO pane takes the keyboard
     } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
     c.notify();
   }
@@ -532,15 +592,15 @@ export default class Inbox extends View {
     const chip = (ctx) => div().h(ctx.line_height).px(5).rounded(5).flex().items_center().bg(t.working + "26").text_color(t.working).text_size(12.5).font_semibold()
       .child(ctx.token.label ?? ctx.token.text.trim());
     return v_flex().flex_none().px(10).pb(10).pt(6).gap(6).border_t(1).border_color(t.border)
-      .on_key_down((e, c) => this.menuKey(e, c))
+      .on_key_down((e, c) => this.inputKey(e, c))
       .when(lines.length > 0, (el) => el.child(v_flex().id("chat-lines").max_h(190).gap(5).overflow_y_scrollbar()
         .on_scroll_wheel((e) => { this.chatUp = chatWheel(this.chatUp, e?.delta?.y); }) // wheel up = positive y
         .when(Boolean(this.chatScroll), (x) => x.track_scroll(this.chatScroll)).children(lines.map(bubble))))
       .when(Boolean(menu), (el) => el.child(menu))
       .child(h_flex().gap(6).items_center()
         .child(div().flex_1().min_w(0).on_mouse_down("left", stop)
-          .child(Input.new(this.chat).token((ctx) => chip(ctx)).h(30).px(10).items_center().rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
-        .child(this.button(t, "chat-send", "PO에 넣기", (c) => this.sendChat(c), { primary: true, tip: "글을 클립보드에 담아 PO 터미널에 붙여 넣습니다. Enter는 PO 터미널에서 누릅니다" })));
+          .child(Textarea.new(this.chat).token((ctx) => chip(ctx)).min_h(30).px(10).py(5).rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
+        .child(this.button(t, "chat-send", "PO에 보내기", (c) => this.sendChat(c), { primary: true, tip: "글을 PO 터미널에 붙여 넣고 Enter까지 눌러 보냅니다(글은 클립보드를 거칩니다). Shift+Enter는 줄바꿈" })));
   }
 
   // ---- parts

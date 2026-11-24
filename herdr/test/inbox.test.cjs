@@ -93,9 +93,11 @@ test("main.js: 답은 클립보드·포커스·붙여넣기로 넣고 hc send와
   assert.match(src, /write_to_clipboard\(line\)/);
   assert.match(src, /run\("pane\.focus", \{ terminal: po \}\)/);
   assert.match(src, /run\("terminal\.paste"/);
-  assert.ok(!/\bhc\b[^"\n]*\(\[?"send"/.test(src) && !/hc\(\[/.test(src));
-  assert.ok(!/import \{[^}]*\bhc\b[^}]*\} from "herdr"/.test(src));
-  assert.ok(!/terminal\.send|send_key|"enter"/i.test(src));
+  assert.ok(!/hc\(\["send"/.test(src) && !/terminal\.send|send_key/i.test(src)); // hc send는 <hc from=...> 꼬리표가 붙어 쓰지 않는다
+  // 답 버튼의 send()는 hc를 부르지 않는다: Enter는 사람이 누른다
+  const a = src.indexOf("  send(a, text, cx) {"), b = src.indexOf("  // ---- PO chat");
+  assert.ok(a > 0 && b > a);
+  assert.ok(!/\bhc\(|"enter"/i.test(src.slice(a, b)));
   assert.match(src, /disabled: a\.po \? "" : NO_PO/); // PO를 못 찾으면 답 버튼이 막힌다
 });
 
@@ -255,7 +257,7 @@ test("main.js: 카드는 접힌 채 시작하고, 펼침은 공유 상태에 두
   // 링크: 앱의 open_url 먼저, http(s)만
   assert.match(src, /cx\.open_url\(url\)/);
   assert.match(src, /if \(!\/\^https\?:\\\/\\\/\/i\.test\(url\)\) return;/);
-  assert.ok(!/hc send|"hc"/.test(src)); // 답은 여전히 hc send 없이 클립보드로만
+  assert.ok(!/hc send|hc\(\["send"/.test(src)); // hc send 없이 클립보드로만(채팅의 Enter는 hc keys)
 });
 
 test("toParts·escapeHtml: 글자는 이스케이프하고, 목록은 <ul>로 묶고, 명령은 코드 조각으로 뺀다", () => {
@@ -486,9 +488,9 @@ test("parseMention: @리더는 살아 있는 리더만 대상이 되고, @here�
   assert.deepEqual(I.parseMention("둘 다 @lead-a, @lead-b! 그리고 @lead-a", known).to, ["lead-a", "lead-b"]);
 });
 
-test("parseMention: 줄바꿈은 한 줄로, 멘션만 있거나 빈 글은 empty, 단어 중간의 @는 멘션이 아니다", () => {
+test("parseMention: 줄바꿈은 지키고, 멘션만 있거나 빈 글은 empty, 단어 중간의 @는 멘션이 아니다", () => {
   const known = ["lead-a"];
-  assert.equal(I.parseMention("위\n  아래", known).text, "위 아래");
+  assert.equal(I.parseMention("위\n  아래", known).text, "위\n아래");
   assert.equal(I.parseMention("@lead-a", known).empty, true);
   assert.equal(I.parseMention("@here  ", known).empty, true);
   assert.equal(I.parseMention("   ", known).empty, true);
@@ -621,4 +623,50 @@ test("채팅 줄 따라가기: 열 때와 새 줄이 올 때만 맨 아래로, �
   up = I.chatWheel(up, -200); assert.equal(up, 0); // 맨 아래로 돌아오면 다시 따라간다
   assert.equal(I.chatWheel(0, 99999), 4000);
   assert.equal(I.chatWheel(5, undefined), 5);
+});
+
+test("parseMention: 줄바꿈과 빈 줄은 지키고, 줄 끝 공백·연속 빈 줄·CRLF만 정리한다", () => {
+  const known = ["lead-a"];
+  assert.equal(I.parseMention("첫 줄  \r\n\n\n\n  셋째   줄\n", known).text, "첫 줄\n\n셋째 줄");
+  assert.equal(I.parseMention("@lead-a 위\n아래", known).text, "@lead-a 위\n아래");
+  assert.deepEqual(I.parseMention("@lead-a 위\n아래", known).to, ["lead-a"]);
+  assert.equal(I.parseMention("@here 안녕\n둘째 줄", known).text, "안녕\n둘째 줄");
+  assert.equal(I.parseMention("a\n@here, b", known).text, "a\nb"); // 줄 맨 앞 @here는 줄바꿈을 먹지 않는다
+  assert.equal(I.parseMention("a @here, b\nc", known).text, "a, b\nc");
+  assert.equal(I.parseMention("\n\n  \n", known).empty, true);
+  assert.equal(I.parseMention("@here\n@lead-a\n", known).empty, true);
+});
+
+test("enterIntent: Shift+Enter는 줄바꿈, Enter(Cmd/Ctrl 포함)는 보내기, 다른 키는 아무것도 아니다", () => {
+  assert.equal(I.enterIntent("enter", true), "newline");
+  assert.equal(I.enterIntent("Enter", false), "send");
+  assert.equal(I.enterIntent("return", false), "send");
+  assert.equal(I.enterIntent("a", false), "");
+  assert.equal(I.enterIntent(undefined, true), "");
+});
+
+test("needsNewline·strayBreak: 위젯이 줄바꿈을 이미 넣었으면 더 넣지 않고, 보낸 뒤 남은 빈 줄만 지운다", () => {
+  assert.equal(I.needsNewline(0, 1000), true); // 편집이 없었다
+  assert.equal(I.needsNewline(990, 1000), false); // 키와 같은 때 위젯이 넣었다
+  assert.equal(I.needsNewline(1010, 1000), false);
+  assert.equal(I.needsNewline(500, 1000), true);
+  assert.equal(I.strayBreak("\n", 1000, 1050), true);
+  assert.equal(I.strayBreak("\n", 1000, 1500), false); // 한참 뒤 사람이 친 줄바꿈은 지우지 않는다
+  assert.equal(I.strayBreak("글", 1000, 1050), false);
+  assert.equal(I.strayBreak("", 1000, 1050), false);
+});
+
+test("main.js: 채팅 입력은 Textarea, Enter는 붙여넣고 hc keys enter까지, 막힌 PO에는 Enter를 누르지 않는다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  assert.match(src, /TextareaState\.new\(/);
+  assert.match(src, /Textarea\.new\(this\.chat\)/);
+  assert.match(src, /hc\(\["keys", po, "enter"\]\)/);
+  assert.ok(!/hc\(\["send"/.test(src));
+  assert.match(src, /=== "blocked"/);
+  assert.match(src, /enterIntent\(e\?\.key, Boolean\(e\?\.modifiers\?\.shift\)\)/);
+  assert.match(src, /PO에 보내기/);
+  const a = src.indexOf("  sendChat(c) {"), b = src.indexOf("  // The chat footer");
+  const body = src.slice(a, b);
+  assert.ok(body.indexOf('run("terminal.paste"') > 0 && body.indexOf("this.submitPo(") > body.indexOf('run("terminal.paste"')); // 붙여넣은 뒤에 Enter
+  assert.match(src, /import \{[^}]*\bhc\b[^}]*\} from "herdr"/);
 });

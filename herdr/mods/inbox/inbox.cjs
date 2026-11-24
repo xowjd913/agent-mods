@@ -372,10 +372,11 @@ function composeChat(content) {
   for (const s of [...(content?.tokens ?? [])].sort((a, b) => b.range.start - a.range.start)) text = text.slice(0, s.range.start) + String(s.token?.text ?? "") + text.slice(s.range.end);
   return text;
 }
-// What goes to the PO: one line, "@here" dropped (it only means "to the PO"), and the live leaders (`known`, hc names) it names.
-// `empty` is true when nothing is left once the mentions are taken out, so a lone "@lead-x" is not sent.
+// What goes to the PO: the text with its line breaks kept (Shift+Enter in the box), "@here" dropped (it only means "to the PO"), and the
+// live leaders (`known`, hc names) it names. `empty` is true when nothing is left once the mentions are taken out, so a lone "@lead-x"
+// is not sent. Spaces are tidied per line; runs of blank lines become one blank line; the ends are trimmed.
 function parseMention(raw, known = []) {
-  const flat = String(raw ?? "").replace(/\s*\n\s*/g, " ").trim();
+  const flat = String(raw ?? "").replace(/\r\n?/g, "\n").replace(/[ \t\f\v]+/g, " ").replace(/ ?\n ?/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   const to = [];
   let here = false;
   const empty = flat.replace(MENTION, (m, pre, name) => {
@@ -383,9 +384,15 @@ function parseMention(raw, known = []) {
     else if (known.includes(name)) { if (!to.includes(name)) to.push(name); } else return m;
     return pre;
   }).trim() === "";
-  const text = flat.replace(HERE_PUNCT, "").replace(HERE, "$1").replace(/\s+/g, " ").replace(/^[\s,.:;!?)]+/, "").trim();
+  const text = flat.replace(/(^|\n)@here[.,!?:;)]+ ?/g, "$1").replace(HERE_PUNCT, "").replace(HERE, "$1").replace(/[ \t]+/g, " ").replace(/ ?\n ?/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/^[\s,.:;!?)]+/, "").trim();
   return { text, to, here, empty };
 }
+// What an Enter does in the box: Shift+Enter is a line break, a plain Enter (or Cmd/Ctrl+Enter) sends, any other key nothing.
+const enterIntent = (key, shift) => (/^(enter|return)$/i.test(String(key ?? "")) ? (shift ? "newline" : "send") : "");
+// The widget may or may not add the line break itself for Shift+Enter, so one is added only when no edit landed around the key press
+// (`changedAt`, `at`: ms); and the stray line break a sent Enter leaves in the emptied box is cleared (`sentAt`, `now`).
+const needsNewline = (changedAt, at) => !(Number(changedAt) >= Number(at) - 25);
+const strayBreak = (value, sentAt, now) => String(value ?? "").length > 0 && String(value).trim() === "" && Number(now) - Number(sentAt) < 200;
 // The "@query" being typed right before `cursor` (offsets into the box text), or null. Not inside a chip, not in the middle of a word.
 function mentionQuery(text, cursor, tokens = []) {
   const before = String(text ?? "").slice(0, cursor);
@@ -427,6 +434,6 @@ const chatWheel = (up, dy) => Math.max(0, Math.min(4000, (Number(up) || 0) + (Nu
 const chatFollow = (seen, key, up) => key !== "" && key !== seen && (Number(up) || 0) <= 4;
 // chat:end
 
-module.exports = { composeChat, parseMention, chatKey, chatWheel, chatFollow, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { composeChat, parseMention, enterIntent, needsNewline, strayBreak, chatKey, chatWheel, chatFollow, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) process.stdout.write(JSON.stringify(collect()));
