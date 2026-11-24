@@ -912,6 +912,8 @@ export default class Schedules extends View {
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(`${when(first)}${ago(first) ? ` (${ago(first)})` : ""}`))
         .child(this.tag(t, r.trigger, r.trigger === "놓친 실행" ? "idle" : "dim"))
         .child(this.tag(t, r.status, color)))
+      // 예약에 정한 GitHub 계정(이름만). 자동이면 적지 않는다.
+      .when(Boolean(r.account), (el) => el.child(div().text_size(11).text_color(t.dim).truncate().child(`GitHub 계정 ${r.account}`)))
       .when(Boolean(detail), (el) => el.child(div().text_size(11).text_color(t.muted).truncate().child(detail)))
       .when(Boolean(r.terminal), (el) => el.child(h_flex().gap(6).items_center().text_size(11).text_color(t.dim)
         .child(svg(ICON("terminal")).size(11).flex_none())

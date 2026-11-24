@@ -1164,3 +1164,40 @@ test("scheduleEnv: 래퍼 폴더를 PATH 맨 앞에, 정한 계정은 GH_ACCOUNT
   assert.match(ga.scheduleEnv(ctx, { account: "acct-c" }).error, /로그인돼 있지 않습니다/);
   assert.ok(!Object.values(ga.scheduleEnv(ctx, { account: "acct-a", dir: "/w/repo" }).env).some((v) => /tok-/.test(v)));
 });
+
+test("scheduleEnv: 예약 계정 신원 뒤에 로그인된 다른 계정의 owner 별 신원을 붙여, 진짜 git 에서 그 저장소는 주인 계정 신원이 된다", (t) => {
+  if (spawnSync("git", ["--version"]).status !== 0) return t.skip("git 없음");
+  const { ctx, home, app } = setup(MAP);
+  fakeInstall(home, app);
+  const idDir = path.join(app, "gh-account", "identity");
+  fs.mkdirSync(idDir, { recursive: true });
+  for (const a of ["acct-a", "acct-b"]) fs.writeFileSync(path.join(idDir, `${a}.gitconfig`), `[user]\n\tname = ${a}\n\temail = ${a}@example.com\n`);
+  // 전역 설정: sync 처럼 example-org/* → acct-b 신원 (명령줄 설정이 이것을 이긴다)
+  const glob = path.join(home, "gitconfig");
+  fs.writeFileSync(glob, ga.urlPatterns("example-org/*").map((p) => `[includeIf "hasconfig:remote.*.url:${p}"]\n\tpath = ${path.join(idDir, "acct-b.gitconfig")}\n`).join(""));
+  const r = ga.scheduleEnv(ctx, { account: "acct-a", dir: "/w/repo" });
+  assert.equal(r.ok, true);
+  const keys = Object.keys(r.env).filter((k) => /^GIT_CONFIG_KEY_/.test(k)).map((k) => r.env[k]);
+  assert.equal(keys[0], "include.path");
+  assert.ok(keys.slice(1).every((k) => k.startsWith("includeIf.hasconfig:remote.*.url:") && k.endsWith(".path")), keys.join("\n"));
+  assert.ok(keys.slice(1).every((k) => plain(k).includes("acct-b/**")), "다른 로그인 계정(acct-b)만");
+  assert.equal(Number(r.env.GIT_CONFIG_COUNT), keys.length);
+  assert.ok(!Object.values(r.env).some((v) => /tok-/.test(v)));
+  const env = { ...process.env, HOME: home, GIT_CONFIG_GLOBAL: glob, GIT_CONFIG_NOSYSTEM: "1", ...r.env, PATH: process.env.PATH };
+  delete env.GIT_DIR;
+  const nameIn = (url) => {
+    const dir = fs.mkdtempSync(path.join(home, "repo-"));
+    assert.equal(spawnSync("git", ["init", "-q", dir], { env }).status, 0);
+    assert.equal(spawnSync("git", ["-C", dir, "remote", "add", "origin", url], { env }).status, 0);
+    return spawnSync("git", ["-C", dir, "config", "user.name"], { env, encoding: "utf8" }).stdout.trim();
+  };
+  // 로그인된 다른 계정(acct-b)의 저장소: 인증처럼 신원도 주인 계정. 대소문자·ssh 주소도.
+  assert.equal(nameIn("https://github.com/acct-b/notes.git"), "acct-b");
+  assert.equal(nameIn("git@github.com:ACCT-B/Notes.git"), "acct-b");
+  // 예약 계정이 쓰이는 저장소: 예약 계정 신원 (전역의 example-org → acct-b 규칙보다 예약이 이긴다)
+  assert.equal(nameIn("https://github.com/example-org/app.git"), "acct-a");
+  assert.equal(nameIn("https://github.com/acct-a/x.git"), "acct-a");
+  // 신원 파일이 없는 다른 로그인 계정은 붙이지 않는다
+  fs.rmSync(path.join(idDir, "acct-b.gitconfig"));
+  assert.equal(ga.scheduleEnv(ctx, { account: "acct-a", dir: "/w/repo" }).env.GIT_CONFIG_COUNT, "1");
+});

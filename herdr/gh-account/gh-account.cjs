@@ -962,16 +962,30 @@ function scheduleEnv(ctx, { account, dir } = {}) {
   if (!account) return { ok: true, env, installed: !!bin };
   const c = scheduleAccount(ctx, account);
   if (!c.ok) return { ok: false, error: c.error, installed: !!bin };
+  const P = paths(ctx);
   env.GH_ACCOUNT = c.login;
-  const id = path.join(paths(ctx).identity, `${c.login}.gitconfig`);
+  const id = path.join(P.identity, `${c.login}.gitconfig`);
   if (dir && fs.existsSync(id)) {
     let r = null;
     try { r = resolve({ ...ctx, env: { ...ctx.env, GH_ACCOUNT: c.login } }, { dir }); } catch { r = null; }
     if (r && r.hit && same(r.hit.account, c.login)) {
-      const n = Number.parseInt(ctx.env.GIT_CONFIG_COUNT, 10) || 0;
-      env[`GIT_CONFIG_KEY_${n}`] = "include.path";
-      env[`GIT_CONFIG_VALUE_${n}`] = id;
-      env.GIT_CONFIG_COUNT = String(n + 1);
+      // 명령줄 설정은 전역 설정의 owner 별 includeIf 보다 나중에 읽혀 이긴다. 그래서 세션이 로그인된 다른 계정의
+      // 저장소에서 커밋하면 인증은 그 주인 계정인데 신원은 예약 계정이 된다. 예약 계정 신원 뒤에 다른 로그인 계정의
+      // owner 별 includeIf 를 다시 붙여, 인증과 같은 안전 장치(그 저장소는 주인 계정)를 신원에도 건다. 신원 파일이 있는 계정만.
+      const pairs = [["include.path", id]];
+      for (const l of ghLogins(ctx) || []) {
+        if (!LOGIN.test(String(l.login)) || same(l.login, c.login)) continue;
+        const other = path.join(P.identity, `${l.login}.gitconfig`);
+        if (!fs.existsSync(other)) continue;
+        for (const pat of urlPatterns(`${l.login}/*`)) pairs.push([`includeIf.hasconfig:remote.*.url:${pat}.path`, other]);
+      }
+      let n = Number.parseInt(ctx.env.GIT_CONFIG_COUNT, 10) || 0;
+      for (const [k, v] of pairs) {
+        env[`GIT_CONFIG_KEY_${n}`] = k;
+        env[`GIT_CONFIG_VALUE_${n}`] = v;
+        n += 1;
+      }
+      env.GIT_CONFIG_COUNT = String(n);
     }
   }
   return { ok: true, env, installed: true, account: c.login };
