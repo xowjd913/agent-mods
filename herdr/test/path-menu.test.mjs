@@ -154,9 +154,9 @@ test("Windows PowerShell에서 실제 파일 이름으로 확인한다", { skip:
   const { join } = await import("node:path");
   const { tmpdir } = await import("node:os");
   const dir = mkdtempSync(join(tmpdir(), "path-menu-"));
-  const marker = join(dir, "pwned");
+  const marker = join(dir, "pwned"); // 이름 속 New-Item이 실행되면 생기는 파일
   try {
-    const file = join(dir, `it’s ‘x’ ‚y‛ a'b; New-Item ${marker}; ‘.txt`);
+    const file = join(dir, "it’s ‘x’ ‚y‛ a'b; New-Item pwned; ‘.txt");
     const sub = join(dir, "‘폴더’");
     writeFileSync(file, "x");
     mkdirSync(sub);
@@ -164,7 +164,7 @@ test("Windows PowerShell에서 실제 파일 이름으로 확인한다", { skip:
       const calls = fake("windows", "");
       await kindOf(path);
       const [[cmd, args]] = of(calls, "exec");
-      assert.equal(execFileSync(cmd, args, { encoding: "utf8" }).trim(), want);
+      assert.equal(execFileSync(cmd, args, { encoding: "utf8", cwd: dir }).trim(), want);
     }
     assert.equal(existsSync(marker), false);
   } finally {
