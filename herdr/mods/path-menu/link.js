@@ -8,6 +8,8 @@ import { MAX_GUESSES, ancestors, joinedPaths, pickJoined } from "./wrap.js";
 // A path the terminal program broke over several rows arrives as just the clicked piece.
 // Read the screen and return the longest joined path that exists, or null (then link.path is used).
 // The piece may appear in several places; the joined path is used only when every place agrees on it.
+// A lower piece (one that could join the row above) that exists on its own is taken as is: in a plain list
+// like "herdr/" over "README.md", the click on "README.md" means that file, not "herdr/README.md".
 // Any failure here (no hc, odd output, slow check) just means "no joined path": the click keeps working.
 async function joinedPath(link, source) {
   try {
@@ -16,25 +18,32 @@ async function joinedPath(link, source) {
     const text = JSON.parse(screen.stdout)?.text;
     if (typeof text !== "string") return null;
     // One list of guesses per place the piece appears; link.path itself is the "not joined" answer.
-    const places = joinedPaths(text.split("\n"), link.raw, {
-      cwd: source.cwd,
-      home: home(),
-      windows: platform() === "windows",
-    }).map((guesses) => guesses.filter((p) => p !== link.path));
+    const lines = text.split("\n");
+    const opts = { cwd: source.cwd, home: home(), windows: platform() === "windows" };
+    const guesses = (up) => joinedPaths(lines, link.raw, { ...opts, up }).map((g) => g.filter((p) => p !== link.path));
+    const places = guesses(true);
     // A place where the piece sits inside its row's text means it may stand alone: keep link.path, check nothing.
     if (!places.length || places.some((g) => !g.length)) return null;
     const all = [...new Set(places.flat())];
     if (all.length > MAX_GUESSES) return null;
-    const kinds = await kindsOf(all);
-    return kinds ? pickJoined(places, new Map(all.map((p, i) => [p, kinds[i]]))) : null;
+    // Only a lower piece needs link.path checked here; it goes in the same command.
+    const lower = link.path && JSON.stringify(guesses(false)) !== JSON.stringify(places);
+    const ask = lower ? [...all, link.path] : all;
+    const kinds = await kindsOf(ask);
+    if (!kinds) return null;
+    const found = new Map(ask.map((p, i) => [p, kinds[i]]));
+    const own = lower && found.get(link.path);
+    if (own === "file" || own === "dir") return { path: link.path, kind: own };
+    return pickJoined(places, found);
   } catch {
     return null;
   }
 }
 
-// The nearest existing folder above a missing path, or null.
+// The nearest existing folder above a missing path, or null. A disk root and the home folder (or above) don't
+// count: they are too far from the click to help.
 async function nearestFolder(path) {
-  const ups = ancestors(path, { windows: platform() === "windows" });
+  const ups = ancestors(path, { windows: platform() === "windows", home: home() });
   const kinds = ups.length ? await kindsOf(ups) : null;
   return kinds ? ups.find((_, i) => kinds[i] === "dir") ?? null : null;
 }

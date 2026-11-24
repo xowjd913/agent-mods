@@ -122,7 +122,8 @@ export const MAX_GUESSES = 16;
 
 // Absolute paths the clicked piece may belong to, one list per place on screen, each longest first.
 // `cwd` resolves relative text; `home` expands "~/"; `windows` switches to drive letters and "\\".
-export function joinedPaths(lines, raw, { cwd, home, windows = false, maxRows } = {}) {
+// `up: false` leaves out joins with an earlier row (the clicked piece is then never a lower piece).
+export function joinedPaths(lines, raw, { cwd, home, windows = false, maxRows, up = true } = {}) {
   const abs = (t) => {
     if (windows) {
       if (/^[A-Za-z]:[\\/]/.test(t) || t.startsWith("\\\\")) return t;
@@ -134,6 +135,7 @@ export function joinedPaths(lines, raw, { cwd, home, windows = false, maxRows } 
   return joinCandidates(lines, raw, { maxRows }).map((joins) => {
     const out = new Set();
     for (const { before, after } of joins) {
+      if (before && !up) continue;
       const text = trimJoined(before + raw + after, { start: before !== "", end: true });
       for (const t of [text, after ? withoutParticle(text) : null]) {
         const p = t && abs(t);
@@ -158,21 +160,28 @@ export function pickJoined(places, kinds) {
   return pick && { path: pick, kind: kinds.get(pick) };
 }
 
-// Folders above `path`, nearest first, up to the root ("/", "C:\\" or a "\\\\server\\share" share).
+// Folders above `path` that may stand in for it, nearest first. Stops before a disk root ("/", "C:\\", a
+// "\\\\server\\share" share) and before `home` or any folder above it: opening those is too far from what was
+// clicked (a web path like "/api/v1/users" would open the whole disk), so the caller then offers copying only.
 // Used when neither the clicked piece nor a joined path exists: the menu then opens the nearest one that does.
-export function ancestors(path, { windows = false } = {}) {
+export function ancestors(path, { windows = false, home } = {}) {
   const out = [];
   if (!path) return out;
   const sep = windows ? /[\\/]/ : /\//;
+  const key = (q) => (windows ? q.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase() : q.replace(/\/+$/, ""));
+  const h = home ? key(home) : null;
+  const tooFar = (q) => {
+    if (!windows ? q === "/" : /^[A-Za-z]:$/.test(q) || /^\\\\[^\\/]*([\\/][^\\/]*)?$/.test(q)) return true;
+    const k = key(q);
+    return h !== null && (h === k || h.startsWith(k + (windows ? "\\" : "/")));
+  };
   let p = path;
   while (out.length < 64) {
     let k = p.length - 1;
     while (k >= 0 && !sep.test(p[k])) k--;
     if (k < 0) break;
-    const parent = p.slice(0, k).replace(windows ? /[\\/]+$/ : /\/+$/, "");
-    if (!windows && !parent) { out.push("/"); break; }
-    if (windows && /^[A-Za-z]:$/.test(parent)) { out.push(parent + "\\"); break; }
-    if (windows && /^\\\\[^\\/]*$/.test(parent)) break;
+    const parent = p.slice(0, k).replace(windows ? /[\\/]+$/ : /\/+$/, "") || (windows ? "" : "/");
+    if (!parent || tooFar(parent)) break;
     out.push(parent);
     p = parent;
   }

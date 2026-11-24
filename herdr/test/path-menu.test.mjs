@@ -386,11 +386,11 @@ test("같은 조각이 화면 여러 곳에 있으면 곳마다 따로 붙이고
   const calls = fakeFs("macos", rows, cols, { [`${dir}README.md`]: "file", "/home/dev/proj/README.md": "file" });
   await click("README.md", "/home/dev/proj/README.md", source);
   assert.deepEqual(opened(calls), { path: "/home/dev/proj/README.md", kind: "file" });
-  // 후보를 한 번에 확인하고, 목록 쪽에 맞는 후보가 없으니 원래 경로를 본다
+  // 아래 조각이 될 수 있으니 원래 경로도 후보와 함께 한 번에 확인하고, 있으니 그대로 쓴다
   const execs = of(calls, "exec").map((c) => c[1].slice(3));
-  assert.equal(execs.length, 2);
+  assert.equal(execs.length, 1);
   assert.ok(execs[0].includes(`${dir}README.md`));
-  assert.deepEqual(execs[1], ["/home/dev/proj/README.md"]);
+  assert.equal(execs[0].at(-1), "/home/dev/proj/README.md");
 });
 
 test("같은 경로가 똑같이 두 번 잘려 있으면 그대로 이어 붙인다", async () => {
@@ -510,7 +510,7 @@ test("열 경로가 없으면 가장 가까운 있는 폴더를 머리에 보여
   const [[toast]] = of(calls, "notify");
   assert.equal(toast.title, "경로를 찾을 수 없음");
   assert.match(toast.body, /가까운 폴더: \/work\/proj$/);
-  assert.deepEqual(of(calls, "exec").at(-1)[1].slice(3), ["/work/proj/d/scratchpad", "/work/proj/d", "/work/proj", "/work", "/"]);
+  assert.deepEqual(of(calls, "exec").at(-1)[1].slice(3), ["/work/proj/d/scratchpad", "/work/proj/d", "/work/proj", "/work"]);
   // 위 조각: 잘린 경로 위로 올라가며 처음 있는 폴더
   calls = fakeFs("macos", rows, 142, { "/private/tmp/claude-501": "dir", "/private/tmp": "dir" });
   await click(tmpTop, tmpTop, proj);
@@ -521,10 +521,43 @@ test("열 경로가 없으면 가장 가까운 있는 폴더를 머리에 보여
   assert.deepEqual(opened(calls), { path: `/work/proj/${tmpBottom}`, kind: "missing" });
 });
 
-test("ancestors: 가까운 위 폴더부터 뿌리까지", () => {
-  assert.deepEqual(ancestors("/a/b/c.md"), ["/a/b", "/a", "/"]);
-  assert.deepEqual(ancestors("/a"), ["/"]);
-  assert.deepEqual(ancestors("C:\\x\\y\\z.txt", { windows: true }), ["C:\\x\\y", "C:\\x", "C:\\"]);
-  assert.deepEqual(ancestors("\\\\srv\\share\\d\\f", { windows: true }), ["\\\\srv\\share\\d", "\\\\srv\\share"]);
+test("ancestors: 가까운 위 폴더부터, 디스크 뿌리와 홈 폴더(또는 그 위)는 빼고", () => {
+  assert.deepEqual(ancestors("/a/b/c.md"), ["/a/b", "/a"]);
+  assert.deepEqual(ancestors("/a"), []);
+  assert.deepEqual(ancestors("/api/v1/users", { home: "/home/dev" }), ["/api/v1", "/api"]);
+  assert.deepEqual(ancestors("/home/dev/no/x.md", { home: "/home/dev/" }), ["/home/dev/no"]);
+  assert.deepEqual(ancestors("/home/other/x.md", { home: "/home/dev" }), ["/home/other"]);
+  assert.deepEqual(ancestors("C:\\x\\y\\z.txt", { windows: true }), ["C:\\x\\y", "C:\\x"]);
+  assert.deepEqual(ancestors("c:/users/DEV/a/b.txt", { windows: true, home: "C:\\Users\\dev" }), ["c:/users/DEV/a"]);
+  assert.deepEqual(ancestors("\\\\srv\\share\\d\\f", { windows: true }), ["\\\\srv\\share\\d"]);
+  assert.deepEqual(ancestors("\\foo", { windows: true }), []);
   assert.deepEqual(ancestors(""), []);
+});
+
+test("가까운 있는 폴더가 디스크 뿌리나 홈 폴더뿐이면 경로 복사만 준다", async () => {
+  // 화면의 웹 경로 조각(/api/v1/users): 위로 올라가면 / 만 있다
+  let calls = fake("macos", (cmd, args) => args.slice(3).map((p) => (p === "/" ? "dir" : "missing")).join("\n") + "\n");
+  await click("/api/v1/users", "/api/v1/users");
+  assert.deepEqual(opened(calls), { path: "/api/v1/users", kind: "missing" });
+  assert.equal(of(calls, "notify")[0][0].body, "/api/v1/users");
+  assert.deepEqual(of(calls, "exec").at(-1)[1].slice(3), ["/api/v1", "/api"]); // / 는 묻지도 않는다
+  // 홈 아래 없는 경로: 홈 폴더까지만 올라간다
+  calls = fake("macos", (cmd, args) => args.slice(3).map((p) => (p.startsWith("/home") && !p.includes("/no") ? "dir" : "missing")).join("\n") + "\n");
+  await click("~/no/where.md", "/home/dev/no/where.md");
+  assert.deepEqual(opened(calls), { path: "/home/dev/no/where.md", kind: "missing" });
+  assert.deepEqual(of(calls, "exec").at(-1)[1].slice(3), ["/home/dev/no"]);
+});
+
+test("위아래 줄에 따로 있는 두 경로(ls -1F 결과)는 이어 붙이지 않고 누른 경로를 연다", async () => {
+  // 리뷰 재현: "herdr/" 다음 줄의 "README.md"는 둘 다 실제로 있어 "herdr/README.md"도 있지만, 아래 조각 자체가 있으면 그것을 쓴다.
+  const rows = ["⏺ Bash(ls -1F)", "  ⎿  herdr/", "     README.md", "     install.sh"];
+  const exist = { "/work/proj/README.md": "file", "/work/proj/herdr/README.md": "file", "/work/proj/herdr": "dir" };
+  const calls = fakeFs("macos", rows, 80, exist);
+  await click("README.md", "/work/proj/README.md", proj);
+  assert.deepEqual(opened(calls), { path: "/work/proj/README.md", kind: "file" });
+  assert.equal(of(calls, "exec").length, 1); // 후보와 원래 경로를 한 번에 확인
+  // 아래 조각이 따로 없으면 지금처럼 이어 붙인다(실제 모양의 아래 조각 d/scratchpad/… 와 같은 경우)
+  const calls2 = fakeFs("macos", rows, 80, { "/work/proj/herdr/README.md": "file" });
+  await click("README.md", "/work/proj/README.md", proj);
+  assert.deepEqual(opened(calls2), { path: "/work/proj/herdr/README.md", kind: "file" });
 });
