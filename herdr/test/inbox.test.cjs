@@ -431,6 +431,37 @@ test("leaderName: 받은편지함·에이전트 목록·inbox.cjs가 같은 블�
   const ref = block("../mods/inbox/inbox.cjs");
   assert.equal(block("../mods/inbox/main.js"), ref);
   assert.equal(block("../mods/agent-groups/main.js"), ref);
+  assert.equal(block("../mods/leader-tabs/main.js"), ref);
+  assert.equal(block("../mods/work/main.js"), ref);
+});
+
+test("leader-tabs·work: 리더 이름을 hc 이름(lead-x) 그대로 그리지 않는다", () => {
+  const tabs = fs.readFileSync(path.join(__dirname, "../mods/leader-tabs/main.js"), "utf8");
+  assert.match(tabs, /return leaderName\(term\.name, term, namesMemo\(\)\)/);
+  assert.doesNotMatch(tabs, /term\.name \|\| term\.address/);
+  const work = fs.readFileSync(path.join(__dirname, "../mods/work/main.js"), "utf8");
+  assert.match(work, /const label = sessionLabel\(s\)/);
+  // The rule itself: a closed or untitled leader reads as its task, a titled one as its title.
+  assert.equal(NAMES.leaderName("lead-po-inbox", { name: "lead-po-inbox", address: "t1", title: "리더 · 받은편지함 정리" }, {}), "받은편지함 정리");
+  assert.equal(NAMES.leaderName("lead-po-inbox", { name: "lead-po-inbox", address: "t1", title: "lead-po-inbox" }, {}), "po inbox");
+});
+
+// The scroll lists keep their place across presses: handles the view owns, tracked on both lists, and an anchor after every press that
+// changes a card's or a section's height. (The kit gives no way to read a pixel offset, so this checks the wiring, not the pixels.)
+test("받은편지함: 자세히·접기·섹션·답 쓰기가 스크롤을 맨 위로 되돌리지 않게 위치를 붙든다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  assert.match(src, /ScrollHandle\.new\(\)/);
+  assert.match(src, /id\("inbox-list"\)[^\n]*track_scroll\(this\.scroll\)/);
+  assert.match(src, /id\("inbox-rows"\)[^\n]*track_scroll\(this\.rowsScroll\)/);
+  assert.match(src, /scroll_to_item\(i\)/);
+  assert.match(src, /this\.toggleOpen\(s, it\); this\.reveal\(this\.spot\(s, it\)\)/);
+  assert.match(src, /o\.toggle\?\.\(\); this\.reveal\(o\.id\)/);
+  assert.match(src, /this\.reveal\(this\.spot\(s, item\)\)/);
+  // Every child of the list is recorded with the spot key reveal looks up.
+  assert.match(src, /add\(this\.askCard\(t, a, cx\), this\.spot\(a\.s, a\.item\)\)/);
+  assert.match(src, /add\(this\.chatRow\(t, r\), this\.spot\(r\.s, r\.it\)\)/);
+  assert.match(src, /"sec-ask"\)/);
+  assert.match(src, /"sec-rep"\)/);
 });
 
 // ---- PO 채팅: @ 멘션, 리더 메뉴, po.jsonl
