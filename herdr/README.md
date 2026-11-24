@@ -176,10 +176,10 @@ gh-account resolve                          # 지금 폴더에서 쓸 계정 확
 sh herdr/install.sh --gh-account-uninstall  # 제거
 ```
 
-- gh 활성 계정은 바꾸지 않고, 토큰은 저장하지 않습니다.
+- gh 활성 계정은 바꾸지 않고(패널의 계정 추가만 로그인 직후 원래대로 되돌림), 토큰은 저장하지 않습니다.
 - 매핑이 없거나 깨졌으면 `gh`와 `git`은 원래대로 동작합니다.
 - macOS·Linux만 지원하고, HTTPS 원격만 인증합니다.
-- 오른쪽 패널에서 보고 고르려면 계정 패널을 더합니다: `sh herdr/install.sh --add gh-accounts` ([gh-accounts](../docs/mods/gh-accounts.md))
+- 오른쪽 패널에서 보고 고르려면 계정 패널을 더합니다: `sh herdr/install.sh --add gh-accounts` ([gh-accounts](../docs/mods/gh-accounts.md)). 도구 설치·되돌리기와 계정 추가도 패널 버튼으로 할 수 있습니다.
 - 자세한 사용법과 한계: [gh-account](../docs/gh-account.md)
 
 ---

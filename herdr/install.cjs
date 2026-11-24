@@ -45,6 +45,8 @@ const LEGACY_LAYOUT = "agent-groups";
 // 이 설치기가 쓰는 레이아웃 이름(dashboard 또는 예전 agent-groups) 기록. 블록이 모두 빠진 뒤에도 같은 레이아웃을 알아본다.
 const LAYOUT_MARK = ".herdr-installer-layout";
 const SRC = path.join(__dirname, "mods");
+// 모드 폴더 밖에 있지만 모드와 함께 복사할 파일. gh-accounts 패널은 설치·확인·계정 추가에 gh-account 도구를 쓴다.
+const BUNDLE = { "gh-accounts": [["gh-account/gh-account.cjs", "gh-account.cjs"]] };
 
 function log(msg) { process.stdout.write(msg + "\n"); }
 
@@ -119,6 +121,7 @@ function installMods(home, opts = {}) {
     }
     fs.mkdirSync(target, { recursive: true });
     fs.cpSync(path.join(SRC, mod), target, { recursive: true, force: true });
+    for (const [from, to] of BUNDLE[mod] || []) fs.copyFileSync(path.join(__dirname, from), path.join(target, to));
     fs.writeFileSync(path.join(target, MARK), "");
     log(`모드 설치: ${target}`);
     result.installed.push(mod);

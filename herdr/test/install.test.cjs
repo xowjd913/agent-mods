@@ -81,6 +81,9 @@ test("--extras는 추가 모드도 복사하고, 이후 기본 설치도 추가 
   const home = tempHome();
   quiet(() => inst.installMods(home, true));
   for (const m of inst.EXTRAS) assert.ok(fs.existsSync(path.join(home, "mods", m, "main.js")), m);
+  // 계정 패널은 gh-account 도구를 함께 가져간다
+  assert.equal(fs.readFileSync(path.join(home, "mods", "gh-accounts", "gh-account.cjs"), "utf8"),
+    fs.readFileSync(path.join(__dirname, "..", "gh-account", "gh-account.cjs"), "utf8"));
   fs.writeFileSync(path.join(home, "mods", "usage-status", "main.js"), "old");
   const { result } = quiet(() => inst.installMods(home, false));
   assert.ok(result.installed.includes("usage-status"));

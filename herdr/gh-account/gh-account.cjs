@@ -135,18 +135,26 @@ function moveRule(map, pattern, dir) {
 }
 
 // 폴더의 원격 저장소. origin 이 github.com 이면 그것, 아니면 github.com 을 가리키는 첫 원격.
-function repoFromDir(ctx, dir) {
+// url 은 사용자·비밀번호(https://user:token@...)를 뺀 값이다.
+function remoteFromDir(ctx, dir) {
   const env = gitEnv(ctx);
   const o = ctx.run("git", ["remote", "get-url", "origin"], { cwd: dir, env });
-  if (o.status === 0) { const r = parseRepo(o.stdout.trim()); if (r) return r; }
+  if (o.status === 0) { const url = o.stdout.trim(); const r = parseRepo(url); if (r) return { repo: r, url: safeUrl(url) }; }
   const all = ctx.run("git", ["config", "--get-regexp", "^remote\\..*\\.url$"], { cwd: dir, env });
   if (all.status !== 0) return null;
   for (const line of all.stdout.split("\n")) {
-    const r = parseRepo(line.slice(line.indexOf(" ") + 1));
-    if (r) return r;
+    const url = line.slice(line.indexOf(" ") + 1).trim();
+    const r = parseRepo(url);
+    if (r) return { repo: r, url: safeUrl(url) };
   }
   return null;
 }
+function repoFromDir(ctx, dir) {
+  const x = remoteFromDir(ctx, dir);
+  return x ? x.repo : null;
+}
+function safeUrl(url) { return String(url).replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@/]+@/i, (m, s) => (/^ssh:/i.test(s) ? m : s)); }
+function isSshUrl(url) { return /^ssh:\/\//i.test(url) || /^[^@/:]+@[^/:]+:/.test(url); }
 
 // 폴더가 git 저장소가 아니면(여러 저장소를 담은 폴더) 바로 아래에서 .git 이 있는 폴더를 이만큼까지 본다.
 const SCAN_CHILDREN = 50;
@@ -158,7 +166,7 @@ function spaceOwners(ctx, dirs, map) {
   const add = (dir) => {
     let r = null;
     try { r = repoFromDir(ctx, dir); } catch { r = null; }
-    if (r) repos.set(`${r.owner}/${r.repo}`.toLowerCase(), r);
+    if (r && !repos.has(`${r.owner}/${r.repo}`.toLowerCase())) repos.set(`${r.owner}/${r.repo}`.toLowerCase(), { ...r, dir });
     return !!r;
   };
   const seen = new Set();
@@ -190,7 +198,7 @@ function spaceOwners(ctx, dirs, map) {
       owners.set(key, { owner: r.owner, rule: rule ? rule.account : null, repos: [] });
     }
     const hit = matchAccount(map, r);
-    owners.get(key).repos.push({ repo: `${r.owner}/${r.repo}`, account: hit ? hit.account : null, by: hit ? hit.by : null, match: hit ? hit.match : null });
+    owners.get(key).repos.push({ repo: `${r.owner}/${r.repo}`, dir: r.dir, account: hit ? hit.account : null, by: hit ? hit.by : null, match: hit ? hit.match : null });
   }
   return [...owners.values()];
 }
@@ -612,15 +620,326 @@ function firstGhDir(ctx) {
   return null;
 }
 
+// 설치 폴더: --bin, GH_ACCOUNT_BIN, 전에 설치한 폴더, ~/.local/bin 순.
+function installBinDir(ctx, opts = {}) {
+  const state = readState(paths(ctx).state);
+  return path.resolve(opts.bin || ctx.env.GH_ACCOUNT_BIN || (state && state.binDir) || path.join(homeDir(ctx), ".local", "bin"));
+}
+function uninstallBinDir(ctx, opts = {}) {
+  const state = readState(paths(ctx).state);
+  return path.resolve(opts.bin || (state && state.binDir) || ctx.env.GH_ACCOUNT_BIN || path.join(homeDir(ctx), ".local", "bin"));
+}
+
+// PATH 에서 설치 폴더가 다른 gh 보다 앞에 있는가(래퍼가 쓰이는가). firstGh 는 래퍼가 아닌 첫 gh 의 폴더.
+function pathOrder(ctx, binDir) {
+  const bin = path.resolve(binDir);
+  const dirs = String(ctx.env.PATH || "").split(path.delimiter).filter(Boolean).map((d) => path.resolve(d));
+  const at = dirs.indexOf(bin);
+  const other = dirs.findIndex((d) => d !== bin && fs.existsSync(path.join(d, "gh")));
+  return { inPath: at >= 0, first: at >= 0 && (other < 0 || at < other), firstGh: other >= 0 ? dirs[other] : null };
+}
+
+// GUI 앱(Herdr 패널)은 PATH 가 짧을 수 있어, 터미널과 같은 PATH 를 사용자 로그인 셸에서 읽는다. 못 읽으면 null.
+function shellPath(ctx) {
+  const sh = ctx.env.SHELL && path.isAbsolute(ctx.env.SHELL) ? ctx.env.SHELL : "/bin/sh";
+  const r = ctx.run(sh, ["-ilc", 'printf "\\n__GHA_PATH__%s__GHA_PATH__\\n" "$PATH"'], { env: ctx.env, timeout: 8000 });
+  const m = String(r.stdout || "").match(/__GHA_PATH__(.*?)__GHA_PATH__/);
+  return m && m[1] ? m[1] : null;
+}
+
+// 설치하면 바뀔 것. 아무것도 쓰지 않는다.
+function planInstall(ctx, opts = {}) {
+  const P = paths(ctx);
+  const binDir = installBinDir(ctx, opts);
+  const files = BIN_FILES.map((f) => {
+    const p = path.join(binDir, f);
+    return { path: p, action: !fs.existsSync(p) ? "create" : isOurs(p) ? "replace" : "blocked" };
+  });
+  const gh = realGh(ctx);
+  const g = globalConfigPath(ctx);
+  const order = pathOrder(ctx, binDir);
+  const m = readMap(P.map);
+  return {
+    supported: ctx.platform !== "win32", binDir, files, blocked: files.filter((f) => f.action === "blocked").map((f) => f.path),
+    app: P.app, globalConfig: g, prior: priorHelpers(ctx, g), gh: path.isAbsolute(gh) ? gh : null,
+    inPath: order.inPath, wrapperFirst: order.first, firstGh: order.firstGh,
+    map: P.map, mapOk: m.ok, installed: !!readState(P.state),
+  };
+}
+
+// 제거하면 지울 것. 매핑 파일은 남긴다.
+function planUninstall(ctx, opts = {}) {
+  const P = paths(ctx);
+  const binDir = uninstallBinDir(ctx, opts);
+  const g = globalConfigPath(ctx);
+  let text = "";
+  try { text = fs.readFileSync(g, "utf8"); } catch { /* 없음 */ }
+  return {
+    binDir, files: BIN_FILES.map((f) => path.join(binDir, f)).filter(isOurs),
+    globalConfig: g, block: text.includes(BEGIN), remove: [P.identity, P.state, P.app], map: P.map, installed: !!readState(P.state),
+  };
+}
+
+// 설치 상태. 패널이 설치·업데이트·되돌리기 단추를 고를 때 쓴다.
+function statusInfo(ctx) {
+  const P = paths(ctx);
+  const state = readState(P.state);
+  const g = globalConfigPath(ctx);
+  let text = "";
+  try { text = fs.readFileSync(g, "utf8"); } catch { /* 없음 */ }
+  const v = gitVersion(ctx);
+  const binDir = state && state.binDir ? state.binDir : null;
+  const files = binDir ? BIN_FILES.map((f) => ({ name: f, ok: isOurs(path.join(binDir, f)) })) : [];
+  const order = binDir ? pathOrder(ctx, binDir) : { inPath: false, first: false, firstGh: firstGhDir(ctx) };
+  let appCurrent = null;
+  if (state) {
+    try { appCurrent = fs.readFileSync(P.app, "utf8") === fs.readFileSync(__filename, "utf8"); } catch { appCurrent = false; }
+  }
+  const m = readMap(P.map);
+  return {
+    installed: !!state, binDir, files, filesOk: !!state && files.every((f) => f.ok),
+    block: text.includes(BEGIN), globalConfig: g, git: v ? v.join(".") : null, identity: versionAtLeast(v, MIN_GIT),
+    inPath: order.inPath, wrapperFirst: order.first, firstGh: order.firstGh,
+    app: P.app, appCurrent,
+    map: { path: P.map, ok: m.ok, rules: m.ok ? m.map.rules.length : 0, default: m.ok ? m.map.default : null, error: m.ok ? null : m.error },
+  };
+}
+
+// gh 에 로그인된 github.com 계정. 읽지 못하면(옛 gh, gh 없음) null.
+function ghAccounts(ctx) {
+  const r = ctx.run(realGh(ctx), ["auth", "status", "--hostname", HOST, "--json", "hosts"], { env: cleanEnv(ctx.env) });
+  try { return (JSON.parse(r.stdout).hosts[HOST] || []).map((h) => ({ login: h.login, active: !!h.active, state: h.state })); } catch { return null; }
+}
+function activeLogin(accounts) {
+  const a = (accounts || []).find((x) => x.active);
+  return a ? a.login : null;
+}
+
+const same = (a, b) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+
+// 저장소의 커밋 신원. 폴더가 있으면 git 이 실제로 쓰는 값과 어디서 왔는지, 없으면 매핑 계정의 신원 파일.
+function identityOf(ctx, dir, account) {
+  const P = paths(ctx);
+  if (dir) {
+    const get = (key) => {
+      const r = ctx.run("git", ["config", "--show-origin", "--get", key], { cwd: dir, env: gitEnv(ctx) });
+      if (r.status !== 0) return null;
+      const line = r.stdout.trim();
+      const i = line.indexOf("\t");
+      return i < 0 ? { value: line, origin: "" } : { value: line.slice(i + 1), origin: line.slice(0, i) };
+    };
+    const name = get("user.name"), email = get("user.email");
+    if (!name && !email) return { name: null, email: null, how: "none" };
+    const origin = (email || name).origin.replace(/^file:/, "");
+    const how = path.resolve(path.dirname(origin)) === path.resolve(P.identity) ? "mapped" : origin === "command line:" ? "env" : "config";
+    return { name: name ? name.value : null, email: email ? email.value : null, how, origin: how === "mapped" ? null : origin };
+  }
+  if (!account) return null;
+  let text = "";
+  try { text = fs.readFileSync(path.join(P.identity, `${account}.gitconfig`), "utf8"); } catch { return { name: null, email: null, how: "none" }; }
+  const pick = (k) => { const m = text.match(new RegExp(`^\\s*${k}\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"`, "m")); return m ? m[1].replace(/\\(.)/g, "$1") : null; };
+  return { name: pick("name"), email: pick("email"), how: "mapped" };
+}
+
+// 이 계정 토큰으로 GitHub 에 물어 본다: 누구로 접속되는지, 이 저장소에 어떤 권한이 있는지. 토큰은 자식 프로세스 환경에만 넣는다.
+function accessTest(ctx, login, repo) {
+  const t = tokenFor(ctx, login);
+  if (!t.ok) return { ok: false, login: null, access: null, message: `${login} 계정 토큰을 받지 못했습니다. gh 에 로그인돼 있는지 보세요.` };
+  const env = { ...cleanEnv(ctx.env), GH_TOKEN: t.token };
+  const gh = realGh(ctx);
+  const u = ctx.run(gh, ["api", "user", "--hostname", HOST, "--jq", ".login"], { env });
+  const who = u.status === 0 ? u.stdout.trim() : "";
+  if (!who) return { ok: false, login: null, access: null, message: `GitHub 에 ${login} 계정으로 접속하지 못했습니다. 토큰이 만료됐다면 다시 로그인하세요.` };
+  let access = null;
+  if (repo) {
+    const r = ctx.run(gh, ["api", `repos/${repo.owner}/${repo.repo}`, "--hostname", HOST, "--jq", ".permissions"], { env });
+    if (r.status === 0) {
+      let p = null;
+      try { p = JSON.parse(r.stdout || "null"); } catch { p = null; }
+      access = !p ? "pull" : p.admin ? "admin" : p.push || p.maintain ? "push" : p.pull || p.triage ? "pull" : "none";
+    } else access = /404|Not Found/i.test(r.stderr + r.stdout) ? "notfound" : "error";
+  }
+  const ok = same(who, login) && (!repo || ["admin", "push", "pull"].includes(access));
+  return { ok, login: who, access };
+}
+
+// 폴더나 저장소 하나에서 gh, git push, 커밋 신원이 어느 계정을 쓰는지 한 번에 본다.
+function check(ctx, { repo, dir, test } = {}) {
+  const P = paths(ctx);
+  const m = readMap(P.map);
+  let remote = null;
+  if (!repo && dir) { try { remote = remoteFromDir(ctx, dir); } catch { remote = null; } }
+  const target = repo || (remote && remote.repo) || null;
+  const accounts = ghAccounts(ctx);
+  const active = activeLogin(accounts);
+  const state = readState(P.state);
+  const order = state && state.binDir ? pathOrder(ctx, state.binDir) : null;
+  const out = {
+    repo: target ? `${target.owner}/${target.repo}` : null, dir: dir || null, remote: remote ? remote.url : null,
+    mapOk: m.ok, error: m.ok ? null : m.error, account: null, by: null, match: null,
+    active, accounts: accounts ? accounts.map((a) => a.login) : null, loggedIn: null,
+    installed: !!state, wrapperFirst: order ? order.first : false,
+    gh: null, push: null, identity: null, warn: [], test: null,
+  };
+  if (!target) return out;
+  const hit = m.ok ? matchAccount(m.map, target) : null;
+  if (hit) Object.assign(out, { account: hit.account, by: hit.by, match: hit.match });
+  if (hit && accounts) out.loggedIn = accounts.some((a) => same(a.login, hit.account));
+  const used = !!(state && hit);
+  out.gh = used && out.wrapperFirst ? { account: hit.account, how: "mapped" } : { account: active, how: used ? "path" : "active" };
+  const ssh = remote && isSshUrl(remote.url);
+  out.push = ssh ? { account: null, how: "ssh" } : used ? { account: hit.account, how: "mapped" } : { account: null, how: "prior" };
+  out.identity = identityOf(ctx, dir || null, hit ? hit.account : null);
+  if (!m.ok) out.warn.push(`매핑 파일이 깨져 아무 계정도 고르지 않습니다: ${m.error}`);
+  if (!state) out.warn.push("gh-account 도구가 설치돼 있지 않아 매핑이 쓰이지 않습니다. 위에서 설치하세요.");
+  else if (!out.wrapperFirst) out.warn.push("gh 래퍼가 PATH 에서 진짜 gh 보다 뒤에 있어 터미널의 gh 명령은 매핑을 따르지 않습니다. git push 와 커밋 신원은 따릅니다.");
+  if (hit && out.loggedIn === false) out.warn.push(`${hit.account} 계정이 gh 에 로그인돼 있지 않아 이 저장소의 gh·git push 는 실패합니다. 계정 추가로 로그인하세요.`);
+  const ghAcct = out.gh.account;
+  const ownerLogin = accounts && accounts.find((a) => same(a.login, target.owner));
+  if (ownerLogin && ghAcct && !same(ghAcct, ownerLogin.login)) {
+    out.warn.push(`${target.owner} 은(는) 로그인된 계정인데 이 저장소는 ${ghAcct} 계정을 씁니다. ${ownerLogin.login} 계정의 개인 저장소라면 규칙을 확인하세요.`);
+  }
+  if (test && ghAcct) out.test = accessTest(ctx, ghAcct, target);
+  return out;
+}
+
+// ---- 계정 추가(gh auth login) ----
+// gh auth login 은 새 계정을 gh 활성 계정으로 바꾸고, 바꾸지 않는 옵션이 없다.
+// 다른 세션은 활성 계정으로 일하므로, 로그인이 끝나면 바로 원래 활성 계정으로 한 번 되돌린다(이슈 #28 선택지 A).
+
+const LOGIN_TIMEOUT = 15 * 60 * 1000;
+const RUNNING = new Set(["starting", "waiting"]);
+function loginFile(ctx) { return path.join(paths(ctx).dir, "login.json"); }
+function readLogin(ctx) { return readState(loginFile(ctx)); }
+function writeLogin(ctx, st) {
+  const f = loginFile(ctx);
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  const tmp = `${f}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(st, null, 2) + "\n");
+  fs.renameSync(tmp, f);
+}
+function alive(pid) {
+  if (!pid) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
+}
+// 토큰처럼 보이는 문자열과 색 코드를 지운다. gh 출력에는 토큰이 나오지 않지만 메시지에 남기지 않으려고 한 번 더 거른다.
+function scrub(s) {
+  return String(s || "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
+    .replace(/\b(gh[opsur]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,})\b/g, "[가림]");
+}
+
+// 이 도구에서 gh auth switch 를 부르는 곳은 여기 하나다. 로그인 직후, 활성 계정이 바뀌었을 때만 원래 계정으로 되돌린다.
+function restoreActive(ctx, prev, now) {
+  if (!prev) return { ok: true, switched: false };
+  if (same(prev, now)) return { ok: true, switched: false };
+  const r = ctx.run(realGh(ctx), ["auth", "switch", "--hostname", HOST, "--user", prev], { env: cleanEnv(ctx.env) });
+  const after = activeLogin(ghAccounts(ctx));
+  if (r.status !== 0 || !same(after, prev)) {
+    return { ok: false, switched: false, message: `gh 활성 계정을 ${prev}(으)로 되돌리지 못했습니다. 터미널에서 gh auth switch --hostname github.com --user ${prev} 를 실행하세요.` };
+  }
+  return { ok: true, switched: true };
+}
+
+function loginStatus(ctx) {
+  const st = readLogin(ctx);
+  if (!st) return { state: "none" };
+  const stale = RUNNING.has(st.state) && (st.pid ? !alive(st.pid) : Date.now() - (st.startedAt || 0) > 30000);
+  if (stale) {
+    const next = { ...st, state: "failed", message: "로그인 진행이 중간에 멈췄습니다. 다시 시도하세요." };
+    writeLogin(ctx, next);
+    return next;
+  }
+  return st;
+}
+
+// 로그인을 뒤에서 돌리는 프로세스를 띄우고 바로 돌아온다. 진행 상황은 login status 로 읽는다.
+function loginStart(ctx) {
+  if (ctx.platform === "win32") return { ok: false, message: "gh-account 는 아직 Windows 를 지원하지 않습니다." };
+  const cur = loginStatus(ctx);
+  if (RUNNING.has(cur.state)) return { ok: false, message: "이미 계정 추가가 진행 중입니다.", login: cur };
+  const accounts = ghAccounts(ctx);
+  if (!accounts) return { ok: false, message: "gh auth status --json 을 읽지 못했습니다. gh 2.60 이상이 설치돼 있는지 보세요." };
+  const prev = activeLogin(accounts);
+  const gh = realGh(ctx);
+  writeLogin(ctx, { state: "starting", prev, pid: null, code: null, url: null, startedAt: Date.now() });
+  const spawn = ctx.spawn || require("child_process").spawn;
+  const args = [__filename, "login", "run", ...(prev ? ["--prev", prev] : [])];
+  const child = spawn(ctx.node || process.execPath, args, {
+    detached: true, stdio: "ignore", cwd: homeDir(ctx),
+    env: { ...ctx.env, ...(path.isAbsolute(gh) ? { GH_ACCOUNT_GH: gh } : {}) },
+  });
+  if (child.unref) child.unref();
+  return { ok: true, login: readLogin(ctx) };
+}
+
+function loginCancel(ctx) {
+  const st = loginStatus(ctx);
+  if (!RUNNING.has(st.state)) return { ok: false, message: "진행 중인 계정 추가가 없습니다.", login: st };
+  if (st.pid && alive(st.pid)) { try { process.kill(st.pid, "SIGTERM"); } catch { /* 이미 끝남 */ } }
+  else writeLogin(ctx, { ...st, state: "cancelled", message: "계정 추가를 그만뒀습니다." });
+  return { ok: true };
+}
+
+// gh auth login --web 을 돌리며 일회용 코드와 주소를 상태 파일에 적고, 끝나면 활성 계정을 되돌린다.
+function loginRun(ctx, prev, opts = {}) {
+  return new Promise((done) => {
+    const startedAt = (readLogin(ctx) || {}).startedAt || Date.now();
+    let st = { state: "waiting", prev: prev || null, pid: process.pid, code: null, url: null, startedAt };
+    writeLogin(ctx, st);
+    const spawn = ctx.spawn || require("child_process").spawn;
+    let child, buf = "", cancelled = false, timedOut = false, finished = false;
+    try {
+      child = spawn(realGh(ctx), ["auth", "login", "--hostname", HOST, "--web", "--git-protocol", "https"], { env: cleanEnv(ctx.env), stdio: ["pipe", "pipe", "pipe"] });
+    } catch (e) { child = null; }
+    const finish = (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      process.removeListener("SIGTERM", onTerm);
+      if (code !== 0) {
+        const last = scrub(buf).split("\n").map((l) => l.trim()).filter(Boolean).pop() || "";
+        const why = cancelled ? "계정 추가를 그만뒀습니다." : timedOut ? "15분 안에 브라우저 승인이 끝나지 않아 멈췄습니다." : `gh auth login 이 실패했습니다${last ? `: ${last}` : "."}`;
+        st = { ...st, state: cancelled ? "cancelled" : "failed", message: why };
+        writeLogin(ctx, st);
+        done(1);
+        return;
+      }
+      const now = activeLogin(ghAccounts(ctx));
+      const back = restoreActive(ctx, st.prev, now);
+      st = { ...st, state: "done", added: now, restored: back.ok, switched: back.switched, message: back.message || null };
+      writeLogin(ctx, st);
+      done(back.ok ? 0 : 1);
+    };
+    const onTerm = () => { cancelled = true; if (child) child.kill("SIGTERM"); else finish(1); };
+    process.on("SIGTERM", onTerm);
+    const timer = setTimeout(() => { timedOut = true; if (child) child.kill("SIGTERM"); }, opts.timeout || LOGIN_TIMEOUT);
+    if (!child) { finish(-1); return; }
+    const onData = (d) => {
+      buf = (buf + d.toString()).slice(-20000);
+      const text = scrub(buf);
+      const c = text.match(/\b([A-Z0-9]{4}-[A-Z0-9]{4})\b/);
+      const u = text.match(/https:\/\/github\.com\/login\/device[^\s"']*/);
+      const code = c ? c[1] : st.code, url = u ? u[0] : st.url;
+      if (code !== st.code || url !== st.url) { st = { ...st, code, url }; writeLogin(ctx, st); }
+    };
+    child.stdout.on("data", onData);
+    child.stderr.on("data", onData);
+    child.stdin.on("error", () => {});
+    child.stdin.end("\n");
+    child.on("error", () => finish(-1));
+    child.on("close", (code) => finish(code));
+  });
+}
+
 function install(ctx, opts, log) {
   if (ctx.platform === "win32") { log("gh-account 는 아직 Windows 를 지원하지 않습니다."); return 1; }
   const P = paths(ctx);
-  const binDir = path.resolve(opts.bin || ctx.env.GH_ACCOUNT_BIN || path.join(homeDir(ctx), ".local", "bin"));
+  const binDir = installBinDir(ctx, opts);
   for (const f of BIN_FILES) {
     const t = path.join(binDir, f);
     if (fs.existsSync(t) && !isOurs(t)) { log(`${t} 에 다른 파일이 있어 설치를 멈춥니다. 그 파일을 옮긴 뒤 다시 실행하세요.`); return 1; }
   }
-  const gh = realGh({ ...ctx, env: { ...ctx.env, GH_ACCOUNT_GH: "" } });
+  const gh = realGh(ctx);
   if (!path.isAbsolute(gh)) log("PATH 에서 gh 를 찾지 못했습니다. GitHub CLI 를 설치하고 로그인해야 계정을 고를 수 있습니다.");
   fs.mkdirSync(P.dir, { recursive: true });
   const src = opts.src || __filename;
@@ -637,9 +956,10 @@ function install(ctx, opts, log) {
   sync(ctx, log);
   log(`설치: ${binDir} 에 gh, git-credential-gh-account, gh-account`);
   log(`git 전역 설정(${globalConfigPath(ctx)})에 gh-account 블록을 썼습니다. 원래 자격 증명 도우미 ${prior.length}개는 그 뒤에 그대로 둡니다.`);
-  const first = firstGhDir(ctx);
-  if (first !== binDir) {
-    log(`주의: PATH 에서 ${first || "(없음)"} 의 gh 가 먼저 찾혀 래퍼가 쓰이지 않습니다. 셸 설정에 export PATH="${binDir}:$PATH" 를 더하세요.`);
+  const order = pathOrder(ctx, binDir);
+  if (!order.first) {
+    const why = order.inPath ? `${order.firstGh} 의 gh 가 먼저 찾혀` : `${binDir} 가 PATH 에 없어`;
+    log(`주의: PATH 에서 ${why} 터미널의 gh 명령은 래퍼를 쓰지 않습니다(git push 와 커밋 신원은 매핑을 따릅니다). 셸 설정에 export PATH="${binDir}:$PATH" 를 더하세요.`);
   }
   if (!readMap(P.map).ok) log(`매핑 파일(${P.map})이 깨져 있어 지금은 아무 계정도 고르지 않습니다.`);
   return 0;
@@ -647,8 +967,7 @@ function install(ctx, opts, log) {
 
 function uninstall(ctx, opts, log) {
   const P = paths(ctx);
-  const state = readState(P.state);
-  const binDir = path.resolve(opts.bin || (state && state.binDir) || ctx.env.GH_ACCOUNT_BIN || path.join(homeDir(ctx), ".local", "bin"));
+  const binDir = uninstallBinDir(ctx, opts);
   for (const f of BIN_FILES) {
     const t = path.join(binDir, f);
     if (isOurs(t)) { fs.rmSync(t, { force: true }); log(`지움: ${t}`); }
@@ -657,6 +976,8 @@ function uninstall(ctx, opts, log) {
   fs.rmSync(P.identity, { recursive: true, force: true });
   fs.rmSync(P.state, { force: true });
   fs.rmSync(P.app, { force: true });
+  // 진행 중인 계정 추가의 상태 파일은 남긴다. 끝난 기록만 지운다.
+  if (!RUNNING.has(loginStatus(ctx).state)) fs.rmSync(loginFile(ctx), { force: true });
   try { fs.rmdirSync(P.dir); } catch { /* 남은 파일 있음 */ }
   log(`git 전역 설정에서 gh-account 블록을 지웠습니다. 매핑 파일(${P.map})은 남겨 둡니다.`);
   return 0;
@@ -675,7 +996,12 @@ const USAGE = `사용법: gh-account <명령>
   assign <계정 | none> <폴더..>          폴더들에서 찾은 owner 마다 owner/* 규칙을 그 계정으로 정한다(none: 지움)
   identity <계정> [--name 이름] [--email 주소] [--off | --auto]  커밋 신원
   sync                                 신원 파일과 git 전역 설정 블록을 다시 만든다
-  install [--bin 폴더] | uninstall | status`;
+  check [폴더 | -R owner/repo] [--test] [--json]  gh, git push, 커밋 신원이 쓸 계정을 한 번에 보여 준다(--test: GitHub 에 접속해 본다)
+  login start | status | cancel [--json]  gh auth login --web 으로 계정을 더한다. 끝나면 gh 활성 계정을 원래대로 되돌린다
+  install [--bin 폴더] [--dry-run] [--json]  설치한다(--dry-run: 바뀔 것만 보여 준다)
+  uninstall [--dry-run] [--json]        설치 전으로 되돌린다(매핑 파일은 남긴다)
+  status [--json]                      설치·PATH·git 버전 점검
+  shell-path                           로그인 셸의 PATH 를 출력한다(GUI 앱이 터미널과 같은 gh 를 찾게 할 때)`;
 
 function flag(args, name) {
   const i = args.indexOf(name);
@@ -698,6 +1024,40 @@ function editMap(ctx, io, fn) {
 
 function warnLogin(ctx, io, login) {
   if (!tokenFor(ctx, login).ok) io.out(`주의: ${login} 계정이 gh 에 로그인돼 있지 않습니다. 이 계정으로 매핑된 저장소는 로그인할 때까지 실패합니다(gh auth login).`);
+}
+
+function checkText(io, c) {
+  if (!c.repo) { io.out(`${c.dir || "이 폴더"}: github.com 원격을 찾지 못했습니다. gh 와 git 은 원래 계정을 씁니다.`); }
+  else {
+    io.out(`${c.repo}${c.remote ? ` (${c.remote})` : ""}`);
+    io.out(`  매핑: ${c.account ? `${c.account} (${c.by === "rule" ? `규칙 ${c.match}` : "default"})` : "없음"}`);
+    io.out(`  gh: ${c.gh.account || "(활성 계정 없음)"}${c.gh.how === "active" ? " (gh 활성 계정)" : c.gh.how === "path" ? " (래퍼가 쓰이지 않아 gh 활성 계정)" : ""}`);
+    io.out(`  git push: ${c.push.how === "ssh" ? "SSH 키" : c.push.how === "prior" ? "원래 자격 증명(키체인 등)" : c.push.account}`);
+    const id = c.identity;
+    io.out(`  커밋 신원: ${!id || id.how === "none" ? "정해지지 않음" : `${id.name || "?"} <${id.email || "?"}>${id.how === "mapped" ? " (매핑)" : id.origin ? ` (${id.origin})` : ""}`}`);
+  }
+  for (const w of c.warn) io.out(`주의: ${w}`);
+  if (c.test) {
+    const t = c.test;
+    io.out(`접속 시험: ${t.ok ? "성공" : "실패"}${t.login ? ` · ${t.login} 로 접속` : ""}${t.access ? ` · 권한 ${t.access}` : ""}${t.message ? ` · ${t.message}` : ""}`);
+  }
+}
+
+function planText(io, p, kind) {
+  if (kind === "install") {
+    io.out(`설치 폴더: ${p.binDir}`);
+    for (const f of p.files) io.out(`  ${f.action === "create" ? "새로 만듦" : f.action === "replace" ? "바꿈" : "다른 파일이 있어 멈춤"}: ${f.path}`);
+    io.out(`git 전역 설정: ${p.globalConfig} 에 gh-account 블록(자격 증명 도우미, 커밋 신원 includeIf)을 씀`);
+    io.out(`원래 자격 증명 도우미 ${p.prior.length}개는 블록 뒤에 그대로 둠`);
+    io.out(`도구 사본: ${p.app}`);
+    io.out(`진짜 gh: ${p.gh || "찾지 못함"}`);
+    if (!p.wrapperFirst) io.out(`주의: PATH 에서 ${p.inPath ? `${p.firstGh} 의 gh 가 먼저 찾혀` : `${p.binDir} 가 없어`} 터미널의 gh 명령은 래퍼를 쓰지 않습니다.`);
+  } else {
+    io.out(`지울 파일: ${p.files.length ? p.files.join(", ") : "없음"}`);
+    io.out(`git 전역 설정 블록: ${p.block ? `${p.globalConfig} 에서 지움` : "없음"}`);
+    io.out(`지울 것: 커밋 신원 파일(${p.remove[0]}), 설치 기록(${p.remove[1]}), 도구 사본(${p.remove[2]})`);
+    io.out(`남기는 것: 매핑 파일 ${p.map}, gh 로그인(계정은 그대로)`);
+  }
 }
 
 function main(argv, ctx, io) {
@@ -742,9 +1102,7 @@ function main(argv, ctx, io) {
     }
     case "list": {
       const json = args.includes("--json");
-      const r = ctx.run(realGh(ctx), ["auth", "status", "--hostname", HOST, "--json", "hosts"], { env: cleanEnv(ctx.env) });
-      let accounts = null;
-      try { accounts = (JSON.parse(r.stdout).hosts[HOST] || []).map((h) => ({ login: h.login, active: !!h.active, state: h.state })); } catch { /* 옛 gh */ }
+      const accounts = ghAccounts(ctx);
       const m = readMap(P.map);
       if (json) { io.out(JSON.stringify({ accounts, map: m.ok ? m.map : null, error: m.ok ? null : m.error })); return 0; }
       if (!accounts) io.out("gh auth status --json 을 읽지 못했습니다(gh 2.60 이상 필요). gh auth status 로 직접 확인하세요.");
@@ -835,25 +1193,65 @@ function main(argv, ctx, io) {
     case "sync":
       return sync(ctx, io.out) ? 0 : 1;
     case "install":
-      return install(ctx, { bin: flag(args, "--bin") }, io.out);
-    case "uninstall":
-      return uninstall(ctx, { bin: flag(args, "--bin") }, io.out);
-    case "status": {
-      const state = readState(P.state);
-      const g = globalConfigPath(ctx);
-      let text = "";
-      try { text = fs.readFileSync(g, "utf8"); } catch { /* 없음 */ }
-      const v = gitVersion(ctx);
-      io.out(`설치: ${state ? state.binDir : "안 됨"}`);
-      io.out(`git 전역 설정 블록: ${text.includes(BEGIN) ? "있음" : "없음"} (${g})`);
-      io.out(`git ${v ? v.join(".") : "?"}: 커밋 신원 ${versionAtLeast(v, MIN_GIT) ? "가능" : "불가(2.36 이상 필요)"}`);
-      if (state) {
-        const first = firstGhDir(ctx);
-        io.out(`gh 래퍼: ${first === state.binDir ? "PATH 맨 앞" : `쓰이지 않음(먼저 찾히는 gh: ${first || "없음"})`}`);
+    case "uninstall": {
+      const json = args.includes("--json"), dry = args.includes("--dry-run");
+      const opts = { bin: flag(args, "--bin") };
+      if (dry) {
+        const plan = cmd === "install" ? planInstall(ctx, opts) : planUninstall(ctx, opts);
+        const lines = [];
+        planText({ out: (l) => lines.push(l) }, plan, cmd);
+        if (json) io.out(JSON.stringify({ ...plan, lines })); else lines.forEach((l) => io.out(l));
+        return 0;
       }
-      const m = readMap(P.map);
-      io.out(`매핑: ${m.ok ? `규칙 ${m.map.rules.length}개, default ${m.map.default || "없음"}` : m.error}`);
+      return cmd === "install" ? install(ctx, opts, io.out) : uninstall(ctx, opts, io.out);
+    }
+    case "status": {
+      const s = statusInfo(ctx);
+      if (args.includes("--json")) { io.out(JSON.stringify(s)); return 0; }
+      io.out(`설치: ${s.installed ? s.binDir : "안 됨"}${s.installed && !s.filesOk ? " (파일 일부가 없음: 다시 설치하세요)" : ""}`);
+      io.out(`git 전역 설정 블록: ${s.block ? "있음" : "없음"} (${s.globalConfig})`);
+      io.out(`git ${s.git || "?"}: 커밋 신원 ${s.identity ? "가능" : "불가(2.36 이상 필요)"}`);
+      if (s.installed) {
+        io.out(`gh 래퍼: ${s.wrapperFirst ? "PATH 에서 먼저 찾힘" : `쓰이지 않음(${s.inPath ? `먼저 찾히는 gh: ${s.firstGh}` : `${s.binDir} 가 PATH 에 없음`})`}`);
+        if (s.appCurrent === false) io.out("도구 사본이 이 버전과 다릅니다. 다시 설치하면 맞춰집니다.");
+      }
+      io.out(`매핑: ${s.map.ok ? `규칙 ${s.map.rules}개, default ${s.map.default || "없음"}` : s.map.error}`);
       return 0;
+    }
+    case "check": {
+      const json = args.includes("--json"), test = args.includes("--test");
+      const rest = args.filter((a) => a !== "--json" && a !== "--test");
+      const R = flag(rest, "-R") || flag(rest, "--repo");
+      let repo = null;
+      if (R) { repo = parseRepo(R); if (!repo) { io.err(`github.com 저장소가 아닙니다: ${R}`); return 2; } }
+      const raw = rest[0] && /^~(\/|$)/.test(rest[0]) ? path.join(homeDir(ctx), rest[0].slice(1)) : rest[0];
+      const dir = repo ? null : path.resolve(ctx.cwd, raw || ".");
+      const c = check(ctx, { repo, dir, test });
+      if (json) io.out(JSON.stringify(c)); else checkText(io, c);
+      return 0;
+    }
+    case "shell-path": {
+      const p = shellPath(ctx);
+      if (!p) { io.err("로그인 셸의 PATH 를 읽지 못했습니다."); return 1; }
+      io.out(p);
+      return 0;
+    }
+    case "login": {
+      const sub = args.shift();
+      const json = args.includes("--json");
+      const show = (r) => {
+        if (json) { io.out(JSON.stringify(r)); return; }
+        const st = r.login || r;
+        if (r.message) io.out(r.message);
+        if (st.code) io.out(`일회용 코드: ${st.code}  주소: ${st.url || "https://github.com/login/device"}`);
+        if (st.state) io.out(`상태: ${st.state}${st.added ? ` · 더한 계정 ${st.added}` : ""}${st.message && st !== r ? ` · ${st.message}` : ""}`);
+      };
+      if (sub === "start") { const r = loginStart(ctx); show(r); return r.ok ? 0 : 1; }
+      if (sub === "status") { show(loginStatus(ctx)); return 0; }
+      if (sub === "cancel") { const r = loginCancel(ctx); show(r); return r.ok ? 0 : 1; }
+      if (sub === "run") return loginRun(ctx, flag(args, "--prev") || null);
+      io.err(USAGE);
+      return 2;
     }
     case undefined: case "-h": case "--help": case "help":
       io.out(USAGE);
@@ -878,7 +1276,9 @@ if (require.main === module) {
     if (cmd === "credential" || cmd === "gh-token") code = 0; // 도우미·래퍼는 오류로 push·gh 를 막지 않는다
     else { io.err(`gh-account: ${e.message}`); code = 1; }
   }
-  process.exitCode = code;
+  if (code && typeof code.then === "function") {
+    code.then((c) => { process.exitCode = c; }, (e) => { io.err(`gh-account: ${e.message}`); process.exitCode = 1; });
+  } else process.exitCode = code;
 }
 
 module.exports = {
@@ -887,4 +1287,6 @@ module.exports = {
   ourCredential, priorCommand, priorHelper,
   globalConfigPath, stripBlock, writeBlock, buildBlock, urlPatterns, priorHelpers, identityFor, sync,
   scripts, install, uninstall, main, makeCtx,
+  remoteFromDir, safeUrl, isSshUrl, pathOrder, shellPath, planInstall, planUninstall, statusInfo,
+  ghAccounts, identityOf, accessTest, check, scrub, restoreActive, readLogin, writeLogin, loginStatus, loginStart, loginCancel, loginRun,
 };

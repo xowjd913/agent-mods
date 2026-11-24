@@ -4,6 +4,7 @@ gh에 계정을 여러 개 로그인해 두고, 저장소 주인(owner)마다 �
 정한 계정은 그 저장소에서 쓰는 `gh` 명령(PR, 이슈, 머지), `git push`·`git pull`의 HTTPS 인증, 커밋 작성자(이름·이메일)에 함께 쓰입니다.
 
 - gh 활성 계정은 바꾸지 않습니다(`gh auth switch`를 쓰지 않습니다).
+  - 예외는 [계정 패널](mods/gh-accounts.md)의 `계정 추가` 하나입니다. `gh auth login`은 새 계정을 활성으로 바꾸므로, 로그인이 끝나면 원래 활성 계정으로 한 번 되돌립니다.
 - 토큰은 어디에도 저장하지 않습니다. 쓸 때마다 `gh auth token --user <계정>`으로 받습니다.
 - Herdr 모드가 아니라서 Herdr 레이아웃과 상관없이 모든 터미널에서 쓰입니다.
 
@@ -15,6 +16,8 @@ sh herdr/install.sh --gh-account
 # 제거
 sh herdr/install.sh --gh-account-uninstall
 ```
+
+[계정 패널](mods/gh-accounts.md)의 `설치…`·`원래대로 되돌리기…` 버튼도 같은 일을 합니다. 누르면 바뀔 것을 먼저 보여 주고, 확인해야 실행합니다.
 
 설치하면 다음이 생깁니다.
 
@@ -74,6 +77,7 @@ sh herdr/install.sh --add gh-accounts
 ```
 
 - 스페이스의 owner 마다 계정을 고르면 `owner/*` 규칙을 만듭니다. 규칙 순서 바꾸기·지우기·더하기와 기본 계정도 패널에서 합니다.
+- 도구 설치·되돌리기, 저장소마다 쓸 계정 확인과 접속 시험, 계정 추가(gh 로그인)도 패널에서 합니다.
 - 자세한 내용: [gh-accounts](mods/gh-accounts.md)
 
 스크립트에서 쓰는 명령:
@@ -81,7 +85,18 @@ sh herdr/install.sh --add gh-accounts
 ```sh
 gh-account space --json <폴더..>          # 폴더들의 저장소를 owner 별로 묶고 쓸 계정을 보여 줌
 gh-account assign acct-b <폴더..>         # 그 폴더들 저장소의 owner 마다 owner/* 규칙을 acct-b 로 (none 이면 지움)
+gh-account check [폴더 | -R owner/repo] [--test] [--json]
+                                          # gh 명령·git push·커밋 신원이 쓸 계정. --test 는 그 계정으로 저장소 권한을 읽어 봄
+gh-account status --json                  # 설치 상태
+gh-account install --dry-run [--json]     # 설치하면 바뀔 것만 보여 줌 (쓰지 않음)
+gh-account uninstall --dry-run [--json]   # 되돌리면 바뀔 것만 보여 줌
+gh-account login start|status|cancel [--json]
+                                          # 계정 추가: 뒤에서 gh auth login --web 을 돌리고 일회용 코드를 알려 줌
+gh-account shell-path                     # 로그인 셸의 PATH (GUI 앱에서 gh·git 을 찾을 때)
 ```
+
+- `check`·`--test`는 토큰을 보여 주지 않습니다. `--test`는 그 계정 토큰을 `GH_TOKEN`으로 넘겨 `gh api`를 부를 뿐입니다.
+- `login start`는 시작할 때의 활성 계정을 기억합니다. 로그인이 성공해 활성 계정이 바뀌었으면 `gh auth switch`로 한 번 되돌리고, 실패·취소·시간 초과(15분)면 아무것도 바꾸지 않습니다. 진행 상태는 `<설정 폴더>/gh-account/login.json`에 있고, 토큰처럼 보이는 문자열은 가려서 적습니다.
 
 ### 커밋 신원
 
