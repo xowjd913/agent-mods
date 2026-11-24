@@ -165,6 +165,7 @@ export default class Work extends View {
             .on_click((_e, cx) => this.load(cx, true)).tooltip("새로고침")
             .child(this.busy ? svg(ICON("spinner")).size(13).spin(900) : div().text_size(13).child("\u21bb")))))
       .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
+      .when(Boolean(d?.notes?.length), (el) => el.child(div().id("work-note").px(14).pb(6).text_size(11).text_color(t.dim).truncate().tooltip(d.notes.join(" / ")).child(d.notes.join(" / "))))
       .when(!d && !this.error, (el) => el.child(div().px(14).text_size(12).text_color(t.dim).child("불러오는 중…")))
       .child(v_flex().id("work-list").flex_1().min_h(0).px(8).overflow_y_scrollbar().mode("always").children(roots.flatMap((s) => tree(s, 0))));
   }

@@ -250,13 +250,19 @@ function mapIssues(signals, repos) {
 
 // ---- GitHub: one aliased GraphQL call, read-only ----
 const PR_FIELDS = "number title url isDraft state mergedAt closedAt headRefName author{login} updatedAt reviewDecision reviewRequests(first:20){nodes{requestedReviewer{... on User{login}}}} commits(last:1){nodes{commit{statusCheckRollup{state}}}}";
-const ISSUE_FIELDS = (rich) =>
-  `number title url state closedAt labels(first:8){nodes{name}} projectItems(first:2){nodes{fieldValueByName(name:\"Status\"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}${rich ? " parent{number title url subIssuesSummary{total completed}}" : ""}`;
-function buildQuery(repos, issues, rich) {
+const PROJECT_FIELDS = " projectItems(first:2){nodes{fieldValueByName(name:\"Status\"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}";
+const ISSUE_FIELDS = (rich, project) =>
+  `number title url state closedAt labels(first:8){nodes{name}}${project ? PROJECT_FIELDS : ""}${rich ? " parent{number title url subIssuesSummary{total completed}}" : ""}`;
+// A token without read:project fails the whole query on projectItems; remember that so later runs skip it.
+// --refresh probes again, so the project status comes back after `gh auth refresh -s read:project`.
+const NO_PROJECT_KEY = "gh:no-project";
+const NO_PROJECT_TTL = 60 * 60 * 1000;
+const NO_PROJECT_NOTE = "프로젝트 상태 숨김 (read:project 권한 없음) · gh auth refresh -s read:project 후 새로고침";
+function buildQuery(repos, issues, rich, project = true) {
   const parts = repos.map((repo, i) => {
     const [owner, name] = repo.slug.split("/");
     const mine = issues.filter((x) => x.repo === repo.slug);
-    const issueParts = mine.map((x) => `i${x.number}:issue(number:${x.number}){${ISSUE_FIELDS(rich)}}`).join(" ");
+    const issueParts = mine.map((x) => `i${x.number}:issue(number:${x.number}){${ISSUE_FIELDS(rich, project)}}`).join(" ");
     return `r${i}:repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(name)}){ nameWithOwner ${issueParts} open:pullRequests(states:OPEN,first:50,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{${PR_FIELDS}}} done:pullRequests(states:[MERGED,CLOSED],first:30,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{${PR_FIELDS}}} }`;
   });
   return `query { viewer{login} ${parts.join("\n")} }`;
@@ -270,21 +276,40 @@ function ghQuery(query) {
     return null;
   }
 }
-function fetchGitHub(repos, issues) {
-  if (!repos.length) return { data: null, errors: [] };
-  for (const rich of [true, false]) {
-    const query = buildQuery(repos, issues, rich);
-    const key = `gh:${crypto.createHash("sha1").update(query).digest("hex")}`;
+const lacksProjectScope = (reply) =>
+  Boolean(reply && Array.isArray(reply.errors)) && reply.errors.some((e) => e && e.type === "INSUFFICIENT_SCOPES" && /read:project|projectItems/.test(e.message || ""));
+function fetchGitHub(repos, issues, query = ghQuery) {
+  if (!repos.length) return { data: null, errors: [], notes: [] };
+  touched.entries.add(NO_PROJECT_KEY);
+  const known = cache.entries[NO_PROJECT_KEY];
+  let project = REFRESH || !known || Date.now() - known.at >= NO_PROJECT_TTL;
+  // Returns the data, or the raw reply (possibly null) when the query did not give data.
+  const attempt = (rich) => {
+    const text = buildQuery(repos, issues, rich, project);
+    const key = `gh:${crypto.createHash("sha1").update(text).digest("hex")}`;
     touched.entries.add(key);
     const hit = cache.entries[key];
-    if (!REFRESH && hit && Date.now() - hit.at < GITHUB_TTL) return { data: hit.value, errors: [] };
-    const reply = ghQuery(query);
-    if (reply && reply.data && reply.data.viewer) {
-      cache.entries[key] = { at: Date.now(), value: reply.data };
-      return { data: reply.data, errors: [] };
+    if (!REFRESH && hit && Date.now() - hit.at < GITHUB_TTL) return { data: hit.value };
+    const reply = query(text);
+    if (!(reply && reply.data && reply.data.viewer)) return { reply };
+    cache.entries[key] = { at: Date.now(), value: reply.data };
+    return { data: reply.data };
+  };
+  let fellBack = false;
+  for (const rich of [true, false]) {
+    let result = attempt(rich);
+    if (!result.data && project && lacksProjectScope(result.reply)) {
+      project = false;
+      fellBack = true;
+      result = attempt(rich);
+    }
+    if (result.data) {
+      if (fellBack) cache.entries[NO_PROJECT_KEY] = { at: Date.now(), value: true };
+      else if (project) delete cache.entries[NO_PROJECT_KEY];
+      return { data: result.data, errors: [], notes: project ? [] : [NO_PROJECT_NOTE] };
     }
   }
-  return { data: null, errors: ["GitHub query failed (gh auth or network)"] };
+  return { data: null, errors: ["GitHub query failed (gh auth or network)"], notes: [] };
 }
 
 const ci = (pr) => {
@@ -314,7 +339,7 @@ function compose(local, github) {
     if (node) {
       for (const [alias, issue] of Object.entries(node)) {
         if (!/^i\d+$/.test(alias) || !issue) continue;
-        const project = issue.projectItems.nodes.map((n) => n.fieldValueByName && n.fieldValueByName.name).find(Boolean);
+        const project = (issue.projectItems ? issue.projectItems.nodes : []).map((n) => n.fieldValueByName && n.fieldValueByName.name).find(Boolean);
         issues[`${repo.slug}#${issue.number}`] = {
           title: issue.title, url: issue.url, state: issue.state, closedAt: issue.closedAt, status: project || null, labels: issue.labels.nodes.map((l) => l.name),
           epic: issue.parent ? { number: issue.parent.number, title: issue.parent.title, url: issue.parent.url, done: issue.parent.subIssuesSummary.completed, total: issue.parent.subIssuesSummary.total } : null,
@@ -333,7 +358,7 @@ function compose(local, github) {
   });
   const sessions = local.sessions.map((s) => ({ terminal: s.terminal, name: s.name, label: s.label, parent: s.parent, status: s.status, cwd: s.cwd, last: s.last, issues: mapIssues(s.signals, local.repos) }));
   const attention = reposOut.reduce((n, r) => n + r.prs.filter((p) => p.needs).length, 0);
-  return { version: VERSION, at: Date.now(), viewer: github.data ? github.data.viewer.login : null, errors: github.errors, attention, sessions, issues, repos: reposOut };
+  return { version: VERSION, at: Date.now(), viewer: github.data ? github.data.viewer.login : null, errors: github.errors, notes: github.notes || [], attention, sessions, issues, repos: reposOut };
 }
 
 function collect() {
@@ -379,4 +404,5 @@ function main() {
   saveCache();
 }
 
-main();
+if (require.main === module) main();
+else module.exports = { fetchGitHub, compose, cache };
