@@ -39,7 +39,7 @@ const LEGACY_MARK = ".installed-by-agent-playbook";
 const LAYOUT_NAME = "dashboard";
 // 예전 설치 스크립트가 만든 레이아웃. agent-groups 블록이 있으면 우리 것으로 보고 계속 쓴다.
 const LEGACY_LAYOUT = "agent-groups";
-// 이 설치기가 복제한 레이아웃이라는 기록. 블록이 없는 모드만 남거나 모두 지운 뒤에도 우리 레이아웃으로 알아본다.
+// 이 설치기가 쓰는 레이아웃 이름(dashboard 또는 예전 agent-groups) 기록. 블록이 모두 빠진 뒤에도 같은 레이아웃을 알아본다.
 const LAYOUT_MARK = ".herdr-installer-layout";
 const SRC = path.join(__dirname, "mods");
 
@@ -145,15 +145,30 @@ function usesMod(layout, mods) {
   return found;
 }
 
+const layoutFile = (home, name) => path.join(home, "layouts", name + ".json");
+// 기록 파일이 가리키는 레이아웃 이름. 기록이 없으면 null. 예전 기록은 내용과 상관없이 dashboard를 뜻한다.
+function recordedLayout(home) {
+  let text;
+  try { text = fs.readFileSync(path.join(home, LAYOUT_MARK), "utf8").trim(); } catch { return null; }
+  return text === LEGACY_LAYOUT ? LEGACY_LAYOUT : LAYOUT_NAME;
+}
+// 쓰고 있는 레이아웃 이름을 남겨, 블록이 모두 빠진 뒤에도 같은 레이아웃을 우리 것으로 본다.
+function rememberLayout(home, file) {
+  fs.writeFileSync(path.join(home, LAYOUT_MARK), path.basename(file, ".json") + "\n");
+}
+
 // 우리 레이아웃 파일 경로. 없으면 null, 같은 이름의 다른 레이아웃이면 { foreign }.
 function findLayout(home, created) {
-  const legacy = path.join(home, "layouts", LEGACY_LAYOUT + ".json");
+  const recorded = recordedLayout(home);
+  if (recorded && fs.existsSync(layoutFile(home, recorded))) return { file: layoutFile(home, recorded) };
+  // 기록이 없는 예전 설치는 agent-groups 블록으로 알아본다.
+  const legacy = layoutFile(home, LEGACY_LAYOUT);
   if (fs.existsSync(legacy)) {
     try { if (usesMod(readLayout(legacy), [LEGACY_LAYOUT])) return { file: legacy }; } catch { /* 아래로 */ }
   }
-  const file = path.join(home, "layouts", LAYOUT_NAME + ".json");
+  const file = layoutFile(home, LAYOUT_NAME);
   if (!fs.existsSync(file)) return null;
-  if (created || fs.existsSync(path.join(home, LAYOUT_MARK))) return { file };
+  if (created) return { file };
   try { if (usesMod(readLayout(file), [...CORE, ...EXTRAS])) return { file }; } catch { /* 아래로 */ }
   return { foreign: file };
 }
@@ -287,7 +302,7 @@ function applyLayout(home, created) {
     return { changed: [] };
   }
   migrateMarks(home);
-  if (path.basename(file) === LAYOUT_NAME + ".json") fs.writeFileSync(path.join(home, LAYOUT_MARK), LAYOUT_NAME + "\n");
+  rememberLayout(home, file);
   const before = JSON.stringify(layout);
   const changed = [];
   for (const step of STEPS) {
@@ -363,6 +378,7 @@ function removeMods(home, names) {
 function revertLayout(home, mods) {
   const found = findLayout(home, false);
   if (!found || found.foreign) return;
+  rememberLayout(home, found.file);
   let layout;
   try { layout = readLayout(found.file); } catch (e) {
     log(`레이아웃을 읽지 못해 되돌리지 않았습니다: ${found.file} (${e.message})`);

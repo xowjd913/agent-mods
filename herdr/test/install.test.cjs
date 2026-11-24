@@ -158,7 +158,9 @@ test("기본 설치 뒤 --extras로 다시 설치하면 추가 모드 블록만 
   assert.equal(m.filter((x) => x === "work").length, 1);
 });
 
-test("예전 설치(agent-groups 레이아웃·예전 표시·기록)는 레이아웃을 그대로 둔다", () => {
+// 예전 설치: 모든 모드에 예전 표시·기록, layouts/agent-groups.json, 레이아웃 이름 기록 없음.
+// full이면 예전 --extras 설치처럼 모든 블록이 바뀐 레이아웃을 만든다.
+function legacyHome(full) {
   const home = tempHome();
   for (const m of [...inst.CORE, ...inst.EXTRAS]) {
     fs.mkdirSync(path.join(home, "mods", m));
@@ -168,18 +170,47 @@ test("예전 설치(agent-groups 레이아웃·예전 표시·기록)는 레이�
   for (const [m, f] of [["usage-status", ".status-swapped"], ["work", ".panels-added"], ["schedules", ".board-added"], ["leader-tabs", ".header-swapped"]]) {
     fs.writeFileSync(path.join(home, "mods", m, f), "");
   }
+  const swaps = full ? { agents: "agent-groups", "workspace-status": "usage-status", tabs: "tabs-mine" } : { agents: "agent-groups" };
   const l = clonedMain();
   (function walk(n) {
-    if (n.content?.mod === "agents") n.content.mod = "agent-groups";
+    if (swaps[n.content?.mod]) n.content.mod = swaps[n.content.mod];
+    if (full && n.content?.pane) n.content.pane.header.content.mod = "leader-tabs";
+    if (full && n.id === "panel-body") for (const mod of ["work", "prs", "schedules"]) n.children.push({ id: mod + "-board", type: "block", content: { mod } });
     for (const c of n.children || []) walk(c);
   })(l);
   const file = path.join(home, "layouts", "agent-groups.json");
   const text = JSON.stringify(l, null, 2) + "\n";
   fs.writeFileSync(file, text);
+  return { home, file, text };
+}
+
+test("예전 설치(agent-groups 레이아웃·예전 표시·기록)는 레이아웃을 그대로 둔다", () => {
+  const { home, file, text } = legacyHome(false);
   assert.equal(inst.pendingLayout(home), "");
   const { result } = quiet(() => inst.installMods(home, false));
   assert.deepEqual(result.installed, [...inst.CORE, ...inst.EXTRAS]);
   quiet(() => inst.applyLayout(home, false));
+  assert.equal(fs.readFileSync(file, "utf8"), text);
+  assert.ok(!fs.existsSync(path.join(home, "layouts", inst.LAYOUT_NAME + ".json")));
+});
+
+test("예전 레이아웃에서 agent-groups를 지운 뒤에도 다른 모드 제거는 블록을 되돌리고, 다음 실행은 새 레이아웃을 만들지 않는다", () => {
+  const { home, file } = legacyHome(true);
+  quiet(() => inst.removeMods(home, ["agent-groups"]));
+  let m = mods(readJson(file));
+  assert.ok(m.includes("agents") && !m.includes("agent-groups"));
+  assert.equal(inst.pendingLayout(home), "");
+  quiet(() => inst.removeMods(home, ["leader-tabs", "usage-status"]));
+  m = mods(readJson(file));
+  for (const x of ["pane", "workspace-status"]) assert.ok(m.includes(x), x);
+  for (const x of ["leader-tabs", "usage-status"]) assert.ok(!m.includes(x), x);
+  assert.equal(inst.pendingLayout(home), "");
+  // 인자 없는 실행: 남은 모드만 갱신하고 같은 예전 레이아웃을 그대로 쓴다.
+  const text = fs.readFileSync(file, "utf8");
+  quiet(() => inst.installMods(home, {}));
+  assert.equal(cli("pending-layout", "--home", home).stdout, "");
+  const { result } = quiet(() => inst.applyLayout(home, false));
+  assert.equal(result.file, file);
   assert.equal(fs.readFileSync(file, "utf8"), text);
   assert.ok(!fs.existsSync(path.join(home, "layouts", inst.LAYOUT_NAME + ".json")));
 });
