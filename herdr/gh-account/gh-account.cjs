@@ -41,6 +41,7 @@ function paths(ctx) {
     home, dir,
     map: path.join(home, "gh-accounts.json"),
     state: path.join(dir, "state.json"),
+    logins: path.join(dir, "logins.json"),
     identity: path.join(dir, "identity"),
     app: path.join(dir, "gh-account.cjs"),
   };
@@ -205,8 +206,32 @@ function gitEnv(ctx) {
   return e;
 }
 
+// 로그인 이름은 대소문자를 가리지 않는다. sync 때 적어 둔 로그인 목록에서 gh 가 쓰는 이름(대소문자 그대로)을 찾는다.
+// gh auth status 는 네트워크를 타므로 git push 나 gh 명령마다 부르지 않고 적어 둔 목록을 쓴다. 없으면 받은 이름 그대로.
+function canonicalLogin(ctx, name) {
+  const c = readState(paths(ctx).logins);
+  const list = c && Array.isArray(c.logins) ? c.logins : [];
+  const low = String(name).toLowerCase();
+  return list.find((l) => typeof l === "string" && l.toLowerCase() === low) || name;
+}
+
+function saveLogins(ctx, logins) {
+  const P = paths(ctx);
+  const want = JSON.stringify({ logins: logins.map((l) => l.login).filter((l) => typeof l === "string" && LOGIN.test(l)) }) + "\n";
+  try {
+    if (fs.readFileSync(P.logins, "utf8") === want) return;
+  } catch { /* 없음 */ }
+  try {
+    fs.mkdirSync(P.dir, { recursive: true });
+    const tmp = `${P.logins}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, want);
+    fs.renameSync(tmp, P.logins);
+  } catch { /* 못 써도 받은 이름 그대로 쓴다 */ }
+}
+
 function tokenFor(ctx, login) {
-  const r = ctx.run(realGh(ctx), ["auth", "token", "--hostname", HOST, "--user", login], { env: cleanEnv(ctx.env) });
+  const user = canonicalLogin(ctx, login);
+  const r = ctx.run(realGh(ctx), ["auth", "token", "--hostname", HOST, "--user", user], { env: cleanEnv(ctx.env) });
   // gh 를 실행하지 못함: ENOENT(-1) 또는 PATH 의 우리 래퍼가 진짜 gh 를 못 찾음(127)
   if (r.status === -1 || r.status === 127) return { ok: false, missing: true };
   const token = r.stdout.trim();
@@ -225,8 +250,9 @@ function ghLogins(ctx) {
 function pickAccount(ctx, map, repo) {
   const hit = matchAccount(map, repo);
   if (!hit || hit.by !== "default" || hit.account.toLowerCase() === repo.owner.toLowerCase() || !LOGIN.test(repo.owner)) return { hit };
-  const t = tokenFor(ctx, repo.owner);
-  if (t.ok) return { hit: { account: repo.owner, by: "owner", match: null }, token: t.token };
+  const login = canonicalLogin(ctx, repo.owner);
+  const t = tokenFor(ctx, login);
+  if (t.ok) return { hit: { account: login, by: "owner", match: null }, token: t.token };
   return { hit };
 }
 
@@ -416,8 +442,11 @@ function priorHelpers(ctx, globalFile) {
 }
 
 // 규칙 하나를 https·ssh 원격 URL 패턴으로. 저장소 규칙은 .git 이 붙은 주소도 넣는다.
+// GitHub 의 owner·저장소 이름은 대소문자를 가리지 않지만 git 의 hasconfig 글롭은 가리므로 글자마다 [aA] 로 쓴다.
+function anyCase(s) { return s.replace(/[A-Za-z]/g, (c) => `[${c.toLowerCase()}${c.toUpperCase()}]`); }
+
 function urlPatterns(match) {
-  const [o, n] = match ? match.split("/") : [null, null];
+  const [o, n] = match ? match.split("/").map((x) => (x === "*" ? x : anyCase(x))) : [null, null];
   const tails = !o ? ["**"] : n === "*" ? [`${o}/**`] : [`${o}/${n}`, `${o}/${n}.git`];
   const out = [];
   for (const t of tails) {
@@ -450,7 +479,8 @@ function buildBlock({ helper, prior, includes }) {
 
 // 계정의 커밋 신원. 매핑에 적은 값이 우선이고, 없으면 그 계정 토큰으로 noreply 주소를 만든다.
 function identityFor(ctx, map, login) {
-  const conf = map.accounts[login] && map.accounts[login].identity;
+  const key = Object.keys(map.accounts).find((k) => k.toLowerCase() === login.toLowerCase());
+  const conf = key && map.accounts[key].identity;
   if (conf === false) return { off: true };
   const want = conf && typeof conf === "object" ? conf : {};
   if (want.name && want.email) return { name: want.name, email: want.email };
@@ -479,14 +509,16 @@ function sync(ctx, log = () => {}) {
   const keep = new Set();
   // default 는 로그인된 계정 자신의 저장소에 쓰지 않으므로, 그 계정마다 login/* 신원을 default 뒤(규칙 앞)에 둔다.
   // 로그인 목록을 읽지 못하면 default 신원은 넣지 않는다(개인 저장소에 다른 계정 신원이 붙지 않게).
+  // 로그인 목록은 래퍼·도우미가 대소문자가 다른 이름을 gh 의 로그인 이름으로 바꿀 때 쓰도록 적어 둔다.
+  const logins = ghLogins(ctx);
+  if (logins) saveLogins(ctx, logins);
   let def = map.default ? [{ match: null, account: map.default }] : [];
   const owners = [];
   if (def.length) {
-    const logins = ghLogins(ctx);
     if (!logins) { log("커밋 신원: gh 로그인 목록을 읽지 못해 기본 계정 신원은 건너뜁니다."); def = []; }
     else for (const l of logins) if (l.login && LOGIN.test(l.login) && l.login.toLowerCase() !== map.default.toLowerCase()) owners.push({ match: `${l.login}/*`, account: l.login, owner: true });
   }
-  const order = [...def, ...owners, ...[...map.rules].reverse()];
+  const order = [...def, ...owners, ...[...map.rules].reverse()].map((r) => ({ ...r, account: canonicalLogin(ctx, r.account) }));
   if (order.length) {
     const v = gitVersion(ctx);
     if (!versionAtLeast(v, MIN_GIT)) {
@@ -516,7 +548,7 @@ function sync(ctx, log = () => {}) {
       // 로그인된 계정의 신원을 만들지 못하면 그 계정 저장소에 default 신원이 붙으므로 default 신원을 뺀다.
       if (ownerGap && def.length) {
         log("커밋 신원: 로그인된 계정의 신원을 만들지 못한 것이 있어 기본 계정 신원은 건너뜁니다.");
-        const defFile = done.get(map.default);
+        const defFile = done.get(canonicalLogin(ctx, map.default));
         const i = includes.findIndex((x) => x.match === null);
         if (i >= 0) includes.splice(i, 1);
         if (defFile && !includes.some((x) => x.file === defFile)) keep.delete(path.basename(defFile));
@@ -547,6 +579,12 @@ function scripts({ app, node, binDir, home, gh }) {
       + `GH_FALLBACK=${shQuote(gh || "")}\n`
       + `[ -z "$REAL" ] && [ -n "$GH_FALLBACK" ] && [ -x "$GH_FALLBACK" ] && REAL=$GH_FALLBACK\n`
       + `if [ -z "$REAL" ]; then echo "gh-account: PATH 에서 진짜 gh 를 찾지 못했습니다." >&2; exit 127; fi\n`
+      // 로그인·로그아웃이 성공하면 로그인된 계정의 커밋 신원을 다시 맞춘다. 실패해도 gh 의 종료 코드는 그대로 돌려준다.
+      + `if [ "\${1-}" = auth ] && { [ "\${2-}" = login ] || [ "\${2-}" = logout ]; } && [ -z "$GH_ACCOUNT_OFF" ]; then\n`
+      + `  "$REAL" "$@"\n  CODE=$?\n`
+      + `  if [ "$CODE" -eq 0 ]; then\n    ${pickNode.trim().replace(/\n/g, "\n    ")}\n`
+      + `    if [ -x "$NODE" ] && [ -f "$APP" ]; then GH_ACCOUNT_GH="$REAL" ${runApp} sync >/dev/null 2>&1 </dev/null || echo "gh-account: 커밋 신원을 다시 맞추지 못했습니다. gh-account sync 를 실행하세요." >&2; fi\n`
+      + `  fi\n  exit $CODE\nfi\n`
       + `# 저장소와 상관없는 명령은 계정을 고르지 않고 그대로 넘긴다\n`
       + `case "\${1-}" in ""|-h|--help|help|--version|version|auth|completion|config|extension|extensions|ext|alias) exec "$REAL" "$@" ;; esac\n`
       + `[ -n "$GH_TOKEN$GITHUB_TOKEN$GH_ACCOUNT_OFF" ] && exec "$REAL" "$@"\n`
@@ -626,6 +664,7 @@ function uninstall(ctx, opts, log) {
   writeBlock(globalConfigPath(ctx), null);
   fs.rmSync(P.identity, { recursive: true, force: true });
   fs.rmSync(P.state, { force: true });
+  fs.rmSync(P.logins, { force: true });
   fs.rmSync(P.app, { force: true });
   try { fs.rmdirSync(P.dir); } catch { /* 남은 파일 있음 */ }
   log(`git 전역 설정에서 gh-account 블록을 지웠습니다. 매핑 파일(${P.map})은 남겨 둡니다.`);

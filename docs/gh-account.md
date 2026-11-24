@@ -64,6 +64,7 @@ gh-account status                    # 설치·PATH·git 버전 점검
 - 규칙은 위에서부터 보고, 먼저 맞는 규칙이 이깁니다. 맞는 규칙이 없으면 `default`를 씁니다.
 - 단, gh 에 로그인된 계정 자신의 저장소(owner 가 그 로그인 이름, 예: `acct-b/notes`)에는 `default`를 쓰지 않고 그 계정을 씁니다. 그런 저장소도 규칙을 적으면 규칙이 이깁니다.
 - `match`는 `owner/*`나 `owner/repo` 모양입니다.
+- owner·저장소·계정 이름은 대소문자를 가리지 않습니다. `gh auth token`에는 gh 에 로그인된 이름의 대소문자 그대로 넘깁니다(`sync` 때 `<설정 폴더>/gh-account/logins.json`에 적어 둔 로그인 이름 목록을 씁니다. 토큰은 적지 않습니다).
 
 ### 커밋 신원
 
@@ -71,6 +72,7 @@ gh-account status                    # 설치·PATH·git 버전 점검
 
 - 기본값은 그 계정의 GitHub 이름(없으면 로그인 이름)과 noreply 주소(`<id>+<login>@users.noreply.github.com`)입니다.
 - 저장소에 직접 정한 `user.name`·`user.email`이 있으면 그 값이 이깁니다.
+- 로그인된 계정의 저장소에 붙는 신원은 로그인 목록으로 만듭니다. 래퍼로 `gh auth login`·`gh auth logout`이 성공하면 자동으로 다시 만듭니다. 래퍼를 거치지 않고 로그인했다면 `gh-account sync`를 실행하세요.
 - git 2.36 이상이 필요합니다. 낮으면 신원만 건너뛰고 인증은 그대로 됩니다.
 
 ```sh
@@ -97,7 +99,7 @@ gh-account identity acct-b --off    # 이 계정은 커밋 신원을 바꾸지 �
 - 기본 계정은 로그인된 다른 계정의 개인 저장소에 쓰이지 않습니다. 인증과 커밋 신원 모두 그 저장소 주인 계정을 씁니다. 로그인 목록(`gh auth status --json`)을 읽지 못하면 기본 계정의 커밋 신원은 넣지 않습니다.
 - 매핑된 계정이 gh에 로그인돼 있지 않으면 다른 계정으로 넘어가지 않고 실패합니다. 메시지에 로그인·매핑 지우기 방법을 함께 보여 줍니다.
 - `GH_TOKEN`이나 `GITHUB_TOKEN`이 이미 있으면 래퍼는 건드리지 않습니다.
-- 저장소와 상관없는 명령(`gh auth`, `gh --version`, `gh help`, `gh config`, `gh extension`, `gh alias`, `gh completion`)은 매핑을 보지 않고 그대로 진짜 `gh`로 넘깁니다.
+- 저장소와 상관없는 명령(`gh auth`(로그인·로그아웃 뒤 신원 다시 만들기만 함), `gh --version`, `gh help`, `gh config`, `gh extension`, `gh alias`, `gh completion`)은 매핑을 보지 않고 그대로 진짜 `gh`로 넘깁니다.
 - 진짜 `gh`를 찾지 못하면 git 자격 증명 도우미는 실패하지 않고 원래 도우미로 넘깁니다. 이때 다시 설치하라는 안내를 보여 줍니다.
 - 잠깐 끄려면 `GH_ACCOUNT_OFF=1`을 붙입니다.
 
@@ -105,7 +107,6 @@ gh-account identity acct-b --off    # 이 계정은 커밋 신원을 바꾸지 �
 
 - HTTPS 원격만 인증합니다. SSH 원격(`git@github.com:...`)의 push 인증은 SSH 키를 따릅니다. 커밋 신원은 SSH 원격에도 적용됩니다.
 - github.com만 다룹니다. GitHub Enterprise(`GH_HOST`)에서는 래퍼가 그대로 넘깁니다.
-- 커밋 신원의 URL 비교는 대소문자를 가립니다. 원격 URL의 owner 철자를 규칙과 같게 적으세요. 로그인된 계정의 저장소도 원격 URL 의 owner 철자가 로그인 이름과 같아야 커밋 신원이 그 계정으로 붙습니다.
 - 원격이 여럿이고 서로 다른 계정에 맞으면, 커밋 신원은 git 설정에서 나중에 오는 규칙(목록에서 앞 규칙)이 이깁니다.
 - 설치 뒤에 `gh auth setup-git` 등으로 자격 증명 도우미를 바꿨다면 `sh herdr/install.sh --gh-account`를 다시 실행하세요.
 - Windows는 아직 지원하지 않습니다.
