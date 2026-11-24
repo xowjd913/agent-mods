@@ -13,7 +13,7 @@ export async function resolve(s, c, n) { return ["gpui-kit","gpui-base","herdr"]
 export async function load(u, c, n) { return u.startsWith("stub:") ? { format: "module", source: ${JSON.stringify(stub)}, shortCircuit: true } : n(u, c); }
 `)}`;
 register(hooks);
-const { taskPlan } = await import("../mods/agent-groups/main.js");
+const { taskPlan, paneless } = await import("../mods/agent-groups/main.js");
 
 const term = (address, name, parent, labels = {}) => ({ address, name, parent, state: "live", labels });
 const agent = (address, seq, tab, tab_name) => ({ address, seq, space: "s1", space_name: "repo", tab, tab_name, pane: address });
@@ -64,4 +64,32 @@ test("taskPlan: 부모를 알 수 없는 팀원만 이슈 번호 묶음으로 �
   assert.equal(sp.poTiers[0].sections[2].title, "새 작업");
   assert.equal(sp.poTiers[0].sections[2].members.length, 0);
   assert.deepEqual(sp.loose.map((g) => g.issue), ["7"]);
+});
+
+// 실제 화면 모양: 창이 있는 건 PO와 리더 t137뿐이고, 리더 t14r·t14x와 팀원은 창 없이 떠 있다.
+test("paneless + taskPlan: 창 없는 리더도 섹션이 되고 loose·중복 행이 없다", () => {
+  const all2 = [
+    term("t28", "po", null, { role: "po" }),
+    term("t137", "lead-po-inbox", "t28", { role: "leader" }),
+    term("t14r", "lead-sched-acct", "t28", { role: "leader", session: "리더 · 예약 계정" }),
+    term("t14x", "lead-agent-groups", "t28", { role: "leader" }),
+    term("t14d", "dev-25-inbox", "t137"),
+    term("t14p", "review-25-inbox", "t137"),
+    term("t14t", "dev-28-gh-account", "t14r"),
+    term("t14w", "review-29-gh-account", "t14r"),
+    term("t14y", "dev-30-agent-groups-tree", "t14x"),
+    term("t150", "review-31-agent-groups-tree", "t14x"),
+  ];
+  const real = [agent("t28", 0, "tab-po", "PO · repo"), agent("t137", 1, "tab-po", "PO · repo")];
+  const ghosts = paneless(real, all2, new Map());
+  assert.deepEqual(ghosts.map((g) => g.address), ["t14r", "t14x", "t14d", "t14p", "t14t", "t14w", "t14y", "t150"]);
+  assert.ok(ghosts.every((g) => g.ghost && g.space === "s1"));
+  const [sp] = taskPlan([...real, ...ghosts], all2);
+  const secs = sp.poTiers[0].sections;
+  assert.deepEqual(secs.map((s) => s.leader.address), ["t137", "t14r", "t14x"]);
+  assert.deepEqual(secs.map((s) => s.members.map((a) => a.address)), [["t14d", "t14p"], ["t14t", "t14w"], ["t14y", "t150"]]);
+  assert.deepEqual(secs.map((s) => s.title), ["po inbox", "예약 계정", "agent groups"]);
+  assert.equal(sp.loose.length, 0);
+  assert.equal(sp.others.length, 0);
+  assert.equal(new Set(sp.order.map((a) => a.address)).size, sp.order.length);
 });

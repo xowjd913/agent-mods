@@ -115,6 +115,56 @@ function icon(p, size, color) {
   return p.tint ? svg(p.icon).size(size).flex_none().text_color(color) : image(p.icon).w(size).h(size).flex_none();
 }
 
+// A leader terminal by its role label, else (no label) its lead- name.
+const isLeader = (t) => {
+  const role = roleOf(t);
+  return role === "leader" || (!role && LEAD.test(t?.name ?? ""));
+};
+// Team members and parked leaders run without a tab or pane, so agents() never lists them. Give each
+// live one an agent-like entry (no pane) in the space of the nearest ancestor that is listed (the PO
+// or leader above it), so taskPlan can place it. The name comes from the `session` label, else the hc name.
+// `listed` maps each listed address to its status.
+export function paneless(real, all, listed = new Map()) {
+  const byAddr = new Map(real.map((a) => [a.address, a]));
+  const term = new Map(all.map((x) => [x.address, x]));
+  const seat = (t) => {
+    let p = t.parent;
+    for (let i = 0; p && i < 8; i++) {
+      const a = byAddr.get(p);
+      if (a) return a;
+      p = term.get(p)?.parent;
+    }
+    return null;
+  };
+  const out = [];
+  all.forEach((t, i) => {
+    if (t.state !== "live" || byAddr.has(t.address)) return;
+    const session = String(t.labels?.[SESSION] ?? "").trim();
+    const leader = isLeader(t);
+    if (!leader && !memberOf(t.name, session)) return;
+    const home = seat(t);
+    if (!home) return;
+    // A leader's title drops the "리더 ·" prefix; its tab name stays empty so taskPlan reads the label itself.
+    const title = leader ? session.replace(/^\s*리더\s*·\s*/, "").trim() || String(t.name ?? "").replace(LEAD, "").replace(/-/g, " ").trim() : session;
+    out.push({
+      address: t.address,
+      pane: null,
+      ghost: true,
+      status: kidStatus(t, listed),
+      program: t.program,
+      space: home.space,
+      space_name: home.space_name,
+      tab: null,
+      tab_name: leader ? "" : session,
+      title: title || t.name || t.address,
+      seq: i,
+      pinned: false,
+      focused: false,
+    });
+  });
+  return out;
+}
+
 // The task view's plan: for each space (in list order) one section per leader (the leader and the
 // team members whose parent chain reaches it), under its PO when the leader's parent chain reaches
 // one. Members with no leader in their chain stay in issue-number groups (`loose`), then `others`.
@@ -312,7 +362,7 @@ export default class Agents extends View {
     // In the task view the leader's listed team members sit in their own groups, not under the leader.
     // A paneless member has an entry of its own (this.ghosts) and a group row too. Any other one not in
     // agents() (no pane, no status report) has no group row, so it stays a sub-row.
-    const kids = all.filter((k) => k.parent === addr && k.state === "live" && !(this.tasks && (this.listed.has(k.address) || this.ghosts.has(k.address)) && (memberOf(k.name, this.tabNames.get(k.address)) || LEAD.test(k.name ?? ""))));
+    const kids = all.filter((k) => k.parent === addr && k.state === "live" && !(this.tasks && (this.listed.has(k.address) || this.ghosts.has(k.address)) && (memberOf(k.name, this.tabNames.get(k.address)) || isLeader(k))));
     return kids.flatMap((k, i) => {
       const last = i === kids.length - 1;
       return [
@@ -348,45 +398,8 @@ export default class Agents extends View {
       .child(this.status(t, { status: st }, compact));
   }
 
-  // Team members run without a tab or pane, so agents() never lists them. Give each live one an
-  // agent-like entry (no pane) in the space of the nearest ancestor that is listed (its leader),
-  // so taskPlan can group it by issue. The name comes from the `session` label, else the hc name.
   paneless(real, all) {
-    const byAddr = new Map(real.map((a) => [a.address, a]));
-    const term = new Map(all.map((x) => [x.address, x]));
-    const seat = (t) => {
-      let p = t.parent;
-      for (let i = 0; p && i < 8; i++) {
-        const a = byAddr.get(p);
-        if (a) return a;
-        p = term.get(p)?.parent;
-      }
-      return null;
-    };
-    const out = [];
-    all.forEach((t, i) => {
-      if (t.state !== "live" || byAddr.has(t.address)) return;
-      const session = String(t.labels?.[SESSION] ?? "").trim();
-      if (!memberOf(t.name, session)) return;
-      const home = seat(t);
-      if (!home) return;
-      out.push({
-        address: t.address,
-        pane: null,
-        ghost: true,
-        status: kidStatus(t, this.listed),
-        program: t.program,
-        space: home.space,
-        space_name: home.space_name,
-        tab: null,
-        tab_name: session,
-        title: session || t.name || t.address,
-        seq: i,
-        pinned: false,
-        focused: false,
-      });
-    });
-    return out;
+    return paneless(real, all, this.listed);
   }
 
   taskPlan(agentList, all) {
