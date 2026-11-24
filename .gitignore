@@ -1,0 +1,5 @@
+node_modules/
+.DS_Store
+# Herdr가 모드 폴더에 만드는 편집기용 파일
+gpui-kit.d.ts
+jsconfig.json
