@@ -5,7 +5,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const inst = require("../install.cjs");
+const CLI = path.join(__dirname, "..", "install.cjs");
 
 // Herdr 기본 레이아웃(main)을 layout.clone으로 복제했을 때와 같은 모양.
 function clonedMain() {
@@ -92,7 +94,7 @@ test("표시가 없는 같은 이름 폴더는 건너뛰고, 예전 표시가 �
   fs.mkdirSync(path.join(home, "mods", "work"));
   fs.writeFileSync(path.join(home, "mods", "work", "main.js"), "legacy");
   fs.writeFileSync(path.join(home, "mods", "work", inst.LEGACY_MARK), "");
-  const { result } = quiet(() => inst.installMods(home, false));
+  const { result } = quiet(() => inst.installMods(home, { add: ["prs"] }));
   assert.deepEqual(result.skipped, ["prs"]);
   assert.equal(fs.readFileSync(path.join(home, "mods", "prs", "main.js"), "utf8"), "foreign");
   assert.notEqual(fs.readFileSync(path.join(home, "mods", "work", "main.js"), "utf8"), "legacy");
@@ -192,4 +194,166 @@ test("같은 이름의 다른 레이아웃은 건드리지 않는다", () => {
   const { result } = quiet(() => inst.applyLayout(home, false));
   assert.equal(result.foreign, file);
   assert.equal(fs.readFileSync(file, "utf8"), text);
+});
+
+const installed = (home) => inst.ALL.filter((m) => fs.existsSync(path.join(home, "mods", m, inst.MARK)));
+const cli = (...args) => spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8" });
+
+test("--only는 고른 모드와 필요한 모드만 설치하고, 함께 설치한다고 알린다", () => {
+  const home = tempHome();
+  const { result, out } = quiet(() => inst.installMods(home, { only: ["prs"] }));
+  assert.deepEqual(result.installed, ["tabs-mine", "work", "prs", "wt-menu"]);
+  assert.deepEqual([...result.added].sort(), ["tabs-mine", "work", "wt-menu"]);
+  assert.match(out, /prs 에 work 이\(가\) 필요해 함께 설치합니다/);
+  assert.deepEqual(installed(home), ["tabs-mine", "work", "prs", "wt-menu"]);
+});
+
+test("--only는 고르지 않은 설치된 모드를 지우지도 갱신하지도 않는다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, false));
+  fs.writeFileSync(path.join(home, "mods", "schedules", "main.js"), "old");
+  const { result, out } = quiet(() => inst.installMods(home, { only: ["wt-menu"] }));
+  assert.deepEqual(result.installed, ["wt-menu"]);
+  assert.deepEqual(result.kept, ["tabs-mine", "work", "prs", "schedules"]);
+  assert.match(out, /그대로 둡니다/);
+  assert.equal(fs.readFileSync(path.join(home, "mods", "schedules", "main.js"), "utf8"), "old");
+});
+
+test("--add는 설치된 모드에 더하고, 인자 없는 실행은 설치된 모드만 갱신한다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { only: ["schedules"] }));
+  assert.deepEqual(installed(home), ["tabs-mine", "schedules"]);
+  quiet(() => inst.installMods(home, { add: ["usage-status"] }));
+  assert.deepEqual(installed(home), ["tabs-mine", "schedules", "usage-status"]);
+  fs.writeFileSync(path.join(home, "mods", "usage-status", "main.js"), "old");
+  const { result } = quiet(() => inst.installMods(home, {}));
+  assert.deepEqual(result.installed, ["tabs-mine", "schedules", "usage-status"]);
+  assert.notEqual(fs.readFileSync(path.join(home, "mods", "usage-status", "main.js"), "utf8"), "old");
+});
+
+test("--only work는 레이아웃에 탭 줄과 Work 패널만 넣는다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { only: ["work"] }));
+  const file = cloneInto(home, inst.LAYOUT_NAME);
+  quiet(() => inst.applyLayout(home, true));
+  const m = mods(readJson(file));
+  for (const x of ["tabs-mine", "work", "files", "agents", "workspace-status", "pane"]) assert.ok(m.includes(x), x);
+  for (const x of ["tabs", "prs", "schedules"]) assert.ok(!m.includes(x), x);
+});
+
+test("모두 제거하면 레이아웃이 복제 직후로 돌아가고, 모드 폴더 밖의 기록은 남는다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, true));
+  const file = cloneInto(home, inst.LAYOUT_NAME);
+  quiet(() => inst.applyLayout(home, true));
+  const records = [path.join(home, "schedules", "jobs.json"), path.join(home, "data", "prs", "panes.json"), path.join(home, "cache", "collect.json")];
+  for (const f of records) { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, "{}"); }
+  const { result } = quiet(() => inst.removeMods(home, inst.ALL));
+  assert.deepEqual(result.removed, inst.ALL);
+  assert.deepEqual(fs.readdirSync(path.join(home, "mods")), []);
+  assert.deepEqual(readJson(file), clonedMain());
+  for (const f of records) assert.ok(fs.existsSync(f), f);
+  // 다시 설치하면 같은 레이아웃에 블록을 다시 넣는다.
+  quiet(() => inst.installMods(home, false));
+  quiet(() => inst.applyLayout(home, false));
+  for (const x of ["tabs-mine", "work", "prs", "schedules"]) assert.ok(mods(readJson(file)).includes(x), x);
+});
+
+test("레이아웃 블록이 없는 wt-menu만 설치한 뒤에도 --add로 패널을 넣는다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { only: ["wt-menu"] }));
+  const file = cloneInto(home, inst.LAYOUT_NAME);
+  quiet(() => inst.applyLayout(home, true));
+  assert.deepEqual(readJson(file), clonedMain());
+  quiet(() => inst.installMods(home, { add: ["prs"] }));
+  const { result } = quiet(() => inst.applyLayout(home, false));
+  assert.equal(result.foreign, undefined);
+  for (const x of ["tabs-mine", "work", "prs"]) assert.ok(mods(readJson(file)).includes(x), x);
+});
+
+test("제거는 사용자가 바꾼 블록을 건드리지 않고, 다시 더하면 레이아웃에 다시 넣는다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, true));
+  const file = cloneInto(home, inst.LAYOUT_NAME);
+  quiet(() => inst.applyLayout(home, true));
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace('"leader-tabs"', '"my-header"'));
+  quiet(() => inst.removeMods(home, ["leader-tabs", "schedules"]));
+  let m = mods(readJson(file));
+  assert.ok(m.includes("my-header"));
+  assert.ok(!m.includes("pane"));
+  assert.ok(!m.includes("schedules"));
+  for (const x of ["usage-status", "agent-groups", "tabs-mine", "work", "prs"]) assert.ok(m.includes(x), x);
+  quiet(() => inst.installMods(home, { add: ["schedules"] }));
+  quiet(() => inst.applyLayout(home, false));
+  m = mods(readJson(file));
+  assert.equal(m.filter((x) => x === "schedules").length, 1);
+});
+
+test("제거는 표시 없는 폴더를 지우지 않고, 남는 모드가 쓰는 모드는 지우지 않는다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, false));
+  fs.mkdirSync(path.join(home, "mods", "leader-tabs"));
+  fs.writeFileSync(path.join(home, "mods", "leader-tabs", "main.js"), "mine");
+  let { result } = quiet(() => inst.removeMods(home, ["leader-tabs", "agent-groups"]));
+  assert.deepEqual(result.kept, ["leader-tabs"]);
+  assert.deepEqual(result.missing, ["agent-groups"]);
+  assert.ok(fs.existsSync(path.join(home, "mods", "leader-tabs", "main.js")));
+  let out;
+  ({ result, out } = quiet(() => inst.removeMods(home, ["work"])));
+  assert.deepEqual(result.blocked, ["prs"]);
+  assert.match(out, /work,prs/);
+  assert.ok(fs.existsSync(path.join(home, "mods", "work", "main.js")));
+  const r = cli("remove", "--home", home, "--mods", "tabs-mine");
+  assert.equal(r.status, 2);
+  assert.match(r.stdout, /tabs-mine,work,prs,schedules/);
+  assert.ok(fs.existsSync(path.join(home, "mods", "tabs-mine", "main.js")));
+});
+
+test("--list는 모드마다 설명과 설치 상태를 보여 준다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { only: ["wt-menu"] }));
+  fs.mkdirSync(path.join(home, "mods", "prs"));
+  const r = cli("list", "--home", home);
+  assert.equal(r.status, 0);
+  const lines = r.stdout.trim().split("\n").slice(1);
+  assert.equal(lines.length, inst.ALL.length);
+  const line = (m) => lines.find((l) => l.startsWith(`  ${m} [`));
+  assert.match(line("wt-menu"), /설치됨/);
+  assert.match(line("prs"), /표시 없는/);
+  assert.match(line("work"), /설치 안 됨.*Work 패널.*함께 설치: tabs-mine, wt-menu/);
+});
+
+test("모르는 모드 이름이나 함께 못 쓰는 옵션은 쓸 수 있는 이름과 함께 2로 끝난다", () => {
+  const home = tempHome();
+  let r = cli("mods", "--home", home, "--only", "work,nope");
+  assert.equal(r.status, 2);
+  assert.match(r.stdout, /알 수 없는 모드: nope/);
+  for (const m of inst.ALL) assert.ok(r.stdout.includes(m), m);
+  assert.deepEqual(fs.readdirSync(path.join(home, "mods")), []);
+  r = cli("remove", "--home", home, "--mods", "x");
+  assert.equal(r.status, 2);
+  assert.throws(() => inst.parseArgs(["mods", "--home", home, "--only", "work", "--extras"]), /하나만/);
+  assert.throws(() => inst.parseArgs(["remove", "--home", home]), /--mods/);
+});
+
+test("예전 work/.panels-added 기록은 단계별 기록으로 옮기고 되돌린 패널을 다시 넣지 않는다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, false));
+  const file = cloneInto(home, inst.LAYOUT_NAME);
+  quiet(() => inst.applyLayout(home, true));
+  for (const [m, f] of [["tabs-mine", ".tabs-swapped"], ["work", ".work-board-added"], ["prs", ".pr-board-added"]]) {
+    fs.rmSync(path.join(home, "mods", m, f));
+  }
+  fs.writeFileSync(path.join(home, "mods", "work", ".panels-added"), "");
+  const l = readJson(file);
+  (function walk(n) {
+    if (n.id === "panel-body") n.children = n.children.filter((k) => k.content.mod !== "prs");
+    for (const c of n.children || []) walk(c);
+  })(l);
+  const text = JSON.stringify(l, null, 2) + "\n";
+  fs.writeFileSync(file, text);
+  quiet(() => inst.applyLayout(home, false));
+  assert.equal(fs.readFileSync(file, "utf8"), text);
+  assert.ok(!fs.existsSync(path.join(home, "mods", "work", ".panels-added")));
+  assert.ok(fs.existsSync(path.join(home, "mods", "prs", ".pr-board-added")));
 });

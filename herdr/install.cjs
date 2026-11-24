@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 // Herdr 모드 설치 도우미. install.sh와 install.ps1이 부른다. macOS·Linux·Windows에서 같은 동작을 한다.
-//   node install.cjs mods --home <Herdr 설정 폴더> [--extras]
-//     모드 폴더를 <home>/mods/<모드>/에 복사한다. 기본 모드는 늘 설치하고, 추가 모드는 --extras를 주거나
-//     이미 설치돼 있을 때만 갱신한다. 이 설치기가 만들지 않은 같은 이름 폴더는 건드리지 않는다.
+//   node install.cjs mods --home <Herdr 설정 폴더> [--extras | --only <모드,..> | --add <모드,..>]
+//     모드 폴더를 <home>/mods/<모드>/에 복사한다. 인자가 없으면 설치된 모드만 갱신하고, 처음이면 기본 모드를 넣는다.
+//     --extras는 모든 모드, --only는 고른 모드만, --add는 설치된 모드에 더한다. 필요한 모드는 함께 넣는다.
+//     이 설치기가 만들지 않은 같은 이름 폴더는 건드리지 않는다.
+//   node install.cjs remove --home <home> --mods <모드,..>
+//     표시가 있는 모드 폴더만 지우고, 그 모드가 바꾼 레이아웃 블록을 되돌린다. 모드 폴더 밖의 기록은 지우지 않는다.
+//   node install.cjs list --home <home>
+//     모드마다 설명과 설치 상태를 한 줄씩 보여 준다.
 //   node install.cjs pending-layout --home <home>
 //     새로 복제해야 할 레이아웃 이름을 출력한다. 이미 있으면 아무것도 출력하지 않는다.
 //   node install.cjs layout --home <home> [--created]
@@ -14,26 +19,56 @@ const path = require("node:path");
 
 const CORE = ["tabs-mine", "work", "prs", "wt-menu", "schedules"];
 const EXTRAS = ["usage-status", "agent-groups", "leader-tabs"];
+const ALL = [...CORE, ...EXTRAS];
+// 모드 설명과 꼭 함께 있어야 하는 모드. deps는 코드에서 확인한 것만 적는다.
+//   work·prs: wt-menu 팝업을 연다(work/main.js, prs/main.js의 openOverlay). 패널 버튼은 tabs-mine에만 있다.
+//   prs: 데이터를 mods/work/collect.cjs로 읽는다. schedules: 30초 tick을 tabs-mine이 부른다.
+const MODS = {
+  "tabs-mine": { desc: "탭 줄. 오른쪽 패널에 Work·PRs·예약 버튼을 더하고 예약 실행을 맡는다", deps: [] },
+  work: { desc: "Work 패널: 누가 무엇을 하고 있나", deps: ["tabs-mine", "wt-menu"] },
+  prs: { desc: "PRs 패널: 무엇을 손봐야 하나", deps: ["work", "tabs-mine", "wt-menu"] },
+  "wt-menu": { desc: "워크트리 메뉴: Work·PRs에서 워크트리 줄을 누르면 뜨는 팝업", deps: [] },
+  schedules: { desc: "예약 패널: 정해진 시각에 에이전트 돌리기", deps: ["tabs-mine"] },
+  "usage-status": { desc: "아래 상태 줄에 Claude 사용률을 보여 준다", deps: [] },
+  "agent-groups": { desc: "왼쪽 사이드바 에이전트 목록을 작업별로 묶는다", deps: [] },
+  "leader-tabs": { desc: "칸 머리줄에 리더 탭을 보여 준다", deps: [] },
+};
 const MARK = ".installed-by-herdr-installer";
 // 예전 설치 스크립트가 남긴 표시. 이 표시가 있는 폴더도 우리 것으로 보고 덮어쓴다.
 const LEGACY_MARK = ".installed-by-agent-playbook";
 const LAYOUT_NAME = "dashboard";
 // 예전 설치 스크립트가 만든 레이아웃. agent-groups 블록이 있으면 우리 것으로 보고 계속 쓴다.
 const LEGACY_LAYOUT = "agent-groups";
+// 이 설치기가 복제한 레이아웃이라는 기록. 블록이 없는 모드만 남거나 모두 지운 뒤에도 우리 레이아웃으로 알아본다.
+const LAYOUT_MARK = ".herdr-installer-layout";
 const SRC = path.join(__dirname, "mods");
 
 function log(msg) { process.stdout.write(msg + "\n"); }
 
+// "work,prs"처럼 쉼표로 나눈 모드 이름. 모르는 이름이 있으면 쓸 수 있는 이름과 함께 오류를 낸다.
+function parseNames(value, flag) {
+  const names = [...new Set(String(value ?? "").split(/[,\s]+/).filter(Boolean))];
+  if (!names.length) throw new Error(`${flag} 뒤에 모드 이름이 필요합니다. 쓸 수 있는 이름: ${ALL.join(", ")}`);
+  const bad = names.filter((n) => !ALL.includes(n));
+  if (bad.length) throw new Error(`알 수 없는 모드: ${bad.join(", ")}. 쓸 수 있는 이름: ${ALL.join(", ")}`);
+  return names;
+}
+
 function parseArgs(argv) {
-  const out = { cmd: argv[0], home: null, extras: false, created: false };
+  const out = { cmd: argv[0], home: null, extras: false, only: null, add: null, mods: null, created: false };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--home") out.home = argv[++i];
     else if (a === "--extras") out.extras = true;
+    else if (a === "--only") out.only = parseNames(argv[++i], a);
+    else if (a === "--add") out.add = parseNames(argv[++i], a);
+    else if (a === "--mods") out.mods = parseNames(argv[++i], a);
     else if (a === "--created") out.created = true;
     else throw new Error(`알 수 없는 인자: ${a}`);
   }
   if (!out.home) throw new Error("--home이 필요합니다.");
+  if ([out.extras, out.only, out.add].filter(Boolean).length > 1) throw new Error("--extras, --only, --add 중 하나만 쓸 수 있습니다.");
+  if (out.cmd === "remove" && !out.mods) throw new Error(`remove에는 --mods가 필요합니다. 쓸 수 있는 이름: ${ALL.join(", ")}`);
   return out;
 }
 
@@ -42,19 +77,43 @@ const ours = (dir) => fs.existsSync(path.join(dir, MARK)) || fs.existsSync(path.
 // 레이아웃에 넣어도 되는 모드: 우리 표시가 있고 main.js가 있는 폴더.
 const available = (home, mod) => ours(modDir(home, mod)) && fs.existsSync(path.join(modDir(home, mod), "main.js"));
 
-// 1) 모드 복사
-function installMods(home, extras) {
-  const result = { installed: [], skipped: [] };
-  for (const mod of [...CORE, ...EXTRAS]) {
+const installedMods = (home) => ALL.filter((m) => ours(modDir(home, m)));
+
+// 고른 모드에 필요한 모드를 더한다. added는 [더한 모드, 그것이 필요한 모드] 목록이다.
+function withDeps(list) {
+  const want = new Set(list);
+  const added = [];
+  const visit = (m) => {
+    for (const d of MODS[m].deps) {
+      if (!want.has(d)) { want.add(d); added.push([d, m]); visit(d); }
+    }
+  };
+  for (const m of list) visit(m);
+  return { mods: ALL.filter((m) => want.has(m)), added };
+}
+
+// 1) 모드 복사. opts는 { extras, only, add }이고, 예전처럼 true/false를 주면 extras로 본다.
+function installMods(home, opts = {}) {
+  if (typeof opts === "boolean") opts = { extras: opts };
+  const result = { installed: [], skipped: [], added: [], kept: [] };
+  const have = installedMods(home);
+  let base;
+  if (opts.extras) base = ALL;
+  else if (opts.only) base = opts.only;
+  else if (opts.add) base = [...have, ...opts.add];
+  else base = have.length ? have : CORE; // 처음 설치면 기본 모드, 아니면 설치된 모드만 갱신
+  const { mods, added } = withDeps(base);
+  for (const [dep, by] of added) log(`${by} 에 ${dep} 이(가) 필요해 함께 설치합니다.`);
+  result.added = added.map(([dep]) => dep);
+  result.kept = have.filter((m) => !mods.includes(m));
+  if (result.kept.length) log(`고르지 않은 모드는 그대로 둡니다: ${result.kept.join(", ")}. 지우려면 제거 옵션(--remove, Windows는 -Remove)을 쓰세요.`);
+  for (const mod of mods) {
     const target = modDir(home, mod);
-    const exists = fs.existsSync(target);
-    if (exists && !ours(target)) {
+    if (fs.existsSync(target) && !ours(target)) {
       log(`${target} 은(는) 이 설치기가 만든 폴더가 아니라 덮어쓰지 않고 건너뜁니다. 폴더 이름을 바꾸거나 지운 뒤 다시 실행하세요.`);
       result.skipped.push(mod);
       continue;
     }
-    // 추가 모드는 --extras를 줬거나 이미 설치돼 있을 때만 복사한다(갱신이 이어지게).
-    if (EXTRAS.includes(mod) && !extras && !exists) continue;
     fs.mkdirSync(target, { recursive: true });
     fs.cpSync(path.join(SRC, mod), target, { recursive: true, force: true });
     fs.writeFileSync(path.join(target, MARK), "");
@@ -94,91 +153,125 @@ function findLayout(home, created) {
   }
   const file = path.join(home, "layouts", LAYOUT_NAME + ".json");
   if (!fs.existsSync(file)) return null;
-  if (created) return { file };
+  if (created || fs.existsSync(path.join(home, LAYOUT_MARK))) return { file };
   try { if (usesMod(readLayout(file), [...CORE, ...EXTRAS])) return { file }; } catch { /* 아래로 */ }
   return { foreign: file };
 }
 
-// 각 단계: 쓸 모드, 기록 파일, 이미 반영됐는지, 바꾸는 함수. 바꾼 블록이 없으면 이유를 돌려준다.
+// 블록의 mod 이름을 from에서 to로 바꾼다. 바꾼 개수를 돌려준다.
+function swapMod(l, from, to) {
+  let n = 0;
+  walk(l, (node) => { if (node.content?.mod === from) { node.content.mod = to; n++; } });
+  return n;
+}
+function swapHeader(l, from, to) {
+  let n = 0;
+  walk(l, (node) => {
+    const h = node.content?.pane?.header?.content;
+    if (h && h.mod === from) { h.mod = to; n++; }
+  });
+  return n;
+}
+function panelBody(l) {
+  let body = null;
+  walk(l, (node) => { if (node.id === "panel-body" && node.type === "stack") body = node; });
+  if (body && !Array.isArray(body.children)) body.children = [];
+  return body;
+}
+function fixActive(body) {
+  if (body.children.length && !body.children.some((k) => k?.id === body.active)) body.active = body.children[0].id;
+}
+// 오른쪽 패널에 모드 블록을 하나 더한다. Files가 없으면 맨 앞에 넣어 기본 버튼이 남게 한다.
+function addPanel(l, id, mod) {
+  const body = panelBody(l);
+  if (!body) return "panel-body를 찾지 못했습니다.";
+  const kids = body.children;
+  if (!kids.some((k) => k?.content?.mod === "files")) kids.unshift({ id: "files", type: "block", content: { mod: "files" } });
+  if (!kids.some((k) => k?.content?.mod === mod)) kids.push({ id, type: "block", content: { mod } });
+  fixActive(body);
+  return null;
+}
+function dropPanel(l, mod) {
+  const body = panelBody(l);
+  if (!body) return 0;
+  const before = body.children.length;
+  body.children = body.children.filter((k) => k?.content?.mod !== mod);
+  fixActive(body);
+  return before - body.children.length;
+}
+
+// 각 단계: 쓸 모드, 기록 파일, 이미 반영됐는지, 바꾸는 함수, 되돌리는 함수(제거할 때).
+// 기록 파일은 그 모드 폴더에 두므로, 모드를 지우면 기록도 함께 사라진다.
 const STEPS = [
   {
     name: "에이전트 목록(agent-groups)",
     needs: ["agent-groups"],
     mark: ["agent-groups", ".agents-swapped"],
     done: (l) => usesMod(l, ["agent-groups"]),
-    apply(l) {
-      let n = 0;
-      walk(l, (node) => { if (node.content?.mod === "agents") { node.content.mod = "agent-groups"; n++; } });
-      return n ? null : "agents 블록을 찾지 못했습니다.";
-    },
+    apply: (l) => (swapMod(l, "agents", "agent-groups") ? null : "agents 블록을 찾지 못했습니다."),
+    undo: (l) => swapMod(l, "agent-groups", "agents"),
   },
   {
     name: "상태 줄(usage-status)",
     needs: ["usage-status"],
     mark: ["usage-status", ".status-swapped"],
     done: (l) => usesMod(l, ["usage-status"]),
-    apply(l) {
-      let n = 0;
-      walk(l, (node) => { if (node.content?.mod === "workspace-status") { node.content.mod = "usage-status"; n++; } });
-      return n ? null : "workspace-status 블록을 찾지 못했습니다.";
-    },
+    apply: (l) => (swapMod(l, "workspace-status", "usage-status") ? null : "workspace-status 블록을 찾지 못했습니다."),
+    undo: (l) => swapMod(l, "usage-status", "workspace-status"),
   },
   {
-    name: "탭 줄(tabs-mine)과 오른쪽 패널 Work·PRs",
-    needs: ["work", "prs", "wt-menu", "tabs-mine"],
-    mark: ["work", ".panels-added"],
+    name: "탭 줄(tabs-mine)",
+    needs: ["tabs-mine"],
+    mark: ["tabs-mine", ".tabs-swapped"],
+    done: (l) => usesMod(l, ["tabs-mine"]),
+    apply: (l) => (swapMod(l, "tabs", "tabs-mine") ? null : "tabs 블록을 찾지 못했습니다."),
+    undo: (l) => swapMod(l, "tabs-mine", "tabs"),
+  },
+  {
+    name: "오른쪽 패널 Work(work)",
+    needs: ["work"],
+    mark: ["work", ".work-board-added"],
     done: () => false,
-    apply(l) {
-      let tabs = null, body = null;
-      walk(l, (node) => {
-        if (node.content && ["tabs", "tabs-mine"].includes(node.content.mod)) tabs = node.content;
-        if (node.id === "panel-body" && node.type === "stack") body = node;
-      });
-      if (!tabs || !body) return "tabs 블록이나 panel-body를 찾지 못했습니다.";
-      tabs.mod = "tabs-mine";
-      if (!Array.isArray(body.children)) body.children = [];
-      const kids = body.children;
-      const have = new Set(kids.map((k) => k?.content?.mod));
-      if (!have.has("files")) kids.unshift({ id: "files", type: "block", content: { mod: "files" } });
-      for (const [id, mod] of [["work-board", "work"], ["pr-board", "prs"]]) {
-        if (!have.has(mod)) kids.push({ id, type: "block", content: { mod } });
-      }
-      if (!kids.some((k) => k?.id === body.active)) body.active = kids[0].id;
-      return null;
-    },
+    apply: (l) => addPanel(l, "work-board", "work"),
+    undo: (l) => dropPanel(l, "work"),
     after: (home) => fs.rmSync(path.join(modDir(home, "work"), ".panels-swapped"), { force: true }),
+  },
+  {
+    name: "오른쪽 패널 PRs(prs)",
+    needs: ["prs"],
+    mark: ["prs", ".pr-board-added"],
+    done: () => false,
+    apply: (l) => addPanel(l, "pr-board", "prs"),
+    undo: (l) => dropPanel(l, "prs"),
   },
   {
     name: "오른쪽 패널 예약(schedules)",
     needs: ["schedules"],
     mark: ["schedules", ".board-added"],
     done: () => false,
-    apply(l) {
-      let body = null;
-      walk(l, (node) => { if (node.id === "panel-body" && node.type === "stack") body = node; });
-      if (!body) return "panel-body를 찾지 못했습니다.";
-      if (!Array.isArray(body.children)) body.children = [];
-      if (!body.children.some((k) => k?.content?.mod === "schedules")) {
-        body.children.push({ id: "schedules-board", type: "block", content: { mod: "schedules" } });
-      }
-      return null;
-    },
+    apply: (l) => addPanel(l, "schedules-board", "schedules"),
+    undo: (l) => dropPanel(l, "schedules"),
   },
   {
     name: "칸 머리줄(leader-tabs)",
     needs: ["leader-tabs"],
     mark: ["leader-tabs", ".header-swapped"],
     done: (l) => usesMod(l, ["leader-tabs"]),
-    apply(l) {
-      let n = 0;
-      walk(l, (node) => {
-        const h = node.content?.pane?.header?.content;
-        if (h && h.mod === "pane") { h.mod = "leader-tabs"; n++; }
-      });
-      return n ? null : "칸 머리줄(pane) 블록을 찾지 못했습니다.";
-    },
+    apply: (l) => (swapHeader(l, "pane", "leader-tabs") ? null : "칸 머리줄(pane) 블록을 찾지 못했습니다."),
+    undo: (l) => swapHeader(l, "leader-tabs", "pane"),
   },
 ];
+
+// 예전 설치기는 탭 줄·Work·PRs를 한 단계로 넣고 work/.panels-added 하나만 남겼다. 단계별 기록으로 옮긴다.
+const LEGACY_PANELS = [["tabs-mine", ".tabs-swapped"], ["work", ".work-board-added"], ["prs", ".pr-board-added"]];
+function migrateMarks(home) {
+  const old = path.join(modDir(home, "work"), ".panels-added");
+  if (!fs.existsSync(old)) return;
+  for (const [mod, file] of LEGACY_PANELS) {
+    if (ours(modDir(home, mod))) fs.writeFileSync(path.join(modDir(home, mod), file), "");
+  }
+  fs.rmSync(old, { force: true });
+}
 
 function applyLayout(home, created) {
   const found = findLayout(home, created);
@@ -193,6 +286,8 @@ function applyLayout(home, created) {
     log(`레이아웃을 읽지 못했습니다: ${file} (${e.message})`);
     return { changed: [] };
   }
+  migrateMarks(home);
+  if (path.basename(file) === LAYOUT_NAME + ".json") fs.writeFileSync(path.join(home, LAYOUT_MARK), LAYOUT_NAME + "\n");
   const before = JSON.stringify(layout);
   const changed = [];
   for (const step of STEPS) {
@@ -229,7 +324,79 @@ function pendingLayout(home) {
   return found ? "" : LAYOUT_NAME;
 }
 
-module.exports = { CORE, EXTRAS, MARK, LEGACY_MARK, LAYOUT_NAME, installMods, applyLayout, pendingLayout };
+// 3) 제거. 남는 모드가 지우려는 모드를 쓰면 아무것도 지우지 않는다(blocked).
+function removeMods(home, names) {
+  const result = { removed: [], kept: [], missing: [], blocked: [] };
+  const going = new Set(names);
+  result.blocked = installedMods(home).filter((m) => !going.has(m) && withDeps([m]).mods.some((d) => going.has(d)));
+  if (result.blocked.length) {
+    for (const m of result.blocked) {
+      const uses = withDeps([m]).mods.filter((d) => going.has(d));
+      log(`${m} 이(가) ${uses.join(", ")} 을(를) 씁니다.`);
+    }
+    log(`아무것도 지우지 않았습니다. 함께 지우려면 이 이름으로 다시 실행하세요: ${ALL.filter((m) => going.has(m) || result.blocked.includes(m)).join(",")}`);
+    return result;
+  }
+  const targets = [];
+  for (const mod of ALL.filter((m) => going.has(m))) {
+    const dir = modDir(home, mod);
+    if (!fs.existsSync(dir)) { log(`${mod} 은(는) 설치돼 있지 않습니다.`); result.missing.push(mod); continue; }
+    if (!ours(dir)) {
+      log(`${dir} 은(는) 이 설치기가 만든 폴더가 아니라 지우지 않습니다.`);
+      result.kept.push(mod);
+      continue;
+    }
+    targets.push(mod);
+  }
+  if (!targets.length) return result;
+  revertLayout(home, targets);
+  for (const mod of targets) {
+    fs.rmSync(modDir(home, mod), { recursive: true, force: true });
+    log(`모드 제거: ${modDir(home, mod)}`);
+    result.removed.push(mod);
+  }
+  log("모드 폴더 밖의 기록(예약 기록, PR 칸 기록, 캐시)은 지우지 않았습니다.");
+  return result;
+}
+
+// 지울 모드가 바꾼 블록만 기본 블록으로 되돌린다. 사용자가 이미 바꾼 블록은 mod 이름이 달라 건드리지 않는다.
+function revertLayout(home, mods) {
+  const found = findLayout(home, false);
+  if (!found || found.foreign) return;
+  let layout;
+  try { layout = readLayout(found.file); } catch (e) {
+    log(`레이아웃을 읽지 못해 되돌리지 않았습니다: ${found.file} (${e.message})`);
+    return;
+  }
+  const names = [];
+  for (const step of STEPS) {
+    if (mods.includes(step.mark[0]) && step.undo(layout)) names.push(step.name);
+  }
+  if (!names.length) return;
+  writeLayout(found.file, layout);
+  log(`레이아웃을 되돌렸습니다: ${names.join(", ")} (${found.file})`);
+}
+
+// 4) 목록
+function modStatus(home, mod) {
+  const dir = modDir(home, mod);
+  if (!fs.existsSync(dir)) return "설치 안 됨";
+  return ours(dir) ? "설치됨" : "표시 없는 같은 이름 폴더";
+}
+function listMods(home) {
+  log(`Herdr 설정 폴더: ${home}`);
+  for (const mod of ALL) {
+    const kind = CORE.includes(mod) ? "기본" : "추가";
+    const deps = MODS[mod].deps.length ? ` (함께 설치: ${MODS[mod].deps.join(", ")})` : "";
+    log(`  ${mod} [${kind}, ${modStatus(home, mod)}] ${MODS[mod].desc}${deps}`);
+  }
+  return ALL.map((mod) => ({ mod, status: modStatus(home, mod) }));
+}
+
+module.exports = {
+  CORE, EXTRAS, ALL, MODS, MARK, LEGACY_MARK, LAYOUT_NAME,
+  parseArgs, installMods, applyLayout, pendingLayout, removeMods, listMods,
+};
 
 if (require.main === module) {
   let args;
@@ -237,7 +404,9 @@ if (require.main === module) {
     log(e.message);
     process.exit(2);
   }
-  if (args.cmd === "mods") installMods(args.home, args.extras);
+  if (args.cmd === "mods") installMods(args.home, args);
+  else if (args.cmd === "remove") { if (removeMods(args.home, args.mods).blocked.length) process.exit(2); }
+  else if (args.cmd === "list") listMods(args.home);
   else if (args.cmd === "pending-layout") { const name = pendingLayout(args.home); if (name) log(name); }
   else if (args.cmd === "layout") applyLayout(args.home, args.created);
   else { log(`알 수 없는 명령: ${args.cmd}`); process.exit(2); }
