@@ -51,7 +51,7 @@ Herdr 탭 줄 오른쪽에는 원래 `Files`와 `Changes` 패널 버튼이 있�
 
 Herdr에서 돌고 있는 에이전트 세션을 트리로 보여 줍니다. 세션 아래에는 그 세션이 다루는 이슈가 있고, 이슈 아래에는 그 이슈의 워크트리가 있습니다.
 
-> 📸 **TODO(스크린샷)**: 세션·이슈·워크트리가 찬 Work 패널. 예정 파일 `docs/images/herdr-work.png`
+<!-- TODO screenshot: 세션·이슈·워크트리가 찬 Work 패널. 예정 파일 `docs/images/herdr-work.png` -->
 
 ```text
  작업                                       1분 전  ↻
@@ -151,7 +151,7 @@ Herdr에서 돌고 있는 에이전트 세션을 트리로 보여 줍니다. 세
 
 Work나 PRs에서 워크트리 줄을 누르면 뜨는 작은 팝업입니다. 무언가를 바꾸지 않고 여는 일만 합니다.
 
-> 📸 **TODO(스크린샷)**: Work 패널 워크트리 줄에서 연 워크트리 메뉴. 예정 파일 `docs/images/herdr-wt-menu.png`
+<!-- TODO screenshot: Work 패널 워크트리 줄에서 연 워크트리 메뉴. 예정 파일 `docs/images/herdr-wt-menu.png` -->
 
 ```text
  ┌ feature/42-dark-mode ─────────┐
@@ -174,7 +174,7 @@ Work나 PRs에서 워크트리 줄을 누르면 뜨는 작은 팝업입니다. �
 
 필요한 사람만 `--extras`(Windows는 `-Extras`)로 설치합니다. 셋 다 Herdr 기본 모드를 복제해 기능을 더한 것이라, 해당 정보가 없으면 기본 모드와 거의 같게 보입니다.
 
-> 📸 **TODO(스크린샷)**: 사이드바 작업별 묶음과 칸 머리줄 리더 탭이 보이는 화면. 아래 상태 줄 사용률은 아래 usage-status에 있습니다.
+<!-- TODO screenshot: 사이드바 작업별 묶음과 칸 머리줄 리더 탭이 보이는 화면. 아래 상태 줄 사용률은 아래 usage-status에 있습니다. -->
 
 #### usage-status: Claude 사용률
 
