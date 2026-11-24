@@ -34,7 +34,7 @@ const CLIP = "답을 클립보드에 담아 PO 터미널에 붙여 넣습니다(
 const waitingKind = (t) => (/^lead-/.test(String(t?.name ?? "")) ? (["decision", "verify"].find((k) => k === String(t.labels?.wait ?? "").trim().toLowerCase()) ?? "") : "");
 
 // leaderName:begin
-// The name a person knows a leader by: its Herdr session name. ONE rule for the inbox (cards, rows) and agent-groups (leader headers).
+// The name a person knows a leader by: its Herdr session name. ONE rule for the inbox (cards, rows), agent-groups (leader headers), leader-tabs (tab text) and work (session rows).
 // The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js and agent-groups/main.js
 // (a test keeps them identical). Order: the live terminal title -> the `session` label -> the last name remembered for that leader
 // (`memo`, {<hc name>: name}) -> the hc name ("lead-po-inbox" -> "po inbox"). The "리더 · " prefix is dropped: the place already says
@@ -721,7 +721,7 @@ export default class Inbox extends View {
     const at = new Map(); // spot key -> index in blocks (the direct children of the scroll list)
     this.at = at;
     const add = (el, key) => { if (key) at.set(key, blocks.length); blocks.push(el); };
-    // The item a pane row opened goes first (the view has no scroll-to): an ask is moved to the top of its lane, a report gets its own
+    // The item a pane row opened goes first (the first pass has no scroll-to; once drawn, reveal() keeps a pressed spot in view): an ask is moved to the top of its lane, a report gets its own
     // spot above the lanes. Its card was opened by the row; "모두 보기" drops the choice.
     const f = this.focusKey();
     const fa = f ? asks.findIndex((a) => this.cardKey(a.s, a.item) === f) : -1;
