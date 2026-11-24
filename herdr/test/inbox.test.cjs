@@ -204,3 +204,44 @@ test("summarize: 카드마다 blocks·head·lead·long을 붙인다(진짜 확�
   const longLead = I.summarize("lead-a", text({ ts: "2026-01-01T00:00:00Z", kind: "done", title: "", body: "가".repeat(300) }));
   assert.ok(longLead.items[0].lead.length <= 110 && longLead.items[0].long);
 });
+
+test("main.js: 카드는 접힌 채 시작하고, 펼침은 공유 상태에 두며, 복사 버튼은 클립보드에만 쓴다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  assert.match(src, /shared\(OPEN_KEY\)/);
+  assert.match(src, /setShared\(OPEN_KEY/);
+  assert.match(src, /"접기" : "자세히"/);
+  assert.match(src, /const open = it\.long && this\.isOpen/); // 기본은 접힘
+  // 복사: 클립보드에만 쓰고 붙여 넣기·PO 이동·hc send 경로는 없다
+  const copy = src.slice(src.indexOf("  copy(key, text, cx)"), src.indexOf("  openWindow()"));
+  assert.match(copy, /cx\.write_to_clipboard\(String\(text\)\)/);
+  assert.ok(!/terminal\.paste|pane\.focus|hc send|exec\(/.test(copy));
+  // 링크: 앱의 open_url 먼저, http(s)만
+  assert.match(src, /cx\.open_url\(url\)/);
+  assert.match(src, /if \(!\/\^https\?:\\\/\\\/\/i\.test\(url\)\) return;/);
+  assert.ok(!/hc send|"hc"/.test(src)); // 답은 여전히 hc send 없이 클립보드로만
+});
+
+test("toParts·escapeHtml: 글자는 이스케이프하고, 목록은 <ul>로 묶고, 명령은 코드 조각으로 뺀다", () => {
+  assert.equal(I.escapeHtml(`a<b>&"c"`), "a&lt;b&gt;&amp;&quot;c&quot;");
+  const body = "소개 <b>\n- 하나\n- 둘 https://github.com/x/y/pull/26\n\n되돌리기: cd ~/a && sh i.sh --remove inbox";
+  const s = I.summarize("lead-a", text({ ts: "2026-01-01T00:00:00Z", kind: "verify", title: "t", body }));
+  const parts = s.items[0].parts;
+  const prose = parts.filter((p) => p.t === "prose").map((p) => p.html).join("");
+  assert.match(prose, /소개 &lt;b&gt;/); // 본문의 꺾쇠가 태그로 번지지 않는다
+  assert.match(prose, /<ul><li>하나<\/li><li>둘 <a href="https:\/\/github\.com\/x\/y\/pull\/26">PR #26<\/a><\/li><\/ul>/);
+  const code = parts.find((p) => p.t === "code");
+  assert.ok(code && code.text.includes("cd ~/a && sh i.sh --remove inbox") && code.html.includes("&amp;&amp;"));
+  assert.equal(s.items[0].linkHtml, "");
+  const linked = I.summarize("lead-a", text({ ts: "2026-01-01T00:00:00Z", kind: "verify", title: "t", body: "x", link: "https://github.com/xowjd913/agent-mods/pull/26" }));
+  assert.equal(linked.items[0].linkHtml, '<a href="https://github.com/xowjd913/agent-mods/pull/26">PR #26</a>');
+});
+
+test("main.js: 카드 글자는 모두 선택 가능한 TextView이고, 눌러서 펼치는 곳은 자세히/접기 버튼뿐이다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  assert.match(src, /TextView\.html\(id, html\)\.selectable\(true\)\.on_link_click/);
+  for (const k of ["-h`", "-lead`", "-link`"]) assert.ok(src.includes("this.text(`${id}" + k), k); // 제목·요약·링크
+  assert.match(src, /it\.parts/); // 펼친 본문
+  // 카드 전체에는 클릭 처리가 없다: toggleOpen은 버튼 한 곳에서만 부른다
+  assert.equal((src.match(/toggleOpen\(/g) ?? []).length, 2); // 정의 1 + 버튼 1
+  assert.ok(!/linkChip|codeSpan/.test(src));
+});

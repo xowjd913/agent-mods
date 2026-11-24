@@ -189,9 +189,41 @@ const MAX_LEAD = 110;
 
 // What the collapsed card shows: head = the title without a leading "[leader] ", lead = the first meaningful body line (not a heading
 // or a command), and whether there is more to open ("long").
+// Selectable text: the body goes to the screen as HTML for a selectable TextView (drag to select, Cmd+C), cut at every command block so a
+// command keeps its own box and copy button. Everything is escaped here; only our own tags (p, strong, ul, li, code, a) are written.
+const escapeHtml = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const segsHtml = (segs) => (segs ?? []).map((g) => (g.k === "c" ? `<code>${escapeHtml(g.v)}</code>` : g.k === "l" ? `<a href="${escapeHtml(g.v)}">${escapeHtml(g.label || g.v)}</a>` : escapeHtml(g.v))).join("");
+const INDENT = "\u00a0\u00a0\u00a0\u00a0";
+
+// [{t:"prose", html} | {t:"code", text, html, depth}]: headings are bold paragraphs, "- " items a real list, numbered items paragraphs that keep their own number.
+function toParts(blocks) {
+  const parts = [];
+  let html = "", list = false;
+  const closeList = () => { if (list) { html += "</ul>"; list = false; } };
+  const flush = () => { closeList(); if (html) parts.push({ t: "prose", html }); html = ""; };
+  for (const b of blocks ?? []) {
+    if (b.t === "code") { flush(); parts.push({ t: "code", text: b.text, html: escapeHtml(b.text), depth: b.depth ?? 0 }); continue; }
+    if (b.t === "gap") { closeList(); continue; }
+    if (b.t === "h") { closeList(); html += `<p><strong>${segsHtml(b.segs)}</strong></p>`; continue; }
+    if (b.t === "li" && b.mark === "•" && !b.depth) {
+      if (!list) { html += "<ul>"; list = true; }
+      html += `<li>${segsHtml(b.segs)}</li>`;
+      continue;
+    }
+    closeList();
+    const pad = INDENT.repeat(Math.min(b.depth ?? 0, 4));
+    html += b.t === "li" ? `<p>${pad}${escapeHtml(b.mark)} ${segsHtml(b.segs)}</p>` : `<p>${pad}${segsHtml(b.segs)}</p>`;
+  }
+  flush();
+  return parts;
+}
+
 function enrich(it) {
   if (!it || it.blocks) return it;
   it.blocks = parseBody(it.body);
+  it.parts = toParts(it.blocks);
+  it.linkLabel = it.link ? linkLabel(it.link) : "";
+  it.linkHtml = it.link ? `<a href="${escapeHtml(it.link)}">${escapeHtml(it.linkLabel)}</a>` : "";
   it.head = it.title.replace(/^\[[^\]]*\]\s*/, "").trim();
   const first = it.blocks.find((b) => b.t === "p" || b.t === "li");
   let lead = first ? plain(first.segs) : "";
@@ -199,6 +231,8 @@ function enrich(it) {
   it.leadFull = lead.length > MAX_LEAD;
   it.lead = it.leadFull ? `${lead.slice(0, MAX_LEAD - 1)}…` : lead;
   const content = it.blocks.filter((b) => b.t !== "gap");
+  it.headHtml = escapeHtml(it.head || it.lead || it.title);
+  it.leadHtml = escapeHtml(it.lead);
   it.long = content.length > 1 || it.leadFull;
   return it;
 }
@@ -271,6 +305,6 @@ function answerLine(kind, leader, text, link) {
   return `Panel answer (${kind}) for ${leader}: "${body}".${link ? ` Target: ${link}` : ""}`;
 }
 
-module.exports = { waitingKind, parseBody, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { waitingKind, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) process.stdout.write(JSON.stringify(collect()));

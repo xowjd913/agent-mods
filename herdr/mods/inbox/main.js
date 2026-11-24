@@ -8,7 +8,7 @@
 // by inbox.cjs; this mod only reads them.
 
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
 import { theme, exec, appHome, checking, window, run, terminals, panes, setBadge, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
@@ -17,6 +17,8 @@ const LOAD_TIMEOUT = 20000, LOAD_STALL_MS = 30000, WINDOW_REFRESH_MS = 5000, PAN
 const KIND = { done: ["완료", "working"], decision: ["결정", "blocked"], verify: ["확인", "blocked"], stop: ["중단", "idle"], resume: ["재개", "dim"], other: ["알림", "dim"], start: ["시작", "dim"] };
 const WINDOW = { mod: "inbox", kind: "window", key: "inbox", keep: true, width: 480, height: 680, props: { mode: "window" } };
 const SENT_KEY = "inbox.sent";
+const OPEN_KEY = "inbox.expanded"; // cards the person opened ("자세히"), shared so they stay open across re-renders and window reopens
+const MAX_OPEN = 60;
 const NO_PO = "이 리더의 PO 터미널을 찾지 못했습니다(리더 터미널의 부모가 role=po 라벨이어야 합니다).";
 const CLIP = "답을 클립보드에 담아 PO 터미널에 붙여 넣습니다(Enter는 직접 누르세요). 클립보드 내용이 바뀝니다.";
 
@@ -37,8 +39,10 @@ function answerLine(kind, leader, text, link) {
   return `Panel answer (${kind}) for ${leader}: "${body}".${link ? ` Target: ${link}` : ""}`;
 }
 
-function openUrl(url) {
+// Opens an http(s) link with the app's own open_url when a context is at hand, else through the system opener.
+function openUrl(url, cx) {
   if (!/^https?:\/\//i.test(url)) return;
+  if (cx?.open_url) { try { cx.open_url(url); return; } catch {} }
   const p = window()?.platform;
   if (p === "macos") exec("open", [url]);
   else if (p === "windows") exec("powershell.exe", ["-NoProfile", "-Command", `Start-Process '${url.replace(/'/g, "''")}'`]);
@@ -84,6 +88,7 @@ export default class Inbox extends View {
     this.writing = null; // leader whose answer box is open
     this.inputs = new Map(); // leader -> InputState
     this.msg = null; // {text, bad}
+    this.copied = null; // key of the command whose 복사 button just ran
     if (checking()) return;
     this.load(cx);
     // The always-on summary pane owns the slow refresh and the badge; the window refreshes faster while it is open.
@@ -111,6 +116,28 @@ export default class Inbox extends View {
       const keep = Object.fromEntries(Object.entries(cur).filter(([k]) => asks.some((a) => a.s.leader === k)));
       if (Object.keys(keep).length !== Object.keys(cur).length) setShared(SENT_KEY, keep);
     } catch {}
+  }
+
+  // Which cards are open ("자세히"): shared state keyed by leader|report time, newest MAX_OPEN kept.
+  cardKey(s, it) { return `${s.leader}|${it?.ts ?? ""}`; }
+  isOpen(s, it) { try { return Boolean(shared(OPEN_KEY)?.[this.cardKey(s, it)]); } catch { return false; } }
+  toggleOpen(s, it) {
+    try {
+      const cur = { ...(shared(OPEN_KEY) ?? {}) };
+      const k = this.cardKey(s, it);
+      if (cur[k]) delete cur[k]; else cur[k] = 1;
+      const keys = Object.keys(cur);
+      for (const old of keys.slice(0, Math.max(0, keys.length - MAX_OPEN))) delete cur[old];
+      setShared(OPEN_KEY, cur);
+    } catch {}
+  }
+
+  // A command's copy button: exactly that text goes on the clipboard (no paste, no send); the button says "복사됨" for a moment.
+  copy(key, text, cx) {
+    try { cx.write_to_clipboard(String(text)); } catch (e) { this.say(`복사하지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); cx.notify(); return; }
+    this.copied = key;
+    cx.notify();
+    try { cx.timer.after(1800, (c) => { if (this.copied === key) { this.copied = null; c.notify(); } }); } catch {}
   }
 
   openWindow() {
@@ -249,12 +276,54 @@ export default class Inbox extends View {
       .child(shortName(leader).slice(0, 1).toUpperCase());
   }
 
-  // A speech bubble: the report's text, one line per paragraph, long lines wrapped.
-  bubble(t, it, accent) {
-    const lines = String(it.body || it.title).split("\n").filter((l) => l.trim());
-    return v_flex().min_w(0).px(10).py(7).gap(3).rounded(10).bg(accent ? accent + "1f" : t.raised).border(1).border_color(accent ? accent + "55" : t.border)
-      .text_size(12.5).text_color(t.foreground)
-      .children(lines.map((l) => div().min_w(0).child(l)));
+  // ---- report text. Collapsed (default): the headline, the first meaningful line and the short link. Open: the structured body
+  // (blocks come parsed from inbox.cjs): headings, indented list rows, command blocks with a copy button, short link labels.
+  mono() { return window()?.platform === "windows" ? "Consolas" : window()?.platform === "macos" ? "Menlo" : "monospace"; }
+
+  // Card text you can drag-select and copy with Cmd+C. Links inside open through openUrl. A press here must not drag the window or toggle anything.
+  text(id, html) {
+    return TextView.html(id, html).selectable(true).on_link_click((url, c) => openUrl(url, c));
+  }
+
+  codeBlock(t, text, html, id) {
+    const done = this.copied === id;
+    return h_flex().min_w(0).gap(6).items_start().px(8).py(5).rounded(6).bg(t.background).border(1).border_color(t.border)
+      .child(div().flex_1().min_w(0).font_family(this.mono()).text_size(11.5).text_color(t.foreground).child(this.text(`${id}-t`, `<p><code>${html}</code></p>`)))
+      .child(div().id(id).flex_none().px(7).h(20).rounded(10).flex().items_center().text_size(10.5).cursor_pointer().bg(t.raised).border(1).border_color(t.border)
+        .text_color(done ? t.working : t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
+        .on_click((_e, cx) => this.copy(id, text, cx)).tooltip("이 명령만 클립보드에 복사합니다(붙여 넣거나 보내지 않습니다)").child(done ? "복사됨" : "복사"));
+  }
+
+  // The body as parts: prose (one selectable text, so a drag can run across headings, lists and lines) and command blocks (own box + 복사).
+  body(t, it, id) {
+    return v_flex().min_w(0).gap(5).children(it.parts.map((p, i) => {
+      const key = `${id}-${i}`;
+      if (p.t === "code") return div().min_w(0).pl(p.depth ? p.depth * 14 + 18 : 0).child(this.codeBlock(t, p.text, p.html, `copy-${key}`));
+      return div().min_w(0).text_size(12.5).text_color(t.foreground).child(this.text(key, p.html));
+    }));
+  }
+
+  // A speech bubble. Reports with more than a line start collapsed; "자세히" / "접기" flips it (kept per card in shared state).
+  bubble(t, s, it, accent) {
+    const open = it.long && this.isOpen(s, it);
+    const id = `b-${s.leader}-${it.ts}`;
+    const toggle = it.long ? div().id(`tg-${s.leader}-${it.ts}`).flex_none().px(8).h(20).rounded(10).flex().items_center().text_size(10.5).cursor_pointer().bg(t.raised)
+      .border(1).border_color(t.border).text_color(t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
+      .on_click((_e, c) => { this.toggleOpen(s, it); c.notify(); }).child(open ? "접기" : "자세히") : null;
+    const box = v_flex().min_w(0).px(10).py(7).gap(5).rounded(10).bg(accent ? accent + "1f" : t.raised).border(1).border_color(accent ? accent + "55" : t.border)
+      .text_size(12.5).text_color(t.foreground);
+    const headline = it.head || it.lead || it.title;
+    box.child(div().min_w(0).font_semibold().child(this.text(`${id}-h`, `<p><strong>${it.headHtml}</strong></p>`)));
+    if (!open) {
+      if (it.lead && it.lead !== headline) box.child(div().min_w(0).max_h(34).overflow_hidden().text_size(12).text_color(t.muted).child(this.text(`${id}-lead`, `<p>${it.leadHtml}</p>`)));
+    } else box.child(this.body(t, it, id));
+    if (it.linkLabel || toggle) {
+      box.child(h_flex().gap(6).items_center().flex_wrap()
+        .when(Boolean(it.link), (el) => el.child(div().flex_none().px(6).rounded(5).bg(t.hover).text_size(11).text_color(t.ansi4 ?? t.foreground).child(this.text(`${id}-link`, it.linkHtml))))
+        .child(div().flex_1())
+        .when(Boolean(toggle), (el) => el.child(toggle)));
+    }
+    return box;
   }
 
   nameRow(t, s, it, extra) {
@@ -276,9 +345,9 @@ export default class Inbox extends View {
       .child(this.avatar(t, s.leader))
       .child(v_flex().flex_1().min_w(0).gap(4)
         .child(this.nameRow(t, s, item ? { ...item, kind } : null))
-        .child(item ? this.bubble(t, item, t.blocked) : div().text_size(12).text_color(t.dim).child("보고 기록 없이 대기 표시만 있습니다. 링크를 열거나 터미널을 들여다보세요.")));
+        .child(item ? this.bubble(t, s, item, t.blocked) : div().text_size(12).text_color(t.dim).child("보고 기록 없이 대기 표시만 있습니다. 링크를 열거나 터미널을 들여다보세요.")));
     const actions = h_flex().gap(6).pl(this.compact ? 0 : 36).items_center().flex_wrap()
-      .when(Boolean(link), (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", () => openUrl(link))))
+      .when(Boolean(link) && link !== item?.link, (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", (c) => openUrl(link, c))))
       .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c), { primary: true, disabled: a.po ? "" : NO_PO, tip: CLIP })))
       .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); c.notify(); }, { disabled: a.po ? "" : NO_PO }))
       .child(div().text_size(11).text_color(done ? t.working : t.dim).child(done ? "PO에 넣음 — PO에서 Enter로 보내면 사라집니다" : "PO에서 Enter로 보내면 리더가 받고 사라집니다"));
@@ -297,9 +366,7 @@ export default class Inbox extends View {
     const { s, it } = r;
     return h_flex().flex_none().px(8).py(4).gap(8).items_start()
       .child(this.avatar(t, s.leader))
-      .child(v_flex().flex_1().min_w(0).gap(4).child(this.nameRow(t, s, it)).child(this.bubble(t, it)))
-      .when(Boolean(it.link), (el) => el.child(div().id(`open-${s.leader}-${it.ts}`).flex_none().mt(2).px(6).py(2).rounded(5).text_size(11).text_color(t.dim)
-        .hover((x) => x.bg(t.hover).text_color(t.foreground)).cursor_pointer().on_mouse_down("left", stop).on_click(() => openUrl(it.link)).tooltip(it.link).child("링크")));
+      .child(v_flex().flex_1().min_w(0).gap(4).child(this.nameRow(t, s, it)).child(this.bubble(t, s, it)))
   }
 
   render(cx) { return this.windowed ? this.full(cx) : this.summary(cx); }
