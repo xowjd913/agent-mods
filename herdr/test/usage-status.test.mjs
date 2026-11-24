@@ -12,23 +12,23 @@ export async function resolve(s, c, n) { return ["gpui-kit","gpui-base","herdr"]
 export async function load(u, c, n) { return u.startsWith("stub:") ? { format: "module", source: ${JSON.stringify(stub)}, shortCircuit: true } : n(u, c); }
 `)}`;
 register(hooks);
-const { parseUsage, barOf } = await import("../mods/usage-status/main.js");
+const { parseUsage, fillWidth } = await import("../mods/usage-status/main.js");
 
 const NOW = Date.parse("2026-11-17T05:10:00Z");
 const file = (limits, updatedAt = "2026-11-17T05:05:00Z") => JSON.stringify({ updatedAt, limits });
 
-test("barOf: 비율만큼 채우고 나머지는 빈칸", () => {
-  assert.deepEqual(barOf(50, 8), { filled: "▰▰▰▰", empty: "▱▱▱▱" });
-  assert.deepEqual(barOf(0, 8), { filled: "", empty: "▱▱▱▱▱▱▱▱" });
-  assert.deepEqual(barOf(100, 8), { filled: "▰▰▰▰▰▰▰▰", empty: "" });
+test("fillWidth: 비율만큼 폭을 채운다", () => {
+  assert.equal(fillWidth(50, 40), 20);
+  assert.equal(fillWidth(100, 40), 40);
+  assert.equal(fillWidth(0, 40), 0);
 });
 
-test("barOf: 0보다 크면 최소 1칸, 100 초과·음수·NaN은 칸을 넘지 않는다", () => {
-  assert.equal(barOf(1, 8).filled, "▰");
-  assert.equal(barOf(250, 8).filled.length, 8);
-  assert.equal(barOf(-5, 8).filled, "");
-  assert.equal(barOf(NaN, 8).filled, "");
-  assert.equal(barOf(30).filled.length + barOf(30).empty.length, 8);
+test("fillWidth: 0보다 크면 최소 폭, 100 초과·음수·NaN은 track을 넘지 않는다", () => {
+  assert.equal(fillWidth(1, 40), 2);
+  assert.equal(fillWidth(250, 40), 40);
+  assert.equal(fillWidth(-5, 40), 0);
+  assert.equal(fillWidth(NaN, 40), 0);
+  assert.ok(fillWidth(30) > 0 && fillWidth(30) < fillWidth(100));
 });
 
 test("parseUsage: 5h·7d 행을 반올림해서 돌려준다", () => {
