@@ -15,6 +15,7 @@
     - [usage-status: Claude 사용률](#usage-status-claude-사용률)
     - [agent-groups: 작업별 묶음](#agent-groups-작업별-묶음)
     - [leader-tabs: 리더 탭](#leader-tabs-리더-탭)
+    - [path-menu: 경로 메뉴](#path-menu-경로-메뉴)
 - [설치](#설치)
   - [모드 골라 설치](#모드-골라-설치)
 - [업데이트와 제거](#업데이트와-제거)
@@ -217,6 +218,23 @@ Work나 PRs에서 워크트리 줄을 누르면 뜨는 작은 팝업입니다.
 - 탭 이름은 리더 세션 제목에서 `리더 · `를 뺀 것입니다. [작업별 묶음 그림](#agent-groups-작업별-묶음)의 `문서`·`설치기`가 그 예입니다.
 - `~/.claude/skills/leader/herdr-team.sh`가 있으면 리더 칸 정리에 그것을 부릅니다. 없으면 그 동작만 하지 않습니다.
 
+#### path-menu: 경로 메뉴
+
+- **위치**: 터미널
+- **맞는 사람**: 에이전트가 알려 준 파일 경로를 바로 열고 싶은 사람
+- **하는 일**: 터미널의 파일 경로를 Cmd+클릭(Windows·Linux는 Ctrl+클릭)하면 누른 자리에 작은 메뉴가 뜹니다.
+
+메뉴 항목:
+
+- `폴더 열기`: Finder·탐색기에서 그 파일을 골라 보여 줍니다. 폴더 경로면 그 폴더를 엽니다.
+- `파일 열기`: 기본 앱으로 엽니다. 폴더에는 이 항목이 없습니다.
+- `경로 복사`: 경로를 클립보드에 넣습니다.
+
+알아 둘 점:
+
+- 없는 경로는 알림을 띄우고 `경로 복사`만 보여 줍니다. 원격 터미널의 경로도 `경로 복사`만 됩니다.
+- 웹 주소(URL)는 건드리지 않아 Herdr 원래대로 열립니다.
+
 ---
 
 ## 설치
@@ -405,8 +423,9 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
    - `agent-groups`: `agents`를 `agent-groups`로 바꿉니다.
    - `usage-status`: `workspace-status`를 `usage-status`로 바꿉니다.
    - `leader-tabs`: 칸 머리줄 `pane`을 `leader-tabs`로 바꿉니다.
+   - `path-menu`: 레이아웃 맨 위 `link_handlers`에 `path-menu`를 더합니다.
 4. **기록 남기기**: 단계마다 모드 폴더 안에 기록 파일을 남깁니다.
-   - 예: `.tabs-swapped`, `.work-board-added`, `.pr-board-added`, `.board-added`, `.agents-swapped`, `.status-swapped`, `.header-swapped`
+   - 예: `.tabs-swapped`, `.work-board-added`, `.pr-board-added`, `.board-added`, `.agents-swapped`, `.status-swapped`, `.header-swapped`, `.link-handler-added`
    - 다음 설치는 기록이 있는 단계를 건너뛰므로, 사용자가 되돌린 블록은 그대로 둡니다.
 
 같은 이름이지만 이 설치기의 모드를 쓰지 않는 `dashboard` 레이아웃이 이미 있으면, 그 레이아웃은 건드리지 않습니다.
