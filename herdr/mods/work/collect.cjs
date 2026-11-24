@@ -257,7 +257,7 @@ const ISSUE_FIELDS = (rich, project) =>
 // --refresh probes again, so the project status comes back after `gh auth refresh -s read:project`.
 const NO_PROJECT_KEY = "gh:no-project";
 const NO_PROJECT_TTL = 60 * 60 * 1000;
-const NO_PROJECT_NOTE = "프로젝트 상태 숨김: gh 토큰에 read:project 권한 없음 (gh auth refresh -s read:project 후 새로고침)";
+const NO_PROJECT_NOTE = "프로젝트 상태 숨김 (read:project 권한 없음) · gh auth refresh -s read:project 후 새로고침";
 function buildQuery(repos, issues, rich, project = true) {
   const parts = repos.map((repo, i) => {
     const [owner, name] = repo.slug.split("/");
@@ -277,7 +277,7 @@ function ghQuery(query) {
   }
 }
 const lacksProjectScope = (reply) =>
-  Boolean(reply && Array.isArray(reply.errors)) && reply.errors.some((e) => e && (e.type === "INSUFFICIENT_SCOPES" || /read:project|projectItems/.test(e.message || "")));
+  Boolean(reply && Array.isArray(reply.errors)) && reply.errors.some((e) => e && e.type === "INSUFFICIENT_SCOPES" && /read:project|projectItems/.test(e.message || ""));
 function fetchGitHub(repos, issues, query = ghQuery) {
   if (!repos.length) return { data: null, errors: [], notes: [] };
   touched.entries.add(NO_PROJECT_KEY);
@@ -295,16 +295,17 @@ function fetchGitHub(repos, issues, query = ghQuery) {
     cache.entries[key] = { at: Date.now(), value: reply.data };
     return { data: reply.data };
   };
+  let fellBack = false;
   for (const rich of [true, false]) {
     let result = attempt(rich);
     if (!result.data && project && lacksProjectScope(result.reply)) {
       project = false;
+      fellBack = true;
       result = attempt(rich);
-      if (result.data) cache.entries[NO_PROJECT_KEY] = { at: Date.now(), value: true };
-      else project = true;
     }
     if (result.data) {
-      if (project) delete cache.entries[NO_PROJECT_KEY];
+      if (fellBack) cache.entries[NO_PROJECT_KEY] = { at: Date.now(), value: true };
+      else if (project) delete cache.entries[NO_PROJECT_KEY];
       return { data: result.data, errors: [], notes: project ? [] : [NO_PROJECT_NOTE] };
     }
   }

@@ -66,6 +66,34 @@ test("권한이 있으면 그대로 한 번 조회하고 프로젝트 상태를 
   assert.equal(C.compose({ sessions: [], repos }, github).issues["o/r#7"].status, "In Progress");
 });
 
+test("read:project가 아닌 권한 오류는 대체 조회 없이 상세·단순 조회 2번 후 실패 문구", () => {
+  reset();
+  const calls = [];
+  const github = C.fetchGitHub(repos, issues, (text) => {
+    calls.push(text);
+    return { errors: [{ type: "INSUFFICIENT_SCOPES", message: "The 'login' field requires one of the following scopes: ['read:org']" }] };
+  });
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every((text) => text.includes("projectItems")));
+  assert.deepEqual(github.errors, ["GitHub query failed (gh auth or network)"]);
+  assert.equal(C.cache.entries["gh:no-project"], undefined);
+});
+
+test("read:project 오류 뒤 상세 조회가 다른 이유로 실패하면 단순 조회는 처음부터 projectItems를 뺀다", () => {
+  reset();
+  const calls = [];
+  const github = C.fetchGitHub(repos, issues, (text) => {
+    calls.push(text);
+    if (text.includes("projectItems")) return SCOPE_ERROR;
+    return text.includes("parent{") ? null : reply(false);
+  });
+  assert.equal(calls.length, 3);
+  assert.ok(!calls[2].includes("projectItems") && !calls[2].includes("parent{"));
+  assert.deepEqual(github.errors, []);
+  assert.equal(github.notes.length, 1);
+  assert.equal(C.cache.entries["gh:no-project"].value, true);
+});
+
 test("권한 오류가 아닌 실패는 기억하지 않고 기존 오류 문구를 낸다", () => {
   reset();
   const github = C.fetchGitHub(repos, issues, () => null);
