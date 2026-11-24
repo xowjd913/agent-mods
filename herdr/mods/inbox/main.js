@@ -72,6 +72,67 @@ function answerLine(kind, leader, text, link) {
   return `Panel answer (${kind}) for ${leader}: "${body}".${link ? ` Target: ${link}` : ""}`;
 }
 
+// chat:begin
+// The chat box of the window: "@" mentions, the menu of live leaders and which PO a line goes to. Pure. The mods cannot require a
+// .cjs file, so this block is copied verbatim between the markers into inbox/main.js (a test keeps them identical).
+const MENTION_END = "(?=$|[\\s.,!?:;)])";
+const MENTION = new RegExp(`(^|\\s)@(here|lead-[A-Za-z0-9_-]+)${MENTION_END}`, "g");
+const HERE = new RegExp(`(^|\\s)@here${MENTION_END}`, "g");
+// The box text with each mention chip written out as its text ("@lead-x"), whether or not the chip's range already holds that text.
+function composeChat(content) {
+  let text = String(content?.text ?? "");
+  for (const s of [...(content?.tokens ?? [])].sort((a, b) => b.range.start - a.range.start)) text = text.slice(0, s.range.start) + String(s.token?.text ?? "") + text.slice(s.range.end);
+  return text;
+}
+// What goes to the PO: one line, "@here" dropped (it only means "to the PO"), and the live leaders (`known`, hc names) it names.
+// `empty` is true when nothing is left once the mentions are taken out, so a lone "@lead-x" is not sent.
+function parseMention(raw, known = []) {
+  const flat = String(raw ?? "").replace(/\s*\n\s*/g, " ").trim();
+  const to = [];
+  let here = false;
+  const empty = flat.replace(MENTION, (m, pre, name) => {
+    if (name === "here") here = true;
+    else if (known.includes(name)) { if (!to.includes(name)) to.push(name); } else return m;
+    return pre;
+  }).trim() === "";
+  return { text: flat.replace(HERE, "$1").replace(/\s+/g, " ").trim(), to, here, empty };
+}
+// The "@query" being typed right before `cursor` (offsets into the box text), or null. Not inside a chip, not in the middle of a word.
+function mentionQuery(text, cursor, tokens = []) {
+  const before = String(text ?? "").slice(0, cursor);
+  const m = /(^|\s)@([^\s@]*)$/.exec(before);
+  if (!m) return null;
+  const start = before.length - m[2].length - 1;
+  if (tokens.some((t) => start >= t.range.start && start < t.range.end)) return null;
+  return { start, end: cursor, query: m[2] };
+}
+// The "@" menu: "@here" first, then the live leaders that have a PO (the same rule as findPo), by shown name. `query` filters by hc name
+// or shown name.
+function leaderMenu(terms, memo, query = "", limit = 8) {
+  const list = terms ?? [];
+  const q = String(query ?? "").trim().toLowerCase();
+  const leaders = list.filter((t) => /^lead-/.test(String(t?.name ?? "")) && findPo(list, t.name, t.address))
+    .map((t) => ({ id: t.name, label: leaderName(t.name, t, memo), sub: t.name }))
+    .filter((x, i, a) => a.findIndex((y) => y.id === x.id) === i)
+    .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0)); // code-unit order: the same on every platform
+  return [{ id: "here", label: "here", sub: "" }, ...leaders].filter((x) => !q || x.id.toLowerCase().includes(q) || x.label.toLowerCase().includes(q)).slice(0, limit);
+}
+// The PO a line is pasted into: the PO of the leaders it names (they must share one), else the PO with the most live leaders.
+// {po} or {po:null, why:"orphan"|"many"|"none"}.
+function chatTarget(terms, to = []) {
+  const list = terms ?? [];
+  if (to.length) {
+    const pos = [...new Set(to.map((n) => findPo(list, n)))];
+    if (pos.includes(null)) return { po: null, why: "orphan" };
+    return pos.length > 1 ? { po: null, why: "many" } : { po: pos[0] };
+  }
+  const isPo = (t) => String(t?.labels?.role ?? "").trim().toLowerCase() === "po";
+  const count = (po) => list.filter((t) => /^lead-/.test(String(t?.name ?? "")) && t.parent === po.address).length;
+  const best = list.filter(isPo).map((p, i) => ({ p, n: count(p), i })).sort((a, b) => b.n - a.n || a.i - b.i)[0];
+  return best ? { po: best.p.address } : { po: null, why: "none" };
+}
+// chat:end
+
 // Opens an http(s) link with the app's own open_url when a context is at hand, else through the system opener.
 function openUrl(url, cx) {
   if (!/^https?:\/\//i.test(url)) return;
