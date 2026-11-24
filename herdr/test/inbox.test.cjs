@@ -162,7 +162,44 @@ test("parseBody: 짧은 '라벨:' 줄과 '되돌리기: 내용' 줄은 소제목
   const bl = I.parseBody("따라 하기(새 터미널에 붙여 넣기):\n1. 해 본다\n\n아직 못 해 본 것: 마우스 클릭");
   assert.deepEqual(shape(bl), ["h:따라 하기(새 터미널에 붙여 넣기)", "li1.:해 본다", "h:아직 못 해 본 것", "p:마우스 클릭"]);
   const cmd = I.parseBody("되돌리기: cd ~/x && sh a.sh --remove inbox, 그다음 git checkout main && sh a.sh");
-  assert.deepEqual(shape(cmd), ["h:되돌리기", "code:cd ~/x && sh a.sh --remove inbox", "p:그다음", "code:git checkout main && sh a.sh"]);
+  // 한글 설명이 섞인 줄은 명령 상자를 만들지 않고 선택할 수 있는 글로 둔다(반쪽 명령을 건네지 않는다)
+  assert.deepEqual(shape(cmd), ["h:되돌리기", "p:cd ~/x && sh a.sh --remove inbox, 그다음 git checkout main && sh a.sh"]);
+  assert.deepEqual(shape(I.parseBody("되돌리기: cd ~/x && sh a.sh --remove inbox")), ["h:되돌리기", "code:cd ~/x && sh a.sh --remove inbox"]);
+});
+
+test("parseBody: '라벨: 명령' 줄은 줄 전체가 명령일 때만 상자가 되고, 복사 글은 원문과 한 글자도 다르지 않다", () => {
+  const codes = (line) => I.parseBody(line).filter((b) => b.t === "code").map((b) => b.text);
+  // 리뷰 4회차에서 지적한 줄들: 상자가 없거나, 원문 명령 전체
+  assert.deepEqual(codes('설치: git commit -m "받은편지함 수정" && git push'), []);
+  assert.deepEqual(codes("설치: curl https://x.y/i.sh | sh -s -- --add inbox. 끝"), []);
+  assert.deepEqual(codes("설치: cd ~/문서/x && rm -rf build"), []);
+  assert.deepEqual(codes("설치: curl https://x.y/i.sh | sh -s -- --add inbox."), []); // 문장 끝 마침표
+  assert.deepEqual(codes('설치: git commit -m "a  b" && git push'), ['git commit -m "a  b" && git push']); // 두 칸 공백 그대로
+  // 실제 확인 보고(2026-11-24) 줄: 통째로 명령이라 원문 그대로 들어간다
+  const real = "[ -d ~/agent-mods ] || git clone https://github.com/xowjd913/agent-mods ~/agent-mods; cd ~/agent-mods && git fetch origin feature/25-inbox && git checkout feature/25-inbox && sh herdr/install.sh --add inbox";
+  assert.deepEqual(codes(`1. 설치: ${real}`), [real]);
+  // 실제 되돌리기 줄은 한글(그다음)이 들어 있어 상자 없이 글로 남는다
+  const undo = "되돌리기: cd ~/agent-mods && sh herdr/install.sh --remove inbox, 그다음 cd ~/agent-mods && git checkout main && sh herdr/install.sh";
+  assert.deepEqual(codes(undo), []);
+  assert.ok(flat(I.parseBody(undo)[1].segs).endsWith("&& sh herdr/install.sh"));
+  // 어떤 줄이든 상자 글자는 원문에 그대로 들어 있는 조각이다
+  for (const line of ['설치: git commit -m "a  b"', "설치: ls -la ~/a", "1. 설치: " + real, "- 설치: echo   hi"]) {
+    for (const c of codes(line)) assert.ok(line.includes(c), c);
+  }
+});
+
+test("toParts: 소제목은 <strong>이 아니라 따로 그리는 조각(h)이고, 명령 하나뿐인 보고도 펼칠 수 있다", () => {
+  const parts = I.toParts(I.parseBody("요약 줄\n\n되돌리기:\n- 하나"));
+  assert.deepEqual(parts.map((p) => p.t), ["prose", "h", "prose"]);
+  assert.equal(parts[1].text, "되돌리기");
+  assert.ok(!parts.some((p) => p.html?.includes("<strong>")));
+  const one = (body) => I.summarize("lead-a", text({ ts: "2026-01-01T00:00:00Z", kind: "verify", title: "[lead-a] 명령 하나", body })).items[0];
+  for (const body of ["`git pull --ff-only origin main`", "$ echo hi", "```\ngit status\n```"]) {
+    const it = one(body);
+    assert.equal(it.long, true, body); // 접힌 카드에 자세히가 생기고, 펼치면 명령 상자와 복사가 보인다
+    assert.equal(it.parts.filter((p) => p.t === "code").length, 1, body);
+  }
+  assert.equal(one("한 줄만").long, false);
 });
 
 test("parseBody: 명령은 코드 블록으로 빼고(전체가 복사됨), 일반 `코드`는 인라인으로 둔다", () => {
@@ -239,9 +276,99 @@ test("toParts·escapeHtml: 글자는 이스케이프하고, 목록은 <ul>로 �
 test("main.js: 카드 글자는 모두 선택 가능한 TextView이고, 눌러서 펼치는 곳은 자세히/접기 버튼뿐이다", () => {
   const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
   assert.match(src, /TextView\.html\(id, html\)\.selectable\(true\)\.on_link_click/);
-  for (const k of ["-h`", "-lead`", "-link`"]) assert.ok(src.includes("this.text(`${id}" + k), k); // 제목·요약·링크
+  for (const k of ["-lead`", "-link`"]) assert.ok(src.includes("this.text(`${id}" + k), k); // 요약·링크
+  assert.ok(src.includes("this.heading_text(t, `${id}-h`") && src.includes("this.heading_text(t, key, p.html")); // 제목·소제목: TextView 자체에 굵기를 준 선택 가능한 글
+  assert.ok(!src.includes("<strong>"));
   assert.match(src, /it\.parts/); // 펼친 본문
   // 카드 전체에는 클릭 처리가 없다: toggleOpen은 버튼 한 곳에서만 부른다
   assert.equal((src.match(/toggleOpen\(/g) ?? []).length, 2); // 정의 1 + 버튼 1
   assert.ok(!/linkChip|codeSpan/.test(src));
+});
+
+test("main.js: 오른쪽 칸은 분류 단계 없이 한 목록이고, 줄을 누르면 그 카드를 펼쳐 창을 연다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const sum = src.slice(src.indexOf("  summary(cx) {"), src.indexOf("  // The full chat view"));
+  assert.ok(sum.length > 200);
+  assert.ok(!/결정 필요|결과 보고|눌러서 채팅 창 열기/.test(sum)); // 분류 버튼·안내 줄이 없다
+  assert.ok(!/id\("inbox-summary"\)[^\n]*on_click/.test(sum) && !/\.on_click\(\(\) => this\.openWindow/.test(sum)); // 칸 전체 클릭 없음
+  assert.match(sum, /badge\("결정", asks\.length/); // 개수는 머리줄의 작은 표시
+  assert.match(sum, /badge\("보고", all\.length/);
+  assert.match(sum, /asks\.forEach\(\(a\) => list\.push\(this\.paneRow/); // 결정·확인이 맨 위
+  assert.match(sum, /reports\(asks, Infinity\)/); // 개수는 전부, 줄은 MAX_ROWS까지
+  assert.match(src, /const MAX_ROWS = 20;/);
+  assert.match(sum, /나머지 \$\{all\.length - rows\.length\}개는 창에서/);
+  const row = src.slice(src.indexOf("  paneRow("), src.indexOf("  // The small pane"));
+  assert.match(row, /on_click\(\(_e, c\) => \{ this\.openCard\(s, it\)/);
+  assert.match(row, /\.truncate\(\)/); // 한 줄로 줄임표
+  // 창은 공유 상태의 선택을 읽어 그 카드를 맨 앞에 둔다(스크롤 이동 API가 없다)
+  assert.match(src, /const FOCUS_KEY = "inbox\.focus"/);
+  assert.match(src, /openCard\(s, it\) \{[\s\S]*cur\[k\] = 1[\s\S]*setShared\(FOCUS_KEY, it \? this\.cardKey\(s, it\) : ""\)[\s\S]*this\.openWindow\(\)/);
+  assert.match(src, /선택한 보고/);
+  assert.match(src, /clearFocus\(\); try \{ closeOverlay/); // 창을 닫으면 선택도 지운다
+  // 창 카드에는 여전히 카드 전체 클릭이 없다
+  assert.equal((src.match(/toggleOpen\(/g) ?? []).length, 2);
+});
+
+test("답함 표시: 실제 lead-sched-acct 순서(결정·답, 확인·답, 결정·답)는 모두 답함이고 열린 것이 없다", () => {
+  const seq = [
+    { ts: "2026-11-24T07:16:07Z", kind: "start", body: "시작" },
+    { ts: "2026-11-24T07:18:01Z", kind: "decision", body: "- 핵심: 결정" },
+    { ts: "2026-11-24T07:19:41Z", kind: "answered", body: "decision" },
+    { ts: "2026-11-24T07:20:06Z", kind: "start", body: "- 핵심: 계획 확정" },
+    { ts: "2026-11-24T07:51:14Z", kind: "verify", body: "- 핵심: 1/3" },
+    { ts: "2026-11-24T07:57:06Z", kind: "answered", body: "verify" },
+    { ts: "2026-11-24T07:58:55Z", kind: "decision", body: "- 질문: 계정 추가" },
+    { ts: "2026-11-24T07:59:53Z", kind: "answered", body: "decision" },
+  ];
+  const s = I.summarize("lead-sched-acct", text(...seq));
+  const asks = s.items.filter((i) => i.kind === "decision" || i.kind === "verify");
+  assert.equal(asks.length, 3);
+  assert.ok(asks.every((i) => i.answered === true));
+  assert.equal(s.open, null);
+  assert.equal(s.ask.answered, true); // 대기 라벨이 아직 있어도 데이터는 답함으로 알려 준다
+  // 데이터는 JSON으로 옮겨져도 표시가 남는다
+  assert.equal(JSON.parse(JSON.stringify(s)).items.find((i) => i.ts === "2026-11-24T07:51:14Z").answered, true);
+});
+
+test("답함 표시: 새 결정이 답 없이 뒤따르면 그것만 열려 있고 이전 것은 답함이다", () => {
+  const s = I.summarize("lead-a", text(
+    { ts: "2026-01-01T00:00:00Z", kind: "decision" }, { ts: "2026-01-01T00:01:00Z", kind: "answered", body: "decision" },
+    { ts: "2026-01-01T00:02:00Z", kind: "verify" }));
+  assert.equal(s.open.kind, "verify");
+  assert.equal(s.open.answered, false);
+  assert.equal(s.items.find((i) => i.kind === "decision").answered, true);
+});
+
+test("답함 표시: answered의 본문 종류가 맞는 가장 가까운 앞선 열린 질문을 닫고, 종류를 모르면 가장 새 질문을 닫는다", () => {
+  const a = I.markAnswered(I.parseLines(text(
+    { ts: "2026-01-01T00:00:00Z", kind: "decision" }, { ts: "2026-01-01T00:01:00Z", kind: "verify" },
+    { ts: "2026-01-01T00:02:00Z", kind: "answered", body: "decision" })));
+  assert.deepEqual(a.map((i) => i.answered), [true, false, undefined]);
+  const b = I.markAnswered(I.parseLines(text(
+    { ts: "2026-01-01T00:00:00Z", kind: "decision" }, { ts: "2026-01-01T00:01:00Z", kind: "decision" },
+    { ts: "2026-01-01T00:02:00Z", kind: "answered", body: "" })));
+  assert.deepEqual(b.map((i) => i.answered), [false, true, undefined]);
+  // 질문 없이 온 answered, 맞는 종류가 없는 answered
+  assert.equal(I.markAnswered(I.parseLines(text({ ts: "2026-01-01T00:00:00Z", kind: "answered", body: "verify" }))).length, 1);
+  const c = I.markAnswered(I.parseLines(text({ ts: "2026-01-01T00:00:00Z", kind: "decision" }, { ts: "2026-01-01T00:01:00Z", kind: "answered", body: "verify" })));
+  assert.equal(c[0].answered, true); // 계약 v1: 뒤따른 answered 한 줄은 질문을 닫는다
+  // 같은 종류가 둘이면 가장 가까운 앞선 것부터
+  const d = I.markAnswered(I.parseLines(text(
+    { ts: "2026-01-01T00:00:00Z", kind: "verify" }, { ts: "2026-01-01T00:01:00Z", kind: "verify" },
+    { ts: "2026-01-01T00:02:00Z", kind: "answered", body: "verify" }, { ts: "2026-01-01T00:03:00Z", kind: "answered", body: "verify" })));
+  assert.deepEqual(d.map((i) => i.answered), [true, true, undefined, undefined]);
+});
+
+test("창 구역 접기와 답함 표시: 머리줄 누름·공유 상태·기본값·붉은색 규칙이 main.js에 있다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  assert.match(src, /const SECT_KEY = "inbox\.sections"/);
+  assert.match(src, /collapsed\(name, count, force\)/);
+  assert.match(src, /return name === "ask" && count === 0/); // 결정 필요는 비면 스스로 접힘
+  assert.match(src, /st\.n === count/); // 직접 누른 것은 개수가 바뀔 때까지 이김
+  assert.match(src, /setShared\(SECT_KEY/);
+  assert.match(src, /id: "sec-ask"[^\n]*this\.collapsed|collapsed\("ask", asks\.length, fa >= 0\)/);
+  assert.match(src, /"▸" : "▾"/);
+  assert.match(src, /\$\{k\[0\]\} · 답함/);
+  assert.match(src, /nameRow\(t, s, item \? \{ \.\.\.item, kind \} : null, null, true\)/); // 대기 카드만 붉은 종류 표시
+  assert.match(src, /this\.kindTag\(t, it, kind \?\? it\?\.kind, ask\)/); // 창 보고 줄과 같은 규칙을 창 옆 목록 줄도 쓴다
 });

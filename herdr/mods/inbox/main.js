@@ -1,4 +1,7 @@
-// Inbox panel: the leaders' reports (~/.herdr-inbox/<leader>.jsonl, written by `report`) as a chat, in two lanes.
+// Inbox panel: the leaders' reports (~/.herdr-inbox/<leader>.jsonl, written by `report`).
+//  - The right pane is ONE list: open decision/verify asks pinned on top, then the latest reports (newest first), one short row each
+//    (leader, kind badge, first line). A row opens the floating window at that item; the counts are small badges in the pane header.
+//  - The window is the chat view, in two lanes:
 //  - "결정 필요": leaders whose terminal has a wait label (decision|verify): their last decision/verify report, with
 //    "링크 열기", "확인 완료" (verify only) and "답 쓰기".
 //  - "결과 보고": every other report (done, stop, ...) as per-leader bubbles, newest first.
@@ -19,6 +22,9 @@ const WINDOW = { mod: "inbox", kind: "window", key: "inbox", keep: true, width: 
 const SENT_KEY = "inbox.sent";
 const OPEN_KEY = "inbox.expanded"; // cards the person opened ("자세히"), shared so they stay open across re-renders and window reopens
 const MAX_OPEN = 60;
+const FOCUS_KEY = "inbox.focus"; // "<leader>|<report time>" the window should show first and open (set by a pane row), "" for none
+const SECT_KEY = "inbox.sections"; // {ask:{c,n}, rep:{c}}: which window sections the person collapsed (c) and, for "결정 필요", at which count (n)
+const MAX_ROWS = 20; // pane rows below the pinned asks; the rest is in the window
 const NO_PO = "이 리더의 PO 터미널을 찾지 못했습니다(리더 터미널의 부모가 role=po 라벨이어야 합니다).";
 const CLIP = "답을 클립보드에 담아 PO 터미널에 붙여 넣습니다(Enter는 직접 누르세요). 클립보드 내용이 바뀝니다.";
 
@@ -138,6 +144,36 @@ export default class Inbox extends View {
     this.copied = key;
     cx.notify();
     try { cx.timer.after(1800, (c) => { if (this.copied === key) { this.copied = null; c.notify(); } }); } catch {}
+  }
+
+  // A pane row: open that card (expanded) and show the window with it first. The window reads FOCUS_KEY, so it also follows a row
+  // pressed while it is already open (at its next refresh at the latest). Without an item the window just opens.
+  openCard(s, it) {
+    try {
+      if (it) {
+        const cur = { ...(shared(OPEN_KEY) ?? {}) };
+        const k = this.cardKey(s, it);
+        if (it.long && !cur[k]) { cur[k] = 1; const keys = Object.keys(cur); for (const old of keys.slice(0, Math.max(0, keys.length - MAX_OPEN))) delete cur[old]; setShared(OPEN_KEY, cur); }
+      }
+      setShared(FOCUS_KEY, it ? this.cardKey(s, it) : "");
+    } catch {}
+    this.openWindow();
+  }
+  focusKey() { try { return String(shared(FOCUS_KEY) ?? ""); } catch { return ""; } }
+  clearFocus() { try { setShared(FOCUS_KEY, ""); } catch {} }
+
+  // Section collapse for the window. "결정 필요" starts open and folds itself while it is empty; a click on its header wins until the
+  // number of waiting asks changes, then the default applies again. "결과 보고" starts open and keeps the person's click for good.
+  // The section holding the item a pane row opened is never folded.
+  collapsed(name, count, force) {
+    if (force) return false;
+    let st = null;
+    try { st = shared(SECT_KEY)?.[name] ?? null; } catch {}
+    if (st && (name !== "ask" || st.n === count)) return Boolean(st.c);
+    return name === "ask" && count === 0;
+  }
+  toggleSection(name, count, now) {
+    try { setShared(SECT_KEY, { ...(shared(SECT_KEY) ?? {}), [name]: { c: !now, n: count } }); } catch {}
   }
 
   openWindow() {
@@ -263,11 +299,25 @@ export default class Inbox extends View {
     return div().flex_none().px(6).h(17).rounded(5).bg((t[color] ?? t.dim) + "26").text_size(10.5).text_color(t[color] ?? t.dim).flex().items_center().child(text);
   }
 
-  heading(t, text, count, first) {
-    return h_flex().h(first ? 30 : 38).px(8).pt(first ? 4 : 14).items_center().gap(7).flex_none()
-      .when(!first, (el) => el.border_t(1).border_color(t.border).mt(6))
+  // The kind tag of a report. Red (the kind's own color) only while the leader is still waiting on it; a decision/verify line that is not
+  // waiting any more is neutral, and "· 답함" when an answered line closed it.
+  kindTag(t, it, kind, waiting) {
+    const kk = kind ?? it?.kind;
+    const k = KIND[kk] ?? KIND.other;
+    if (waiting || (kk !== "decision" && kk !== "verify")) return this.tag(t, k[0], k[1]);
+    return this.tag(t, it?.answered ? `${k[0]} · 답함` : k[0], "dim");
+  }
+
+  // A window section header: press it to fold or unfold the section (chevron + title + count that stays visible when folded).
+  heading(t, text, count, first, o = {}) {
+    const el = h_flex().id(o.id ?? `sec-${text}`).h(first ? 30 : 38).px(8).pt(first ? 4 : 14).items_center().gap(7).flex_none().cursor_pointer()
+      .when(!first, (x) => x.border_t(1).border_color(t.border).mt(6))
+      .on_mouse_down("left", stop).on_click((_e, c) => { o.toggle?.(); c.notify(); }).tooltip(o.folded ? "눌러서 펼칩니다" : "눌러서 접습니다")
+      .child(div().flex_none().w(12).text_size(11).text_color(t.dim).child(o.folded ? "▸" : "▾"))
       .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(text))
-      .child(div().flex_none().px(6).h(16).rounded(8).bg(t.raised).flex().items_center().text_size(10.5).text_color(t.muted).child(String(count)));
+      .child(div().flex_none().px(6).h(16).rounded(8).bg(o.hot && count > 0 ? t.blocked + "26" : t.raised).flex().items_center().text_size(10.5)
+        .text_color(o.hot && count > 0 ? t.blocked : t.muted).child(String(count)));
+    return el;
   }
 
   avatar(t, leader) {
@@ -294,11 +344,18 @@ export default class Inbox extends View {
         .on_click((_e, cx) => this.copy(id, text, cx)).tooltip("이 명령만 클립보드에 복사합니다(붙여 넣거나 보내지 않습니다)").child(done ? "복사됨" : "복사"));
   }
 
+  // Card title and section headings: the TextView ignores bold tags and the weight of the box around it, so the style goes on the
+  // TextView element itself (still selectable).
+  heading_text(t, id, html, size = 14) {
+    return this.text(id, `<p>${html}</p>`).font_weight(700).text_size(size).text_color(t.foreground);
+  }
+
   // The body as parts: prose (one selectable text, so a drag can run across headings, lists and lines) and command blocks (own box + 복사).
   body(t, it, id) {
     return v_flex().min_w(0).gap(5).children(it.parts.map((p, i) => {
       const key = `${id}-${i}`;
       if (p.t === "code") return div().min_w(0).pl(p.depth ? p.depth * 14 + 18 : 0).child(this.codeBlock(t, p.text, p.html, `copy-${key}`));
+      if (p.t === "h") return div().min_w(0).pt(4).child(this.heading_text(t, key, p.html, 14.5));
       return div().min_w(0).text_size(12.5).text_color(t.foreground).child(this.text(key, p.html));
     }));
   }
@@ -313,7 +370,7 @@ export default class Inbox extends View {
     const box = v_flex().min_w(0).px(10).py(7).gap(5).rounded(10).bg(accent ? accent + "1f" : t.raised).border(1).border_color(accent ? accent + "55" : t.border)
       .text_size(12.5).text_color(t.foreground);
     const headline = it.head || it.lead || it.title;
-    box.child(div().min_w(0).font_semibold().child(this.text(`${id}-h`, `<p><strong>${it.headHtml}</strong></p>`)));
+    box.child(div().min_w(0).child(this.heading_text(t, `${id}-h`, it.headHtml, 16)));
     if (!open) {
       if (it.lead && it.lead !== headline) box.child(div().min_w(0).max_h(34).overflow_hidden().text_size(12).text_color(t.muted).child(this.text(`${id}-lead`, `<p>${it.leadHtml}</p>`)));
     } else box.child(this.body(t, it, id));
@@ -326,11 +383,11 @@ export default class Inbox extends View {
     return box;
   }
 
-  nameRow(t, s, it, extra) {
+  nameRow(t, s, it, extra, waiting) {
     return h_flex().gap(6).items_center().min_w(0)
       .child(div().id(`peek-${s.leader}-${it?.ts ?? ""}`).min_w(0).truncate().text_size(12).font_semibold().text_color(tint(t, s.leader)).cursor_pointer()
         .hover((x) => x.text_color(t.foreground)).on_mouse_down("left", stop).on_click(() => this.peek(s)).tooltip("그 리더 터미널 들여다보기").child(shortName(s.leader)))
-      .when(Boolean(it), (el) => { const k = KIND[it.kind] ?? KIND.other; return el.child(this.tag(t, k[0], k[1])); })
+      .when(Boolean(it), (el) => el.child(this.kindTag(t, it, it.kind, waiting)))
       .child(div().flex_1())
       .when(Boolean(it?.ts), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(ago(it.ts))))
       .when(Boolean(extra), (el) => el.child(extra));
@@ -344,7 +401,7 @@ export default class Inbox extends View {
     const head = h_flex().gap(8).items_start()
       .child(this.avatar(t, s.leader))
       .child(v_flex().flex_1().min_w(0).gap(4)
-        .child(this.nameRow(t, s, item ? { ...item, kind } : null))
+        .child(this.nameRow(t, s, item ? { ...item, kind } : null, null, true))
         .child(item ? this.bubble(t, s, item, t.blocked) : div().text_size(12).text_color(t.dim).child("보고 기록 없이 대기 표시만 있습니다. 링크를 열거나 터미널을 들여다보세요.")));
     const actions = h_flex().gap(6).pl(this.compact ? 0 : 36).items_center().flex_wrap()
       .when(Boolean(link) && link !== item?.link, (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", (c) => openUrl(link, c))))
@@ -371,38 +428,84 @@ export default class Inbox extends View {
 
   render(cx) { return this.windowed ? this.full(cx) : this.summary(cx); }
 
-  // The small pane: how many wait on a decision and how many reports came in; a click opens the chat view in a floating window.
+  // One pane row: leader, kind badge, first line (ellipsized). A press opens the window at this item. Plain text: the cards in the window
+  // are the selectable ones.
+  paneRow(t, s, it, kind, ask) {
+    const parts = it ? [it.head, it.lead].filter((x, n, a) => x && a.indexOf(x) === n) : [];
+    const text = (parts.join(" — ") || (it?.title ?? "")) || "보고 기록 없이 대기 표시만 있습니다";
+    const key = this.cardKey(s, it);
+    return h_flex().id(`row-${key}`).flex_none().h(30).px(8).gap(7).items_center().rounded(8).cursor_pointer()
+      .bg(ask ? t.blocked + "14" : t.raised).border(1).border_color(ask ? t.blocked + "55" : t.border)
+      .hover((x) => x.bg(t.hover)).on_click((_e, c) => { this.openCard(s, it); c.notify(); }).tooltip("누르면 이 보고를 창에서 엽니다")
+      .child(div().flex_none().w(74).truncate().text_size(12).font_semibold().text_color(tint(t, s.leader)).child(shortName(s.leader)))
+      .child(this.kindTag(t, it, kind ?? it?.kind, ask))
+      .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(text))
+      .child(div().flex_none().text_size(10.5).text_color(t.dim).child(it?.ts ? ago(it.ts) : ""));
+  }
+
+  // The small pane: ONE list, no category step. Open asks pinned on top, then the latest reports; the counts are small badges in the header.
   summary(cx) {
     const t = theme();
     const asks = this.asks();
-    const reports = this.reports(asks, Infinity);
-    const row = (id, label, n, color) => h_flex().id(id).h(34).px(10).gap(8).items_center().rounded(8).bg(t.raised).border(1).border_color(n > 0 && color ? color + "66" : t.border)
-      .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(label))
-      .child(div().flex_none().px(8).h(18).rounded(9).bg(n > 0 && color ? color + "26" : t.hover).flex().items_center().text_size(11.5).font_semibold().text_color(n > 0 && color ? color : t.muted).child(String(n)));
-    return v_flex().id("inbox-summary").size_full().min_h(0).bg(t.chrome).p(12).gap(8).cursor_pointer()
-      .on_click((_e, c) => this.openWindow()).tooltip("누르면 받은편지함 창을 엽니다")
-      .child(h_flex().items_center().justify_between()
+    const all = this.reports(asks, Infinity);
+    const rows = all.slice(0, MAX_ROWS);
+    const badge = (label, n, color) => h_flex().flex_none().h(18).px(7).gap(4).items_center().rounded(9).text_size(10.5)
+      .bg(n > 0 && color ? color + "26" : t.raised).text_color(n > 0 && color ? color : t.muted)
+      .child(label).child(div().font_semibold().child(String(n)));
+    const list = [];
+    asks.forEach((a) => list.push(this.paneRow(t, a.s, a.item, a.kind, true)));
+    rows.forEach((r) => list.push(this.paneRow(t, r.s, r.it, r.it.kind, false)));
+    if (!list.length) list.push(div().px(4).text_size(12).text_color(t.dim).child(this.data ? "받은 보고가 없습니다." : "불러오는 중…"));
+    if (all.length > rows.length) {
+      list.push(div().id("inbox-more").flex_none().px(8).h(26).flex().items_center().rounded(8).cursor_pointer().text_size(11.5).text_color(t.muted)
+        .hover((x) => x.bg(t.hover).text_color(t.foreground)).on_click((_e, c) => { try { setShared(FOCUS_KEY, ""); } catch {} this.openWindow(); c.notify(); })
+        .child(`나머지 ${all.length - rows.length}개는 창에서 열 수 있습니다`));
+    }
+    return v_flex().id("inbox-summary").size_full().min_h(0).bg(t.chrome).p(12).gap(8)
+      .child(h_flex().items_center().gap(7)
         .child(div().text_size(14).font_semibold().text_color(t.foreground).child("받은편지함"))
-        .child(div().text_size(11).text_color(t.dim).child(this.data ? ago(this.data.at) : "불러오는 중…")))
+        .child(badge("결정", asks.length, t.blocked))
+        .child(badge("보고", all.length, null))
+        .child(div().flex_1())
+        .child(div().flex_none().text_size(11).text_color(t.dim).child(this.data ? ago(this.data.at) : "불러오는 중…"))
+        .child(this.button(t, "inbox-open", "창 열기", (c) => { this.clearFocus(); this.openWindow(); c.notify(); }, { tip: "받은편지함 창을 엽니다" })))
       .when(Boolean(this.error), (el) => el.child(div().text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
-      .child(row("sum-asks", "결정 필요", asks.length, t.blocked))
-      .child(row("sum-reports", "결과 보고", reports.length, null))
       .when(Boolean(this.msg), (el) => el.child(div().text_size(11.5).text_color(this.msg.bad ? t.blocked : t.working).child(this.msg.text)))
-      .child(div().text_size(11).text_color(t.dim).child("눌러서 채팅 창 열기"));
+      .child(v_flex().id("inbox-rows").flex_1().min_h(0).gap(4).overflow_y_scrollbar().mode("always").children(list));
   }
 
   // The full chat view (pane or window): both lanes.
   full(cx) {
     const t = theme();
     const asks = this.asks();
-    const reports = this.reports(asks);
+    let reports = this.reports(asks);
     const blocks = [];
-    blocks.push(this.heading(t, "결정 필요", asks.length, true));
-    if (asks.length) asks.forEach((a) => blocks.push(this.askCard(t, a, cx)));
-    else blocks.push(div().flex_none().px(10).pb(8).text_size(12).text_color(t.dim).child(this.data ? "기다리는 결정·확인이 없습니다." : "불러오는 중…"));
-    blocks.push(this.heading(t, "결과 보고", reports.length, false));
-    if (reports.length) reports.forEach((r) => blocks.push(this.chatRow(t, r)));
-    else blocks.push(div().flex_none().px(10).text_size(12).text_color(t.dim).child(this.data ? "받은 보고가 없습니다." : ""));
+    // The item a pane row opened goes first (the view has no scroll-to): an ask is moved to the top of its lane, a report gets its own
+    // spot above the lanes. Its card was opened by the row; "모두 보기" drops the choice.
+    const f = this.focusKey();
+    const fa = f ? asks.findIndex((a) => this.cardKey(a.s, a.item) === f) : -1;
+    if (fa > 0) asks.unshift(...asks.splice(fa, 1));
+    const fr = f && fa < 0 ? reports.findIndex((r) => this.cardKey(r.s, r.it) === f) : -1;
+    if (fr >= 0) {
+      const [pick] = reports.splice(fr, 1);
+      blocks.push(h_flex().h(30).px(8).pt(4).items_center().gap(7).flex_none()
+        .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child("선택한 보고"))
+        .child(div().flex_1())
+        .child(this.button(t, "focus-clear", "모두 보기", (c) => { this.clearFocus(); c.notify(); })));
+      blocks.push(this.chatRow(t, pick));
+    }
+    const askFold = this.collapsed("ask", asks.length, fa >= 0);
+    blocks.push(this.heading(t, "결정 필요", asks.length, fr < 0, { id: "sec-ask", hot: true, folded: askFold, toggle: () => this.toggleSection("ask", asks.length, askFold) }));
+    if (!askFold) {
+      if (asks.length) asks.forEach((a) => blocks.push(this.askCard(t, a, cx)));
+      else blocks.push(div().flex_none().px(10).pb(8).text_size(12).text_color(t.dim).child(this.data ? "기다리는 결정·확인이 없습니다." : "불러오는 중…"));
+    }
+    const repFold = this.collapsed("rep", reports.length, false);
+    blocks.push(this.heading(t, "결과 보고", reports.length + (fr >= 0 ? 1 : 0), false, { id: "sec-rep", folded: repFold, toggle: () => this.toggleSection("rep", reports.length, repFold) }));
+    if (!repFold) {
+      if (reports.length) reports.forEach((r) => blocks.push(this.chatRow(t, r)));
+      else blocks.push(div().flex_none().px(10).text_size(12).text_color(t.dim).child(this.data ? "받은 보고가 없습니다." : ""));
+    }
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .on_size_change((size, c) => { const x = size.width < 360; if (x !== this.compact) { this.compact = x; c.notify(); } })
       .child(h_flex().h(38).px(this.compact ? 10 : 14).flex_none().items_center().justify_between()
@@ -414,7 +517,7 @@ export default class Inbox extends View {
         .child(h_flex().gap(8).items_center()
           .child(div().text_size(11).text_color(t.dim).child(this.data ? ago(this.data.at) : ""))
           .when(this.windowed, (el) => el.child(div().id("inbox-close").p(4).rounded(5).text_color(t.dim).cursor_pointer().hover((x) => x.bg(t.hover).text_color(t.foreground))
-            .on_mouse_down("left", stop).on_click((_e, c) => { try { closeOverlay(safeProps().overlay); } catch {} c.notify(); }).tooltip("닫기")
+            .on_mouse_down("left", stop).on_click((_e, c) => { this.clearFocus(); try { closeOverlay(safeProps().overlay); } catch {} c.notify(); }).tooltip("닫기")
             .child(svg("mods/pane/close.svg").size(13))))))
       .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
       .when(Boolean(this.msg), (el) => el.child(div().id("inbox-msg").px(14).pb(6).text_size(11.5).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
