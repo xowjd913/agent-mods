@@ -328,8 +328,8 @@ Windows는 `.\agent-mods\herdr\install.ps1 -Only usage-status`입니다.
   - `schedules`: `tabs-mine`
 - 남은 모드가 쓰는 모드는 지우지 않습니다.
   - 예: `work`가 설치돼 있으면 `--remove wt-menu`는 아무것도 지우지 않고, 함께 지울 이름을 알려 줍니다.
-- `--remove`는 모드 폴더만 지웁니다.
-  - 예약 기록, PRs `옆에 열기` 기록, 캐시는 남습니다([데이터가 저장되는 곳](#데이터가-저장되는-곳)).
+- `--remove`(Windows는 `-Remove`)는 고른 모드 폴더를 지우고, 그 모드가 바꾼 레이아웃 블록을 되돌립니다.
+  - 모드 폴더 밖의 예약 기록, PRs `옆에 열기` 기록, 캐시는 남습니다([데이터가 저장되는 곳](#데이터가-저장되는-곳)).
 
 ---
 
@@ -406,7 +406,7 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
    - `usage-status`: `workspace-status`를 `usage-status`로 바꿉니다.
    - `leader-tabs`: 칸 머리줄 `pane`을 `leader-tabs`로 바꿉니다.
 4. **기록 남기기**: 단계마다 모드 폴더 안에 기록 파일을 남깁니다.
-   - 예: `.tabs-swapped`, `.work-board-added`, `.board-added`, `.agents-swapped`, `.status-swapped`, `.header-swapped`
+   - 예: `.tabs-swapped`, `.work-board-added`, `.pr-board-added`, `.board-added`, `.agents-swapped`, `.status-swapped`, `.header-swapped`
    - 다음 설치는 기록이 있는 단계를 건너뛰므로, 사용자가 되돌린 블록은 그대로 둡니다.
 
 같은 이름이지만 이 설치기의 모드를 쓰지 않는 `dashboard` 레이아웃이 이미 있으면, 그 레이아웃은 건드리지 않습니다.

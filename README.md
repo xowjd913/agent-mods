@@ -85,6 +85,7 @@ curl -fsSL https://raw.githubusercontent.com/xowjd913/agent-mods/main/herdr/inst
   - 설치돼 있는 모드만 갱신합니다.
   - 직접 고친 레이아웃은 덮어쓰지 않습니다.
 - **모드 하나 빼기**: 위의 `--remove`를 씁니다.
+  - 모드 폴더를 지우고, 그 모드가 바꾼 레이아웃 블록을 되돌립니다.
 - **모두 지우기**: [제거 안내](herdr/README.md#제거)대로 `dashboard` 레이아웃과 설치기가 표시한 모드 폴더를 지웁니다.
 
 자세한 요구 사항, 동작 방식, 데이터 저장 위치는 [herdr/README.md](herdr/README.md)에 있습니다.
