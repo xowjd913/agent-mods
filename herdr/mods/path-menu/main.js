@@ -3,32 +3,8 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { theme, exec, window, props, closeOverlay } from "herdr";
-
-const ps = (s) => `'${String(s).replace(/'/g, "''")}'`;
-const platform = () => window()?.platform;
-
-// A folder opens itself; a file opens its folder with the file selected.
-export function openFolder(path, isDir) {
-  const p = platform();
-  if (p === "macos") return exec("open", isDir ? [path] : ["-R", path]);
-  if (p === "windows") return exec("powershell.exe", ["-NoProfile", "-Command", `Start-Process explorer.exe -ArgumentList ${ps(isDir ? `"${path}"` : `/select,"${path}"`)}`]);
-  return exec("sh", ["-c", 'xdg-open "$1"', "sh", isDir ? path : path.replace(/\/[^/]*$/, "") || "/"]);
-}
-
-export function openFile(path) {
-  const p = platform();
-  if (p === "macos") return exec("open", [path]);
-  if (p === "windows") return exec("powershell.exe", ["-NoProfile", "-Command", `Invoke-Item -LiteralPath ${ps(path)}`]);
-  return exec("xdg-open", [path]);
-}
-
-export function copyText(text) {
-  const p = platform();
-  if (p === "macos") return exec("sh", ["-c", 'printf %s "$1" | pbcopy', "sh", text]);
-  if (p === "windows") return exec("powershell.exe", ["-NoProfile", "-Command", `Set-Clipboard -Value ${ps(text)}`]);
-  return exec("sh", ["-c", 'printf %s "$1" | { xclip -selection clipboard 2>/dev/null || wl-copy; }', "sh", text]);
-}
+import { theme, props, closeOverlay } from "herdr";
+import { openFolder, openFile, copyText } from "./os.js";
 
 export default class PathMenu extends View {
   render() {
