@@ -29,12 +29,13 @@ export const MAX_ROWS = 4;
 
 const reaches = (line, cols, margin) => cellWidth(line.trimEnd()) >= cols - margin;
 
-// Ways to extend `raw` with the rows around each place it appears: [{ before, after }], each a string
-// to put in front of / behind raw. Both empty (raw alone) is left out. Order: shortest join first.
+// Ways to extend `raw` at each place it appears on screen, one list per place (top to bottom):
+// [[{ before, after }, ...], ...], each a string to put in front of / behind raw. Both empty (raw alone)
+// is left out, so a place where raw isn't cut by the edge gets []. Each list: shortest join first.
+// Places stay apart: the click doesn't say which one was clicked, so the caller must not mix them.
 export function joinCandidates(lines, raw, cols, { margin = EDGE_MARGIN, maxRows = MAX_ROWS } = {}) {
-  const out = [];
-  const seen = new Set();
-  if (!raw || !(cols > 0)) return out;
+  const places = [];
+  if (!raw || !(cols > 0)) return places;
   for (let i = 0; i < lines.length; i++) {
     for (let idx = lines[i].indexOf(raw); idx !== -1; idx = lines[i].indexOf(raw, idx + 1)) {
       const afters = [""];
@@ -62,18 +63,14 @@ export function joinCandidates(lines, raw, cols, { margin = EDGE_MARGIN, maxRows
           if (m[1].trim() !== "") break;
         }
       }
+      const joins = [];
       for (const before of befores) {
-        for (const after of afters) {
-          const key = `${before}\0${after}`;
-          if ((before || after) && !seen.has(key)) {
-            seen.add(key);
-            out.push({ before, after });
-          }
-        }
+        for (const after of afters) if (before || after) joins.push({ before, after });
       }
+      places.push(joins.sort((a, b) => a.before.length + a.after.length - (b.before.length + b.after.length)));
     }
   }
-  return out.sort((a, b) => a.before.length + a.after.length - (b.before.length + b.after.length));
+  return places;
 }
 
 // Tidy the outer ends of a joined path: quotes and brackets around it, sentence punctuation and a
@@ -91,11 +88,11 @@ export function withoutParticle(text) {
   return s && s !== text ? s : null;
 }
 
-// At most this many guesses go to the existence check (one command for all of them).
+// At most this many guesses go to the existence check (one command for all of them), per place and in all.
 export const MAX_GUESSES = 16;
 
-// Absolute paths the clicked piece may belong to, longest first, without duplicates.
-// `cwd` resolves relative text; `home` expands "~/"; `windows` switches to drive letters and "\".
+// Absolute paths the clicked piece may belong to, one list per place on screen, each longest first.
+// `cwd` resolves relative text; `home` expands "~/"; `windows` switches to drive letters and "\\".
 export function joinedPaths(lines, raw, cols, { cwd, home, windows = false, margin, maxRows } = {}) {
   const abs = (t) => {
     if (windows) {
@@ -105,13 +102,29 @@ export function joinedPaths(lines, raw, cols, { cwd, home, windows = false, marg
     if (!cwd || t.startsWith("~")) return null;
     return cwd.replace(/[\\/]+$/, "") + (windows ? "\\" : "/") + t.replace(/^\.[\\/]/, "");
   };
-  const out = new Set();
-  for (const { before, after } of joinCandidates(lines, raw, cols, { margin, maxRows })) {
-    const text = trimJoined(before + raw + after, { start: before !== "", end: true });
-    for (const t of [text, after ? withoutParticle(text) : null]) {
-      const p = t && abs(t);
-      if (p) out.add(p);
+  return joinCandidates(lines, raw, cols, { margin, maxRows }).map((joins) => {
+    const out = new Set();
+    for (const { before, after } of joins) {
+      const text = trimJoined(before + raw + after, { start: before !== "", end: true });
+      for (const t of [text, after ? withoutParticle(text) : null]) {
+        const p = t && abs(t);
+        if (p) out.add(p);
+      }
     }
+    return [...out].sort((a, b) => b.length - a.length).slice(0, MAX_GUESSES);
+  });
+}
+
+// The joined path to open, given each place's guesses and what the check found (path -> kind):
+// each place takes its longest existing guess. Only when every place has one and they all agree is the
+// answer sure; a place with none means raw also stands alone there, so the click may have meant raw itself.
+// null then, and the caller keeps link.path.
+export function pickJoined(places, kinds) {
+  let pick = null;
+  for (const guesses of places) {
+    const found = guesses.find((p) => (kinds.get(p) ?? "missing") !== "missing");
+    if (!found || (pick && pick !== found)) return null;
+    pick = found;
   }
-  return [...out].sort((a, b) => b.length - a.length).slice(0, MAX_GUESSES);
+  return pick && { path: pick, kind: kinds.get(pick) };
 }
