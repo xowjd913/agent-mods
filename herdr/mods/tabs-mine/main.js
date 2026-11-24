@@ -171,6 +171,11 @@ export default class Tabs extends View {
   // small events per gesture: a short swipe or one smoothed notch (about
   // 25 px) switches one tab, a longer swipe keeps going a tab per 60 px, at
   // most one every 100 ms so each shows.
+  // 답을 기다리는 리더 수: 대기 라벨(decision|verify)이 붙은 lead-* 터미널. 받은편지함 칸이 닫혀 있어도 터미널 라벨만 보므로 늘 맞다.
+  inboxWaiting() {
+    return (terminals() ?? []).filter((t) => /^lead-/.test(String(t.name ?? "")) && ["decision", "verify"].includes(String(t.labels?.wait ?? "").trim().toLowerCase())).length;
+  }
+
   wheel(e) {
     if (e.delta_lines) {
       if (e.delta_lines.y) run(e.delta_lines.y > 0 ? "tab.prev" : "tab.next");
@@ -290,7 +295,7 @@ export default class Tabs extends View {
       .when(enabled.includes("work-board"), el => el.child(panelButton("work-board", "Work", "mods/workspace-chrome/layers.svg")))
       .when(enabled.includes("pr-board"), el => el.child(panelButton("pr-board", "PRs", "mods/workspace-chrome/git-compare.svg", this.attention)))
       .when(enabled.includes("schedules-board"), el => el.child(panelButton("schedules-board", "예약", "mods/workspace-chrome/clock.svg")))
-      .when(enabled.includes("inbox-board"), el => el.child(panelButton("inbox-board", "받은편지함", "mods/workspace-chrome/archive.svg", Number(shared("inbox.waiting")) || 0)))
+      .when(enabled.includes("inbox-board"), el => el.child(panelButton("inbox-board", "받은편지함", "mods/workspace-chrome/archive.svg", this.inboxWaiting())))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/tabs/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));
