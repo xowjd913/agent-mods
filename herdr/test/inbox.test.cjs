@@ -596,3 +596,29 @@ test("chat 블록: main.js가 inbox.cjs와 한 글자도 다르지 않은 같은
   };
   assert.equal(block("../mods/inbox/main.js"), block("../mods/inbox/inbox.cjs"));
 });
+
+test("parseMention: 글 가운데 @here는 빠지고 남는 공백·문장부호를 정리한다, 모르는 @lead는 글에 그대로 남는다", () => {
+  const known = ["lead-a"];
+  assert.equal(I.parseMention("확인해 줘 @here 부탁해", known).text, "확인해 줘 부탁해");
+  assert.equal(I.parseMention("확인해 줘 @here, 부탁해", known).text, "확인해 줘, 부탁해");
+  assert.equal(I.parseMention("@here, 부탁해", known).text, "부탁해");
+  const u = I.parseMention("@lead-zzz 이거 해줘", known);
+  assert.deepEqual([u.text, u.to, u.empty], ["@lead-zzz 이거 해줘", [], false]);
+});
+
+test("채팅 줄 따라가기: 열 때와 새 줄이 올 때만 맨 아래로, 위로 올려 읽는 중이면 건드리지 않는다", () => {
+  const a = [{ ms: 1, me: true, text: "안녕" }];
+  const b = [...a, { ms: 2, me: false, text: "네" }];
+  assert.equal(I.chatKey([]), "");
+  assert.notEqual(I.chatKey(a), I.chatKey(b));
+  assert.equal(I.chatFollow(null, I.chatKey(a), 0), true); // 창을 막 열었다
+  assert.equal(I.chatFollow(I.chatKey(a), I.chatKey(a), 0), false); // 같은 줄: 그대로
+  assert.equal(I.chatFollow(I.chatKey(a), I.chatKey(b), 0), true); // 새 줄
+  assert.equal(I.chatFollow(I.chatKey(a), I.chatKey(b), 120), false); // 위로 올려 읽는 중
+  assert.equal(I.chatFollow(null, "", 0), false); // 줄이 없다
+  let up = 0;
+  up = I.chatWheel(up, 80); assert.equal(up, 80);
+  up = I.chatWheel(up, -200); assert.equal(up, 0); // 맨 아래로 돌아오면 다시 따라간다
+  assert.equal(I.chatWheel(0, 99999), 4000);
+  assert.equal(I.chatWheel(5, undefined), 5);
+});

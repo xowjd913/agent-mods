@@ -365,6 +365,7 @@ function answerLine(kind, leader, text, link) {
 const MENTION_END = "(?=$|[\\s.,!?:;)])";
 const MENTION = new RegExp(`(^|\\s)@(here|lead-[A-Za-z0-9_-]+)${MENTION_END}`, "g");
 const HERE = new RegExp(`(^|\\s)@here${MENTION_END}`, "g");
+const HERE_PUNCT = /(^|\s)@here(?=[.,!?:;)])/g; // "@here" before punctuation takes its leading space with it: "hi @here, ok" -> "hi, ok"
 // The box text with each mention chip written out as its text ("@lead-x"), whether or not the chip's range already holds that text.
 function composeChat(content) {
   let text = String(content?.text ?? "");
@@ -382,7 +383,8 @@ function parseMention(raw, known = []) {
     else if (known.includes(name)) { if (!to.includes(name)) to.push(name); } else return m;
     return pre;
   }).trim() === "";
-  return { text: flat.replace(HERE, "$1").replace(/\s+/g, " ").trim(), to, here, empty };
+  const text = flat.replace(HERE_PUNCT, "").replace(HERE, "$1").replace(/\s+/g, " ").replace(/^[\s,.:;!?)]+/, "").trim();
+  return { text, to, here, empty };
 }
 // The "@query" being typed right before `cursor` (offsets into the box text), or null. Not inside a chip, not in the middle of a word.
 function mentionQuery(text, cursor, tokens = []) {
@@ -418,8 +420,13 @@ function chatTarget(terms, to = []) {
   const best = list.filter(isPo).map((p, i) => ({ p, n: count(p), i })).sort((a, b) => b.n - a.n || a.i - b.i)[0];
   return best ? { po: best.p.address } : { po: null, why: "none" };
 }
+// Follow-the-newest rule of the chat lines: scroll to the bottom when the window opens (no key seen yet) or a new line arrived, but
+// not while the person has scrolled up to read. `up` is how far (px) the wheel has moved up from the bottom.
+const chatKey = (lines) => { const l = (lines ?? [])[(lines ?? []).length - 1]; return l ? `${lines.length}|${l.ms}|${l.me ? 1 : 0}|${l.text}` : ""; };
+const chatWheel = (up, dy) => Math.max(0, Math.min(4000, (Number(up) || 0) + (Number(dy) || 0)));
+const chatFollow = (seen, key, up) => key !== "" && key !== seen && (Number(up) || 0) <= 4;
 // chat:end
 
-module.exports = { composeChat, parseMention, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { composeChat, parseMention, chatKey, chatWheel, chatFollow, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) process.stdout.write(JSON.stringify(collect()));

@@ -80,6 +80,7 @@ function answerLine(kind, leader, text, link) {
 const MENTION_END = "(?=$|[\\s.,!?:;)])";
 const MENTION = new RegExp(`(^|\\s)@(here|lead-[A-Za-z0-9_-]+)${MENTION_END}`, "g");
 const HERE = new RegExp(`(^|\\s)@here${MENTION_END}`, "g");
+const HERE_PUNCT = /(^|\s)@here(?=[.,!?:;)])/g; // "@here" before punctuation takes its leading space with it: "hi @here, ok" -> "hi, ok"
 // The box text with each mention chip written out as its text ("@lead-x"), whether or not the chip's range already holds that text.
 function composeChat(content) {
   let text = String(content?.text ?? "");
@@ -97,7 +98,8 @@ function parseMention(raw, known = []) {
     else if (known.includes(name)) { if (!to.includes(name)) to.push(name); } else return m;
     return pre;
   }).trim() === "";
-  return { text: flat.replace(HERE, "$1").replace(/\s+/g, " ").trim(), to, here, empty };
+  const text = flat.replace(HERE_PUNCT, "").replace(HERE, "$1").replace(/\s+/g, " ").replace(/^[\s,.:;!?)]+/, "").trim();
+  return { text, to, here, empty };
 }
 // The "@query" being typed right before `cursor` (offsets into the box text), or null. Not inside a chip, not in the middle of a word.
 function mentionQuery(text, cursor, tokens = []) {
@@ -133,6 +135,11 @@ function chatTarget(terms, to = []) {
   const best = list.filter(isPo).map((p, i) => ({ p, n: count(p), i })).sort((a, b) => b.n - a.n || a.i - b.i)[0];
   return best ? { po: best.p.address } : { po: null, why: "none" };
 }
+// Follow-the-newest rule of the chat lines: scroll to the bottom when the window opens (no key seen yet) or a new line arrived, but
+// not while the person has scrolled up to read. `up` is how far (px) the wheel has moved up from the bottom.
+const chatKey = (lines) => { const l = (lines ?? [])[(lines ?? []).length - 1]; return l ? `${lines.length}|${l.ms}|${l.me ? 1 : 0}|${l.text}` : ""; };
+const chatWheel = (up, dy) => Math.max(0, Math.min(4000, (Number(up) || 0) + (Number(dy) || 0)));
+const chatFollow = (seen, key, up) => key !== "" && key !== seen && (Number(up) || 0) <= 4;
 // chat:end
 
 // Opens an http(s) link with the app's own open_url when a context is at hand, else through the system opener.
@@ -202,7 +209,12 @@ export default class Inbox extends View {
     this.chat = InputState.new({ value: "", placeholder: "PO에게 말하기 — @로 리더를 부르고 Enter로 PO 입력칸에 넣기" });
     this.menu = null; // the open "@" menu: {start, end, query, items, sel}
     this.chat.on("change", (_e, c) => this.syncMenu(c));
-    this.chat.on("submit", (_e, c) => { if (this.menu) this.pickMenu(this.menu.sel, c); else this.sendChat(c); });
+    this.chat.on("submit", (_e, c) => { if (this.menu) this.pickMenu(this.menu.sel, c); else if (Date.now() - this.pickedAt > 250) this.sendChat(c); });
+    this.pickedAt = 0; // a menu pick just now: the Enter that made it must not also send
+    this.chatScroll = null; // the chat lines' scroll handle
+    try { this.chatScroll = ScrollHandle.new(); } catch {}
+    this.chatSeen = null; // chatKey of the last drawn lines
+    this.chatUp = 0; // px the person has wheeled up from the bottom of the chat lines
     // The scroll position of both lists is held by handles the view owns (not only by the element id), and every press that changes the
     // height of a card or a section asks for that spot to stay in view (see reveal).
     this.scroll = null; // the window's list
@@ -429,6 +441,7 @@ export default class Inbox extends View {
     const range = { start: m.start, end: m.end };
     const token = { id: item.id, text: `@${item.id} `, label: `@${item.label}` };
     this.menu = null;
+    this.pickedAt = Date.now();
     try { this.chat.replace_range_with_token(range, token); }
     catch {
       try {
@@ -441,13 +454,17 @@ export default class Inbox extends View {
     c.notify();
   }
 
+  // Keys the open menu handles stop here, so they do not also move the cursor, the focus or close the window.
   menuKey(e, c) {
     const m = this.menu;
     if (!m) return;
     const key = String(e?.key ?? "").toLowerCase().replace(/^arrow/, "");
-    if (key === "down" || key === "up") { m.sel = (m.sel + (key === "down" ? 1 : m.items.length - 1)) % m.items.length; c.notify(); }
-    else if (key === "escape") { this.menu = null; c.notify(); }
-    else if (key === "tab") this.pickMenu(m.sel, c);
+    if (key === "down" || key === "up") m.sel = (m.sel + (key === "down" ? 1 : m.items.length - 1)) % m.items.length;
+    else if (key === "escape") this.menu = null;
+    else if (/^(tab|enter)$/.test(key)) this.pickMenu(m.sel, c);
+    else return;
+    try { c.stop_propagation(); } catch {}
+    c.notify();
   }
 
   chatLines() {
@@ -493,6 +510,9 @@ export default class Inbox extends View {
   // The chat footer: the last few lines (the person's and the PO's), the "@" menu, the input with mention chips.
   chatBox(t) {
     const lines = this.chatLines();
+    const key = chatKey(lines);
+    if (chatFollow(this.chatSeen, key, this.chatUp)) { try { this.chatScroll?.scroll_to_item(lines.length - 1); } catch {} }
+    this.chatSeen = key;
     const bubble = (x, i) => {
       const who = x.me ? null : h_flex().gap(5).items_center()
         .child(div().text_size(10.5).font_semibold().text_color(t.working).child("PO"))
@@ -513,7 +533,9 @@ export default class Inbox extends View {
       .child(ctx.token.label ?? ctx.token.text.trim());
     return v_flex().flex_none().px(10).pb(10).pt(6).gap(6).border_t(1).border_color(t.border)
       .on_key_down((e, c) => this.menuKey(e, c))
-      .when(lines.length > 0, (el) => el.child(v_flex().id("chat-lines").max_h(190).gap(5).overflow_y_scrollbar().children(lines.map(bubble))))
+      .when(lines.length > 0, (el) => el.child(v_flex().id("chat-lines").max_h(190).gap(5).overflow_y_scrollbar()
+        .on_scroll_wheel((e) => { this.chatUp = chatWheel(this.chatUp, e?.delta?.y); }) // wheel up = positive y
+        .when(Boolean(this.chatScroll), (x) => x.track_scroll(this.chatScroll)).children(lines.map(bubble))))
       .when(Boolean(menu), (el) => el.child(menu))
       .child(h_flex().gap(6).items_center()
         .child(div().flex_1().min_w(0).on_mouse_down("left", stop)
