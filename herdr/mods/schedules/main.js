@@ -112,6 +112,11 @@ function summarize(hist, now = Date.now()) {
   return out;
 }
 const base = (p) => String(p ?? "").split(/[\\/]/).filter(Boolean).pop() ?? "";
+// 드롭다운 힌트는 경로 앞이 아니라 상위 폴더 끝 두 칸(…/disk/projects)만 보인다. 앞부분은 거의 같아서 잘리면 구분이 안 된다.
+const parentHint = (p) => {
+  const parts = p.split(/[\\/]+/).filter(Boolean).slice(0, -1);
+  return parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : `/${parts.join("/")}`;
+};
 const graceLabel = (m) => (m === 0 ? "유예 없음" : m % 60 === 0 ? `${m / 60}시간` : `${m}분`);
 const secLabel = (s) => (s % 60 === 0 ? `${s / 60}분` : `${s}초`);
 const hour12Of = (h) => h % 12 || 12;
@@ -148,6 +153,11 @@ export default class Schedules extends View {
     this.screen = "list"; // list | history
     this.items = null;
     this.confirmDelete = null;
+    this.repo = null; // 기록 저장소 상태({repo, name, emailOk, error}). 없으면 아직 못 읽음
+    this.repoCustom = false; // "다른 폴더…"로 직접 쓰는 중
+    this.repoInput = null;
+    this.syncBusy = false;
+    this.syncAsk = null; // 사용자 확인이 필요한 기록·불러오기: {kind: "public"|"import", ...}
     this.histId = null;
     this.hist = [];
     this.busy = false;
@@ -164,6 +174,8 @@ export default class Schedules extends View {
     if (checking()) return;
     if (this.dialog) this.initDialog(p, cx);
     else {
+      this.repoInput = this.input("", "/path/to/notes-repo");
+      this.loadRepo(cx);
       this.reload(cx);
       this.rev = shared("schedules.done")?.at ?? null;
       cx.timer.every(8000, (cx) => this.reload(cx));
@@ -240,6 +252,70 @@ export default class Schedules extends View {
     if (!error) cx.timer.after(TOAST_MS, (cx) => { if (this.msg && this.msg.id === id) { this.msg = null; cx.notify(); } });
   }
   say(cx, text, error = false) { this.setMsg(cx, text, error); cx.notify(); }
+
+  // ---- 패널: 문서 저장소에 기록·불러오기
+  loadRepo(cx) {
+    cx.spawn(async (cx) => { const d = await helper(["repo"]); this.repo = d.ok ? d : { repo: null, error: d.error }; cx.notify(); });
+  }
+
+  setRepo(dir, cx) {
+    if (!dir) return;
+    cx.spawn(async (cx) => {
+      const d = await helper(["repo-set", dir]);
+      if (d.ok) { this.repo = d; this.repoCustom = false; this.syncAsk = null; this.say(cx, `기록 저장소를 "${d.name}"(으)로 정했습니다.${d.emailOk ? "" : " 이 저장소의 커밋 이메일이 noreply가 아니라 기록하려면 먼저 바꿔야 합니다."}`, !d.emailOk); }
+      else this.say(cx, d.error || "저장소를 정하지 못했습니다.", true);
+    });
+  }
+
+  // 기록 저장소 후보: 열려 있는 작업 공간 폴더와 예약에 쓰는 폴더(모두 이 PC에 실제로 있는 폴더).
+  knownFolders() {
+    const out = [];
+    for (const s of spaces() ?? []) if (!s.machine && s.folder) out.push(s.folder);
+    for (const a of this.items ?? []) if (a.folder?.path) out.push(a.folder.path);
+    return [...new Set(out)];
+  }
+
+  repoItems() {
+    const list = this.knownFolders();
+    if (this.repo?.repo && !list.includes(this.repo.repo)) list.unshift(this.repo.repo);
+    return [...list.map((p) => ({ value: p, label: base(p) || p, hint: parentHint(p) })), { sep: true }, { value: CUSTOM, label: "다른 폴더…" }];
+  }
+
+  // 한 개(id) 또는 전부(--all)를 기록한다. 공개·확인 못 한 저장소는 한 번 더 묻고, push가 막히면 이유를 그대로 보여 준다.
+  record(args, cx, confirmPublic = false) {
+    if (this.syncBusy) return;
+    this.syncBusy = true;
+    this.syncAsk = null;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      const d = await helper(["record", ...args, ...(confirmPublic ? ["--confirm-public"] : [])], 180000);
+      this.syncBusy = false;
+      if (d.needsConfirm) this.syncAsk = { kind: "public", args, text: d.error };
+      else if (d.ok) this.setMsg(cx, d.changed === false ? "저장소의 기록과 같아서 바뀐 것이 없습니다." : `${d.count}개를 저장소에 기록하고 push했습니다.`);
+      else this.setMsg(cx, d.error || "기록하지 못했습니다.", true);
+      cx.notify();
+    });
+  }
+
+  // 새 PC 복원: 아직 없는 예약만 꺼진 채 추가한다. 사전 확인 명령이 있으면 명령을 보여 주고 확인을 받는다(가져올 때 실행하지 않는다).
+  importRepo(cx, ack = false) {
+    if (this.syncBusy) return;
+    this.syncBusy = true;
+    this.syncAsk = null;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      const d = await helper(["import", "--folders", toBase64(JSON.stringify(this.knownFolders())), ...(ack ? ["--ack"] : [])], 60000);
+      this.syncBusy = false;
+      if (d.needsConfirm) this.syncAsk = { kind: "import", commands: d.needsConfirm };
+      else if (d.ok) {
+        const extra = [d.unlinked?.length ? `작업 폴더를 다시 골라야 켤 수 있습니다: ${d.unlinked.join(", ")}` : "", d.skipped?.length ? `건너뜀 ${d.skipped.length}개(${d.skipped[0].reason})` : ""].filter(Boolean).join(" · ");
+        this.setMsg(cx, d.added ? `${d.added}개를 꺼진 상태로 불러왔습니다.${extra ? ` ${extra}` : ""}` : `새로 불러올 예약이 없습니다(이미 ${d.existing}개 있음).${extra ? ` ${extra}` : ""}`, Boolean(d.skipped?.length) && !d.added);
+        this.busy = false;
+        this.reload(cx);
+      } else this.setMsg(cx, d.error || "불러오지 못했습니다.", true);
+      cx.notify();
+    });
+  }
 
   runNow(a, cx) {
     cx.spawn(async (cx) => {
@@ -405,11 +481,6 @@ export default class Schedules extends View {
     const f = this.f;
     const seen = new Set();
     const items = [];
-    // 힌트는 경로 앞이 아니라 상위 폴더 끝 두 칸(…/disk/projects)만 보인다. 앞부분은 거의 같아서 잘리면 구분이 안 된다.
-    const parentHint = (p) => {
-      const parts = p.split(/[\\/]+/).filter(Boolean).slice(0, -1);
-      return parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : `/${parts.join("/")}`;
-    };
     const add = (path, label) => { if (path && !seen.has(path)) { seen.add(path); items.push({ value: path, label: label || base(path) || path, hint: parentHint(path) }); } };
     for (const s of spaces() ?? []) if (!s.machine) add(s.folder, base(s.folder) || s.name);
     for (const p of this.opts?.folders ?? []) add(p);
@@ -723,10 +794,11 @@ export default class Schedules extends View {
       .on_click((_e, cx) => { this.dd = null; fn(cx); cx.notify(); }).child(label);
     const trigger = div().id(`${id}-btn`).flex_none().w(24).h(24).rounded(6).flex().items_center().justify_center().cursor_pointer()
       .text_size(15).text_color(open ? t.foreground : t.dim).when(open, (e) => e.bg(t.hover)).hover((s) => s.bg(t.hover).text_color(t.foreground)).child("⋯");
-    const content = v_flex().w(140).p(4).gap(1).rounded(8).border(1).border_color(t.border).bg(t.popover ?? t.raised).shadow_lg()
+    const content = v_flex().w(150).p(4).gap(1).rounded(8).border(1).border_color(t.border).bg(t.popover ?? t.raised).shadow_lg()
       .child(item("run", "지금 실행", (cx) => this.runNow(a, cx)))
       .child(item("edit", "편집", (cx) => this.openDialog(a, cx)))
       .child(item("hist", "기록", (cx) => this.openHistory(a, cx)))
+      .child(item("repo", "저장소에 기록", (cx) => this.record([a.id], cx)))
       .child(div().flex_none().h(1).my(3).bg(t.border))
       .child(item("del", "삭제", () => { this.confirmDelete = a.id; }, true));
     return Popover.new(`${id}-pop`).anchor("top_right").open(open)
@@ -738,7 +810,8 @@ export default class Schedules extends View {
     const last = a.last;
     const color = last ? t[STATUS_COLOR[last.status] ?? "dim"] ?? t.dim : t.dim;
     const confirming = this.confirmDelete === a.id;
-    const folder = `${a.folder.mode === "worktree" ? "새 워크트리 · " : ""}${base(a.folder.path)}`;
+    const unlinked = !a.folder.path;
+    const folder = unlinked ? `작업 폴더를 다시 고르세요(편집)${a.folder.hint?.name ? ` · 원래 ${a.folder.hint.name}` : ""}` : `${a.folder.mode === "worktree" ? "새 워크트리 · " : ""}${base(a.folder.path)}`;
     return v_flex().flex_none().px(12).py(9).gap(4).border_b(1).border_color(t.border)
       .child(h_flex().gap(8).items_center()
         .child(div().flex_none().size(8).rounded(4).bg(color))
@@ -749,7 +822,7 @@ export default class Schedules extends View {
       .child(div().pl(16).min_w(0).truncate().text_size(11.5).text_color(t.muted).child(a.summary))
       .child(h_flex().pl(16).gap(6).items_center().text_size(11).text_color(t.dim)
         .child(svg(ICON("folder")).size(11).flex_none())
-        .child(div().flex_1().min_w(0).truncate().child(folder)))
+        .child(div().flex_1().min_w(0).truncate().text_color(unlinked ? t.blocked : t.dim).child(folder)))
       .child(h_flex().pl(16).gap(8).items_center().text_size(11).text_color(t.dim)
         .child(div().flex_none().child(a.enabled ? `다음 ${when(a.nextRun)}` : "꺼져 있음"))
         .child(div().id(`last-${a.id}`).flex_1().min_w(0).truncate().text_color(color)
@@ -765,6 +838,33 @@ export default class Schedules extends View {
     return div().flex_none().px(12).pt(10).pb(4).text_size(11).font_semibold().text_color(color ?? t.dim).child(`${label} ${n}`);
   }
 
+  // 기록 저장소 칸: 저장소 고르기 + 모두 기록·불러오기 + 확인 줄.
+  syncBar(t) {
+    const ready = Boolean(this.repo?.repo);
+    const ask = this.syncAsk;
+    return v_flex().flex_none().mx(12).mb(8).p(8).gap(6).rounded(8).border(1).border_color(t.border)
+      .child(div().text_size(11.5).font_semibold().text_color(t.muted).child("기록 저장소"))
+      .child(this.dropdown(t, "sync-repo", { items: this.repoItems(), value: this.repoCustom ? CUSTOM : this.repo?.repo ?? "", placeholder: "git 저장소를 고르세요", menuW: 280,
+        onPick: (v, cx) => { this.dd = null; if (v === CUSTOM) { this.repoCustom = true; this.repoInput.set_value(this.repo?.repo ?? ""); } else { this.repoCustom = false; this.setRepo(v, cx); } cx.notify(); } }))
+      .when(this.repoCustom, (el) => el.child(h_flex().gap(6).items_center()
+        .child(div().flex_1().min_w(0).child(Input.new(this.repoInput).h(28).px(8).items_center().rounded(6).border(1).border_color(this.focusKey === this.repoInput ? t.accent : t.input).bg(t.background).text_size(12).text_color(t.foreground)))
+        .child(this.button(t, "sync-set", "정하기", (cx) => this.setRepo(this.repoInput.value().trim(), cx)))))
+      .when(!this.repoCustom && ready, (el) => el.child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(this.repo.repo)))
+      .when(Boolean(this.repo?.error) && !ready, (el) => el.child(this.note(t, this.repo.error, t.blocked)))
+      .when(ready && !this.repo.emailOk, (el) => el.child(this.note(t, "이 저장소의 커밋 이메일이 GitHub noreply 주소가 아니라 기록할 수 없습니다.", t.blocked)))
+      .when(!ready && !this.repo?.error, (el) => el.child(this.note(t, "저장소를 고르면 예약을 그 저장소의 herdr-schedules/에 기록할 수 있습니다. 비공개 저장소를 권장합니다.")))
+      .child(h_flex().gap(6).items_center().flex_wrap()
+        .child(this.button(t, "sync-all", "모두 기록", (cx) => this.record(["--all"], cx), { disabled: !ready || this.syncBusy || !(this.items ?? []).length }))
+        .child(this.button(t, "sync-import", "저장소에서 불러오기", (cx) => this.importRepo(cx), { disabled: !ready || this.syncBusy }))
+        .when(this.syncBusy, (el) => el.child(div().text_size(11).text_color(t.dim).child("처리 중…"))))
+      .when(Boolean(ask), (el) => el.child(v_flex().gap(5).pt(2)
+        .child(div().text_size(11.5).text_color(t.blocked).child(ask.kind === "public" ? `${ask.text} 그래도 기록할까요?` : "아래 사전 확인 명령이 들어 있습니다. 불러올 때 실행하지는 않지만, 켜면 이 PC에서 실행됩니다. 믿을 수 있는 명령인지 확인하세요."))
+        .when(ask.kind === "import", (e) => e.children(ask.commands.map((c) => div().flex_none().px(6).py(3).rounded(5).bg(t.raised).text_size(11).text_color(t.foreground).child(`${c.name}: ${c.command}`))))
+        .child(h_flex().gap(6).items_center()
+          .child(this.button(t, "sync-ask-yes", ask.kind === "public" ? "기록" : "불러오기", (cx) => (ask.kind === "public" ? this.record(ask.args, cx, true) : this.importRepo(cx, true)), { danger: true }))
+          .child(this.button(t, "sync-ask-no", "취소", (cx) => { this.syncAsk = null; cx.notify(); })))));
+  }
+
   listScreen(t) {
     const items = this.items;
     const attention = (items ?? []).filter((a) => a.last && ATTENTION_STATUS.has(a.last.status));
@@ -773,6 +873,7 @@ export default class Schedules extends View {
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .child(this.header(t, "예약", null, [this.button(t, "sc-new", "+ 새 예약", (cx) => this.openDialog(null, cx), { primary: true })]))
       .child(div().px(12).pb(6).flex_none().text_size(11).text_color(t.dim).child("Herdr 앱이 켜져 있을 때만 실행됩니다."))
+      .child(this.syncBar(t))
       .when(Boolean(this.banner(t)), (el) => el.child(this.banner(t)))
       .when(!items && !this.msg, (el) => el.child(div().px(12).text_size(12).text_color(t.dim).child("불러오는 중…")))
       .when(Boolean(items) && items.length === 0, (el) => el.child(div().px(12).py(8).text_size(12).text_color(t.dim).child("예약이 없습니다. 오른쪽 위 \"새 예약\"으로 만드세요.")))
