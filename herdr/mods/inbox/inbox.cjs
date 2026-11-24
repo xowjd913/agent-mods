@@ -272,9 +272,34 @@ function readTail(file) {
   } finally { fs.closeSync(fd); }
 }
 
+const PO_FILE = "po.jsonl"; // the PO's own lines to the person; not a leader's report file
+const MAX_PO = 100; // newest PO lines kept
+const MAX_PO_TEXT = 2000;
+
+// The PO's lines: {ts, kind:"say", text, to?} per line, oldest first. Lenient like parseLines: broken or unknown lines are skipped,
+// unknown fields are ignored. `to` is who the line answers (an hc name or "here"), "" when absent.
+function parsePoLines(text) {
+  const out = [];
+  for (const raw of String(text ?? "").split("\n")) {
+    let o;
+    try { o = JSON.parse(raw); } catch { continue; }
+    if (!o || o.kind !== "say" || typeof o.text !== "string" || !o.text.trim()) continue;
+    const ms = Date.parse(o.ts);
+    if (!(ms > 0)) continue;
+    out.push({ ts: new Date(ms).toISOString(), ms, text: o.text.trim().slice(0, MAX_PO_TEXT), to: typeof o.to === "string" ? o.to.trim() : "" });
+  }
+  out.sort((a, b) => a.ms - b.ms);
+  return out.slice(-MAX_PO);
+}
+
+// A missing, unreadable or empty file is no replies, not an error.
+function readPo(dir = inboxDir()) {
+  try { return parsePoLines(readTail(path.join(dir, PO_FILE))); } catch { return []; }
+}
+
 function collect(dir = inboxDir()) {
   let names = [];
-  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl")); } catch { return { at: new Date().toISOString(), leaders: [] }; }
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== PO_FILE); } catch { return { at: new Date().toISOString(), leaders: [], po: [] }; }
   const leaders = [];
   for (const n of names) {
     try {
@@ -283,7 +308,7 @@ function collect(dir = inboxDir()) {
     } catch {}
   }
   leaders.sort((a, b) => (b.last?.ms ?? 0) - (a.last?.ms ?? 0));
-  return { at: new Date().toISOString(), leaders };
+  return { at: new Date().toISOString(), leaders, po: readPo(dir) };
 }
 
 // Which terminal is a waiting leader: a terminal named lead-* with the wait label decision|verify; returns that kind or "".
@@ -334,6 +359,74 @@ function answerLine(kind, leader, text, link) {
   return `Panel answer (${kind}) for ${leader}: "${body}".${link ? ` Target: ${link}` : ""}`;
 }
 
-module.exports = { markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+// chat:begin
+// The chat box of the window: "@" mentions, the menu of live leaders and which PO a line goes to. Pure. The mods cannot require a
+// .cjs file, so this block is copied verbatim between the markers into inbox/main.js (a test keeps them identical).
+const MENTION_END = "(?=$|[\\s.,!?:;)])";
+const MENTION = new RegExp(`(^|\\s)@(here|lead-[A-Za-z0-9_-]+)${MENTION_END}`, "g");
+const HERE = new RegExp(`(^|\\s)@here${MENTION_END}`, "g");
+const HERE_PUNCT = /(^|\s)@here(?=[.,!?:;)])/g; // "@here" before punctuation takes its leading space with it: "hi @here, ok" -> "hi, ok"
+// The box text with each mention chip written out as its text ("@lead-x"), whether or not the chip's range already holds that text.
+function composeChat(content) {
+  let text = String(content?.text ?? "");
+  for (const s of [...(content?.tokens ?? [])].sort((a, b) => b.range.start - a.range.start)) text = text.slice(0, s.range.start) + String(s.token?.text ?? "") + text.slice(s.range.end);
+  return text;
+}
+// What goes to the PO: one line, "@here" dropped (it only means "to the PO"), and the live leaders (`known`, hc names) it names.
+// `empty` is true when nothing is left once the mentions are taken out, so a lone "@lead-x" is not sent.
+function parseMention(raw, known = []) {
+  const flat = String(raw ?? "").replace(/\s*\n\s*/g, " ").trim();
+  const to = [];
+  let here = false;
+  const empty = flat.replace(MENTION, (m, pre, name) => {
+    if (name === "here") here = true;
+    else if (known.includes(name)) { if (!to.includes(name)) to.push(name); } else return m;
+    return pre;
+  }).trim() === "";
+  const text = flat.replace(HERE_PUNCT, "").replace(HERE, "$1").replace(/\s+/g, " ").replace(/^[\s,.:;!?)]+/, "").trim();
+  return { text, to, here, empty };
+}
+// The "@query" being typed right before `cursor` (offsets into the box text), or null. Not inside a chip, not in the middle of a word.
+function mentionQuery(text, cursor, tokens = []) {
+  const before = String(text ?? "").slice(0, cursor);
+  const m = /(^|\s)@([^\s@]*)$/.exec(before);
+  if (!m) return null;
+  const start = before.length - m[2].length - 1;
+  if (tokens.some((t) => start >= t.range.start && start < t.range.end)) return null;
+  return { start, end: cursor, query: m[2] };
+}
+// The "@" menu: "@here" first, then the live leaders that have a PO (the same rule as findPo), by shown name. `query` filters by hc name
+// or shown name.
+function leaderMenu(terms, memo, query = "", limit = 8) {
+  const list = terms ?? [];
+  const q = String(query ?? "").trim().toLowerCase();
+  const leaders = list.filter((t) => /^lead-/.test(String(t?.name ?? "")) && findPo(list, t.name, t.address))
+    .map((t) => ({ id: t.name, label: leaderName(t.name, t, memo), sub: t.name }))
+    .filter((x, i, a) => a.findIndex((y) => y.id === x.id) === i)
+    .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0)); // code-unit order: the same on every platform
+  return [{ id: "here", label: "here", sub: "" }, ...leaders].filter((x) => !q || x.id.toLowerCase().includes(q) || x.label.toLowerCase().includes(q)).slice(0, limit);
+}
+// The PO a line is pasted into: the PO of the leaders it names (they must share one), else the PO with the most live leaders.
+// {po} or {po:null, why:"orphan"|"many"|"none"}.
+function chatTarget(terms, to = []) {
+  const list = terms ?? [];
+  if (to.length) {
+    const pos = [...new Set(to.map((n) => findPo(list, n)))];
+    if (pos.includes(null)) return { po: null, why: "orphan" };
+    return pos.length > 1 ? { po: null, why: "many" } : { po: pos[0] };
+  }
+  const isPo = (t) => String(t?.labels?.role ?? "").trim().toLowerCase() === "po";
+  const count = (po) => list.filter((t) => /^lead-/.test(String(t?.name ?? "")) && t.parent === po.address).length;
+  const best = list.filter(isPo).map((p, i) => ({ p, n: count(p), i })).sort((a, b) => b.n - a.n || a.i - b.i)[0];
+  return best ? { po: best.p.address } : { po: null, why: "none" };
+}
+// Follow-the-newest rule of the chat lines: scroll to the bottom when the window opens (no key seen yet) or a new line arrived, but
+// not while the person has scrolled up to read. `up` is how far (px) the wheel has moved up from the bottom.
+const chatKey = (lines) => { const l = (lines ?? [])[(lines ?? []).length - 1]; return l ? `${lines.length}|${l.ms}|${l.me ? 1 : 0}|${l.text}` : ""; };
+const chatWheel = (up, dy) => Math.max(0, Math.min(4000, (Number(up) || 0) + (Number(dy) || 0)));
+const chatFollow = (seen, key, up) => key !== "" && key !== seen && (Number(up) || 0) <= 4;
+// chat:end
+
+module.exports = { composeChat, parseMention, chatKey, chatWheel, chatFollow, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) process.stdout.write(JSON.stringify(collect()));
