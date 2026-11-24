@@ -84,7 +84,9 @@ sh herdr/install.sh --add gh-accounts
 
 ```sh
 gh-account space --json <폴더..>          # 폴더들의 저장소를 owner 별로 묶고 쓸 계정을 보여 줌
-gh-account assign acct-b <폴더..>         # 그 폴더들 저장소의 owner 마다 owner/* 규칙을 acct-b 로 (none 이면 지움)
+gh-account assign acct-b <폴더..> [--json]
+                                          # 그 폴더들 저장소의 owner 마다 owner/* 규칙을 acct-b 로 (none 이면 지움)
+                                          # 로그인된 계정과 같은 owner(개인 저장소일 수 있음)는 건너뛰고 알려 줌
 gh-account check [폴더 | -R owner/repo] [--test] [--json]
                                           # gh 명령·git push·커밋 신원이 쓸 계정. --test 는 그 계정으로 저장소 권한을 읽어 봄
 gh-account status --json                  # 설치 상태

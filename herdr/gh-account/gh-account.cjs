@@ -161,7 +161,8 @@ const SCAN_CHILDREN = 50;
 
 // 스페이스 폴더·터미널 폴더들의 github.com 원격을 owner 별로 묶는다.
 // 각 저장소에 지금 매핑에서 쓰는 계정을 붙이고, owner/* 규칙이 있으면 그 계정도 붙인다.
-function spaceOwners(ctx, dirs, map) {
+// logins(gh 에 로그인된 계정 이름들)에 owner 가 있으면 personal 로 표시한다. 그 계정의 개인 저장소일 수 있다.
+function spaceOwners(ctx, dirs, map, logins = []) {
   const repos = new Map();
   const add = (dir) => {
     let r = null;
@@ -195,7 +196,7 @@ function spaceOwners(ctx, dirs, map) {
     const key = r.owner.toLowerCase();
     if (!owners.has(key)) {
       const rule = map.rules.find((x) => x.match.toLowerCase() === `${key}/*`);
-      owners.set(key, { owner: r.owner, rule: rule ? rule.account : null, repos: [] });
+      owners.set(key, { owner: r.owner, personal: logins.some((l) => same(l, r.owner)), rule: rule ? rule.account : null, repos: [] });
     }
     const hit = matchAccount(map, r);
     owners.get(key).repos.push({ repo: `${r.owner}/${r.repo}`, dir: r.dir, account: hit ? hit.account : null, by: hit ? hit.by : null, match: hit ? hit.match : null });
@@ -205,15 +206,19 @@ function spaceOwners(ctx, dirs, map) {
 
 // 폴더들에서 찾은 owner 마다 owner/* 규칙을 그 계정으로 바꾼다. account 가 null 이면 그 owner/* 규칙을 지운다.
 // owner/repo 처럼 저장소 하나만 정한 규칙은 건드리지 않는다.
+// 로그인된 계정과 같은 owner(personal)를 다른 계정으로 묶지는 않는다. 개인 공개 저장소가 다른 계정으로 push 되지 않게 skipped 로 돌려준다.
 function assignOwners(map, owners, account) {
-  const changed = [];
+  const changed = [], skipped = [];
   for (const o of owners) {
     const pattern = `${o.owner}/*`;
-    if (account) { setRule(map, pattern, account); changed.push(pattern); }
+    if (account && o.personal && !same(o.owner, account)) skipped.push(pattern);
+    else if (account) { setRule(map, pattern, account); changed.push(pattern); }
     else if (unsetRule(map, pattern)) changed.push(pattern);
   }
-  return changed;
+  return { changed, skipped };
 }
+
+const loginNames = (ctx) => (ghAccounts(ctx) || []).map((a) => a.login);
 
 // gh 인자에서 대상 저장소: -R/--repo, GitHub URL, gh repo <명령> o/r, gh api repos/o/r, GH_REPO 순.
 function repoFromGhArgs(args, env = {}) {
@@ -795,9 +800,12 @@ function check(ctx, { repo, dir, test } = {}) {
   else if (!out.wrapperFirst) out.warn.push("gh 래퍼가 PATH 에서 진짜 gh 보다 뒤에 있어 터미널의 gh 명령은 매핑을 따르지 않습니다. git push 와 커밋 신원은 따릅니다.");
   if (hit && out.loggedIn === false) out.warn.push(`${hit.account} 계정이 gh 에 로그인돼 있지 않아 이 저장소의 gh·git push 는 실패합니다. 계정 추가로 로그인하세요.`);
   const ghAcct = out.gh.account;
+  // gh·git push·커밋 신원 중 하나라도 owner 와 다른 계정을 쓰면 알린다. 래퍼가 PATH 뒤에 있으면 gh 는 활성 계정이어도 push 는 매핑 계정이다.
   const ownerLogin = accounts && accounts.find((a) => same(a.login, target.owner));
-  if (ownerLogin && ghAcct && !same(ghAcct, ownerLogin.login)) {
-    out.warn.push(`${target.owner} 은(는) 로그인된 계정인데 이 저장소는 ${ghAcct} 계정을 씁니다. ${ownerLogin.login} 계정의 개인 저장소라면 규칙을 확인하세요.`);
+  const idAcct = out.identity && out.identity.how === "mapped" && hit ? hit.account : null;
+  const others = [...new Set([ghAcct, out.push.account, idAcct].filter((x) => x && ownerLogin && !same(x, ownerLogin.login)))];
+  if (others.length) {
+    out.warn.push(`${target.owner} 은(는) 로그인된 계정인데 이 저장소는 ${others.join(", ")} 계정을 씁니다. ${ownerLogin.login} 계정의 개인 저장소라면 규칙을 확인하세요.`);
   }
   if (test && ghAcct) out.test = accessTest(ctx, ghAcct, target);
   return out;
@@ -993,7 +1001,7 @@ const USAGE = `사용법: gh-account <명령>
   move <owner/* | owner/repo> <up|down>  규칙 순서를 한 칸 옮긴다(위에 있을수록 먼저 맞는다)
   default <계정 | none>                  규칙에 없는 저장소에 쓸 계정
   space [--json] <폴더..>                폴더들의 저장소를 owner 별로 묶어 지금 쓰는 계정을 보여 준다
-  assign <계정 | none> <폴더..>          폴더들에서 찾은 owner 마다 owner/* 규칙을 그 계정으로 정한다(none: 지움)
+  assign <계정 | none> <폴더..> [--json] 폴더들에서 찾은 owner 마다 owner/* 규칙을 그 계정으로 정한다(none: 지움). 로그인된 계정과 같은 owner 는 건너뜀
   identity <계정> [--name 이름] [--email 주소] [--off | --auto]  커밋 신원
   sync                                 신원 파일과 git 전역 설정 블록을 다시 만든다
   check [폴더 | -R owner/repo] [--test] [--json]  gh, git push, 커밋 신원이 쓸 계정을 한 번에 보여 준다(--test: GitHub 에 접속해 본다)
@@ -1149,29 +1157,38 @@ function main(argv, ctx, io) {
         if (json) { io.out(JSON.stringify({ owners: [], error: m.error })); return 0; }
         io.err(m.error); return 1;
       }
-      const owners = spaceOwners(ctx, dirs.length ? dirs : [ctx.cwd], m.map);
+      const owners = spaceOwners(ctx, dirs.length ? dirs : [ctx.cwd], m.map, loginNames(ctx));
       if (json) { io.out(JSON.stringify({ owners, error: null })); return 0; }
       if (!owners.length) { io.out("이 폴더들에서 github.com 원격을 찾지 못했습니다."); return 0; }
       for (const o of owners) {
-        io.out(`${o.owner}/*: ${o.rule || "(규칙 없음)"}`);
+        io.out(`${o.owner}/*: ${o.rule || "(규칙 없음)"}${o.personal ? " (로그인된 계정)" : ""}`);
         for (const r of o.repos) io.out(`  ${r.repo} -> ${r.account || "(매핑 없음)"}${r.by === "rule" && r.match !== `${o.owner}/*` ? ` (규칙 ${r.match})` : r.by === "default" ? " (default)" : ""}`);
       }
       return 0;
     }
     case "assign": {
+      const json = args.includes("--json");
+      for (let i = args.indexOf("--json"); i >= 0; i = args.indexOf("--json")) args.splice(i, 1);
       const a = args.shift();
       if (!a || (a !== "none" && !LOGIN.test(a)) || !args.length) { io.err(USAGE); return 2; }
       const account = a === "none" ? null : a;
       const m = readMap(P.map);
       if (!m.ok) { io.err(`${m.error}\n파일을 고치거나 지운 뒤 다시 실행하세요: ${P.map}`); return 1; }
-      const owners = spaceOwners(ctx, args, m.map);
+      const owners = spaceOwners(ctx, args, m.map, account ? loginNames(ctx) : []);
       if (!owners.length) { io.err("이 폴더들에서 github.com 원격을 찾지 못해 바꾼 규칙이 없습니다."); return 1; }
-      const code = editMap(ctx, io, (map) => {
-        const changed = assignOwners(map, owners, account);
-        if (!changed.length) return "바꾼 규칙이 없습니다.";
-        return account ? `규칙: ${changed.join(", ")} -> ${account}` : `규칙을 지웠습니다: ${changed.join(", ")}`;
+      let res = { changed: [], skipped: [] };
+      const notes = [];
+      const sub = json ? { ...io, out: (l) => notes.push(l) } : io;
+      const code = editMap(ctx, sub, (map) => {
+        res = assignOwners(map, owners, account);
+        const msg = [];
+        if (!res.changed.length) msg.push("바꾼 규칙이 없습니다.");
+        else msg.push(account ? `규칙: ${res.changed.join(", ")} -> ${account}` : `규칙을 지웠습니다: ${res.changed.join(", ")}`);
+        if (res.skipped.length) msg.push(`주의: ${res.skipped.join(", ")} 은(는) 로그인된 계정이라 개인 저장소일 수 있어 ${account} 로 바꾸지 않았습니다. 정말 바꾸려면 그 owner 만 따로 정하세요(gh-account set <owner>/* <계정>).`);
+        return msg.join("\n");
       });
-      if (code === 0 && account) warnLogin(ctx, io, account);
+      if (code === 0 && account) warnLogin(ctx, sub, account);
+      if (json && code === 0) io.out(JSON.stringify({ ...res, account, notes }));
       return code;
     }
     case "identity": {

@@ -21,6 +21,9 @@ function fakeRun({ logged = ["acct-a", "acct-b"], remotes = {}, gitVersion = "gi
       const user = args[args.indexOf("--user") + 1];
       return logged.includes(user) ? { status: 0, stdout: `tok-${user}\n`, stderr: "" } : { status: 1, stdout: "", stderr: "no account" };
     }
+    if (cmd === "fake-gh" && args[0] === "auth" && args[1] === "status" && args.includes("--json")) {
+      return { status: 0, stdout: JSON.stringify({ hosts: { "github.com": logged.map((login, i) => ({ login, active: i === 0, state: "success" })) } }), stderr: "" };
+    }
     if (cmd === "fake-gh" && args[0] === "api" && args[1] === "user") {
       const login = String(opts.env.GH_TOKEN || "").replace(/^tok-/, "");
       if (!logged.includes(login)) return { status: 1, stdout: "", stderr: "401" };
@@ -320,8 +323,8 @@ test("space: 폴더와 그 아래 저장소를 owner 별로 묶고 지금 쓰는
   const out = JSON.parse(t.o.lines[0]);
   assert.equal(out.error, null);
   assert.deepEqual(out.owners, [
-    { owner: "acct-a", rule: null, repos: [{ repo: "acct-a/tool", dir: s.solo, account: null, by: null, match: null }] },
-    { owner: "Example-Org", rule: "acct-b", repos: [
+    { owner: "acct-a", personal: true, rule: null, repos: [{ repo: "acct-a/tool", dir: s.solo, account: null, by: null, match: null }] },
+    { owner: "Example-Org", personal: false, rule: "acct-b", repos: [
       { repo: "Example-Org/api", dir: path.join(s.ws, "api"), account: "acct-a", by: "rule", match: "example-org/api" },
       { repo: "example-org/app", dir: path.join(s.ws, "app"), account: "acct-b", by: "rule", match: "example-org/*" },
     ] },
@@ -329,8 +332,9 @@ test("space: 폴더와 그 아래 저장소를 owner 별로 묶고 지금 쓰는
   // .git 이 없는 하위 폴더(notes)는 원격이 있어도 보지 않는다.
   assert.ok(!t.o.lines[0].includes("other-org"));
   const txt = io();
-  ga.main(["space", s.ws], ctx, txt.io);
+  ga.main(["space", s.ws, s.solo], ctx, txt.io);
   assert.ok(txt.o.lines.some((l) => l.includes("Example-Org/api -> acct-a (규칙 example-org/api)")));
+  assert.ok(txt.o.lines.includes("acct-a/*: (규칙 없음) (로그인된 계정)"));
 });
 
 test("assign: 찾은 owner 마다 owner/* 규칙을 정하거나 지우고, 저장소 하나 규칙은 그대로 둔다", () => {
@@ -340,11 +344,23 @@ test("assign: 찾은 owner 마다 owner/* 규칙을 정하거나 지우고, 저�
   let t = io();
   assert.equal(ga.main(["assign", "acct-b", s.ws, s.solo], ctx, t.io), 0);
   let m = JSON.parse(fs.readFileSync(file, "utf8"));
+  // acct-a 는 gh 에 로그인된 계정이라 acct-a/* (개인 저장소일 수 있음)는 acct-b 로 묶지 않는다.
   assert.deepEqual(m.rules, [
     { match: "example-org/api", account: "acct-a" },
     { match: "Example-Org/*", account: "acct-b" },
-    { match: "acct-a/*", account: "acct-b" },
   ]);
+  assert.ok(t.o.lines.some((l) => l.includes("\n주의: acct-a/* 은(는) 로그인된 계정이라")), t.o.lines.join("\n"));
+  t = io();
+  assert.equal(ga.main(["assign", "acct-b", s.ws, s.solo, "--json"], ctx, t.io), 0);
+  const j = JSON.parse(t.o.lines.at(-1));
+  assert.deepEqual([j.changed, j.skipped, j.account], [["Example-Org/*"], ["acct-a/*"], "acct-b"]);
+  assert.equal(t.o.lines.length, 1, "--json 은 한 줄만 쓴다");
+  // 같은 계정으로 정하는 것은 막지 않는다.
+  assert.equal(ga.main(["assign", "acct-a", s.solo], ctx, io().io), 0);
+  m = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.deepEqual(m.rules.at(-1), { match: "acct-a/*", account: "acct-a" });
+  // owner 하나만 직접 정하면(set) 다른 계정이어도 그대로 따른다.
+  assert.equal(ga.main(["set", "acct-a/*", "acct-b"], ctx, io().io), 0);
   t = io();
   assert.equal(ga.main(["assign", "none", s.ws], ctx, t.io), 0);
   m = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -671,7 +687,18 @@ test("check: gh·push·신원 계정과 경고, --test 는 매핑 계정 토큰�
   assert.equal(c.push.how, "ssh");
 
   c = ga.check(ctx, { repo: ga.parseRepo("acct-a/notes") });
-  assert.ok(c.warn.some((w) => w.includes("acct-a 은(는) 로그인된 계정인데")), "로그인 계정의 개인 저장소를 다른 계정으로 쓰면 알린다");
+  assert.ok(c.warn.some((w) => w.includes("acct-a 은(는) 로그인된 계정인데 이 저장소는 acct-b")), "로그인 계정의 개인 저장소를 다른 계정으로 쓰면 알린다");
+
+  // 래퍼가 PATH 에서 진짜 gh 보다 뒤에 있으면 gh 는 활성 계정(acct-a)이지만 push 는 acct-b 라 역시 알린다.
+  const real = path.join(home, "real");
+  fs.mkdirSync(real);
+  fs.writeFileSync(path.join(real, "gh"), "#!/bin/sh\n", { mode: 0o755 });
+  ctx.env.PATH = [real, path.join(home, "bin")].join(path.delimiter);
+  c = ga.check(ctx, { repo: ga.parseRepo("acct-a/notes") });
+  assert.equal(c.wrapperFirst, false);
+  assert.deepEqual([c.gh.account, c.push.account], ["acct-a", "acct-b"]);
+  assert.ok(c.warn.some((w) => w.includes("acct-a 은(는) 로그인된 계정인데 이 저장소는 acct-b")), c.warn.join("\n"));
+  ctx.env.PATH = path.join(home, "bin");
 
   g.perms = null;
   c = ga.check(ctx, { repo: ga.parseRepo("example-org/private"), test: true });

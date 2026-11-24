@@ -458,9 +458,18 @@ export default class Accounts extends View {
           items: this.accountItems("규칙 없음", o.rule), value: o.rule ?? NONE,
           onPick: (v, cx) => this.change(cx, v === NONE ? ["unset", `${o.owner}/*`] : ["set", `${o.owner}/*`, v]),
         })))
+      .when(Boolean(this.personalOther(o)), (el) => el.child(div().pl(10).text_size(11).text_color(t.blocked)
+        .child(`주의: ${o.owner} 은(는) 로그인된 계정인데 ${this.personalOther(o)} 계정을 씁니다. 개인 저장소라면 ${o.owner} 로 고르세요.`)))
       .children(o.repos.map((r) => h_flex().pl(10).gap(6).items_center().text_size(11)
         .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(r.repo.split("/").pop()))
         .child(div().flex_none().max_w(200).truncate().text_color(r.account ? t.dim : t.idle ?? t.dim).child(this.repoNote(r, o.owner)))));
+  }
+
+  // 로그인된 계정과 같은 owner 의 저장소가 다른 계정을 쓰면 그 계정 이름들. 없으면 "".
+  personalOther(o) {
+    if (!o.personal) return "";
+    const own = o.owner.toLowerCase();
+    return [...new Set(o.repos.map((r) => r.account).filter((a) => a && a.toLowerCase() !== own))].join(", ");
   }
 
   spaceBlock(t, s) {
