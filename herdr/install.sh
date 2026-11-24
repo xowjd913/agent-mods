@@ -2,6 +2,8 @@
 # Herdr 모드를 설치·갱신한다(macOS·Linux). 다시 실행해도 된다.
 #   기본 모드: tabs-mine, work, prs, wt-menu, schedules
 #   추가 모드(--extras): usage-status, agent-groups, leader-tabs
+#   인자 없이 실행하면 설치된 모드만 갱신한다(처음이면 기본 모드를 설치한다).
+#   --only work,prs / --add usage-status / --remove leader-tabs / --list 로 모드를 고를 수 있다.
 # 저장소를 받지 않고 바로 실행할 수도 있다.
 #   curl -fsSL <저장소 raw 주소>/main/herdr/install.sh | sh
 #   curl -fsSL <저장소 raw 주소>/main/herdr/install.sh | sh -s -- --extras
@@ -11,20 +13,39 @@ set -e
 REPO_URL="https://github.com/xowjd913/agent-mods"
 BRANCH="main"
 HOME_DIR="${HERDR_APP_HOME:-$HOME/.config/herdr-app}"
-EXTRAS=""
+OPT=""
+VAL=""
 
-for a in "$@"; do
-  case "$a" in
-    --extras) EXTRAS="--extras" ;;
+# 고르는 옵션은 하나만 받는다.
+pick() {
+  if [ -n "$OPT" ]; then echo "$OPT 와(과) $1 은(는) 함께 쓸 수 없습니다. 하나만 주세요."; exit 2; fi
+  OPT="$1"
+  VAL="$2"
+}
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --extras|--list) pick "$1" "" ;;
+    --only|--add|--remove)
+      if [ $# -lt 2 ]; then echo "$1 뒤에 모드 이름이 필요합니다(예: $1 work,prs)."; exit 2; fi
+      pick "$1" "$2"
+      shift ;;
+    --only=*|--add=*|--remove=*) pick "${1%%=*}" "${1#*=}" ;;
     -h|--help)
-      echo "사용법: sh install.sh [--extras]"
-      echo "  --extras  추가 모드(usage-status, agent-groups, leader-tabs)도 설치한다."
+      echo "사용법: sh install.sh [--extras | --only 모드,.. | --add 모드,.. | --remove 모드,.. | --list]"
+      echo "  (인자 없음)  설치된 모드만 갱신한다. 처음이면 기본 모드를 설치한다."
+      echo "  --extras     모든 모드(추가 모드 usage-status, agent-groups, leader-tabs 포함)를 설치한다."
+      echo "  --only       고른 모드만 설치·갱신한다. 다른 설치된 모드는 그대로 둔다."
+      echo "  --add        설치된 모드에 고른 모드를 더한다."
+      echo "  --remove     고른 모드를 지우고 그 모드가 바꾼 레이아웃 블록을 되돌린다."
+      echo "  --list       모드마다 설명과 설치 상태를 보여 준다."
+      echo "  필요한 모드(예: prs에는 work)는 함께 설치한다."
       exit 0 ;;
-    *) echo "알 수 없는 인자: $a (sh install.sh --help)"; exit 2 ;;
+    *) echo "알 수 없는 인자: $1 (sh install.sh --help)"; exit 2 ;;
   esac
+  shift
 done
 
-if [ ! -d "$HOME_DIR" ]; then
+if [ ! -d "$HOME_DIR" ] && [ "$OPT" != "--list" ]; then
   echo "Herdr 설정 폴더($HOME_DIR)가 없어 건너뜁니다. Herdr 앱을 한 번 실행한 뒤 다시 실행하세요."
   exit 0
 fi
@@ -53,8 +74,32 @@ if [ -z "$DIR" ] || [ ! -f "$DIR/install.cjs" ]; then
   fi
 fi
 
+# 목록과 제거는 레이아웃 복제가 필요 없어 여기서 끝난다. 도우미가 2로 끝나면(잘못된 이름 등) 2로 끝낸다.
+if [ "$OPT" = "--list" ]; then
+  node "$DIR/install.cjs" list --home "$HOME_DIR"
+  exit 0
+fi
+if [ "$OPT" = "--remove" ]; then
+  node "$DIR/install.cjs" remove --home "$HOME_DIR" --mods "$VAL" || {
+    CODE=$?
+    [ "$CODE" -eq 2 ] && exit 2
+    echo "모드를 지우지 못했습니다."
+  }
+  exit 0
+fi
+
 # 1) 모드 복사
-node "$DIR/install.cjs" mods --home "$HOME_DIR" $EXTRAS || { echo "모드를 복사하지 못했습니다."; exit 0; }
+set -- mods --home "$HOME_DIR"
+case "$OPT" in
+  --extras) set -- "$@" --extras ;;
+  --only|--add) set -- "$@" "$OPT" "$VAL" ;;
+esac
+node "$DIR/install.cjs" "$@" || {
+  CODE=$?
+  [ "$CODE" -eq 2 ] && exit 2
+  echo "모드를 복사하지 못했습니다."
+  exit 0
+}
 command -v gh >/dev/null 2>&1 || echo "gh가 없어 Work·PRs 패널은 GitHub 데이터를 불러오지 못합니다. GitHub CLI를 설치하고 로그인하세요."
 
 # 2) 레이아웃. 우리 레이아웃이 없으면 실행 중인 앱에서 기본 레이아웃(main)을 복제한다.

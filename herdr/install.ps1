@@ -1,19 +1,28 @@
 ﻿# Herdr 모드를 설치·갱신한다(Windows). 다시 실행해도 된다. install.sh의 Windows 버전이다.
 #   기본 모드: tabs-mine, work, prs, wt-menu, schedules
 #   추가 모드(-Extras): usage-status, agent-groups, leader-tabs
+#   인자 없이 실행하면 설치된 모드만 갱신한다(처음이면 기본 모드를 설치한다).
+#   -Only work,prs / -Add usage-status / -Remove leader-tabs / -List 로 모드를 고를 수 있다.
 # 저장소를 받지 않고 바로 실행할 수도 있다.
 #   & ([scriptblock]::Create((irm <저장소 raw 주소>/main/herdr/install.ps1)))
 #   & ([scriptblock]::Create((irm <저장소 raw 주소>/main/herdr/install.ps1))) -Extras
 # Herdr 설정 폴더는 HERDR_APP_HOME, 없으면 ~\.config\herdr-app 이다(Windows 경로는 실기 미확인: 다르면 HERDR_APP_HOME을 지정한다).
 # Herdr가 없거나 실행 중이 아니거나 레이아웃 단계가 실패해도 안내만 출력하고 끝난다.
 # irm으로 실행해도 창이 닫히지 않도록 exit 대신 return을 쓴다.
-param([switch]$Extras)
+param([switch]$Extras, [string[]]$Only, [string[]]$Add, [string[]]$Remove, [switch]$List)
 $ErrorActionPreference = 'Stop'
 $RepoUrl = 'https://github.com/xowjd913/agent-mods'
 $Branch = 'main'
 $AppHome = if ($env:HERDR_APP_HOME) { $env:HERDR_APP_HOME } else { Join-Path $HOME '.config\herdr-app' }
 
-if (-not (Test-Path $AppHome -PathType Container)) {
+# 고르는 옵션은 하나만 받는다.
+$Picked = @(@{ n = '-Extras'; v = $Extras.IsPresent }, @{ n = '-Only'; v = [bool]$Only }, @{ n = '-Add'; v = [bool]$Add }, @{ n = '-Remove'; v = [bool]$Remove }, @{ n = '-List'; v = $List.IsPresent }) | Where-Object { $_.v }
+if (@($Picked).Count -gt 1) {
+  Write-Host "$((@($Picked) | ForEach-Object { $_.n }) -join ', ') 은(는) 함께 쓸 수 없습니다. 하나만 주세요."
+  return
+}
+
+if (-not (Test-Path $AppHome -PathType Container) -and -not $List) {
   Write-Host "Herdr 설정 폴더($AppHome)가 없어 건너뜁니다. Herdr 앱을 한 번 실행한 뒤 다시 실행하세요."
   return
 }
@@ -55,11 +64,27 @@ function Invoke-Helper([string[]]$HelperArgs) {
 }
 
 try {
+  # 목록과 제거는 레이아웃 복제가 필요 없어 여기서 끝난다. 도우미가 2로 끝나면(잘못된 이름 등) 그 안내만 보여 준다.
+  if ($List) {
+    $R = Invoke-Helper @('list', '--home', $AppHome)
+    Write-Host -NoNewline $R.Out
+    return
+  }
+  if ($Remove) {
+    $R = Invoke-Helper @('remove', '--home', $AppHome, '--mods', ($Remove -join ','))
+    Write-Host -NoNewline $R.Out
+    if ($R.Code -ne 0 -and $R.Code -ne 2) { Write-Host '모드를 지우지 못했습니다.' }
+    return
+  }
+
   # 1) 모드 복사
   $ModArgs = @('mods', '--home', $AppHome)
   if ($Extras) { $ModArgs += '--extras' }
+  elseif ($Only) { $ModArgs += @('--only', ($Only -join ',')) }
+  elseif ($Add) { $ModArgs += @('--add', ($Add -join ',')) }
   $R = Invoke-Helper $ModArgs
   Write-Host -NoNewline $R.Out
+  if ($R.Code -eq 2) { return }
   if ($R.Code -ne 0) { Write-Host '모드를 복사하지 못했습니다.'; return }
   if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { Write-Host 'gh가 없어 Work·PRs 패널은 GitHub 데이터를 불러오지 못합니다. GitHub CLI를 설치하고 로그인하세요.' }
 
