@@ -60,3 +60,16 @@ test("answerLine: 한 줄이고, 원문을 그대로 따옴표에 넣고, 링크
   assert.equal(I.answerLine("verify", "lead-a", "확인 완료", ""), 'Panel answer (verify) for lead-a: "확인 완료".');
   assert.ok(!I.answerLine("decision", "l", "x", "").includes("<hc"));
 });
+
+// 요약 칸이 채팅 창을 여는 약속: 같은 키로 위치를 기억하고(keep) 다시 켤 때 돌아오며, 창 안 버튼은 끌기를 시작하지 않는다.
+test("main.js: 요약 칸은 key·keep이 있는 떠 있는 창으로 채팅 보기를 열고, 창에는 닫기 버튼이 있다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  assert.match(src, /const WINDOW = \{[^}]*kind: "window"[^}]*key: "inbox"[^}]*keep: true/);
+  assert.match(src, /props: \{ mode: "window" \}/);
+  assert.match(src, /openOverlay\(WINDOW\)/);
+  assert.match(src, /closeOverlay\(safeProps\(\)\.overlay\)/);
+  assert.match(src, /const stop = \(_e, cx\) => cx\.stop_propagation\(\)/);
+  // 모든 눌러지는 조각(버튼·이름·링크·입력 칸·닫기·새로고침)은 끌기를 막는다.
+  assert.ok((src.match(/on_mouse_down\("left", stop\)/g) ?? []).length >= 8);
+  assert.match(src, /setBadge\(text \|\| null\)/);
+});
