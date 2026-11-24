@@ -1,7 +1,8 @@
 // 계정 패널: 저장소별 GitHub 계정 도구(herdr/gh-account)를 설치하고, 매핑을 보고 바꾸고, 저장소가 어느 계정을 쓰는지 확인한다.
 // - 설치: 설치 상태를 보여 주고, 바뀔 것을 먼저 보여 준 뒤 설치·업데이트·원래대로 되돌리기를 한다.
 // - 이 저장소는 어느 계정?: 폴더나 owner/repo 하나가 gh, git push, 커밋 신원에 쓸 계정과 접속 시험.
-// - 스페이스: 스페이스 폴더와 그 스페이스 탭의 터미널 폴더에서 찾은 저장소를 owner 별로 묶고, owner 마다 쓸 계정을 고른다(owner/* 규칙).
+// - 저장소 owner: 모든 스페이스 폴더와 그 탭의 터미널 폴더에서 찾은 저장소를 owner 하나에 한 줄로 묶고, owner 마다 쓸 계정을 고른다(owner/* 규칙).
+//   저장소 목록은 접혀 있고 owner 줄을 누르면 펼친다.
 // - 기본 계정, gh 에 로그인된 계정과 계정 추가(gh auth login --web), 규칙 목록(순서 바꾸기·지우기·더하기).
 // 모든 일은 이 모드에 함께 설치되는 gh-account CLI 로 하고, 이 패널은 토큰을 읽거나 보여 주지 않는다.
 // gh 활성 계정은 바꾸지 않는다. 계정 추가만 예외로, gh 가 새 계정을 활성으로 바꾸므로 로그인 직후 원래 계정으로 한 번 되돌린다(CLI 의 login run).
@@ -41,21 +42,28 @@ function copyText(text) {
   return exec("sh", ["-c", 'printf %s "$1" | { xclip -selection clipboard 2>/dev/null || wl-copy; }', "sh", text]);
 }
 
-// 스페이스마다 볼 폴더: 스페이스 폴더와 그 스페이스 탭에 있는 창들의 지금 폴더.
-function spaceDirs() {
+// 볼 폴더: 모든 스페이스(기계 스페이스 빼고)의 폴더와 그 스페이스 탭에 있는 창들의 지금 폴더. 같은 폴더는 한 번만.
+// folders 는 "이 저장소는 어느 계정?" 목록에 쓸 스페이스 폴더들이다. 폴더가 같은 스페이스는 하나로 친다.
+function scanDirs() {
   const ps = panes() ?? [];
-  return (spaces() ?? []).filter((s) => !s.machine).map((s) => {
+  const folders = [], dirs = [];
+  for (const s of (spaces() ?? []).filter((x) => !x.machine)) {
     const tabs = new Set((s.tabs ?? []).map((t) => t.id));
-    const dirs = [s.folder, ...ps.filter((p) => p.cwd && tabs.has(p.tab)).map((p) => p.cwd)].filter(Boolean);
-    return { id: s.id, name: base(s.folder) || s.name || String(s.id), folder: s.folder || null, dirs: [...new Set(dirs)] };
-  }).filter((s) => s.dirs.length);
+    if (s.folder && !folders.includes(s.folder)) folders.push(s.folder);
+    for (const d of [s.folder, ...ps.filter((p) => p.cwd && tabs.has(p.tab)).map((p) => p.cwd)]) if (d && !dirs.includes(d)) dirs.push(d);
+  }
+  return { folders, dirs };
 }
 
 export default class Accounts extends View {
   init(_props, cx) {
     this.data = null;      // list --json: { accounts, map, error }
     this.status = null;    // status --json
-    this.rows = [];        // [{ id, name, folder, dirs, owners, error }]
+    this.owners = [];      // space --json 의 owners: [{ owner, personal, rule, repos }]
+    this.folders = [];     // 스페이스 폴더들(같은 폴더는 한 번)
+    this.scanError = null;
+    this.expanded = new Set(); // 저장소 목록을 펼친 owner(소문자)
+    this.defaultAsk = null;    // 기본 계정 바꾸기 확인 카드: { account, uses, keeps }
     this.error = null;
     this.missing = false;
     this.busy = false;
@@ -91,30 +99,33 @@ export default class Accounts extends View {
     if (this.busy) { this.queued = true; return; }
     this.busy = true;
     cx.notify();
-    const list = spaceDirs();
+    const scan = scanDirs();
     cx.spawn(async (cx) => {
       try {
         if (shellPath === null) {
           const p = await cli(["shell-path"]);
-          if (missingTool(p)) { this.missing = true; this.data = null; this.status = null; this.rows = []; this.error = null; return; }
+          if (missingTool(p)) { this.missing = true; this.data = null; this.status = null; this.owners = []; this.error = null; return; }
           const v = String(p.stdout || "").trim();
           shellPath = p.code === 0 && v && !v.includes("\n") ? v : "";
         }
         const r = await cli(["list", "--json"]);
-        if (missingTool(r)) { this.missing = true; this.data = null; this.status = null; this.rows = []; this.error = null; return; }
+        if (missingTool(r)) { this.missing = true; this.data = null; this.status = null; this.owners = []; this.error = null; return; }
         this.missing = false;
         const d = JSON.parse(r.stdout);
         this.status = parse((await cli(["status", "--json"])).stdout);
         const lg = parse((await cli(["login", "status", "--json"])).stdout);
         if (lg && RUNNING.has(lg.state)) { this.login = lg; this.loginAsk = false; }
-        const rows = [];
-        for (const s of list) {
-          const x = await cli(["space", "--json", ...s.dirs]);
+        let owners = [], scanError = null;
+        if (scan.dirs.length) {
+          const x = await cli(["space", "--json", ...scan.dirs]);
           const j = parse(x.stdout);
-          rows.push({ ...s, owners: j?.owners ?? [], error: j ? j.error : `저장소를 읽지 못했습니다 ${String(x.stderr || "").trim().slice(0, 120)}` });
+          owners = j?.owners ?? [];
+          scanError = j ? j.error : `저장소를 읽지 못했습니다 ${String(x.stderr || "").trim().slice(0, 120)}`;
         }
         this.data = d;
-        this.rows = rows;
+        this.owners = owners;
+        this.folders = scan.folders;
+        this.scanError = scanError;
         this.error = d.error ?? null;
       } catch (e) { this.error = `불러오기 실패: ${String(e?.message ?? e).slice(0, 180)}`; }
       finally {
@@ -219,13 +230,10 @@ export default class Accounts extends View {
   // ---- 이 저장소는 어느 계정? ----
 
   targetItems() {
-    const items = [];
-    for (const s of this.rows) {
-      if (s.folder) items.push({ value: `dir:${s.folder}`, label: `${s.name} (스페이스 폴더)`, dir: s.folder });
-      for (const o of s.owners) for (const r of o.repos) {
-        const key = r.dir ? `dir:${r.dir}` : `repo:${r.repo}`;
-        if (!items.some((i) => i.value === key)) items.push({ value: key, label: r.repo, hint: r.dir ? base(r.dir) : "", ...(r.dir ? { dir: r.dir } : { repo: r.repo }) });
-      }
+    const items = this.folders.map((f) => ({ value: `dir:${f}`, label: `${base(f) || f} (스페이스 폴더)`, dir: f }));
+    for (const o of this.owners) for (const r of o.repos) {
+      const key = r.dir ? `dir:${r.dir}` : `repo:${r.repo}`;
+      if (!items.some((i) => i.value === key)) items.push({ value: key, label: r.repo, hint: r.dir ? base(r.dir) : "", ...(r.dir ? { dir: r.dir } : { repo: r.repo }) });
     }
     return items;
   }
@@ -445,24 +453,33 @@ export default class Accounts extends View {
   repoNote(r, owner) {
     if (!r.account) return "매핑 없음 · gh 활성 계정";
     if (r.by === "default") return `${r.account} · 기본 계정`;
+    if (r.by === "owner") return `${r.account} · 로그인된 계정의 저장소`;
     if (r.match && r.match.toLowerCase() !== `${owner}/*`.toLowerCase()) return `${r.account} · 규칙 ${r.match}`;
     return r.account;
   }
 
-  ownerBlock(t, s, o) {
-    const id = `own-${s.id}-${o.owner}`;
-    return v_flex().flex_none().px(8).py(4).gap(2)
+  // owner 한 줄: 누르면 저장소 목록을 펼치거나 접는다. 드롭다운은 owner/* 규칙을 만들거나 바꾸거나 지운다.
+  ownerBlock(t, o) {
+    const key = o.owner.toLowerCase();
+    const open = this.expanded.has(key);
+    const id = `own-${o.owner}`;
+    const other = this.personalOther(o);
+    return v_flex().flex_none().px(8).py(3).gap(2)
       .child(h_flex().gap(8).items_center()
-        .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(`${o.owner}/*`))
+        .child(h_flex().id(`own-fold-${o.owner}`).flex_1().min_w(0).gap(5).items_center().cursor_pointer()
+          .on_click((_e, cx) => { if (open) this.expanded.delete(key); else this.expanded.add(key); cx.notify(); })
+          .child(div().w(10).flex_none().text_size(10).text_color(t.dim).child(open ? "▾" : "▸"))
+          .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(`${o.owner}/*`))
+          .child(div().flex_none().text_size(11).text_color(t.dim).child(`저장소 ${o.repos.length}`)))
         .child(this.dropdown(t, id, {
           items: this.accountItems("규칙 없음", o.rule), value: o.rule ?? NONE,
           onPick: (v, cx) => this.change(cx, v === NONE ? ["unset", `${o.owner}/*`] : ["set", `${o.owner}/*`, v]),
         })))
-      .when(Boolean(this.personalOther(o)), (el) => el.child(div().pl(10).text_size(11).text_color(t.blocked)
-        .child(`주의: ${o.owner} 은(는) 로그인된 계정인데 ${this.personalOther(o)} 계정을 씁니다. 개인 저장소라면 ${o.owner} 로 고르세요.`)))
-      .children(o.repos.map((r) => h_flex().pl(10).gap(6).items_center().text_size(11)
+      .when(Boolean(other), (el) => el.child(div().pl(15).text_size(11).text_color(t.blocked)
+        .child(`주의: ${o.owner} 은(는) 로그인된 계정인데 ${other} 계정을 씁니다. 개인 저장소라면 ${o.owner} 로 고르세요.`)))
+      .when(open, (el) => el.children(o.repos.map((r) => h_flex().pl(15).gap(6).items_center().text_size(11)
         .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(r.repo.split("/").pop()))
-        .child(div().flex_none().max_w(200).truncate().text_color(r.account ? t.dim : t.idle ?? t.dim).child(this.repoNote(r, o.owner)))));
+        .child(div().flex_none().max_w(200).truncate().text_color(r.account ? t.dim : t.idle ?? t.dim).child(this.repoNote(r, o.owner))))));
   }
 
   // 로그인된 계정과 같은 owner 의 저장소가 다른 계정을 쓰면 그 계정 이름들. 없으면 "".
@@ -472,19 +489,38 @@ export default class Accounts extends View {
     return [...new Set(o.repos.map((r) => r.account).filter((a) => a && a.toLowerCase() !== own))].join(", ");
   }
 
-  spaceBlock(t, s) {
-    const rules = [...new Set(s.owners.map((o) => o.rule ?? NONE))];
-    return v_flex().flex_none().pb(4)
-      .child(h_flex().px(8).pt(6).pb(2).gap(8).items_center()
-        .child(svg(ICON("layers")).size(12).flex_none().text_color(t.dim))
-        .child(div().flex_1().min_w(0).truncate().text_size(12.5).font_semibold().text_color(t.foreground).child(s.name))
-        .when(s.owners.length > 1, (el) => el.child(this.dropdown(t, `sp-${s.id}`, {
-          items: this.accountItems("모두 규칙 없음", rules.length === 1 && rules[0] !== NONE ? rules[0] : undefined), value: rules.length === 1 ? rules[0] : null, placeholder: "여러 계정",
-          onPick: (v, cx) => this.change(cx, ["assign", v === NONE ? "none" : v, ...s.dirs]),
-        }))))
-      .when(Boolean(s.error), (el) => el.child(div().px(8).text_size(11).text_color(t.blocked).child(s.error)))
-      .when(!s.error && !s.owners.length, (el) => el.child(div().px(8).pl(28).text_size(11).text_color(t.dim).child("github.com 원격이 있는 저장소가 없습니다.")))
-      .children(s.owners.map((o) => this.ownerBlock(t, s, o)));
+  // ---- 기본 계정 ----
+
+  // 기본 계정을 account 로 바꾸면: 규칙에 없는 저장소(uses)는 그 계정을 쓰고,
+  // 로그인된 다른 계정의 저장소(keeps)는 gh-account 가 default 대신 그 계정을 쓴다. 찾은 저장소로만 계산한다.
+  defaultPreview(account) {
+    const uses = [], keeps = [];
+    const acct = account.toLowerCase();
+    for (const o of this.owners) for (const r of o.repos) {
+      if (r.by === "rule") continue;
+      if (o.personal && o.owner.toLowerCase() !== acct) keeps.push(r.repo);
+      else uses.push(r.repo);
+    }
+    return { account, uses, keeps };
+  }
+
+  pickDefault(cx, v) {
+    if (v === NONE) { this.defaultAsk = null; this.change(cx, ["default", "none"]); return; }
+    this.defaultAsk = this.defaultPreview(v);
+    cx.notify();
+  }
+
+  defaultCard(t) {
+    const a = this.defaultAsk;
+    const list = (xs) => xs.length > 6 ? `${xs.slice(0, 6).join(", ")} 외 ${xs.length - 6}개` : xs.join(", ");
+    return v_flex().mx(8).my(4).p(8).gap(4).rounded(8).border(1).border_color(t.accent).bg(t.background)
+      .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child(`기본 계정을 ${a.account} 로 바꿀까요?`))
+      .child(div().text_size(11).text_color(t.muted).child(a.uses.length ? `${a.account} 를 쓰게 될 저장소: ${list(a.uses)}` : "찾은 저장소 중 이 계정을 새로 쓸 저장소는 없습니다."))
+      .when(a.keeps.length > 0, (el) => el.child(div().text_size(11).text_color(t.muted).child(`로그인된 계정의 저장소라 그 계정을 그대로 씀: ${list(a.keeps)}`)))
+      .child(div().text_size(11).text_color(t.dim).child("규칙에 없는 다른 저장소도 이 계정을 씁니다."))
+      .child(h_flex().pt(4).gap(6)
+        .child(this.button(t, "default-go", "바꾸기", (cx) => { const v = a.account; this.defaultAsk = null; this.change(cx, ["default", v]); }, { primary: true }))
+        .child(this.button(t, "default-cancel", "취소", (cx) => { this.defaultAsk = null; cx.notify(); })));
   }
 
   ruleRow(t, r, i, n) {
@@ -526,15 +562,17 @@ export default class Accounts extends View {
       if (this.probing && !this.result) body.push(div().px(8).pl(16).text_size(11.5).text_color(t.dim).child("확인하는 중…"));
       body.push(...this.resultBlock(t));
 
-      body.push(this.heading(t, "스페이스", false, "스페이스 폴더와 그 탭의 터미널 폴더에서 찾은 저장소입니다. owner 마다 쓸 계정을 고르세요."));
-      if (!this.rows.length) body.push(div().px(8).text_size(12).text_color(t.dim).child("열린 스페이스가 없습니다."));
-      for (const s of this.rows) body.push(this.spaceBlock(t, s));
+      body.push(this.heading(t, "저장소 owner", false, "모든 스페이스 폴더와 그 탭의 터미널 폴더에서 찾은 저장소입니다. owner 마다 쓸 계정을 고르세요. owner 를 누르면 저장소를 펼칩니다."));
+      if (this.scanError) body.push(div().px(8).text_size(11).text_color(t.blocked).child(this.scanError));
+      else if (!this.owners.length) body.push(div().px(8).text_size(12).text_color(t.dim).child(this.folders.length ? "github.com 원격이 있는 저장소가 없습니다." : "열린 스페이스가 없습니다."));
+      for (const o of this.owners) body.push(this.ownerBlock(t, o));
 
       body.push(this.heading(t, "기본 계정", false, "규칙에 없는 저장소에 씁니다. 없음이면 gh 활성 계정을 그대로 씁니다."));
       body.push(h_flex().px(8).pb(4).child(this.dropdown(t, "default", {
         items: this.accountItems("없음", map?.default), value: map?.default ?? NONE, w: 200,
-        onPick: (v, cx) => this.change(cx, ["default", v === NONE ? "none" : v]),
+        onPick: (v, cx) => this.pickDefault(cx, v),
       })));
+      if (this.defaultAsk) body.push(this.defaultCard(t));
 
       const canAdd = !this.login && !this.loginAsk && Boolean(accounts);
       body.push(this.heading(t, "로그인된 계정", false, "gh 활성 계정은 이 패널이 바꾸지 않습니다. 계정 추가만 로그인 직후 원래 계정으로 되돌립니다.",

@@ -37,7 +37,7 @@ const LIST = { accounts: [{ login: "acct-a", active: true, state: "success" }, {
   map: { rules: [{ match: "example-org/*", account: "acct-b" }], default: null, accounts: {} }, error: null };
 const SPACE = { owners: [
   { owner: "example-org", rule: "acct-b", repos: [{ repo: "example-org/app", account: "acct-b", by: "rule", match: "example-org/*" }] },
-  { owner: "acct-a", rule: null, repos: [{ repo: "acct-a/notes", account: null, by: null, match: null }] },
+  { owner: "acct-a", personal: true, rule: null, repos: [{ repo: "acct-a/notes", account: null, by: null, match: null }] },
 ], error: null };
 
 const STATUS = { installed: true, binDir: "/h/.local/bin", files: [], filesOk: true, block: true, globalConfig: "/h/.gitconfig", git: "2.45.0", identity: true,
@@ -99,13 +99,37 @@ test("불러오기: 계정·규칙을 읽고, 기계 스페이스는 빼고 스�
   v.init({}, cx);
   await cx.settle();
   assert.deepEqual(cliArgs(h), [["shell-path"], ["list", "--json"], ["status", "--json"], ["login", "status", "--json"], ["space", "--json", "/w/app", "/w/notes"]]);
-  assert.equal(v.rows.length, 1);
-  assert.equal(v.rows[0].owners.length, 2);
+  assert.deepEqual(v.owners.map((o) => o.owner), ["example-org", "acct-a"]);
   v.render(cx);
-  for (const s of ["app", "example-org/*", "acct-a/*", "매핑 없음 · gh 활성 계정", "acct-a", "acct-b"]) assert.ok(h.texts.includes(s), s);
+  for (const s of ["example-org/*", "acct-a/*", "저장소 1", "acct-a", "acct-b"]) assert.ok(h.texts.includes(s), s);
+  // 저장소 목록은 접혀 있다가 owner 줄을 누르면 펼친다. 다시 누르면 접는다.
+  assert.ok(!h.texts.includes("매핑 없음 · gh 활성 계정"));
+  h.clicks["own-fold-acct-a"]({}, cx);
+  h.texts.length = 0;
+  v.render(cx);
+  for (const s of ["notes", "매핑 없음 · gh 활성 계정"]) assert.ok(h.texts.includes(s), s);
+  assert.ok(!h.texts.includes("app"), "example-org 는 접혀 있다");
+  h.clicks["own-fold-acct-a"]({}, cx);
+  h.texts.length = 0;
+  v.render(cx);
+  assert.ok(!h.texts.includes("notes"));
 });
 
-test("바꾸기: 규칙 순서·지우기·스페이스 한 번에 고르기가 gh-account 명령으로 가고, 바꾼 뒤 다시 읽는다", async () => {
+test("스페이스: 폴더가 같은 스페이스가 여럿이어도 space 는 한 번, 같은 폴더도 한 번만 넘기고 owner 줄도 한 번만 나온다", async () => {
+  const { h, cx, v } = await open({
+    spaces: [{ id: 1, folder: "/w/app", tabs: [{ id: 10 }] }, { id: 3, folder: "/w/app", tabs: [{ id: 30 }] }, { id: 2, folder: "/m", machine: true, tabs: [] }],
+    panes: [{ tab: 10, cwd: "/w/app" }, { tab: 30, cwd: "/w/notes" }, { tab: 30, cwd: "/w/app" }],
+  });
+  assert.deepEqual(cliArgs(h).filter((a) => a[0] === "space"), [["space", "--json", "/w/app", "/w/notes"]]);
+  v.render(cx);
+  assert.deepEqual(v.owners.map((o) => o.owner), ["example-org", "acct-a"]);
+  assert.equal(h.texts.filter((s) => s === "저장소 1").length, 2);
+  assert.deepEqual(v.targetItems().map((i) => i.label), ["app (스페이스 폴더)", "example-org/app", "acct-a/notes"]);
+  // 스페이스마다 있던 "여러 계정" 드롭다운은 없다.
+  assert.ok(!Object.keys(h.clicks).some((k) => k.startsWith("sp-")));
+});
+
+test("바꾸기: 규칙 지우기·owner 계정 고르기가 gh-account 명령으로 가고, 바꾼 뒤 다시 읽는다", async () => {
   const h = fake();
   const cx = cxFake();
   const v = new Accounts();
@@ -118,11 +142,56 @@ test("바꾸기: 규칙 순서·지우기·스페이스 한 번에 고르기가 
   assert.deepEqual(cliArgs(h)[0], ["unset", "example-org/*"]);
   assert.deepEqual(cliArgs(h)[1], ["list", "--json"]);
   assert.deepEqual(v.note, { text: "바꿨습니다", bad: false });
+  // owner 드롭다운: 0 = 규칙 없음, 2 = acct-a, 3 = acct-b.
+  v.render(cx);
   h.calls.length = 0;
-  v.change(cx, ["assign", "acct-a", "/w/app", "/w/notes"]);
-  v.change(cx, ["default", "acct-a"]); // 바꾸는 중에는 두 번째를 받지 않는다.
+  h.clicks["own-acct-a-i2"]({}, cx);
   await cx.settle();
-  assert.deepEqual(changes(h), [["assign", "acct-a", "/w/app", "/w/notes"]]);
+  v.render(cx);
+  h.clicks["own-example-org-i0"]({}, cx);
+  await cx.settle();
+  assert.deepEqual(changes(h), [["set", "acct-a/*", "acct-a"], ["unset", "example-org/*"]]);
+  h.calls.length = 0;
+  v.change(cx, ["set", "acct-a/*", "acct-a"]);
+  v.change(cx, ["default", "none"]); // 바꾸는 중에는 두 번째를 받지 않는다.
+  await cx.settle();
+  assert.deepEqual(changes(h), [["set", "acct-a/*", "acct-a"]]);
+});
+
+test("기본 계정: 고르면 바로 바꾸지 않고 쓸 저장소·그대로 둘 저장소를 보여 준 뒤, 바꾸기를 눌러야 바꾼다", async () => {
+  let def = null;
+  const { h, cx, v } = await open({ reply: (a) => a[0] === "default" ? (def = a[1] === "none" ? null : a[1], ok("바꿨습니다"))
+    : a[0] === "list" ? ok({ ...LIST, map: { ...LIST.map, default: def } }) : base(a) });
+  v.render(cx);
+  h.calls.length = 0;
+  // 기본 드롭다운: 3 = acct-b. acct-a/notes 는 로그인된 acct-a 의 저장소라 acct-a 를 그대로 쓴다. example-org/app 은 규칙이 있어 빠진다.
+  h.clicks["default-i3"]({}, cx);
+  await cx.settle();
+  assert.deepEqual(changes(h), []);
+  assert.deepEqual(v.defaultAsk, { account: "acct-b", uses: [], keeps: ["acct-a/notes"] });
+  h.texts.length = 0;
+  v.render(cx);
+  for (const s of ["기본 계정을 acct-b 로 바꿀까요?", "로그인된 계정의 저장소라 그 계정을 그대로 씀: acct-a/notes"]) assert.ok(h.texts.includes(s), s);
+  h.clicks["default-cancel"]({}, cx);
+  await cx.settle();
+  assert.equal(v.defaultAsk, null);
+  assert.deepEqual(changes(h), []);
+
+  v.render(cx);
+  h.clicks["default-i2"]({}, cx);
+  assert.deepEqual(v.defaultAsk, { account: "acct-a", uses: ["acct-a/notes"], keeps: [] });
+  v.render(cx);
+  h.clicks["default-go"]({}, cx);
+  await cx.settle();
+  assert.equal(v.defaultAsk, null);
+  assert.deepEqual(changes(h), [["default", "acct-a"]]);
+
+  // 없음은 확인 없이 바로 바꾼다.
+  h.calls.length = 0;
+  v.render(cx);
+  h.clicks["default-i0"]({}, cx);
+  await cx.settle();
+  assert.deepEqual(changes(h), [["default", "none"]]);
 });
 
 test("규칙 더하기: 모양이 틀리거나 계정이 없으면 명령을 부르지 않는다", async () => {
