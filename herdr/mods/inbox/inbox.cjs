@@ -291,6 +291,33 @@ function collect(dir = inboxDir()) {
 // line below is copied verbatim into inbox/main.js and tabs-mine/main.js and a test checks that all three stay identical.
 const waitingKind = (t) => (/^lead-/.test(String(t?.name ?? "")) ? (["decision", "verify"].find((k) => k === String(t.labels?.wait ?? "").trim().toLowerCase()) ?? "") : "");
 
+// leaderName:begin
+// The name a person knows a leader by: its Herdr session name. ONE rule for the inbox (cards, rows) and agent-groups (leader headers).
+// The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js and agent-groups/main.js
+// (a test keeps them identical). Order: the live terminal title -> the `session` label -> the last name remembered for that leader
+// (`memo`, {<hc name>: name}) -> the hc name ("lead-po-inbox" -> "po inbox"). The "리더 · " prefix is dropped: the place already says
+// it is a leader, and the name then reads as its task.
+const LEADER_PREFIX = /^\s*리더\s*·\s*/;
+const sessionName = (s) => String(s ?? "").replace(/^[^\p{L}\p{N}\p{Ps}\p{Pi}]+/u, "").replace(LEADER_PREFIX, "").trim();
+const liveName = (term) => [term?.title, term?.labels?.session].map(sessionName).find((n) => n && n !== term?.name && n !== term?.address && n.toLowerCase() !== "claude") ?? "";
+const leaderName = (leader, term, memo) => liveName(term) || sessionName(memo?.[leader]) || String(leader ?? "").replace(/^lead-/, "").replace(/-/g, " ").trim() || String(term?.address ?? "");
+// The memo with the live names of `terms` merged in; null when nothing changed. At most `max` leaders are kept (oldest dropped).
+function rememberNames(memo, terms, max = 60) {
+  const next = { ...(memo ?? {}) };
+  let changed = false;
+  for (const t of terms ?? []) {
+    const n = /^lead-/.test(String(t?.name ?? "")) ? liveName(t) : "";
+    if (!n || next[t.name] === n) continue;
+    delete next[t.name]; // re-added last: the newest stay when the cap drops the oldest
+    next[t.name] = n;
+    changed = true;
+  }
+  if (!changed) return null;
+  for (const k of Object.keys(next).slice(0, Math.max(0, Object.keys(next).length - max))) delete next[k];
+  return next;
+}
+// leaderName:end
+
 // The PO of a leader: that leader's terminal's parent, accepted only when the parent carries the label role=po. No guessing from
 // sibling lead-* terminals: a wrong guess would put an answer into some other agent's prompt. null when there is none.
 // `terms` are Herdr's terminals() entries ({address, name, parent, labels}); the leader is found by name, else by `address`.
@@ -307,6 +334,6 @@ function answerLine(kind, leader, text, link) {
   return `Panel answer (${kind}) for ${leader}: "${body}".${link ? ` Target: ${link}` : ""}`;
 }
 
-module.exports = { markAnswered, waitingKind, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) process.stdout.write(JSON.stringify(collect()));

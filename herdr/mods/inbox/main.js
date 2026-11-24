@@ -31,6 +31,33 @@ const CLIP = "답을 클립보드에 담아 PO 터미널에 붙여 넣습니다(
 // Which terminal is a waiting leader. Copied verbatim from inbox.cjs (a test keeps them identical); tabs-mine uses the same line.
 const waitingKind = (t) => (/^lead-/.test(String(t?.name ?? "")) ? (["decision", "verify"].find((k) => k === String(t.labels?.wait ?? "").trim().toLowerCase()) ?? "") : "");
 
+// leaderName:begin
+// The name a person knows a leader by: its Herdr session name. ONE rule for the inbox (cards, rows) and agent-groups (leader headers).
+// The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js and agent-groups/main.js
+// (a test keeps them identical). Order: the live terminal title -> the `session` label -> the last name remembered for that leader
+// (`memo`, {<hc name>: name}) -> the hc name ("lead-po-inbox" -> "po inbox"). The "리더 · " prefix is dropped: the place already says
+// it is a leader, and the name then reads as its task.
+const LEADER_PREFIX = /^\s*리더\s*·\s*/;
+const sessionName = (s) => String(s ?? "").replace(/^[^\p{L}\p{N}\p{Ps}\p{Pi}]+/u, "").replace(LEADER_PREFIX, "").trim();
+const liveName = (term) => [term?.title, term?.labels?.session].map(sessionName).find((n) => n && n !== term?.name && n !== term?.address && n.toLowerCase() !== "claude") ?? "";
+const leaderName = (leader, term, memo) => liveName(term) || sessionName(memo?.[leader]) || String(leader ?? "").replace(/^lead-/, "").replace(/-/g, " ").trim() || String(term?.address ?? "");
+// The memo with the live names of `terms` merged in; null when nothing changed. At most `max` leaders are kept (oldest dropped).
+function rememberNames(memo, terms, max = 60) {
+  const next = { ...(memo ?? {}) };
+  let changed = false;
+  for (const t of terms ?? []) {
+    const n = /^lead-/.test(String(t?.name ?? "")) ? liveName(t) : "";
+    if (!n || next[t.name] === n) continue;
+    delete next[t.name]; // re-added last: the newest stay when the cap drops the oldest
+    next[t.name] = n;
+    changed = true;
+  }
+  if (!changed) return null;
+  for (const k of Object.keys(next).slice(0, Math.max(0, Object.keys(next).length - max))) delete next[k];
+  return next;
+}
+// leaderName:end
+
 // The PO of a leader: its terminal's parent, only when that parent has the label role=po (no guessing). Same rule as inbox.cjs
 // findPo; kept here because the mod cannot require a .cjs file.
 function findPo(terms, leaderName, address) {
@@ -77,7 +104,21 @@ const safeProps = () => { try { return props() ?? {}; } catch { return {}; } };
 // A press the mod handles must not start a drag of the floating window.
 const stop = (_e, cx) => cx.stop_propagation();
 
-const shortName = (leader) => String(leader).replace(/^lead-/, "");
+const NAMES_KEY = "leader.names"; // {<hc name>: session name}, shared with agent-groups: a closed leader keeps a readable name
+const namesMemo = () => { try { return shared(NAMES_KEY) ?? {}; } catch { return {}; } };
+// The shown name of a leader (by hc name): live terminal, else remembered, else the hc name.
+function shortName(leader) {
+  let list = [];
+  try { list = terminals() ?? []; } catch {}
+  return leaderName(leader, list.find((t) => t.name === leader), namesMemo());
+}
+// Remember the live names (only changes are written).
+function rememberLeaders() {
+  try {
+    const next = rememberNames(namesMemo(), terminals() ?? []);
+    if (next) setShared(NAMES_KEY, next);
+  } catch {}
+}
 
 // Two shapes of one mod: the small summary pane (lane counts, opens the window) and the full chat view, which runs in a floating
 // window (props().mode === "window") and works the same as a pane.
@@ -194,6 +235,7 @@ export default class Inbox extends View {
         if (gen !== this.gen) return;
         this.data = d;
         this.error = null;
+        rememberLeaders();
       } catch (e) { if (gen === this.gen) this.error = `불러오기 실패: ${String(e?.message ?? e).slice(0, 180)}`; }
       finally { if (gen === this.gen) { this.busy = false; this.badge(); cx.notify(); } }
     });
