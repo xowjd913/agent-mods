@@ -297,7 +297,7 @@ function parsePoLines(text) {
 }
 
 // The file of one PO's lines, or null when `id` is not a valid PO id (so a label can never reach outside the folder).
-const poFile = (dir, id) => (cleanPoId(id) ? path.join(dir, PO_DIR, `${id}.jsonl`) : null);
+const poFile = (dir, id) => (cleanPoId(id) ? path.join(dir, PO_DIR, `${cleanPoId(id)}.jsonl`) : null);
 
 // Every PO's lines: {<po id>: [lines]}. A missing folder, an unreadable or empty file, or a file not named <valid id>.jsonl is no replies.
 function readPo(dir = inboxDir()) {
@@ -409,6 +409,16 @@ const enterIntent = (key, shift) => (/^(enter|return)$/i.test(String(key ?? ""))
 // (`changedAt`, `at`: ms); and the stray line break a sent Enter leaves in the emptied box is cleared (`sentAt`, `now`).
 const needsNewline = (changedAt, at) => !(Number(changedAt) >= Number(at) - 25);
 const strayBreak = (value, sentAt, now) => String(value ?? "").length > 0 && String(value).trim() === "" && Number(now) - Number(sentAt) < 200;
+// A Korean/Japanese/Chinese IME's confirming Enter reaches the box as a plain Enter (KeyEvent has no composing flag), so the first Enter is held, once, when
+// the text was edited within IME_MS before it, or ends in a script an IME composes in; the second Enter (no edit since the held one, give or take the
+// commit's own 100 ms edit) sends. `heldAt`: when an Enter was last held (0 = never); `changedAt`, `now`: ms.
+const IME_MS = 500;
+const IME_TAIL = /[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\u3040-\u30FF\u3400-\u9FFF]$/;
+const imeHold = (value, changedAt, heldAt, now) => {
+  if (Number(heldAt) > 0 && Number(changedAt) <= Number(heldAt) + 100) return false;
+  if (Number(now) - Number(changedAt) < IME_MS) return true;
+  return IME_TAIL.test(String(value ?? "").trimEnd());
+};
 // The "@query" being typed right before `cursor` (offsets into the box text), or null. Not inside a chip, not in the middle of a word.
 function mentionQuery(text, cursor, tokens = []) {
   const before = String(text ?? "").slice(0, cursor);
@@ -485,6 +495,6 @@ const chatWheel = (up, dy) => Math.max(0, Math.min(4000, (Number(up) || 0) + (Nu
 const chatFollow = (seen, key, up) => key !== "" && key !== seen && (Number(up) || 0) <= 4;
 // chat:end
 
-module.exports = { PO_OTHER, cleanPoId, poId, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, chatKey, chatWheel, chatFollow, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { PO_OTHER, cleanPoId, poId, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, chatKey, chatWheel, chatFollow, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) process.stdout.write(JSON.stringify(collect()));

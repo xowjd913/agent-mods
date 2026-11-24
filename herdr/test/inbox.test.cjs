@@ -773,3 +773,32 @@ test("main.js: 창은 고른 PO 하나만 보이고(카드·보고·@ 목록·�
   assert.match(badge, /this\.asks\(\)/);
   assert.ok(!/view\(\)/.test(badge));
 });
+
+test("imeHold: 글을 막 고쳤거나 한글·가나·한자로 끝나면 첫 Enter는 한 번 붙들고, 그 뒤 편집 없는 Enter는 보낸다", () => {
+  assert.equal(I.imeHold("hello", 1000, 0, 1200), true); // 막 친 글: 500ms 안
+  assert.equal(I.imeHold("hello", 1000, 0, 1600), false); // 한참 전, 영문 끝: 바로 보낸다
+  assert.equal(I.imeHold("안녕", 1000, 0, 5000), true); // 조합 중일 수 있는 한글 끝
+  assert.equal(I.imeHold("안녕 ", 1000, 0, 5000), true); // 끝 공백은 무시
+  assert.equal(I.imeHold("안녕.", 1000, 0, 5000), false); // 마침표로 끝나면 조합이 끝난 글
+  assert.equal(I.imeHold("ありがとう", 1000, 0, 5000), true);
+  assert.equal(I.imeHold("你好", 1000, 0, 5000), true);
+  assert.equal(I.imeHold("ㅎ", 1000, 0, 5000), true); // 자모
+  // 붙든 뒤 두 번째 Enter: 그 사이 편집이 없으면(확정이 만든 100ms 안 편집 포함) 보낸다
+  assert.equal(I.imeHold("안녕", 1000, 5000, 6000), false);
+  assert.equal(I.imeHold("안녕", 5050, 5000, 6000), false);
+  // 붙든 뒤 새로 쳤으면 다시 붙든다
+  assert.equal(I.imeHold("안녕하", 5500, 5000, 5600), true);
+  assert.equal(I.imeHold("", 0, 0, 100), true);
+});
+
+test("poFile: 앞뒤 공백이 낀 id는 다듬은 id로 파일을 만든다", () => {
+  assert.equal(I.poFile("/h/x", " devnotes "), path.join("/h/x", "po", "devnotes.jsonl"));
+  assert.equal(I.poFile("/h/x", " a/b "), null);
+});
+
+test("main.js: Enter 전송은 imeHold를 거치고, PO 라벨이 없으면 안내를 보인다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8");
+  assert.match(src, /imeHold\(value, this\.changedAt, this\.heldAt, now\)/);
+  assert.match(src, /id\("po-hint"\)/);
+  assert.match(src, /\.child\(this\.picker\(t, v\)\)/); // 전체 보기는 PO가 0개여도 안내를 그린다
+});

@@ -118,6 +118,16 @@ const enterIntent = (key, shift) => (/^(enter|return)$/i.test(String(key ?? ""))
 // (`changedAt`, `at`: ms); and the stray line break a sent Enter leaves in the emptied box is cleared (`sentAt`, `now`).
 const needsNewline = (changedAt, at) => !(Number(changedAt) >= Number(at) - 25);
 const strayBreak = (value, sentAt, now) => String(value ?? "").length > 0 && String(value).trim() === "" && Number(now) - Number(sentAt) < 200;
+// A Korean/Japanese/Chinese IME's confirming Enter reaches the box as a plain Enter (KeyEvent has no composing flag), so the first Enter is held, once, when
+// the text was edited within IME_MS before it, or ends in a script an IME composes in; the second Enter (no edit since the held one, give or take the
+// commit's own 100 ms edit) sends. `heldAt`: when an Enter was last held (0 = never); `changedAt`, `now`: ms.
+const IME_MS = 500;
+const IME_TAIL = /[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\u3040-\u30FF\u3400-\u9FFF]$/;
+const imeHold = (value, changedAt, heldAt, now) => {
+  if (Number(heldAt) > 0 && Number(changedAt) <= Number(heldAt) + 100) return false;
+  if (Number(now) - Number(changedAt) < IME_MS) return true;
+  return IME_TAIL.test(String(value ?? "").trimEnd());
+};
 // The "@query" being typed right before `cursor` (offsets into the box text), or null. Not inside a chip, not in the middle of a word.
 function mentionQuery(text, cursor, tokens = []) {
   const before = String(text ?? "").slice(0, cursor);
@@ -263,6 +273,7 @@ export default class Inbox extends View {
     this.menu = null; // the open "@" menu: {start, end, query, items, sel}
     this.changedAt = 0; // the last edit of the box (ms)
     this.sentAt = 0; // the last send (ms)
+    this.heldAt = 0; // the last Enter held back as a possible IME confirm (ms)
     this.nlAt = 0; // the last Shift+Enter handled (ms)
     this.chat.on("change", (_e, c) => {
       this.changedAt = Date.now();
@@ -547,7 +558,11 @@ export default class Inbox extends View {
   enterBox(intent, c) {
     const now = Date.now();
     if (intent === "send") {
-      if (now - this.pickedAt > 250 && now - this.sentAt > 250) this.sendChat(c);
+      if (now - this.pickedAt <= 250 || now - this.sentAt <= 250 || now - this.heldAt < 150) return; // (the key and the submit event of one press are one Enter)
+      let value = "";
+      try { value = this.chat.value(); } catch {}
+      if (value.trim() && imeHold(value, this.changedAt, this.heldAt, now)) { this.heldAt = now; return; } // maybe the IME's confirming Enter: only this once
+      this.sendChat(c);
     } else if (intent === "newline" && now - this.nlAt > 80) {
       this.nlAt = now;
       try { c.timer.after(40, () => { if (needsNewline(this.changedAt, now)) { try { this.chat.replace("\n"); } catch {} } }); } catch {}
@@ -679,7 +694,10 @@ export default class Inbox extends View {
 
   // The PO picker: one chip per live PO (title or id, the waiting count in red) and "기타" while something belongs to no live PO.
   picker(t, v) {
-    if (!v.tabs.length) return null;
+    if (!v.tabs.some((x) => x.id !== PO_OTHER)) {
+      return div().id("po-hint").flex_none().px(this.compact ? 10 : 14).pb(6).text_size(11).text_color(t.muted)
+        .child("PO 터미널에 role=po, po=<id> 라벨을 달면 PO별로 나뉩니다. 지금은 PO가 없어 채팅을 보낼 수 없습니다.");
+    }
     return h_flex().id("po-picker").flex_none().px(this.compact ? 10 : 14).pb(6).gap(5).flex_wrap()
       .children(v.tabs.map((x) => {
         const on = x.id === v.pick;
@@ -934,7 +952,7 @@ export default class Inbox extends View {
           .when(this.windowed, (el) => el.child(div().id("inbox-close").p(4).rounded(5).text_color(t.dim).cursor_pointer().hover((x) => x.bg(t.hover).text_color(t.foreground))
             .on_mouse_down("left", stop).on_click((_e, c) => { this.clearFocus(); try { closeOverlay(safeProps().overlay); } catch {} c.notify(); }).tooltip("닫기")
             .child(svg("mods/pane/close.svg").size(13))))))
-      .when(v.tabs.length > 0, (el) => el.child(this.picker(t, v)))
+      .child(this.picker(t, v))
       .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
       .when(Boolean(this.msg), (el) => el.child(div().id("inbox-msg").px(14).pb(6).text_size(11.5).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
         .on_mouse_down("left", stop).on_click((_e, c) => { this.msg = null; c.notify(); }).child(this.msg.text)))
