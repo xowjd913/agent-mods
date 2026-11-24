@@ -294,7 +294,7 @@ export default class Accounts extends View {
         push.how === "ssh" ? "SSH 원격은 이 도구가 인증하지 않습니다" : push.how === "prior" ? "키체인 등 설치 전과 같은 방법" : "매핑 계정 토큰"));
       const id = c.identity;
       out.push(this.fact(t, "커밋 신원", !id || id.how === "none" ? "정해지지 않음" : `${id.name ?? "?"} <${id.email ?? "?"}>`,
-        !id || id.how === "none" ? "" : id.how === "mapped" ? "매핑 계정의 신원" : id.how === "env" ? "환경 변수" : `직접 정한 값${id.origin ? ` · ${id.origin}` : ""}`));
+        !id || id.how === "none" ? "" : id.how === "mapped" ? `${id.account ? `${id.account} 계정` : "매핑 계정"}의 신원` : id.how === "env" ? "환경 변수" : `직접 정한 값${id.origin ? ` · ${id.origin}` : ""}`));
     }
     for (const w of c.warn ?? []) out.push(div().px(8).pl(16).text_size(11).text_color(t.blocked).child(`주의: ${w}`));
     if (c.test) {

@@ -893,7 +893,7 @@ function fakeChild() {
 }
 
 test("loginRun: 코드와 주소를 적고, 성공하면 원래 활성 계정으로 한 번 되돌린다", async () => {
-  const { ctx, g } = panelSetup();
+  const { ctx, g, app } = panelSetup();
   const child = fakeChild();
   const spawned = [];
   ctx.spawn = (cmd, args, opts) => { spawned.push({ cmd, args, env: opts.env }); return child; };
@@ -916,6 +916,51 @@ test("loginRun: 코드와 주소를 적고, 성공하면 원래 활성 계정으
   assert.equal(st.switched, true);
   assert.equal(g.active, "acct-a");
   assert.equal(switches(g).length, 1);
+  // 진짜 gh 를 바로 돌려 래퍼가 끼지 않으므로 loginRun 이 직접 다시 맞춘다: 새 계정이 로그인 목록에 적힌다.
+  assert.equal(st.synced, true);
+  const logins = JSON.parse(fs.readFileSync(path.join(app, "gh-account", "logins.json"), "utf8")).logins;
+  assert.ok(logins.includes("acct-c"), logins.join(","));
+});
+
+test("loginRun: 성공해도 설치·매핑이 없으면 git 설정을 건드리지 않는다", async () => {
+  const { ctx, app } = panelSetup();
+  fs.rmSync(path.join(app, "gh-accounts.json"));
+  const child = fakeChild();
+  ctx.spawn = () => child;
+  const p = ga.loginRun(ctx, "acct-a");
+  child.emit("close", 0);
+  assert.equal(await p, 0);
+  assert.equal(ga.loginStatus(ctx).synced, null);
+  assert.equal(fs.existsSync(ctx.env.GIT_CONFIG_GLOBAL), false);
+  assert.equal(fs.existsSync(path.join(app, "gh-account", "logins.json")), false);
+});
+
+test("check: 커밋 신원은 git 이 읽은 신원 파일의 계정으로 알리고, 매핑 계정과 다르면 경고한다", () => {
+  const { ctx, app, g } = panelSetup();
+  let idFile = "acct-a";
+  const base = g.run;
+  ctx.run = (cmd, args, opts = {}) => {
+    if (cmd === "git" && args[0] === "config" && args.includes("--show-origin")) {
+      const file = path.join(app, "gh-account", "identity", `${idFile}.gitconfig`);
+      const v = args.includes("user.email") ? `1001+${idFile}@users.noreply.github.com` : idFile;
+      return { status: 0, stdout: `file:${file}\t${v}\n`, stderr: "" };
+    }
+    return base(cmd, args, opts);
+  };
+  let c = ga.check(ctx, { dir: "/w/repo" });
+  assert.equal(c.account, "acct-b");
+  assert.equal(c.identity.how, "mapped");
+  assert.equal(c.identity.account, "acct-a", "매핑 계정이 아니라 실제 신원 파일의 계정");
+  assert.ok(c.warn.some((w) => w.includes("커밋 신원은 acct-a 계정 것인데 이 저장소는 acct-b")), c.warn.join("\n"));
+  const { o, io: x } = io();
+  ctx.cwd = "/w/repo";
+  assert.equal(ga.main(["check"], ctx, x), 0);
+  assert.ok(o.lines.some((l) => l.includes("(acct-a 계정 매핑)")), o.lines.join("\n"));
+
+  idFile = "ACCT-B";
+  c = ga.check(ctx, { dir: "/w/repo" });
+  assert.equal(c.identity.account, "ACCT-B");
+  assert.ok(!c.warn.some((w) => w.includes("커밋 신원은")), "대소문자만 다르면 같은 계정");
 });
 
 test("loginRun: 실패·취소·시간 초과는 되돌리지 않고, 토큰 모양 문자열은 메시지에서 가린다", async () => {
@@ -932,6 +977,7 @@ test("loginRun: 실패·취소·시간 초과는 되돌리지 않고, 토큰 모
     assert.ok(!st.message.includes("gho_ABCDEFGHIJKLMNOPQRST"));
     assert.match(st.message, /\[가림\]/);
     assert.equal(switches(g).length, 0);
+    assert.equal(st.synced, undefined, "실패하면 다시 맞추지 않는다");
   }
   {
     const { ctx, g } = panelSetup();

@@ -111,7 +111,7 @@ sh agent-mods/herdr/install.sh --extras   # Windows: .\agent-mods\herdr\install.
 | macOS·Linux | Windows | 하는 일 |
 | --- | --- | --- |
 | (옵션 없음) | (옵션 없음) | 설치된 모드만 갱신합니다. 처음이면 기본 모드 5개를 설치합니다. |
-| `--extras` | `-Extras` | 모드 9개를 모두 설치합니다. |
+| `--extras` | `-Extras` | 모드 11개를 모두 설치합니다. |
 | `--only <모드>` | `-Only <모드>` | 고른 모드만 설치·갱신합니다. 이미 설치된 다른 모드는 그대로 둡니다. |
 | `--add <모드>` | `-Add <모드>` | 설치된 모드에 고른 모드를 더합니다. |
 | `--remove <모드>` | `-Remove <모드>` | 고른 모드를 지우고, 그 모드가 바꾼 레이아웃 블록을 되돌립니다. |

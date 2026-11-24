@@ -301,7 +301,7 @@ test("이 저장소는 어느 계정?: 고른 폴더나 적은 owner/repo 를 ch
   const CHECK = { repo: "example-org/app", dir: "/w/app", remote: "https://github.com/example-org/app.git", mapOk: true, error: null,
     account: "acct-b", by: "rule", match: "example-org/*", active: "acct-a", accounts: ["acct-a", "acct-b"], loggedIn: true, installed: true, wrapperFirst: true,
     gh: { account: "acct-b", how: "mapped" }, push: { account: "acct-b", how: "mapped" },
-    identity: { name: "Person B", email: "user@example.com", how: "mapped", origin: null }, warn: [], test: null };
+    identity: { name: "Person B", email: "user@example.com", how: "mapped", account: "acct-b", origin: null }, warn: [], test: null };
   const { h, cx, v } = await open({ reply: (a) => base(a) ?? (a[0] === "check"
     ? ok(a.includes("--test") ? { ...CHECK, test: { ok: true, login: "acct-b", access: "push" } } : CHECK) : undefined) });
   const items = v.targetItems();
@@ -312,7 +312,7 @@ test("이 저장소는 어느 계정?: 고른 폴더나 적은 owner/repo 를 ch
   assert.deepEqual(changes(h), [["check", "/w/app", "--json"]]);
   h.texts.length = 0;
   v.render(cx);
-  for (const s of ["example-org/app", "acct-b", "Person B <user@example.com>", "매핑 계정 토큰"]) assert.ok(h.texts.includes(s), s);
+  for (const s of ["example-org/app", "acct-b", "Person B <user@example.com>", "매핑 계정 토큰", "acct-b 계정의 신원"]) assert.ok(h.texts.includes(s), s);
   h.clicks["chk-test"]({}, cx);
   await cx.settle();
   assert.deepEqual(changes(h).pop(), ["check", "/w/app", "--json", "--test"]);

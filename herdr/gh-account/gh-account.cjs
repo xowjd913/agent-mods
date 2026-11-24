@@ -816,13 +816,15 @@ function identityOf(ctx, dir, account) {
     if (!name && !email) return { name: null, email: null, how: "none" };
     const origin = (email || name).origin.replace(/^file:/, "");
     const how = path.resolve(path.dirname(origin)) === path.resolve(P.identity) ? "mapped" : origin === "command line:" ? "env" : "config";
-    return { name: name ? name.value : null, email: email ? email.value : null, how, origin: how === "mapped" ? null : origin };
+    // 매핑 신원이면 git 이 실제로 읽은 신원 파일의 계정(파일 이름)을 알린다. 매핑 계정과 다를 수 있다.
+    const account = how === "mapped" ? path.basename(origin, ".gitconfig") : null;
+    return { name: name ? name.value : null, email: email ? email.value : null, how, account, origin: how === "mapped" ? null : origin };
   }
   if (!account) return null;
   let text = "";
   try { text = fs.readFileSync(path.join(P.identity, `${account}.gitconfig`), "utf8"); } catch { return { name: null, email: null, how: "none" }; }
   const pick = (k) => { const m = text.match(new RegExp(`^\\s*${k}\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"`, "m")); return m ? m[1].replace(/\\(.)/g, "$1") : null; };
-  return { name: pick("name"), email: pick("email"), how: "mapped" };
+  return { name: pick("name"), email: pick("email"), how: "mapped", account };
 }
 
 // 이 계정 토큰으로 GitHub 에 물어 본다: 누구로 접속되는지, 이 저장소에 어떤 권한이 있는지. 토큰은 자식 프로세스 환경에만 넣는다.
@@ -881,7 +883,10 @@ function check(ctx, { repo, dir, test } = {}) {
   const ghAcct = out.gh.account;
   // gh·git push·커밋 신원 중 하나라도 owner 와 다른 계정을 쓰면 알린다. 래퍼가 PATH 뒤에 있으면 gh 는 활성 계정이어도 push 는 매핑 계정이다.
   const ownerLogin = accounts && accounts.find((a) => same(a.login, target.owner));
-  const idAcct = out.identity && out.identity.how === "mapped" && hit ? hit.account : null;
+  const idAcct = out.identity && out.identity.how === "mapped" ? out.identity.account : null;
+  if (idAcct && hit && !same(idAcct, hit.account)) {
+    out.warn.push(`커밋 신원은 ${idAcct} 계정 것인데 이 저장소는 ${hit.account} 계정을 씁니다. gh-account sync 를 실행하고, 그래도 같으면 ${hit.account} 계정의 신원 설정(identity)을 확인하세요.`);
+  }
   const others = [...new Set([ghAcct, out.push.account, idAcct].filter((x) => x && ownerLogin && !same(x, ownerLogin.login)))];
   if (others.length) {
     out.warn.push(`${target.owner} 은(는) 로그인된 계정인데 이 저장소는 ${others.join(", ")} 계정을 씁니다. ${ownerLogin.login} 계정의 개인 저장소라면 규칙을 확인하세요.`);
@@ -993,7 +998,12 @@ function loginRun(ctx, prev, opts = {}) {
       }
       const now = activeLogin(ghLogins(ctx));
       const back = restoreActive(ctx, st.prev, now);
-      st = { ...st, state: "done", added: now, restored: back.ok, switched: back.switched, message: back.message || null };
+      // 진짜 gh 를 바로 돌렸으므로 래퍼의 다시 맞추기가 돌지 않는다. 새 계정의 커밋 신원을 여기서 맞춘다(설치·매핑이 있을 때만).
+      let synced = null;
+      const P = paths(ctx);
+      if (readState(P.state) || fs.existsSync(P.map)) { try { synced = sync(ctx); } catch { synced = false; } }
+      const note = synced === false ? "커밋 신원을 다시 맞추지 못했습니다. gh-account sync 를 실행하세요." : null;
+      st = { ...st, state: "done", added: now, restored: back.ok, switched: back.switched, synced, message: [back.message, note].filter(Boolean).join(" ") || null };
       writeLogin(ctx, st);
       done(back.ok ? 0 : 1);
     };
@@ -1122,7 +1132,7 @@ function checkText(io, c) {
     io.out(`  gh: ${c.gh.account || "(활성 계정 없음)"}${c.gh.how === "active" ? " (gh 활성 계정)" : c.gh.how === "path" ? " (래퍼가 쓰이지 않아 gh 활성 계정)" : ""}`);
     io.out(`  git push: ${c.push.how === "ssh" ? "SSH 키" : c.push.how === "prior" ? "원래 자격 증명(키체인 등)" : c.push.account}`);
     const id = c.identity;
-    io.out(`  커밋 신원: ${!id || id.how === "none" ? "정해지지 않음" : `${id.name || "?"} <${id.email || "?"}>${id.how === "mapped" ? " (매핑)" : id.origin ? ` (${id.origin})` : ""}`}`);
+    io.out(`  커밋 신원: ${!id || id.how === "none" ? "정해지지 않음" : `${id.name || "?"} <${id.email || "?"}>${id.how === "mapped" ? ` (${id.account ? `${id.account} 계정 ` : ""}매핑)` : id.origin ? ` (${id.origin})` : ""}`}`);
   }
   for (const w of c.warn) io.out(`주의: ${w}`);
   if (c.test) {
