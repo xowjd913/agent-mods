@@ -26,6 +26,7 @@ Herdr는 터미널 작업 공간 앱이고, 모드는 그 화면에 패널과 �
 | Claude 사용률 (`usage-status`) | 아래 상태 줄에 Claude 5시간·7일 사용률을 막대로 보여 줍니다 | 추가 | [usage-status](docs/mods/usage-status.md) |
 | 작업별 묶음 (`agent-groups`) | 사이드바에서 터미널을 이슈 번호별로 묶고 리더를 맨 위에 둡니다 | 추가 | [agent-groups](docs/mods/agent-groups.md) |
 | 리더 탭 (`leader-tabs`) | 리더 세션이 둘 이상이면 칸 머리줄에 리더 탭을 띄웁니다 | 추가 | [leader-tabs](docs/mods/leader-tabs.md) |
+| 경로 메뉴 (`path-menu`) | 터미널의 파일 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄웁니다 | 추가 | [path-menu](docs/mods/path-menu.md) |
 
 <!-- 새 모드: docs/mods/<모드>.md를 만들고 이 표와 herdr/README.md 모드 표에 한 줄씩 더합니다. -->
 

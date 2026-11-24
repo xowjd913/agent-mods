@@ -34,12 +34,13 @@
 | Claude 사용률 (`usage-status`) | 아래 상태 줄에 Claude 5시간·7일 사용률을 막대로 보여 줍니다 | 추가 | [usage-status](../docs/mods/usage-status.md) |
 | 작업별 묶음 (`agent-groups`) | 사이드바에서 터미널을 이슈 번호별로 묶고 리더를 맨 위에 둡니다 | 추가 | [agent-groups](../docs/mods/agent-groups.md) |
 | 리더 탭 (`leader-tabs`) | 리더 세션이 둘 이상이면 칸 머리줄에 리더 탭을 띄웁니다 | 추가 | [leader-tabs](../docs/mods/leader-tabs.md) |
+| 경로 메뉴 (`path-menu`) | 터미널의 파일 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄웁니다 | 추가 | [path-menu](../docs/mods/path-menu.md) |
 
 <!-- 새 모드: docs/mods/<모드>.md를 같은 틀(제목, 한 줄 소개, 스크린샷, 사용법, 필요한 것, 설치, 돌아가기 링크)로 만들고 위 표와 ../README.md 모드 표에 한 줄씩 더합니다. -->
 
 - **기본**: 옵션 없이 설치하면 들어갑니다.
 - **추가**: `--extras`(Windows는 `-Extras`)로 모두 넣거나, `--add <모드>`로 하나씩 넣습니다.
-  - 추가 모드 셋은 Herdr 기본 모드를 복제해 기능을 더한 것입니다.
+  - `usage-status`·`agent-groups`·`leader-tabs`는 Herdr 기본 모드를 복제해 기능을 더한 것입니다.
   - 해당 정보가 없으면 기본 모드와 거의 같게 보입니다.
 - 스크린샷은 설명용 데모 저장소(`demo-app`)를 열어 실제로 찍은 화면입니다.
   - 저장소 이름, 이슈, 브랜치는 모두 설명용으로 지어낸 것입니다.
@@ -107,7 +108,7 @@ sh agent-mods/herdr/install.sh --extras   # Windows: .\agent-mods\herdr\install.
 | macOS·Linux | Windows | 하는 일 |
 | --- | --- | --- |
 | (옵션 없음) | (옵션 없음) | 설치된 모드만 갱신합니다. 처음이면 기본 모드 5개를 설치합니다. |
-| `--extras` | `-Extras` | 모드 8개를 모두 설치합니다. |
+| `--extras` | `-Extras` | 모드 9개를 모두 설치합니다. |
 | `--only <모드>` | `-Only <모드>` | 고른 모드만 설치·갱신합니다. 이미 설치된 다른 모드는 그대로 둡니다. |
 | `--add <모드>` | `-Add <모드>` | 설치된 모드에 고른 모드를 더합니다. |
 | `--remove <모드>` | `-Remove <모드>` | 고른 모드를 지우고, 그 모드가 바꾼 레이아웃 블록을 되돌립니다. |
@@ -232,8 +233,9 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
    - `agent-groups`: `agents`를 `agent-groups`로 바꿉니다.
    - `usage-status`: `workspace-status`를 `usage-status`로 바꿉니다.
    - `leader-tabs`: 칸 머리줄 `pane`을 `leader-tabs`로 바꿉니다.
+   - `path-menu`: 레이아웃 맨 위 `link_handlers`에 `path-menu`를 더합니다.
 4. **기록 남기기**: 단계마다 모드 폴더 안에 기록 파일을 남깁니다.
-   - 예: `.tabs-swapped`, `.work-board-added`, `.pr-board-added`, `.board-added`, `.agents-swapped`, `.status-swapped`, `.header-swapped`
+   - 예: `.tabs-swapped`, `.work-board-added`, `.pr-board-added`, `.board-added`, `.agents-swapped`, `.status-swapped`, `.header-swapped`, `.link-handler-added`
    - 다음 설치는 기록이 있는 단계를 건너뛰므로, 사용자가 되돌린 블록은 그대로 둡니다.
 
 같은 이름이지만 이 설치기의 모드를 쓰지 않는 `dashboard` 레이아웃이 이미 있으면, 그 레이아웃은 건드리지 않습니다.

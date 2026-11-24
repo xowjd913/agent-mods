@@ -160,9 +160,11 @@ test("기본 설치 뒤 --extras로 다시 설치하면 추가 모드 블록만 
 
 // 예전 설치: 모든 모드에 예전 표시·기록, layouts/agent-groups.json, 레이아웃 이름 기록 없음.
 // full이면 예전 --extras 설치처럼 모든 블록이 바뀐 레이아웃을 만든다.
+// 예전 설치기에는 path-menu가 없었다.
+const LEGACY_MODS = inst.ALL.filter((m) => m !== "path-menu");
 function legacyHome(full) {
   const home = tempHome();
-  for (const m of [...inst.CORE, ...inst.EXTRAS]) {
+  for (const m of LEGACY_MODS) {
     fs.mkdirSync(path.join(home, "mods", m));
     fs.writeFileSync(path.join(home, "mods", m, "main.js"), "legacy");
     fs.writeFileSync(path.join(home, "mods", m, inst.LEGACY_MARK), "");
@@ -188,7 +190,7 @@ test("예전 설치(agent-groups 레이아웃·예전 표시·기록)는 레이�
   const { home, file, text } = legacyHome(false);
   assert.equal(inst.pendingLayout(home), "");
   const { result } = quiet(() => inst.installMods(home, false));
-  assert.deepEqual(result.installed, [...inst.CORE, ...inst.EXTRAS]);
+  assert.deepEqual(result.installed, LEGACY_MODS);
   quiet(() => inst.applyLayout(home, false));
   assert.equal(fs.readFileSync(file, "utf8"), text);
   assert.ok(!fs.existsSync(path.join(home, "layouts", inst.LAYOUT_NAME + ".json")));
@@ -387,4 +389,39 @@ test("예전 work/.panels-added 기록은 단계별 기록으로 옮기고 되�
   assert.equal(fs.readFileSync(file, "utf8"), text);
   assert.ok(!fs.existsSync(path.join(home, "mods", "work", ".panels-added")));
   assert.ok(fs.existsSync(path.join(home, "mods", "prs", ".pr-board-added")));
+});
+
+test("path-menu는 레이아웃 link_handlers 끝에 한 번만 넣고, 제거하면 원래 목록으로 돌린다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { only: ["path-menu"] }));
+  const file = cloneInto(home, inst.LAYOUT_NAME);
+  fs.writeFileSync(file, JSON.stringify({ ...clonedMain(), link_handlers: ["my-viewer"] }, null, 2) + "\n");
+  quiet(() => inst.applyLayout(home, true));
+  assert.deepEqual(readJson(file).link_handlers, ["my-viewer", "path-menu"]);
+  assert.ok(fs.existsSync(path.join(home, "mods", "path-menu", ".link-handler-added")));
+  quiet(() => inst.applyLayout(home, false));
+  assert.deepEqual(readJson(file).link_handlers, ["my-viewer", "path-menu"]);
+  quiet(() => inst.removeMods(home, ["path-menu"]));
+  assert.deepEqual(readJson(file).link_handlers, ["my-viewer"]);
+});
+
+test("path-menu만 넣은 레이아웃도 우리 것으로 보고, 사용자가 뺀 link_handlers는 다시 넣지 않는다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { only: ["path-menu"] }));
+  const file = cloneInto(home, inst.LAYOUT_NAME);
+  quiet(() => inst.applyLayout(home, true));
+  assert.deepEqual(readJson(file).link_handlers, ["path-menu"]);
+  fs.rmSync(path.join(home, ".herdr-installer-layout"));
+  let { result } = quiet(() => inst.applyLayout(home, false));
+  assert.equal(result.foreign, undefined);
+  fs.writeFileSync(file, JSON.stringify(clonedMain(), null, 2) + "\n");
+  quiet(() => inst.applyLayout(home, false));
+  assert.deepEqual(readJson(file), clonedMain());
+  // Herdr가 먼저 넣어 둔 경우: 겹쳐 넣지 않고, 제거하면 키까지 지운다.
+  fs.rmSync(path.join(home, "mods", "path-menu", ".link-handler-added"));
+  fs.writeFileSync(file, JSON.stringify({ ...clonedMain(), link_handlers: ["path-menu"] }, null, 2) + "\n");
+  quiet(() => inst.applyLayout(home, false));
+  assert.deepEqual(readJson(file).link_handlers, ["path-menu"]);
+  quiet(() => inst.removeMods(home, ["path-menu"]));
+  assert.deepEqual(readJson(file), clonedMain());
 });

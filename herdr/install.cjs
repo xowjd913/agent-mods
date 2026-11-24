@@ -18,7 +18,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const CORE = ["tabs-mine", "work", "prs", "wt-menu", "schedules"];
-const EXTRAS = ["usage-status", "agent-groups", "leader-tabs"];
+const EXTRAS = ["usage-status", "agent-groups", "leader-tabs", "path-menu"];
 const ALL = [...CORE, ...EXTRAS];
 // 모드 설명과 꼭 함께 있어야 하는 모드. deps는 코드에서 확인한 것만 적는다.
 //   work·prs: wt-menu 팝업을 연다(work/main.js, prs/main.js의 openOverlay). 패널 버튼은 tabs-mine에만 있다.
@@ -32,6 +32,7 @@ const MODS = {
   "usage-status": { desc: "아래 상태 줄에 Claude 사용률을 보여 준다", deps: [] },
   "agent-groups": { desc: "왼쪽 사이드바 에이전트 목록을 작업별로 묶는다", deps: [] },
   "leader-tabs": { desc: "칸 머리줄에 리더 탭을 보여 준다", deps: [] },
+  "path-menu": { desc: "터미널 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄운다", deps: [] },
 };
 const MARK = ".installed-by-herdr-installer";
 // 예전 설치 스크립트가 남긴 표시. 이 표시가 있는 폴더도 우리 것으로 보고 덮어쓴다.
@@ -136,13 +137,32 @@ function walk(node, fn) {
   for (const child of Array.isArray(node.children) ? node.children : []) walk(child, fn);
 }
 function usesMod(layout, mods) {
-  let found = false;
+  let found = linkHandlers(layout).some((m) => mods.includes(m));
   walk(layout, (n) => {
     if (n.content && mods.includes(n.content.mod)) found = true;
     const h = n.content?.pane?.header?.content;
     if (h && mods.includes(h.mod)) found = true;
   });
   return found;
+}
+
+// 레이아웃 맨 위의 link_handlers(터미널 링크 Cmd·Ctrl+클릭을 맡는 모드 순서). 없으면 빈 배열.
+function linkHandlers(l) {
+  return Array.isArray(l?.link_handlers) ? l.link_handlers : [];
+}
+function addLinkHandler(l, mod) {
+  if (!Array.isArray(l.link_handlers)) l.link_handlers = [];
+  if (!l.link_handlers.includes(mod)) l.link_handlers.push(mod);
+  return null;
+}
+// 목록에서 모드를 뺀다. 비면 키를 지워 넣기 전 모양으로 돌린다. 뺀 개수를 돌려준다.
+function dropLinkHandler(l, mod) {
+  const before = linkHandlers(l).length;
+  if (!before) return 0;
+  l.link_handlers = l.link_handlers.filter((m) => m !== mod);
+  const n = before - l.link_handlers.length;
+  if (!l.link_handlers.length) delete l.link_handlers;
+  return n;
 }
 
 const layoutFile = (home, name) => path.join(home, "layouts", name + ".json");
@@ -274,6 +294,14 @@ const STEPS = [
     done: (l) => usesMod(l, ["leader-tabs"]),
     apply: (l) => (swapHeader(l, "pane", "leader-tabs") ? null : "칸 머리줄(pane) 블록을 찾지 못했습니다."),
     undo: (l) => swapHeader(l, "leader-tabs", "pane"),
+  },
+  {
+    name: "터미널 경로 메뉴(path-menu)",
+    needs: ["path-menu"],
+    mark: ["path-menu", ".link-handler-added"],
+    done: (l) => linkHandlers(l).includes("path-menu"),
+    apply: (l) => addLinkHandler(l, "path-menu"),
+    undo: (l) => dropLinkHandler(l, "path-menu"),
   },
 ];
 

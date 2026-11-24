@@ -1,0 +1,1 @@
+{ "place": "none", "title": "Path menu", "link_handlers": [{ "kind": "file", "pattern": "." }] }
