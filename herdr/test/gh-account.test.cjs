@@ -463,7 +463,9 @@ test("e2e: 원래 도우미 저장 거르기, URL 경로 우선, gh 가 없을 �
   assert.match(fill(plain, "url=https://github.com/example-org/x.git\n\n").stdout, /^username=acct-b$/m);
   assert.doesNotMatch(fill(mapped, "url=https://github.com/acct-a/tool.git\n\n").stdout, /acct-b/);
 
-  // P2: PATH 에 gh 가 없어도 설치 때 기록한 gh 를 쓴다
+  // P2: PATH 에 gh 가 없어도 설치 때 기록한 gh 를 쓴다.
+  // /usr/bin 이나 /bin 에 진짜 gh 가 있는 기계(예: Linux 의 apt 설치)는 PATH 의 gh 가 먼저라 이 상황을 만들 수 없어 건너뛴다.
+  if (["/usr/bin/gh", "/bin/gh"].some((f) => fs.existsSync(f))) return;
   const noGh = { env: { PATH: [bin, tools, "/usr/bin", "/bin"].join(":") } };
   assert.match(fill(mapped, undefined, noGh).stdout, /^username=acct-b$/m);
   // 그 gh 마저 없으면 실패하지 않고 원래 도우미로 넘긴다
