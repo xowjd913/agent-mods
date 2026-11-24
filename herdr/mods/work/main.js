@@ -10,7 +10,7 @@ const LOAD_TIMEOUT = 90000, LOAD_STALL_MS = 100000;
 const ICON = (name) => `mods/workspace-chrome/${name}.svg`;
 
 // leaderName:begin
-// The name a person knows a leader by: its Herdr session name. ONE rule for the inbox (cards, rows) and agent-groups (leader headers).
+// The name a person knows a leader by: its Herdr session name. ONE rule for the inbox (cards, rows), agent-groups (leader headers), leader-tabs (tab text) and work (session rows).
 // The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js and agent-groups/main.js
 // (a test keeps them identical). Order: the live terminal title -> the `session` label -> the last name remembered for that leader
 // (`memo`, {<hc name>: name}) -> the hc name ("lead-po-inbox" -> "po inbox"). The "리더 · " prefix is dropped: the place already says
