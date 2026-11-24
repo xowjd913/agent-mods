@@ -1,4 +1,8 @@
-// Inbox panel: the leaders' reports (~/.herdr-inbox/<leader>.jsonl, written by `report`).
+// PO 데스크 (mod id "inbox"): the leaders' reports (~/.herdr-inbox/<leader>.jsonl, written by `report`) and the PO's own lines
+// (~/.herdr-inbox/po/<po id>.jsonl).
+//  - One PO at a time: a PO terminal carries the labels role=po and po=<id>; the picker lists the live ones and the pick (kept in
+//    shared state) decides which leaders' cards, wait counts, "@" menu, chat target and PO lines are shown. A leader belongs to the PO
+//    that is its live terminal's parent (else the PO its reports name); the rest sits under "기타", which cannot chat.
 //  - The right pane is ONE list: open decision/verify asks pinned on top, then the latest reports (newest first), one short row each
 //    (leader, kind badge, first line). A row opens the floating window at that item; the counts are small badges in the pane header.
 //  - The window is the chat view, in two lanes:
@@ -23,7 +27,8 @@ const LOAD_TIMEOUT = 20000, LOAD_STALL_MS = 30000, WINDOW_REFRESH_MS = 5000, PAN
 const KIND = { done: ["완료", "working"], decision: ["결정", "blocked"], verify: ["확인", "blocked"], stop: ["중단", "idle"], resume: ["재개", "dim"], other: ["알림", "dim"], start: ["시작", "dim"] };
 const WINDOW = { mod: "inbox", kind: "window", key: "inbox", keep: true, width: 480, height: 680, props: { mode: "window" } };
 const SENT_KEY = "inbox.sent";
-const CHAT_KEY = "inbox.chat"; // the lines the person sent through the chat box [{ts, ms, text, to}]
+const PICK_KEY = "inbox.po"; // the PO id the person picked last (shared, so it also holds across window reopens)
+const CHAT_KEY = "inbox.chat"; // the lines the person sent through the chat box [{ts, ms, text, to, po}] (po: the PO id they went to)
 const MAX_CHAT = 30, SHOW_CHAT = 6;
 const PASTE_SETTLE_MS = 350; // the PO terminal takes the paste before Enter is pressed
 const OPEN_KEY = "inbox.expanded"; // cards the person opened ("자세히"), shared so they stay open across re-renders and window reopens
@@ -32,6 +37,7 @@ const FOCUS_KEY = "inbox.focus"; // "<leader>|<report time>" the window should s
 const SECT_KEY = "inbox.sections"; // {ask:{c,n}, rep:{c}}: which window sections the person collapsed (c) and, for "결정 필요", at which count (n)
 const MAX_ROWS = 20; // pane rows below the pinned asks; the rest is in the window
 const NO_PO = "이 리더의 PO 터미널을 찾지 못했습니다(리더 터미널의 부모가 role=po 라벨이어야 합니다).";
+const OTHER_LABEL = "기타";
 const CLIP = "답을 클립보드에 담아 PO 터미널에 붙여 넣습니다(Enter는 직접 누르세요). 클립보드 내용이 바뀝니다.";
 
 // Which terminal is a waiting leader. Copied verbatim from inbox.cjs (a test keeps them identical); tabs-mine uses the same line.
@@ -121,30 +127,65 @@ function mentionQuery(text, cursor, tokens = []) {
   if (tokens.some((t) => start >= t.range.start && start < t.range.end)) return null;
   return { start, end: cursor, query: m[2] };
 }
-// The "@" menu: "@here" first, then the live leaders that have a PO (the same rule as findPo), by shown name. `query` filters by hc name
-// or shown name.
-function leaderMenu(terms, memo, query = "", limit = 8) {
+// ---- The PO picker. A PO terminal carries the labels role=po and po=<id>; the id is lowercase [a-z0-9-], 1-40 long (never the terminal
+// address, which changes on a restart). Everything in the window is for the one picked PO.
+const PO_ID = /^[a-z0-9-]{1,40}$/;
+const PO_OTHER = "~"; // the pick that holds leaders and reports no live PO owns ("기타"); not a valid id, so it never clashes
+const cleanPoId = (v) => { const s = String(v ?? "").trim(); return PO_ID.test(s) ? s : ""; };
+const isPoTerm = (t) => String(t?.labels?.role ?? "").trim().toLowerCase() === "po";
+const poId = (t) => (isPoTerm(t) ? cleanPoId(t?.labels?.po) : "");
+// The live PO terminals that have a po id, in terminal order: [{id, address, label, n}]. `label` is the terminal title ("PO · DevNotes"),
+// else the id; `n` the live lead-* terminals under it. Two terminals with the same id: the first one is the PO.
+function poList(terms) {
+  const list = terms ?? [];
+  const out = [];
+  for (const t of list) {
+    const id = poId(t);
+    if (!id || out.some((p) => p.id === id)) continue;
+    const title = String(t.title ?? "").trim();
+    out.push({ id, address: t.address, label: title && title !== t.name && title !== t.address ? title : id, n: list.filter((x) => /^lead-/.test(String(x?.name ?? "")) && x.parent === t.address).length });
+  }
+  return out;
+}
+// Which PO a leader belongs to: a live PO's id, else PO_OTHER. A live leader belongs to the PO that is its terminal's parent (the
+// terminals are the truth: the id a report names may be old); a leader that is not live, to the PO its reports name (`reportPo`).
+// A PO that is not live owns nothing.
+function leaderOwner(terms, leaderName, address, reportPo = "") {
+  const list = terms ?? [];
+  const leader = (leaderName && list.find((t) => t.name === leaderName)) || (address && list.find((t) => t.address === address)) || null;
+  const id = leader ? poId(leader.parent ? list.find((t) => t.address === leader.parent) : null) : cleanPoId(reportPo);
+  return id && poList(list).some((p) => p.id === id) ? id : PO_OTHER;
+}
+// The PO shown when the window opens: the last one picked while it is still live (PO_OTHER while something still belongs there), else
+// the PO with the most live leaders (the first one on a tie), else PO_OTHER when only that exists, else "".
+function choosePick(pos, last, hasOther) {
+  const l = String(last ?? "");
+  if ((pos ?? []).some((p) => p.id === l) || (l === PO_OTHER && hasOther)) return l;
+  const best = (pos ?? []).map((p, i) => ({ p, i })).sort((a, b) => b.p.n - a.p.n || a.i - b.i)[0];
+  return best ? best.p.id : hasOther ? PO_OTHER : "";
+}
+// The "@" menu: "@here" first, then the live leaders of the picked PO (`pick`, a PO id; none for PO_OTHER), by shown name. `query`
+// filters by hc name or shown name.
+function leaderMenu(terms, memo, query = "", limit = 8, pick = "") {
   const list = terms ?? [];
   const q = String(query ?? "").trim().toLowerCase();
-  const leaders = list.filter((t) => /^lead-/.test(String(t?.name ?? "")) && findPo(list, t.name, t.address))
+  const leaders = list.filter((t) => pick && pick !== PO_OTHER && /^lead-/.test(String(t?.name ?? "")) && findPo(list, t.name, t.address) && leaderOwner(list, t.name, t.address) === pick)
     .map((t) => ({ id: t.name, label: leaderName(t.name, t, memo), sub: t.name }))
     .filter((x, i, a) => a.findIndex((y) => y.id === x.id) === i)
     .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0)); // code-unit order: the same on every platform
   return [{ id: "here", label: "here", sub: "" }, ...leaders].filter((x) => !q || x.id.toLowerCase().includes(q) || x.label.toLowerCase().includes(q)).slice(0, limit);
 }
-// The PO a line is pasted into: the PO of the leaders it names (they must share one), else the PO with the most live leaders.
+// The PO terminal a line is pasted into: the PO of the leaders it names (they must share one), else the picked PO (`pick`, a PO id).
 // {po} or {po:null, why:"orphan"|"many"|"none"}.
-function chatTarget(terms, to = []) {
+function chatTarget(terms, to = [], pick = "") {
   const list = terms ?? [];
   if (to.length) {
     const pos = [...new Set(to.map((n) => findPo(list, n)))];
     if (pos.includes(null)) return { po: null, why: "orphan" };
     return pos.length > 1 ? { po: null, why: "many" } : { po: pos[0] };
   }
-  const isPo = (t) => String(t?.labels?.role ?? "").trim().toLowerCase() === "po";
-  const count = (po) => list.filter((t) => /^lead-/.test(String(t?.name ?? "")) && t.parent === po.address).length;
-  const best = list.filter(isPo).map((p, i) => ({ p, n: count(p), i })).sort((a, b) => b.n - a.n || a.i - b.i)[0];
-  return best ? { po: best.p.address } : { po: null, why: "none" };
+  const p = pick && pick !== PO_OTHER ? poList(list).find((x) => x.id === pick) : null;
+  return p ? { po: p.address } : { po: null, why: "none" };
 }
 // Follow-the-newest rule of the chat lines: scroll to the bottom when the window opens (no key seen yet) or a new line arrived, but
 // not while the person has scrolled up to read. `up` is how far (px) the wheel has moved up from the bottom.
@@ -373,22 +414,49 @@ export default class Inbox extends View {
       const s = (this.data?.leaders ?? []).find((l) => l.leader === term.name) ?? (this.data?.leaders ?? []).find((l) => l.terminal === term.address)
         ?? { leader: term.name, terminal: term.address, open: null, ask: null, items: [], last: null };
       const item = s.ask ?? s.open;
-      out.push({ s, term, kind, item, po: findPo(list, term.name, term.address), link: String(term?.labels?.["wait-link"] ?? "").trim() || item?.link || "" });
+      out.push({ s, term, kind, item, po: findPo(list, term.name, term.address), owner: leaderOwner(list, term.name, term.address, s.po), link: String(term?.labels?.["wait-link"] ?? "").trim() || item?.link || "" });
     }
     return out.sort((a, b) => (b.item?.ms ?? 0) - (a.item?.ms ?? 0));
   }
 
-  // Everything else, newest first: not start/answered lines, and not the report a lane-1 card already shows.
-  reports(asks, cap = MAX_BUBBLES) {
+  // Everything else, newest first: not start/answered lines, and not the report a lane-1 card already shows. Each carries its owner PO.
+  reports(asks) {
     const shown = new Set(asks.map((a) => `${a.s.leader}|${a.item?.ts}`));
+    const list = this.liveTerms();
     const out = [];
     for (const s of this.data?.leaders ?? []) {
+      const owner = leaderOwner(list, s.leader, s.terminal, s.po);
       for (const it of s.items) {
         if (it.kind === "answered" || it.kind === "start" || shown.has(`${s.leader}|${it.ts}`)) continue;
-        out.push({ s, it });
+        out.push({ s, it, owner });
       }
     }
-    return out.sort((a, b) => b.it.ms - a.it.ms).slice(0, cap);
+    return out.sort((a, b) => b.it.ms - a.it.ms);
+  }
+
+  // What the window shows: the live POs (plus "기타" while a leader or report belongs to none), the picked one, and its asks and reports.
+  // `tabs` [{id, label, n}]: n = the waiting leaders of that PO.
+  view() {
+    const terms = this.liveTerms();
+    const pos = poList(terms);
+    const all = this.asks();
+    const reps = this.reports(all);
+    const hasOther = all.some((a) => a.owner === PO_OTHER) || reps.some((r) => r.owner === PO_OTHER);
+    let last = "";
+    try { last = shared(PICK_KEY) ?? ""; } catch {}
+    const pick = choosePick(pos, last, hasOther);
+    const waiting = (id) => all.filter((a) => a.owner === id).length;
+    const tabs = pos.map((p) => ({ id: p.id, label: p.label, n: waiting(p.id) }));
+    if (hasOther) tabs.push({ id: PO_OTHER, label: OTHER_LABEL, n: waiting(PO_OTHER) });
+    return { terms, tabs, pick, asks: all.filter((a) => a.owner === pick), reports: reps.filter((r) => r.owner === pick) };
+  }
+
+  pickPo(id, c) {
+    try { setShared(PICK_KEY, id); } catch {}
+    this.menu = null;
+    this.chatSeen = null; // the other PO's lines: scroll to their bottom
+    this.chatUp = 0;
+    c.notify();
   }
 
   peek(s) {
@@ -448,7 +516,7 @@ export default class Inbox extends View {
     try {
       const content = this.chat.content();
       const q = mentionQuery(content.text, this.chat.selected_range().end, content.tokens);
-      const items = q ? leaderMenu(this.liveTerms(), namesMemo(), q.query) : [];
+      const items = q ? leaderMenu(this.liveTerms(), namesMemo(), q.query, 8, this.view().pick) : [];
       if (q && items.length) next = { ...q, items, sel: Math.min(this.menu?.sel ?? 0, items.length - 1) };
     } catch {}
     this.menu = next;
@@ -508,10 +576,12 @@ export default class Inbox extends View {
     c.notify();
   }
 
-  chatLines() {
+  // The chat lines of the picked PO: what the person sent to it and what it said (its own file).
+  chatLines(pick) {
     let mine = [];
     try { mine = shared(CHAT_KEY) ?? []; } catch {}
-    return [...mine.map((x) => ({ ...x, me: true })), ...(this.data?.po ?? [])].sort((a, b) => a.ms - b.ms).slice(-SHOW_CHAT);
+    const said = pick && pick !== PO_OTHER ? this.data?.po?.[pick] ?? [] : [];
+    return [...mine.filter((x) => x.po === pick).map((x) => ({ ...x, me: true })), ...said].sort((a, b) => a.ms - b.ms).slice(-SHOW_CHAT);
   }
 
   // Presses Enter in the PO terminal once the paste has landed (`hc keys`, no <hc ...> tag), and reports a failure in the box's message.
@@ -529,14 +599,16 @@ export default class Inbox extends View {
 
   sendChat(c) {
     this.sentAt = Date.now();
-    const terms = this.liveTerms();
-    const known = terms.map((t) => t.name).filter((n) => /^lead-/.test(String(n ?? "")));
+    const v = this.view();
+    const terms = v.terms;
+    const known = v.pick === PO_OTHER ? [] : terms.filter((t) => /^lead-/.test(String(t.name ?? "")) && leaderOwner(terms, t.name, t.address) === v.pick).map((t) => t.name);
     let p;
     try { p = parseMention(composeChat(this.chat.content()), known); } catch { p = { empty: true }; }
     if (p.empty) { this.say("PO에게 보낼 글을 먼저 적어 주세요.", true); c.notify(); return; }
-    const tgt = chatTarget(terms, p.to);
+    const tgt = chatTarget(terms, p.to, v.pick);
     if (!tgt.po) {
-      this.say(tgt.why === "many" ? "부른 리더들의 PO가 서로 다릅니다. 한 PO의 리더만 함께 부르세요." : tgt.why === "orphan" ? NO_PO : "role=po 라벨이 붙은 PO 터미널이 없습니다.", true);
+      this.say(tgt.why === "many" ? "부른 리더들의 PO가 서로 다릅니다. 한 PO의 리더만 함께 부르세요." : tgt.why === "orphan" ? NO_PO
+        : "받을 PO를 먼저 고르세요(role=po, po=<id> 라벨이 붙은 PO 터미널만 고를 수 있습니다).", true);
       c.notify();
       return;
     }
@@ -558,7 +630,7 @@ export default class Inbox extends View {
       }
       try {
         const now = Date.now();
-        setShared(CHAT_KEY, [...(shared(CHAT_KEY) ?? []), { ts: new Date(now).toISOString(), ms: now, text: p.text, to: p.to[0] ?? "" }].slice(-MAX_CHAT));
+        setShared(CHAT_KEY, [...(shared(CHAT_KEY) ?? []), { ts: new Date(now).toISOString(), ms: now, text: p.text, to: p.to[0] ?? "", po: v.pick }].slice(-MAX_CHAT));
       } catch {}
       this.chat.set_value("");
       this.menu = null;
@@ -568,8 +640,8 @@ export default class Inbox extends View {
   }
 
   // The chat footer: the last few lines (the person's and the PO's), the "@" menu, the input with mention chips.
-  chatBox(t) {
-    const lines = this.chatLines();
+  chatBox(t, v) {
+    const lines = this.chatLines(v.pick);
     const key = chatKey(lines);
     if (chatFollow(this.chatSeen, key, this.chatUp)) { try { this.chatScroll?.scroll_to_item(lines.length - 1); } catch {} }
     this.chatSeen = key;
@@ -589,6 +661,7 @@ export default class Inbox extends View {
         .on_mouse_down("left", stop).on_click((_e, c) => this.pickMenu(i, c))
         .child(div().text_size(12.5).font_semibold().text_color(it.id === "here" ? t.muted : tint(t, it.id)).child(`@${it.label}`))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(it.id === "here" ? "PO에게 그냥 보내기" : it.sub))));
+    const target = v.tabs.find((x) => x.id === v.pick && x.id !== PO_OTHER);
     const chip = (ctx) => div().h(ctx.line_height).px(5).rounded(5).flex().items_center().bg(t.working + "26").text_color(t.working).text_size(12.5).font_semibold()
       .child(ctx.token.label ?? ctx.token.text.trim());
     return v_flex().flex_none().px(10).pb(10).pt(6).gap(6).border_t(1).border_color(t.border)
@@ -597,10 +670,26 @@ export default class Inbox extends View {
         .on_scroll_wheel((e) => { this.chatUp = chatWheel(this.chatUp, e?.delta?.y); }) // wheel up = positive y
         .when(Boolean(this.chatScroll), (x) => x.track_scroll(this.chatScroll)).children(lines.map(bubble))))
       .when(Boolean(menu), (el) => el.child(menu))
+      .child(div().truncate().text_size(10.5).text_color(t.dim).child(target ? `받는 PO: ${target.label}` : "받는 PO가 없습니다 — PO를 고르세요"))
       .child(h_flex().gap(6).items_center()
         .child(div().flex_1().min_w(0).on_mouse_down("left", stop)
           .child(Textarea.new(this.chat).token((ctx) => chip(ctx)).min_h(30).px(10).py(5).rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
-        .child(this.button(t, "chat-send", "PO에 보내기", (c) => this.sendChat(c), { primary: true, tip: "글을 PO 터미널에 붙여 넣고 Enter까지 눌러 보냅니다(글은 클립보드를 거칩니다). Shift+Enter는 줄바꿈" })));
+        .child(this.button(t, "chat-send", "PO에 보내기", (c) => this.sendChat(c), { primary: true, tip: "고른 PO 터미널에 글을 붙여 넣고 Enter까지 눌러 보냅니다(글은 클립보드를 거칩니다). Shift+Enter는 줄바꿈" })));
+  }
+
+  // The PO picker: one chip per live PO (title or id, the waiting count in red) and "기타" while something belongs to no live PO.
+  picker(t, v) {
+    if (!v.tabs.length) return null;
+    return h_flex().id("po-picker").flex_none().px(this.compact ? 10 : 14).pb(6).gap(5).flex_wrap()
+      .children(v.tabs.map((x) => {
+        const on = x.id === v.pick;
+        return h_flex().id(`po-${x.id}`).h(24).px(9).gap(5).items_center().rounded(12).cursor_pointer().on_mouse_down("left", stop)
+          .bg(on ? t.selected : t.raised).border(1).border_color(on ? t.foreground + "40" : t.border)
+          .hover((s) => s.bg(on ? t.selected : t.hover)).on_click((_e, c) => this.pickPo(x.id, c))
+          .tooltip(x.id === PO_OTHER ? "PO를 알 수 없는 리더와 보고(채팅은 보낼 수 없습니다)" : `po=${x.id}`)
+          .child(div().max_w(150).truncate().text_size(11.5).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
+          .when(x.n > 0, (el) => el.child(div().flex_none().px(5).h(15).rounded(8).bg(t.blocked + "26").flex().items_center().text_size(10).text_color(t.blocked).child(String(x.n))));
+      }));
   }
 
   // ---- parts
@@ -766,8 +855,9 @@ export default class Inbox extends View {
   // The small pane: ONE list, no category step. Open asks pinned on top, then the latest reports; the counts are small badges in the header.
   summary(cx) {
     const t = theme();
-    const asks = this.asks();
-    const all = this.reports(asks, Infinity);
+    const v = this.view();
+    const asks = v.asks;
+    const all = v.reports;
     const rows = all.slice(0, MAX_ROWS);
     const badge = (label, n, color) => h_flex().flex_none().h(18).px(7).gap(4).items_center().rounded(9).text_size(10.5)
       .bg(n > 0 && color ? color + "26" : t.raised).text_color(n > 0 && color ? color : t.muted)
@@ -783,12 +873,13 @@ export default class Inbox extends View {
     }
     return v_flex().id("inbox-summary").size_full().min_h(0).bg(t.chrome).p(12).gap(8)
       .child(h_flex().items_center().gap(7)
-        .child(div().text_size(14).font_semibold().text_color(t.foreground).child("받은편지함"))
+        .child(div().text_size(14).font_semibold().text_color(t.foreground).child("PO 데스크"))
         .child(badge("결정", asks.length, t.blocked))
         .child(badge("보고", all.length, null))
         .child(div().flex_1())
         .child(div().flex_none().text_size(11).text_color(t.dim).child(this.data ? ago(this.data.at) : "불러오는 중…"))
-        .child(this.button(t, "inbox-open", "창 열기", (c) => { this.clearFocus(); this.openWindow(); c.notify(); }, { tip: "받은편지함 창을 엽니다" })))
+        .child(this.button(t, "inbox-open", "창 열기", (c) => { this.clearFocus(); this.openWindow(); c.notify(); }, { tip: "PO 데스크 창을 엽니다" })))
+      .when(v.tabs.length > 1 || v.pick === PO_OTHER, (el) => el.child(this.picker(t, v)))
       .when(Boolean(this.error), (el) => el.child(div().text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
       .when(Boolean(this.msg), (el) => el.child(div().text_size(11.5).text_color(this.msg.bad ? t.blocked : t.working).child(this.msg.text)))
       .child(v_flex().id("inbox-rows").flex_1().min_h(0).gap(4).overflow_y_scrollbar().mode("always").when(Boolean(this.rowsScroll), (el) => el.track_scroll(this.rowsScroll)).children(list));
@@ -797,8 +888,9 @@ export default class Inbox extends View {
   // The full chat view (pane or window): both lanes.
   full(cx) {
     const t = theme();
-    const asks = this.asks();
-    let reports = this.reports(asks);
+    const v = this.view();
+    const asks = v.asks;
+    let reports = v.reports.slice(0, MAX_BUBBLES);
     const blocks = [];
     const at = new Map(); // spot key -> index in blocks (the direct children of the scroll list)
     this.at = at;
@@ -833,7 +925,7 @@ export default class Inbox extends View {
       .on_size_change((size, c) => { const x = size.width < 360; if (x !== this.compact) { this.compact = x; c.notify(); } })
       .child(h_flex().h(38).px(this.compact ? 10 : 14).flex_none().items_center().justify_between()
         .child(h_flex().gap(6).items_center()
-          .child(div().text_size(15).font_semibold().text_color(t.foreground).child("받은편지함"))
+          .child(div().text_size(15).font_semibold().text_color(t.foreground).child("PO 데스크"))
           .child(div().id("inbox-refresh").p(3).rounded(5).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
             .on_mouse_down("left", stop).on_click((_e, c) => { this.gen++; this.busy = false; this.load(c); }).tooltip("새로고침")
             .child(this.busy ? svg(ICON("spinner")).size(13).spin(900) : div().text_size(14).child("↻"))))
@@ -842,10 +934,11 @@ export default class Inbox extends View {
           .when(this.windowed, (el) => el.child(div().id("inbox-close").p(4).rounded(5).text_color(t.dim).cursor_pointer().hover((x) => x.bg(t.hover).text_color(t.foreground))
             .on_mouse_down("left", stop).on_click((_e, c) => { this.clearFocus(); try { closeOverlay(safeProps().overlay); } catch {} c.notify(); }).tooltip("닫기")
             .child(svg("mods/pane/close.svg").size(13))))))
+      .when(v.tabs.length > 0, (el) => el.child(this.picker(t, v)))
       .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
       .when(Boolean(this.msg), (el) => el.child(div().id("inbox-msg").px(14).pb(6).text_size(11.5).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
         .on_mouse_down("left", stop).on_click((_e, c) => { this.msg = null; c.notify(); }).child(this.msg.text)))
       .child(v_flex().id("inbox-list").on_mouse_down("left", stop).flex_1().min_h(0).px(4).overflow_y_scrollbar().mode("always").when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks))
-      .child(this.chatBox(t));
+      .child(this.chatBox(t, v));
   }
 }

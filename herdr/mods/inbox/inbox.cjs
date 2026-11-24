@@ -1,5 +1,6 @@
-// Inbox helper: reads the leader reports in ~/.herdr-inbox/<leader>.jsonl (one JSON object per line, written by `report`)
-// and sorts them into the panel's two lanes. Pure functions plus one CLI: `node inbox.cjs` prints {at, leaders:[...]} as JSON.
+// PO desk helper: reads the leader reports in ~/.herdr-inbox/<leader>.jsonl (one JSON object per line, written by `report`) and each
+// PO's own lines in ~/.herdr-inbox/po/<po id>.jsonl, and sorts them into the panel's two lanes. Pure functions plus one CLI:
+// `node inbox.cjs` prints {at, leaders:[...], po:{<po id>:[...]}} as JSON.
 // Reader rules (Leader Inbox contract v1): ignore unknown fields and kinds, skip a half-written or broken line, and the newest
 // decision/verify line of a leader stays open until a later `answered` line of the same leader.
 const fs = require("fs");
@@ -34,6 +35,7 @@ function parseLines(text) {
       title: typeof o.title === "string" ? o.title : "",
       body: typeof o.body === "string" ? o.body : "",
       link: typeof o.link === "string" ? o.link : "",
+      po: cleanPoId(o.po), // the PO id the leader reports under (optional; "" when absent or not a valid id)
     });
   }
   return out;
@@ -252,6 +254,7 @@ function summarize(leader, text) {
   return {
     leader: named,
     terminal: items.length ? items[items.length - 1].terminal : "",
+    po: [...items].reverse().find((i) => i.po)?.po ?? "", // the newest PO id the leader named, "" when none
     open,
     ask, // the newest decision/verify even if answered: shown while the wait label is still on
     items: newest,
@@ -272,7 +275,8 @@ function readTail(file) {
   } finally { fs.closeSync(fd); }
 }
 
-const PO_FILE = "po.jsonl"; // the PO's own lines to the person; not a leader's report file
+const OLD_PO_FILE = "po.jsonl"; // the old single PO file: dropped, never read (and never shown as a leader)
+const PO_DIR = "po"; // ~/.herdr-inbox/po/<po id>.jsonl: one file per PO, keyed by its id label (never by terminal address)
 const MAX_PO = 100; // newest PO lines kept
 const MAX_PO_TEXT = 2000;
 
@@ -292,14 +296,26 @@ function parsePoLines(text) {
   return out.slice(-MAX_PO);
 }
 
-// A missing, unreadable or empty file is no replies, not an error.
+// The file of one PO's lines, or null when `id` is not a valid PO id (so a label can never reach outside the folder).
+const poFile = (dir, id) => (cleanPoId(id) ? path.join(dir, PO_DIR, `${id}.jsonl`) : null);
+
+// Every PO's lines: {<po id>: [lines]}. A missing folder, an unreadable or empty file, or a file not named <valid id>.jsonl is no replies.
 function readPo(dir = inboxDir()) {
-  try { return parsePoLines(readTail(path.join(dir, PO_FILE))); } catch { return []; }
+  const out = {};
+  let names = [];
+  try { names = fs.readdirSync(path.join(dir, PO_DIR)); } catch { return out; }
+  for (const n of names) {
+    const id = n.endsWith(".jsonl") ? n.slice(0, -6) : "";
+    const file = poFile(dir, id);
+    if (!file) continue;
+    try { const lines = parsePoLines(readTail(file)); if (lines.length) out[id] = lines; } catch {}
+  }
+  return out;
 }
 
 function collect(dir = inboxDir()) {
   let names = [];
-  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== PO_FILE); } catch { return { at: new Date().toISOString(), leaders: [], po: [] }; }
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== OLD_PO_FILE); } catch { return { at: new Date().toISOString(), leaders: [], po: {} }; }
   const leaders = [];
   for (const n of names) {
     try {
@@ -402,30 +418,65 @@ function mentionQuery(text, cursor, tokens = []) {
   if (tokens.some((t) => start >= t.range.start && start < t.range.end)) return null;
   return { start, end: cursor, query: m[2] };
 }
-// The "@" menu: "@here" first, then the live leaders that have a PO (the same rule as findPo), by shown name. `query` filters by hc name
-// or shown name.
-function leaderMenu(terms, memo, query = "", limit = 8) {
+// ---- The PO picker. A PO terminal carries the labels role=po and po=<id>; the id is lowercase [a-z0-9-], 1-40 long (never the terminal
+// address, which changes on a restart). Everything in the window is for the one picked PO.
+const PO_ID = /^[a-z0-9-]{1,40}$/;
+const PO_OTHER = "~"; // the pick that holds leaders and reports no live PO owns ("기타"); not a valid id, so it never clashes
+const cleanPoId = (v) => { const s = String(v ?? "").trim(); return PO_ID.test(s) ? s : ""; };
+const isPoTerm = (t) => String(t?.labels?.role ?? "").trim().toLowerCase() === "po";
+const poId = (t) => (isPoTerm(t) ? cleanPoId(t?.labels?.po) : "");
+// The live PO terminals that have a po id, in terminal order: [{id, address, label, n}]. `label` is the terminal title ("PO · DevNotes"),
+// else the id; `n` the live lead-* terminals under it. Two terminals with the same id: the first one is the PO.
+function poList(terms) {
+  const list = terms ?? [];
+  const out = [];
+  for (const t of list) {
+    const id = poId(t);
+    if (!id || out.some((p) => p.id === id)) continue;
+    const title = String(t.title ?? "").trim();
+    out.push({ id, address: t.address, label: title && title !== t.name && title !== t.address ? title : id, n: list.filter((x) => /^lead-/.test(String(x?.name ?? "")) && x.parent === t.address).length });
+  }
+  return out;
+}
+// Which PO a leader belongs to: a live PO's id, else PO_OTHER. A live leader belongs to the PO that is its terminal's parent (the
+// terminals are the truth: the id a report names may be old); a leader that is not live, to the PO its reports name (`reportPo`).
+// A PO that is not live owns nothing.
+function leaderOwner(terms, leaderName, address, reportPo = "") {
+  const list = terms ?? [];
+  const leader = (leaderName && list.find((t) => t.name === leaderName)) || (address && list.find((t) => t.address === address)) || null;
+  const id = leader ? poId(leader.parent ? list.find((t) => t.address === leader.parent) : null) : cleanPoId(reportPo);
+  return id && poList(list).some((p) => p.id === id) ? id : PO_OTHER;
+}
+// The PO shown when the window opens: the last one picked while it is still live (PO_OTHER while something still belongs there), else
+// the PO with the most live leaders (the first one on a tie), else PO_OTHER when only that exists, else "".
+function choosePick(pos, last, hasOther) {
+  const l = String(last ?? "");
+  if ((pos ?? []).some((p) => p.id === l) || (l === PO_OTHER && hasOther)) return l;
+  const best = (pos ?? []).map((p, i) => ({ p, i })).sort((a, b) => b.p.n - a.p.n || a.i - b.i)[0];
+  return best ? best.p.id : hasOther ? PO_OTHER : "";
+}
+// The "@" menu: "@here" first, then the live leaders of the picked PO (`pick`, a PO id; none for PO_OTHER), by shown name. `query`
+// filters by hc name or shown name.
+function leaderMenu(terms, memo, query = "", limit = 8, pick = "") {
   const list = terms ?? [];
   const q = String(query ?? "").trim().toLowerCase();
-  const leaders = list.filter((t) => /^lead-/.test(String(t?.name ?? "")) && findPo(list, t.name, t.address))
+  const leaders = list.filter((t) => pick && pick !== PO_OTHER && /^lead-/.test(String(t?.name ?? "")) && findPo(list, t.name, t.address) && leaderOwner(list, t.name, t.address) === pick)
     .map((t) => ({ id: t.name, label: leaderName(t.name, t, memo), sub: t.name }))
     .filter((x, i, a) => a.findIndex((y) => y.id === x.id) === i)
     .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0)); // code-unit order: the same on every platform
   return [{ id: "here", label: "here", sub: "" }, ...leaders].filter((x) => !q || x.id.toLowerCase().includes(q) || x.label.toLowerCase().includes(q)).slice(0, limit);
 }
-// The PO a line is pasted into: the PO of the leaders it names (they must share one), else the PO with the most live leaders.
+// The PO terminal a line is pasted into: the PO of the leaders it names (they must share one), else the picked PO (`pick`, a PO id).
 // {po} or {po:null, why:"orphan"|"many"|"none"}.
-function chatTarget(terms, to = []) {
+function chatTarget(terms, to = [], pick = "") {
   const list = terms ?? [];
   if (to.length) {
     const pos = [...new Set(to.map((n) => findPo(list, n)))];
     if (pos.includes(null)) return { po: null, why: "orphan" };
     return pos.length > 1 ? { po: null, why: "many" } : { po: pos[0] };
   }
-  const isPo = (t) => String(t?.labels?.role ?? "").trim().toLowerCase() === "po";
-  const count = (po) => list.filter((t) => /^lead-/.test(String(t?.name ?? "")) && t.parent === po.address).length;
-  const best = list.filter(isPo).map((p, i) => ({ p, n: count(p), i })).sort((a, b) => b.n - a.n || a.i - b.i)[0];
-  return best ? { po: best.p.address } : { po: null, why: "none" };
+  const p = pick && pick !== PO_OTHER ? poList(list).find((x) => x.id === pick) : null;
+  return p ? { po: p.address } : { po: null, why: "none" };
 }
 // Follow-the-newest rule of the chat lines: scroll to the bottom when the window opens (no key seen yet) or a new line arrived, but
 // not while the person has scrolled up to read. `up` is how far (px) the wheel has moved up from the bottom.
@@ -434,6 +485,6 @@ const chatWheel = (up, dy) => Math.max(0, Math.min(4000, (Number(up) || 0) + (Nu
 const chatFollow = (seen, key, up) => key !== "" && key !== seen && (Number(up) || 0) <= 4;
 // chat:end
 
-module.exports = { composeChat, parseMention, enterIntent, needsNewline, strayBreak, chatKey, chatWheel, chatFollow, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { PO_OTHER, cleanPoId, poId, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, chatKey, chatWheel, chatFollow, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) process.stdout.write(JSON.stringify(collect()));

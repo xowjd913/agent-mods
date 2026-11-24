@@ -296,7 +296,7 @@ test("main.js: 오른쪽 칸은 분류 단계 없이 한 목록이고, 줄을 �
   assert.match(sum, /badge\("결정", asks\.length/); // 개수는 머리줄의 작은 표시
   assert.match(sum, /badge\("보고", all\.length/);
   assert.match(sum, /asks\.forEach\(\(a\) => list\.push\(this\.paneRow/); // 결정·확인이 맨 위
-  assert.match(sum, /reports\(asks, Infinity\)/); // 개수는 전부, 줄은 MAX_ROWS까지
+  assert.match(sum, /const all = v\.reports;/); // 고른 PO의 보고 전부를 세고, 줄은 MAX_ROWS까지
   assert.match(src, /const MAX_ROWS = 20;/);
   assert.match(sum, /나머지 \$\{all\.length - rows\.length\}개는 창에서/);
   const row = src.slice(src.indexOf("  paneRow("), src.indexOf("  // The small pane"));
@@ -466,13 +466,13 @@ test("받은편지함: 자세히·접기·섹션·답 쓰기가 스크롤을 맨
   assert.match(src, /"sec-rep"\)/);
 });
 
-// ---- PO 채팅: @ 멘션, 리더 메뉴, po.jsonl
+// ---- PO 채팅: @ 멘션, 리더 메뉴, po/<id>.jsonl
 const TERMS = [
-  { address: "t28", name: "", labels: { role: "po" } },
+  { address: "t28", name: "", title: "PO · DevNotes", labels: { role: "po", po: "devnotes" } },
   { address: "t12", name: "lead-b", title: "받은편지함 패널", parent: "t28" },
   { address: "t13", name: "lead-a", title: "리더 · 가나다", parent: "t28" },
   { address: "t99", name: "lead-orphan", parent: "t5" },
-  { address: "t40", name: "", labels: { role: "po" } },
+  { address: "t40", name: "", labels: { role: "po", po: "mascoz" } },
   { address: "t41", name: "lead-c", parent: "t40" },
 ];
 
@@ -517,36 +517,112 @@ test("mentionQuery: 커서 바로 앞의 @글자만 질의이고, 칩 안이나 
   assert.deepEqual(I.mentionQuery("@lead-a @", 9, [{ range: { start: 0, end: 7 } }]), { start: 8, end: 9, query: "" });
 });
 
-test("leaderMenu: @here가 맨 위, 그다음 PO가 있는 살아 있는 리더를 세션 이름으로, 질의로 거른다", () => {
-  const all = I.leaderMenu(TERMS, {});
-  assert.deepEqual(all.map((x) => x.id), ["here", "lead-c", "lead-a", "lead-b"]); // 이름 순(글자 코드 순)
-  assert.equal(all.some((x) => x.id === "lead-orphan"), false); // 부모가 PO가 아닌 리더는 뺀다
+test("leaderMenu: @here가 맨 위, 그다음 고른 PO의 살아 있는 리더를 세션 이름으로, 질의로 거른다", () => {
+  const all = I.leaderMenu(TERMS, {}, "", 8, "devnotes");
+  assert.deepEqual(all.map((x) => x.id), ["here", "lead-a", "lead-b"]); // 이름 순(글자 코드 순)
+  assert.equal(all.some((x) => x.id === "lead-orphan" || x.id === "lead-c"), false); // 다른 PO나 PO 없는 리더는 뺀다
   assert.equal(all.find((x) => x.id === "lead-b").label, "받은편지함 패널");
   assert.equal(all.find((x) => x.id === "lead-a").label, "가나다"); // '리더 · ' 머리말은 뗀다
-  assert.equal(all.find((x) => x.id === "lead-c").label, "c"); // 제목이 없으면 hc 이름에서
-  assert.deepEqual(I.leaderMenu(TERMS, {}, "받은").map((x) => x.id), ["lead-b"]);
-  assert.deepEqual(I.leaderMenu(TERMS, {}, "LEAD-A").map((x) => x.id), ["lead-a"]);
-  assert.deepEqual(I.leaderMenu(TERMS, {}, "he").map((x) => x.id), ["here"]);
-  assert.deepEqual(I.leaderMenu(TERMS, {}, "없는이름"), []);
-  assert.equal(I.leaderMenu(TERMS, {}, "", 2).length, 2);
-  assert.deepEqual(I.leaderMenu([], {}).map((x) => x.id), ["here"]);
+  const m = I.leaderMenu(TERMS, {}, "", 8, "mascoz");
+  assert.deepEqual(m.map((x) => x.id), ["here", "lead-c"]);
+  assert.equal(m.find((x) => x.id === "lead-c").label, "c"); // 제목이 없으면 hc 이름에서
+  assert.deepEqual(I.leaderMenu(TERMS, {}, "받은", 8, "devnotes").map((x) => x.id), ["lead-b"]);
+  assert.deepEqual(I.leaderMenu(TERMS, {}, "LEAD-A", 8, "devnotes").map((x) => x.id), ["lead-a"]);
+  assert.deepEqual(I.leaderMenu(TERMS, {}, "he", 8, "devnotes").map((x) => x.id), ["here"]);
+  assert.deepEqual(I.leaderMenu(TERMS, {}, "없는이름", 8, "devnotes"), []);
+  assert.equal(I.leaderMenu(TERMS, {}, "", 2, "devnotes").length, 2);
+  assert.deepEqual(I.leaderMenu([], {}, "", 8, "devnotes").map((x) => x.id), ["here"]);
+  assert.deepEqual(I.leaderMenu(TERMS, {}).map((x) => x.id), ["here"]); // 고른 PO가 없으면 리더도 없다
+  assert.deepEqual(I.leaderMenu(TERMS, {}, "", 8, I.PO_OTHER).map((x) => x.id), ["here"]); // 기타에는 리더 메뉴가 없다
 });
 
 test("leaderMenu: 닫힌 리더는 없고, 기억한 이름은 터미널 제목이 없을 때만 쓴다", () => {
-  const terms = [{ address: "t1", name: "", labels: { role: "po" } }, { address: "t2", name: "lead-x", parent: "t1" }];
-  assert.equal(I.leaderMenu(terms, { "lead-x": "기억한 이름" }).find((x) => x.id === "lead-x").label, "기억한 이름");
-  assert.deepEqual(I.leaderMenu([terms[0]], { "lead-x": "기억한 이름" }).map((x) => x.id), ["here"]);
+  const terms = [{ address: "t1", name: "", labels: { role: "po", po: "p1" } }, { address: "t2", name: "lead-x", parent: "t1" }];
+  assert.equal(I.leaderMenu(terms, { "lead-x": "기억한 이름" }, "", 8, "p1").find((x) => x.id === "lead-x").label, "기억한 이름");
+  assert.deepEqual(I.leaderMenu([terms[0]], { "lead-x": "기억한 이름" }, "", 8, "p1").map((x) => x.id), ["here"]);
 });
 
-test("chatTarget: 부른 리더들의 PO, 서로 다른 PO나 PO 없는 리더는 거절, 멘션이 없으면 리더가 가장 많은 PO", () => {
-  assert.deepEqual(I.chatTarget(TERMS, ["lead-a"]), { po: "t28" });
-  assert.deepEqual(I.chatTarget(TERMS, ["lead-a", "lead-b"]), { po: "t28" });
-  assert.deepEqual(I.chatTarget(TERMS, ["lead-c"]), { po: "t40" });
-  assert.deepEqual(I.chatTarget(TERMS, ["lead-a", "lead-c"]), { po: null, why: "many" });
-  assert.deepEqual(I.chatTarget(TERMS, ["lead-orphan"]), { po: null, why: "orphan" });
-  assert.deepEqual(I.chatTarget(TERMS, []), { po: "t28" }); // 리더 둘인 t28 > 하나인 t40
-  assert.deepEqual(I.chatTarget(TERMS.slice(0, 1), []), { po: "t28" }); // 리더가 없어도 role=po면 보낼 수 있다
-  assert.deepEqual(I.chatTarget([{ address: "t1", name: "", labels: { role: "dev" } }], []), { po: null, why: "none" });
+test("chatTarget: 부른 리더들의 PO, 서로 다른 PO나 PO 없는 리더는 거절, 멘션이 없으면 고른 PO", () => {
+  assert.deepEqual(I.chatTarget(TERMS, ["lead-a"], "devnotes"), { po: "t28" });
+  assert.deepEqual(I.chatTarget(TERMS, ["lead-a", "lead-b"], "devnotes"), { po: "t28" });
+  assert.deepEqual(I.chatTarget(TERMS, ["lead-c"], "mascoz"), { po: "t40" });
+  assert.deepEqual(I.chatTarget(TERMS, ["lead-a", "lead-c"], "devnotes"), { po: null, why: "many" });
+  assert.deepEqual(I.chatTarget(TERMS, ["lead-orphan"], "devnotes"), { po: null, why: "orphan" });
+  assert.deepEqual(I.chatTarget(TERMS, [], "devnotes"), { po: "t28" });
+  assert.deepEqual(I.chatTarget(TERMS, [], "mascoz"), { po: "t40" }); // 리더가 적어도 고른 PO가 받는다
+  assert.deepEqual(I.chatTarget(TERMS.slice(0, 1), [], "devnotes"), { po: "t28" }); // 리더가 없어도 고른 PO면 보낼 수 있다
+  assert.deepEqual(I.chatTarget(TERMS, [], ""), { po: null, why: "none" }); // 고른 PO가 없다
+  assert.deepEqual(I.chatTarget(TERMS, [], "gone"), { po: null, why: "none" }); // 닫힌 PO
+  assert.deepEqual(I.chatTarget(TERMS, [], I.PO_OTHER), { po: null, why: "none" }); // 기타에는 보내지 않는다
+  assert.deepEqual(I.chatTarget([{ address: "t1", name: "", labels: { role: "po" } }], [], "x"), { po: null, why: "none" });
+});
+
+test("cleanPoId·poId: 소문자·숫자·하이픈 1~40자만 id이고, po 라벨은 role=po 터미널에서만 읽는다", () => {
+  assert.equal(I.cleanPoId("devnotes"), "devnotes");
+  assert.equal(I.cleanPoId(" mascoz-2 "), "mascoz-2"); // 앞뒤 공백은 뗀다
+  for (const bad of ["", "DevNotes", "a_b", "a b", "../x", "a/b", "a.b", "한글", null, undefined, 5 === 5 ? "x".repeat(41) : ""]) assert.equal(I.cleanPoId(bad), "", String(bad));
+  assert.equal(I.cleanPoId("x".repeat(40)), "x".repeat(40));
+  assert.equal(I.poId({ labels: { role: "po", po: "devnotes" } }), "devnotes");
+  assert.equal(I.poId({ labels: { role: "PO", po: "devnotes" } }), "devnotes");
+  assert.equal(I.poId({ labels: { role: "po" } }), ""); // po 라벨이 없다
+  assert.equal(I.poId({ labels: { role: "dev", po: "devnotes" } }), ""); // PO가 아니다
+  assert.equal(I.poId({ labels: { role: "po", po: "Bad Id" } }), "");
+  assert.equal(I.poId({}), "");
+  assert.equal(I.poId(null), "");
+});
+
+test("poList: po id가 있는 살아 있는 PO만, 터미널 제목(없으면 id)과 살아 있는 리더 수와 함께, 같은 id는 첫 터미널", () => {
+  assert.deepEqual(I.poList(TERMS), [
+    { id: "devnotes", address: "t28", label: "PO · DevNotes", n: 2 },
+    { id: "mascoz", address: "t40", label: "mascoz", n: 1 },
+  ]);
+  assert.deepEqual(I.poList([{ address: "t1", labels: { role: "po" } }, { address: "t2", labels: { role: "dev", po: "x" } }]), []); // po 라벨 없음·PO 아님
+  assert.deepEqual(I.poList(null), []);
+  const dup = [{ address: "t1", title: "첫째", labels: { role: "po", po: "a" } }, { address: "t2", title: "둘째", labels: { role: "po", po: "a" } }];
+  assert.deepEqual(I.poList(dup).map((p) => [p.id, p.address]), [["a", "t1"]]);
+  assert.equal(I.poList([{ address: "t1", name: "po-main", title: "po-main", labels: { role: "po", po: "a" } }])[0].label, "a"); // 제목이 이름·주소 그대로면 id
+});
+
+test("poFile: po/<id>.jsonl 경로만 만들고, 잘못된 id는 null이라 폴더를 벗어나지 못한다", () => {
+  assert.equal(I.poFile("/h/.herdr-inbox", "devnotes"), path.join("/h/.herdr-inbox", "po", "devnotes.jsonl"));
+  for (const bad of ["", "../x", "a/b", "A", "..", ".", "a.jsonl", null]) assert.equal(I.poFile("/h/.herdr-inbox", bad), null, String(bad));
+});
+
+test("leaderOwner: 살아 있는 리더는 부모 PO, 닫힌 리더는 보고에 적힌 po(그 PO가 살아 있을 때), 나머지는 기타", () => {
+  const O = I.leaderOwner, X = I.PO_OTHER;
+  assert.equal(O(TERMS, "lead-a", "t13"), "devnotes");
+  assert.equal(O(TERMS, "lead-c", "t41"), "mascoz");
+  assert.equal(O(TERMS, "lead-a", "t13", "mascoz"), "devnotes"); // 터미널이 보고의 po보다 앞선다
+  assert.equal(O(TERMS, "lead-gone", "", "mascoz"), "mascoz"); // 닫힌 리더는 보고의 po
+  assert.equal(O(TERMS, "lead-gone", "", "nobody"), X); // 그 PO가 닫혀 있다
+  assert.equal(O(TERMS, "lead-gone", "", ""), X); // po 없음
+  assert.equal(O(TERMS, "lead-gone", "", "../x"), X); // 잘못된 id
+  assert.equal(O(TERMS, "lead-orphan", "t99", "devnotes"), X); // 살아 있는데 부모가 PO가 아니다: 보고의 po를 믿지 않는다
+  assert.equal(O([{ address: "t1", name: "", labels: { role: "po" } }, { address: "t2", name: "lead-x", parent: "t1" }], "lead-x", "t2"), X); // 부모 PO에 po 라벨이 없다
+  assert.equal(O([], "lead-a", "t1", "devnotes"), X); // PO가 하나도 안 살아 있다
+});
+
+test("choosePick: 마지막에 고른 PO(살아 있으면), 아니면 살아 있는 리더가 가장 많은 PO, 같으면 앞의 PO, 기타만 남으면 기타", () => {
+  const pos = [{ id: "a", n: 1 }, { id: "b", n: 3 }, { id: "c", n: 3 }];
+  assert.equal(I.choosePick(pos, "a", false), "a");
+  assert.equal(I.choosePick(pos, "gone", false), "b"); // 닫힌 PO는 건너뛴다
+  assert.equal(I.choosePick(pos, "", false), "b"); // 같은 3이면 앞의 b
+  assert.equal(I.choosePick(pos, undefined, true), "b");
+  assert.equal(I.choosePick(pos, I.PO_OTHER, true), I.PO_OTHER); // 기타에 볼 것이 남아 있으면 유지
+  assert.equal(I.choosePick(pos, I.PO_OTHER, false), "b"); // 기타가 비면 기본으로
+  assert.equal(I.choosePick([], "a", true), I.PO_OTHER);
+  assert.equal(I.choosePick([], "a", false), "");
+  assert.equal(I.choosePick([{ id: "a", n: 0 }, { id: "b", n: 0 }], "", false), "a");
+});
+
+test("parseLines·summarize: 보고 줄의 po는 규칙에 맞을 때만 읽고, 리더의 po는 가장 최근 줄의 것이다", () => {
+  const l1 = JSON.stringify({ ts: "2026-01-01T00:00:00Z", kind: "done", po: "devnotes" });
+  const l2 = JSON.stringify({ ts: "2026-01-02T00:00:00Z", kind: "done" });
+  const l3 = JSON.stringify({ ts: "2026-01-03T00:00:00Z", kind: "done", po: "Bad Id" });
+  assert.deepEqual(I.parseLines([l1, l2, l3].join("\n")).map((x) => x.po), ["devnotes", "", ""]);
+  assert.equal(I.summarize("lead-a", [l1, l2].join("\n")).po, "devnotes"); // po가 없는 줄은 건너뛰고 있는 줄의 것
+  assert.equal(I.summarize("lead-a", l2).po, "");
+  assert.equal(I.summarize("lead-a", [l1, l3].join("\n")).po, "devnotes"); // 잘못된 id는 없는 것과 같다
 });
 
 test("parsePoLines: say 줄만, 오래된 것부터, 깨진 줄·모르는 종류·빈 글·잘못된 시각은 건너뛴다", () => {
@@ -576,17 +652,26 @@ test("parsePoLines: 최근 100줄만 남긴다. 빈 글은 빈 목록", () => {
   assert.deepEqual(I.parsePoLines(undefined), []);
 });
 
-test("collect: po.jsonl은 리더가 아니라 po 줄로 읽고, 없거나 비어 있어도 오류 없이 빈 목록이다", () => {
+test("collect: po/<id>.jsonl을 PO별로 읽고, 옛 po.jsonl과 잘못된 파일 이름은 무시하며, 리더로 보이지 않는다", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "inbox-po-"));
-  fs.writeFileSync(path.join(dir, "lead-a.jsonl"), text({ ts: "2026-01-01T00:00:00Z", kind: "done" }));
-  assert.deepEqual(I.collect(dir).po, []); // 파일 없음
-  fs.writeFileSync(path.join(dir, "po.jsonl"), "");
-  assert.deepEqual(I.collect(dir).po, []); // 빈 파일
-  fs.writeFileSync(path.join(dir, "po.jsonl"), JSON.stringify({ ts: "2026-01-02T00:00:00Z", kind: "say", text: "안녕하세요", to: "here" }) + "\n");
+  fs.writeFileSync(path.join(dir, "lead-a.jsonl"), text({ ts: "2026-01-01T00:00:00Z", kind: "done", po: "devnotes" }));
+  assert.deepEqual(I.collect(dir).po, {}); // 폴더 없음
+  fs.mkdirSync(path.join(dir, "po"));
+  fs.writeFileSync(path.join(dir, "po", "devnotes.jsonl"), ""); // 빈 파일
+  assert.deepEqual(I.collect(dir).po, {}); // 줄이 없는 파일은 항목이 아니다
+  const line = (t, to) => JSON.stringify({ ts: "2026-01-02T00:00:00Z", kind: "say", text: t, to }) + "\n";
+  fs.writeFileSync(path.join(dir, "po", "devnotes.jsonl"), line("안녕하세요", "here"));
+  fs.writeFileSync(path.join(dir, "po", "mascoz.jsonl"), line("마스코즈", ""));
+  fs.writeFileSync(path.join(dir, "po", "Bad.jsonl"), line("버려진다", "")); // id 규칙에 안 맞는 파일 이름
+  fs.writeFileSync(path.join(dir, "po", "notes.txt"), "x");
+  fs.writeFileSync(path.join(dir, "po.jsonl"), line("옛 파일", "")); // 옛 전역 파일: 읽지 않고 리더도 아니다
   const d = I.collect(dir);
-  assert.deepEqual(d.leaders.map((x) => x.leader), ["lead-a"]); // po가 리더로 보이지 않는다
-  assert.deepEqual(d.po.map((x) => [x.text, x.to]), [["안녕하세요", "here"]]);
-  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, leaders: [], po: [] });
+  assert.deepEqual(d.leaders.map((x) => [x.leader, x.po]), [["lead-a", "devnotes"]]);
+  assert.deepEqual(Object.keys(d.po).sort(), ["devnotes", "mascoz"]);
+  assert.deepEqual(d.po.devnotes.map((x) => [x.text, x.to]), [["안녕하세요", "here"]]);
+  assert.deepEqual(d.po.mascoz.map((x) => x.text), ["마스코즈"]);
+  assert.deepEqual(I.readPo(dir), d.po);
+  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, leaders: [], po: {} });
 });
 
 test("chat 블록: main.js가 inbox.cjs와 한 글자도 다르지 않은 같은 블록을 쓴다", () => {
@@ -669,4 +754,22 @@ test("main.js: 채팅 입력은 Textarea, Enter는 붙여넣고 hc keys enter까
   const body = src.slice(a, b);
   assert.ok(body.indexOf('run("terminal.paste"') > 0 && body.indexOf("this.submitPo(") > body.indexOf('run("terminal.paste"')); // 붙여넣은 뒤에 Enter
   assert.match(src, /import \{[^}]*\bhc\b[^}]*\} from "herdr"/);
+});
+
+test("main.js: 창은 고른 PO 하나만 보이고(카드·보고·@ 목록·채팅 대상·PO 답글), 이름은 'PO 데스크'다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  assert.match(src, /const PICK_KEY = "inbox\.po"/);
+  assert.match(src, /choosePick\(pos, last, hasOther\)/);
+  assert.match(src, /leaderMenu\(this\.liveTerms\(\), namesMemo\(\), q\.query, 8, this\.view\(\)\.pick\)/);
+  assert.match(src, /chatTarget\(terms, p\.to, v\.pick\)/);
+  assert.match(src, /mine\.filter\(\(x\) => x\.po === pick\)/);
+  assert.match(src, /this\.data\?\.po\?\.\[pick\]/);
+  assert.match(src, /po: v\.pick \}/); // 보낸 글에 PO를 적어 둔다
+  assert.match(src, /setShared\(PICK_KEY, id\)/);
+  assert.match(src, /child\("PO 데스크"\)/);
+  assert.ok(!/받은편지함/.test(src));
+  // 배지·탭 개수는 PO와 상관없이 기다리는 리더 전부
+  const badge = src.slice(src.indexOf("  badge() {"), src.indexOf("  // The \"pasted into the PO\""));
+  assert.match(badge, /this\.asks\(\)/);
+  assert.ok(!/view\(\)/.test(badge));
 });

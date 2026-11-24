@@ -33,7 +33,7 @@ const MODS = {
   "agent-groups": { desc: "왼쪽 사이드바 에이전트 목록을 작업별로 묶는다", deps: [] },
   "leader-tabs": { desc: "칸 머리줄에 리더 탭을 보여 준다", deps: [] },
   "path-menu": { desc: "터미널 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄운다", deps: [] },
-  inbox: { desc: "받은편지함 패널: 리더 결과 보고를 채팅처럼 보고, 결정을 PO에게 답한다", deps: ["tabs-mine"] },
+  inbox: { desc: "PO 데스크 패널: 리더 결과 보고를 채팅처럼 보고, 결정을 PO에게 답한다", deps: ["tabs-mine"] },
 };
 const MARK = ".installed-by-herdr-installer";
 // 예전 설치 스크립트가 남긴 표시. 이 표시가 있는 폴더도 우리 것으로 보고 덮어쓴다.
@@ -289,7 +289,7 @@ const STEPS = [
     undo: (l) => dropPanel(l, "schedules"),
   },
   {
-    name: "오른쪽 패널 받은편지함(inbox)",
+    name: "오른쪽 패널 PO 데스크(inbox)",
     needs: ["inbox"],
     mark: ["inbox", ".board-added"],
     done: () => false,
