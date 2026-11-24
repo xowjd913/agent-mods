@@ -90,6 +90,11 @@ function collect(dir = inboxDir()) {
   return { at: new Date().toISOString(), leaders };
 }
 
+// Which terminal is a waiting leader: a terminal named lead-* with the wait label decision|verify; returns that kind or "".
+// ONE rule for the tab-row count (tabs-mine), the summary pane and the Dock badge. The two mods cannot require a .cjs file, so the
+// line below is copied verbatim into inbox/main.js and tabs-mine/main.js and a test checks that all three stay identical.
+const waitingKind = (t) => (/^lead-/.test(String(t?.name ?? "")) ? (["decision", "verify"].find((k) => k === String(t.labels?.wait ?? "").trim().toLowerCase()) ?? "") : "");
+
 // The PO of a leader: that leader's terminal's parent, accepted only when the parent carries the label role=po. No guessing from
 // sibling lead-* terminals: a wrong guess would put an answer into some other agent's prompt. null when there is none.
 // `terms` are Herdr's terminals() entries ({address, name, parent, labels}); the leader is found by name, else by `address`.
@@ -106,6 +111,6 @@ function answerLine(kind, leader, text, link) {
   return `Panel answer (${kind}) for ${leader}: "${body}".${link ? ` Target: ${link}` : ""}`;
 }
 
-module.exports = { parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { waitingKind, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) process.stdout.write(JSON.stringify(collect()));

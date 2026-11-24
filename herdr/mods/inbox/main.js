@@ -9,15 +9,19 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { theme, exec, appHome, checking, window, run, terminals, panes, setBadge, props, openOverlay, closeOverlay } from "herdr";
+import { theme, exec, appHome, checking, window, run, terminals, panes, setBadge, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
 const ICON = (name) => `mods/workspace-chrome/${name}.svg`;
 const LOAD_TIMEOUT = 20000, LOAD_STALL_MS = 30000, WINDOW_REFRESH_MS = 5000, PANE_REFRESH_MS = 30000, MAX_BUBBLES = 40;
 const KIND = { done: ["완료", "working"], decision: ["결정", "blocked"], verify: ["확인", "blocked"], stop: ["중단", "idle"], resume: ["재개", "dim"], other: ["알림", "dim"], start: ["시작", "dim"] };
 const WINDOW = { mod: "inbox", kind: "window", key: "inbox", keep: true, width: 480, height: 680, props: { mode: "window" } };
+const SENT_KEY = "inbox.sent";
 const NO_PO = "이 리더의 PO 터미널을 찾지 못했습니다(리더 터미널의 부모가 role=po 라벨이어야 합니다).";
 const CLIP = "답을 클립보드에 담아 PO 터미널에 붙여 넣습니다(Enter는 직접 누르세요). 클립보드 내용이 바뀝니다.";
+
+// Which terminal is a waiting leader. Copied verbatim from inbox.cjs (a test keeps them identical); tabs-mine uses the same line.
+const waitingKind = (t) => (/^lead-/.test(String(t?.name ?? "")) ? (["decision", "verify"].find((k) => k === String(t.labels?.wait ?? "").trim().toLowerCase()) ?? "") : "");
 
 // The PO of a leader: its terminal's parent, only when that parent has the label role=po (no guessing). Same rule as inbox.cjs
 // findPo; kept here because the mod cannot require a .cjs file.
@@ -79,7 +83,6 @@ export default class Inbox extends View {
     this.compact = false;
     this.writing = null; // leader whose answer box is open
     this.inputs = new Map(); // leader -> InputState
-    this.sent = new Map(); // leader -> ts of the ask that got an answer from this panel
     this.msg = null; // {text, bad}
     if (checking()) return;
     this.load(cx);
@@ -91,9 +94,23 @@ export default class Inbox extends View {
   // the same number); tabs-mine counts the wait labels itself for the tab-row button (even with the panel closed).
   badge() {
     if (this.windowed) return;
-    const n = this.asks().length;
+    const asks = this.asks();
+    this.pruneSent(asks);
+    const n = asks.length;
     const text = n > 0 ? String(n) : "";
     if (text !== this.badged) { this.badged = text; try { setBadge(text || null); } catch {} }
+  }
+
+  // The "pasted into the PO" marker lives in shared state (keyed by leader), so the window and the pane see the same one even after
+  // the window closed and reopened. It matches only the same ask (kind, report time, link); the pane drops it once the leader stops waiting.
+  askKey(a) { return `${a.kind}|${a.item?.ts ?? ""}|${a.link}`; }
+  sentOf(a) { try { return shared(SENT_KEY)?.[a.s.leader] === this.askKey(a); } catch { return false; } }
+  pruneSent(asks) {
+    try {
+      const cur = shared(SENT_KEY) ?? {};
+      const keep = Object.fromEntries(Object.entries(cur).filter(([k]) => asks.some((a) => a.s.leader === k)));
+      if (Object.keys(keep).length !== Object.keys(cur).length) setShared(SENT_KEY, keep);
+    } catch {}
   }
 
   openWindow() {
@@ -125,15 +142,19 @@ export default class Inbox extends View {
     return list.find((t) => t.name === s.leader) ?? list.find((t) => t.address === s.terminal) ?? null;
   }
 
-  // Leaders whose terminal carries a wait label: [{s, term, kind, link, item}]. The text is the leader's last decision/verify report.
+  // Leaders whose terminal carries a wait label: [{s, term, kind, link, item}]. A leader is a live terminal named lead-* (the same rule
+  // tabs-mine uses for the tab-row count). The text is its last decision/verify report; with no report file the label alone makes the
+  // card (kind and wait-link only), as the contract says.
   asks() {
     const out = [];
-    for (const s of this.data?.leaders ?? []) {
-      const term = this.terminalOf(s);
-      const kind = String(term?.labels?.wait ?? "").trim().toLowerCase();
-      if (kind !== "decision" && kind !== "verify") continue;
+    const list = terminals() ?? [];
+    for (const term of list) {
+      const kind = waitingKind(term);
+      if (!kind) continue;
+      const s = (this.data?.leaders ?? []).find((l) => l.leader === term.name) ?? (this.data?.leaders ?? []).find((l) => l.terminal === term.address)
+        ?? { leader: term.name, terminal: term.address, open: null, ask: null, items: [], last: null };
       const item = s.ask ?? s.open;
-      out.push({ s, term, kind, item, po: findPo(terminals(), s.leader, s.terminal), link: String(term?.labels?.["wait-link"] ?? "").trim() || item?.link || "" });
+      out.push({ s, term, kind, item, po: findPo(list, term.name, term.address), link: String(term?.labels?.["wait-link"] ?? "").trim() || item?.link || "" });
     }
     return out.sort((a, b) => (b.item?.ms ?? 0) - (a.item?.ms ?? 0));
   }
@@ -170,21 +191,21 @@ export default class Inbox extends View {
       cx.write_to_clipboard(line);
       if (!(panes() ?? []).some((p) => p.terminal === po)) {
         run("terminal.keep", { terminal: po }); // finishes in the background: the person focuses the pane and pastes
-        this.markSent(a);
-        this.say(`PO(${po})에 창이 없어 열었습니다. 글은 클립보드에 있으니 PO 터미널에서 붙여넣고 Enter를 누르세요.`);
+        this.clearBox(a);
+        this.say(`PO(${po})에 창이 없어 열었습니다. 다른 것을 복사하기 전에 PO 터미널에서 붙여넣고 Enter를 누르세요(글은 클립보드에 있습니다).`);
       } else {
         run("pane.focus", { terminal: po });
         try { run("terminal.paste", {}); this.say(`PO(${po})에 붙여 넣었습니다. PO 터미널에서 Enter를 눌러 보내세요.`); }
         catch { this.say(`PO(${po})를 열었습니다. 글은 클립보드에 있으니 붙여넣고 Enter를 누르세요.`); }
-        this.markSent(a);
+        this.clearBox(a);
         if (this.windowed) { try { closeOverlay(safeProps().overlay); } catch {} } // the PO pane takes the keyboard
       }
     } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
     cx.notify();
   }
 
-  markSent(a) {
-    this.sent.set(a.s.leader, a.item?.ts ?? "");
+  clearBox(a) {
+    try { setShared(SENT_KEY, { ...(shared(SENT_KEY) ?? {}), [a.s.leader]: this.askKey(a) }); } catch {}
     this.inputs.get(a.s.leader)?.set_value("");
     if (this.writing === a.s.leader) this.writing = null;
   }
@@ -248,19 +269,19 @@ export default class Inbox extends View {
 
   askCard(t, a, cx) {
     const { s, kind, item, link } = a;
-    const done = this.sent.get(s.leader) === (item?.ts ?? "");
     const writing = this.writing === s.leader;
+    const done = this.sentOf(a);
     const card = v_flex().id(`ask-${s.leader}`).flex_none().mx(4).mb(8).p(8).gap(6).rounded(10).bg(t.raised).border(1).border_color(t.blocked + "66");
     const head = h_flex().gap(8).items_start()
       .child(this.avatar(t, s.leader))
       .child(v_flex().flex_1().min_w(0).gap(4)
         .child(this.nameRow(t, s, item ? { ...item, kind } : null))
-        .child(item ? this.bubble(t, item, t.blocked) : div().text_size(12).text_color(t.dim).child("이 리더의 보고 내용을 찾지 못했습니다. 터미널을 들여다보세요.")));
+        .child(item ? this.bubble(t, item, t.blocked) : div().text_size(12).text_color(t.dim).child("보고 기록 없이 대기 표시만 있습니다. 링크를 열거나 터미널을 들여다보세요.")));
     const actions = h_flex().gap(6).pl(this.compact ? 0 : 36).items_center().flex_wrap()
       .when(Boolean(link), (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", () => openUrl(link))))
       .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c), { primary: true, disabled: a.po ? "" : NO_PO, tip: CLIP })))
       .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); c.notify(); }, { disabled: a.po ? "" : NO_PO }))
-      .when(done, (el) => el.child(div().text_size(11).text_color(t.working).child("PO에 붙여 넣음 · Enter로 보내면 리더가 받고 사라집니다")));
+      .child(div().text_size(11).text_color(done ? t.working : t.dim).child(done ? "PO에 넣음 — PO에서 Enter로 보내면 사라집니다" : "PO에서 Enter로 보내면 리더가 받고 사라집니다"));
     card.child(head).child(actions);
     if (!a.po) card.child(div().pl(this.compact ? 0 : 36).text_size(11).text_color(t.dim).child(NO_PO));
     if (writing) {

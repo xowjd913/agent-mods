@@ -28,6 +28,9 @@ function label(tab, lead) {
   return (tab.name === prog || !tab.named) && telling ? live : base;
 }
 
+// Which terminal is a waiting leader. Copied verbatim from inbox/inbox.cjs (a test keeps them identical).
+const waitingKind = (t) => (/^lead-/.test(String(t?.name ?? "")) ? (["decision", "verify"].find((k) => k === String(t.labels?.wait ?? "").trim().toLowerCase()) ?? "") : "");
+
 export default class Tabs extends View {
   init(_props, cx) {
     this.attention = 0;
@@ -167,15 +170,13 @@ export default class Tabs extends View {
     });
   }
 
+  // 답을 기다리는 리더 수: 대기 라벨(decision|verify)이 붙은 lead-* 터미널(받은편지함 요약 칸과 같은 규칙, inbox.cjs의 waitingKind). 받은편지함 칸이 닫혀 있어도 터미널 라벨만 보므로 늘 맞다.
+  inboxWaiting() { return (terminals() ?? []).filter((t) => waitingKind(t)).length; }
+
   // One tab per wheel notch. A touchpad or smooth-scrolling mouse sends many
   // small events per gesture: a short swipe or one smoothed notch (about
   // 25 px) switches one tab, a longer swipe keeps going a tab per 60 px, at
   // most one every 100 ms so each shows.
-  // 답을 기다리는 리더 수: 대기 라벨(decision|verify)이 붙은 lead-* 터미널. 받은편지함 칸이 닫혀 있어도 터미널 라벨만 보므로 늘 맞다.
-  inboxWaiting() {
-    return (terminals() ?? []).filter((t) => /^lead-/.test(String(t.name ?? "")) && ["decision", "verify"].includes(String(t.labels?.wait ?? "").trim().toLowerCase())).length;
-  }
-
   wheel(e) {
     if (e.delta_lines) {
       if (e.delta_lines.y) run(e.delta_lines.y > 0 ? "tab.prev" : "tab.next");

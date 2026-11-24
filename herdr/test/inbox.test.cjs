@@ -107,3 +107,32 @@ test("main.js: 배지는 요약 칸이 맡고 30초마다 새로 읽는다(창�
   assert.match(tabs, /inboxWaiting\(\)/);
   assert.ok(!/shared\("inbox\.waiting"\)/.test(tabs)); // 받은편지함 칸이 닫혀 있어도 터미널 라벨로 센다
 });
+
+test("waitingKind: lead-* 이름과 wait=decision|verify 라벨만 대기 리더로 본다", () => {
+  const { waitingKind } = require("../mods/inbox/inbox.cjs");
+  assert.equal(waitingKind({ name: "lead-a", labels: { wait: "decision" } }), "decision");
+  assert.equal(waitingKind({ name: "lead-a", labels: { wait: " Verify " } }), "verify");
+  assert.equal(waitingKind({ name: "lead-a", labels: { wait: "other" } }), "");
+  assert.equal(waitingKind({ name: "lead-a", labels: {} }), "");
+  assert.equal(waitingKind({ name: "worker-1", labels: { wait: "decision" } }), ""); // lead-*가 아니면 세지 않는다
+  assert.equal(waitingKind({ name: null, labels: { wait: "decision" } }), "");
+  assert.equal(waitingKind(null), "");
+});
+
+test("waitingKind: 탭 줄(tabs-mine)·요약 칸(inbox/main.js)·inbox.cjs가 같은 줄을 쓴다", () => {
+  const line = (f) => fs.readFileSync(path.join(__dirname, f), "utf8").split("\n").find((l) => l.startsWith("const waitingKind = "));
+  const a = line("../mods/inbox/inbox.cjs");
+  assert.ok(a);
+  assert.equal(line("../mods/inbox/main.js"), a);
+  assert.equal(line("../mods/tabs-mine/main.js"), a);
+});
+
+test("main.js: 보고 기록이 없어도 라벨만으로 카드를 만들고 보낸 표시는 공유 상태에 둔다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  assert.match(src, /for \(const term of list\) \{\s*const kind = waitingKind\(term\);/); // 터미널을 돈다(보고 파일 목록이 아니라)
+  assert.match(src, /items: \[\], last: null/); // 보고 없는 리더의 빈 기록
+  assert.match(src, /setShared\(SENT_KEY/);
+  assert.match(src, /shared\(SENT_KEY\)/);
+  assert.ok(!/this\.sent\b/.test(src)); // 창 안에만 있던 표시는 없다
+  assert.match(src, /다른 것을 복사하기 전에/);
+});
