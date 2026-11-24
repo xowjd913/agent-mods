@@ -1,9 +1,9 @@
 // Agents in grouped or priority views; parents take their most urgent sub-agent's place.
 // Cloned from Herdr's shipped `agents` mod. Added: the "tasks" view, which keeps each
-// space's leader on top and groups team members by the issue number in their hc name
-// (dev-271-..., review-271-..., integration-271-...), else by their lone tab's "리뷰 · #271 ..." name;
-// "#271 <task>" is taken from the dev tab's name.
-// A space with 2+ leaders shows each group under the leader that spawned its members.
+// space's leaders on top, one section per leader: a header, the leader and its team members (found
+// through the hc parent chain, not the issue number in their name). Only members whose chain reaches
+// no leader are grouped by the issue number in their hc name (dev-271-..., review-271-...), else by
+// their lone tab's "리뷰 · #271 ..." name; "#271 <task>" is taken from the dev tab's name.
 // Team members start without a tab or pane, so agents() doesn't list them: the task view builds an
 // agent-like entry for each from terminals() (name, parent, state, status and the `session` label that
 // `herdr-team.sh spawn` sets to the Korean session name). Clicking such a row peeks at the terminal.
@@ -92,8 +92,6 @@ const SCHEDULE = "schedule";
 const SCHEDULED = "예약";
 // Label `herdr-team.sh spawn` puts on a team member: its Korean session name ("개발 · #351 ..."). A member has no tab to read it from.
 const SESSION = "session";
-// Label a PO-child leader sets on its own terminal (`hc label <t> group-issue=<N>`) to join issue N's group.
-const MARK = "group-issue";
 // A PO terminal's tab name starts with "PO" as a word ("PO · repo"), so "POLICY" doesn't count.
 const PO_TAB = /^PO(?:\s|·|$)/;
 // Role label: the PO start flow sets `role=po` on its own terminal and `spawn --leader` sets
@@ -115,6 +113,158 @@ function duration(ms) {
 function icon(p, size, color) {
   if (!p?.icon) return null;
   return p.tint ? svg(p.icon).size(size).flex_none().text_color(color) : image(p.icon).w(size).h(size).flex_none();
+}
+
+// A leader terminal by its role label, else (no label) its lead- name.
+const isLeader = (t) => {
+  const role = roleOf(t);
+  return role === "leader" || (!role && LEAD.test(t?.name ?? ""));
+};
+// Team members and parked leaders run without a tab or pane, so agents() never lists them. Give each
+// live one an agent-like entry (no pane) in the space of the nearest ancestor that is listed (the PO
+// or leader above it), so taskPlan can place it. The name comes from the `session` label, else the hc name.
+// `listed` maps each listed address to its status.
+export function paneless(real, all, listed = new Map()) {
+  const byAddr = new Map(real.map((a) => [a.address, a]));
+  const term = new Map(all.map((x) => [x.address, x]));
+  const seat = (t) => {
+    let p = t.parent;
+    for (let i = 0; p && i < 8; i++) {
+      const a = byAddr.get(p);
+      if (a) return a;
+      p = term.get(p)?.parent;
+    }
+    return null;
+  };
+  const out = [];
+  all.forEach((t, i) => {
+    if (t.state !== "live" || byAddr.has(t.address)) return;
+    const session = String(t.labels?.[SESSION] ?? "").trim();
+    const leader = isLeader(t);
+    if (!leader && !memberOf(t.name, session)) return;
+    const home = seat(t);
+    if (!home) return;
+    // A leader's row reads like a real leader's: the full `session` label ("리더 · ..."), else "리더 · " + the
+    // hc name without "lead-". Its tab name stays empty so taskPlan builds the section header itself.
+    const title = leader ? session || `리더 · ${String(t.name ?? "").replace(LEAD, "").replace(/-/g, " ").trim()}` : session;
+    out.push({
+      address: t.address,
+      pane: null,
+      ghost: true,
+      status: kidStatus(t, listed),
+      program: t.program,
+      space: home.space,
+      space_name: home.space_name,
+      tab: null,
+      tab_name: leader ? "" : session,
+      title: title || t.name || t.address,
+      seq: i,
+      pinned: false,
+      focused: false,
+    });
+  });
+  return out;
+}
+
+// The task view's plan: for each space (in list order) one section per leader (the leader and the
+// team members whose parent chain reaches it), under its PO when the leader's parent chain reaches
+// one. Members with no leader in their chain stay in issue-number groups (`loose`), then `others`.
+// `order` is the on-screen order. Pure: reads only the snapshot (agents, terminals, tab names).
+export function taskPlan(agentList, all, tabNames = new Map()) {
+  const term = new Map(all.map((x) => [x.address, x]));
+  const parents = new Set(all.filter((x) => x.state === "live" && x.parent).map((x) => x.parent));
+  // Nearest ancestor (up to 8 steps) that is in `set`.
+  const ancestorIn = (addr, set) => {
+    let p = term.get(addr)?.parent;
+    for (let i = 0; p && i < 8; i++) {
+      if (set.has(p)) return p;
+      p = term.get(p)?.parent;
+    }
+    return null;
+  };
+  const bySpace = new Map();
+  for (const a of agentList) {
+    if (!bySpace.has(a.space)) bySpace.set(a.space, []);
+    bySpace.get(a.space).push(a);
+  }
+  const plan = [];
+  for (const [space, members] of bySpace) {
+    const leaders = [];
+    const others = [];
+    const scheduled = [];
+    const pos = [];
+    const team = [];
+    for (const a of members) {
+      const t = term.get(a.address);
+      const role = roleOf(t);
+      const m = memberOf(t?.name, tabNames.get(a.address));
+      if (t?.labels?.[SCHEDULE]) scheduled.push(a);
+      // A labelled terminal is classified by its label, never by the tab it sits in; then the lead- name;
+      // only then the team-member name and the tab name / "has child terminals".
+      else if (role === "po") pos.push(a);
+      else if (role === "leader" || (!role && LEAD.test(t?.name ?? ""))) leaders.push(a);
+      else if (m) team.push({ a, ...m });
+      else if (PO_TAB.test(a.tab_name ?? "")) pos.push(a);
+      else if (parents.has(a.address) || /^리더/.test(a.tab_name ?? "")) leaders.push(a);
+      else others.push(a);
+    }
+    const leaderSet = new Set(leaders.map((a) => a.address));
+    const byLeader = new Map(leaders.map((a) => [a.address, []]));
+    const orphans = [];
+    for (const x of team) {
+      const owner = ancestorIn(x.a.address, leaderSet);
+      (owner ? byLeader.get(owner) : orphans).push(x);
+    }
+    const byRole = (x, y) => ROLE_ORDER[x.role] - ROLE_ORDER[y.role] || x.a.seq - y.a.seq;
+    // Header title: the leader's tab name (not just a number, not the PO's own tab), else the
+    // `session` label without "리더 ·", else the hc name without "lead-".
+    const titleOf = (leader) => {
+      const t = term.get(leader.address);
+      const po = pos.find((p) => p.tab === leader.tab);
+      const tab = String(leader.tab_name ?? "").trim();
+      if (tab && !/^\d+$/.test(tab) && !po) return tab;
+      const session = String(t?.labels?.[SESSION] ?? "").replace(/^\s*리더\s*·\s*/, "").trim();
+      if (session) return session;
+      return String(t?.name ?? "").replace(LEAD, "").replace(/-/g, " ").trim() || leader.address;
+    };
+    const sectionOf = (leader) => ({ leader, title: titleOf(leader), members: byLeader.get(leader.address).sort(byRole).map((x) => x.a) });
+    const sections = leaders.map(sectionOf);
+    const poSet = new Set(pos.map((a) => a.address));
+    const poOf = (s) => ancestorIn(s.leader.address, poSet);
+    const poTiers = pos.map((po) => ({ po, sections: sections.filter((s) => poOf(s) === po.address) }));
+    const top = sections.filter((s) => !poOf(s));
+    // Members with no leader: one group per issue number (ascending), as before.
+    const issues = new Map();
+    for (const x of orphans) {
+      if (!issues.has(x.issue)) issues.set(x.issue, []);
+      issues.get(x.issue).push(x);
+    }
+    const loose = [...issues.entries()]
+      .sort((x, y) => Number(x[0]) - Number(y[0]))
+      .map(([issue, items]) => {
+        items.sort(byRole);
+        // "#271 <task>" comes from the dev tab's name ("개발 · #271 <task>"), else any member's tab.
+        const re = new RegExp(`#${issue}\\s+(\\S.*)$`);
+        const named = items.map((x) => re.exec(x.a.tab_name ?? "")).find(Boolean);
+        const fallback = items.find((x) => x.summary)?.summary.replace(/-/g, " ");
+        const task = named?.[1].trim() ?? fallback;
+        return { issue, title: task ? `#${issue} ${task}` : `#${issue}`, members: items.map((x) => x.a) };
+      });
+    const inSection = (s) => [s.leader, ...s.members];
+    plan.push({
+      space,
+      label: members[0].space_name || "",
+      members,
+      leaders,
+      poTiers,
+      sections: top,
+      loose,
+      others,
+      scheduled,
+      order: [...poTiers.flatMap((p) => [p.po, ...p.sections.flatMap(inSection)]), ...top.flatMap(inSection), ...loose.flatMap((g) => g.members), ...others, ...scheduled],
+    });
+  }
+  return plan;
 }
 
 export default class Agents extends View {
@@ -213,7 +363,7 @@ export default class Agents extends View {
     // In the task view the leader's listed team members sit in their own groups, not under the leader.
     // A paneless member has an entry of its own (this.ghosts) and a group row too. Any other one not in
     // agents() (no pane, no status report) has no group row, so it stays a sub-row.
-    const kids = all.filter((k) => k.parent === addr && k.state === "live" && !(this.tasks && (this.listed.has(k.address) || this.ghosts.has(k.address)) && (memberOf(k.name, this.tabNames.get(k.address)) || LEAD.test(k.name ?? ""))));
+    const kids = all.filter((k) => k.parent === addr && k.state === "live" && !(this.tasks && (this.listed.has(k.address) || this.ghosts.has(k.address)) && (memberOf(k.name, this.tabNames.get(k.address)) || isLeader(k))));
     return kids.flatMap((k, i) => {
       const last = i === kids.length - 1;
       return [
@@ -249,153 +399,12 @@ export default class Agents extends View {
       .child(this.status(t, { status: st }, compact));
   }
 
-  // Team members run without a tab or pane, so agents() never lists them. Give each live one an
-  // agent-like entry (no pane) in the space of the nearest ancestor that is listed (its leader),
-  // so taskPlan can group it by issue. The name comes from the `session` label, else the hc name.
   paneless(real, all) {
-    const byAddr = new Map(real.map((a) => [a.address, a]));
-    const term = new Map(all.map((x) => [x.address, x]));
-    const seat = (t) => {
-      let p = t.parent;
-      for (let i = 0; p && i < 8; i++) {
-        const a = byAddr.get(p);
-        if (a) return a;
-        p = term.get(p)?.parent;
-      }
-      return null;
-    };
-    const out = [];
-    all.forEach((t, i) => {
-      if (t.state !== "live" || byAddr.has(t.address)) return;
-      const session = String(t.labels?.[SESSION] ?? "").trim();
-      if (!memberOf(t.name, session)) return;
-      const home = seat(t);
-      if (!home) return;
-      out.push({
-        address: t.address,
-        pane: null,
-        ghost: true,
-        status: kidStatus(t, this.listed),
-        program: t.program,
-        space: home.space,
-        space_name: home.space_name,
-        tab: null,
-        tab_name: session,
-        title: session || t.name || t.address,
-        seq: i,
-        pinned: false,
-        focused: false,
-      });
-    });
-    return out;
+    return paneless(real, all, this.listed);
   }
 
-  // The task view's plan: for each space (in list order) its leaders, its groups by issue
-  // number (ascending) and the agents that name no issue. `order` is the on-screen order.
   taskPlan(agentList, all) {
-    const term = new Map(all.map((x) => [x.address, x]));
-    const parents = new Set(all.filter((x) => x.state === "live" && x.parent).map((x) => x.parent));
-    const bySpace = new Map();
-    for (const a of agentList) {
-      if (!bySpace.has(a.space)) bySpace.set(a.space, []);
-      bySpace.get(a.space).push(a);
-    }
-    const plan = [];
-    for (const [space, members] of bySpace) {
-      const leaders = [];
-      const others = [];
-      const scheduled = [];
-      const pos = [];
-      const issues = new Map();
-      for (const a of members) {
-        const m = memberOf(term.get(a.address)?.name, this.tabNames.get(a.address));
-        if (term.get(a.address)?.labels?.[SCHEDULE]) {
-          scheduled.push(a);
-        } else if (m) {
-          if (!issues.has(m.issue)) issues.set(m.issue, []);
-          issues.get(m.issue).push({ a, role: m.role, summary: m.summary });
-        } else {
-          // A labelled terminal is classified by its label, never by the tab it sits in. Only a
-          // terminal with no role label falls back to the tab name or "has child terminals".
-          const role = roleOf(term.get(a.address));
-          if (role === "po") pos.push(a);
-          else if (role === "leader") leaders.push(a);
-          else if (PO_TAB.test(a.tab_name ?? "")) pos.push(a);
-          else if (parents.has(a.address) || /^리더/.test(a.tab_name ?? "")) leaders.push(a);
-          else others.push(a);
-        }
-      }
-      const groups = [...issues.entries()]
-        .sort((x, y) => Number(x[0]) - Number(y[0]))
-        .map(([issue, items]) => {
-          items.sort((x, y) => ROLE_ORDER[x.role] - ROLE_ORDER[y.role] || x.a.seq - y.a.seq);
-          // "#271 <task>" comes from the dev tab's name ("개발 · #271 <task>"), else any member's tab.
-          const re = new RegExp(`#${issue}\\s+(\\S.*)$`);
-          const named = items.map((x) => re.exec(x.a.tab_name ?? "")).find(Boolean);
-          const fallback = items.find((x) => x.summary)?.summary.replace(/-/g, " ");
-          const task = named?.[1].trim() ?? fallback;
-          return { issue, title: task ? `#${issue} ${task}` : `#${issue}`, members: items.map((x) => x.a) };
-        });
-      // Inside a PO tier a leader sits in the issue group of its first member: PO > group > leader >
-      // its members. With several issues it takes the smallest one and its other groups follow
-      // beneath it; a leader with no member yet stays directly under the PO. A leader that carries
-      // the label `group-issue=<N>` (set by the leader itself with `hc label`) joins instead the group
-      // of the leader that owns issue N in the same PO tier. The mod only reads the label: a number
-      // that names no group of this tier, or a leader that is itself marked, leaves the leader in place.
-      const tierOf = (secs) => {
-        const markOf = (s) => String(term.get(s.leader.address)?.labels?.[MARK] ?? "").trim().replace(/^#/, "");
-        const ownerOfIssue = new Map(secs.flatMap((s) => s.groups.map((g) => [g.issue, s])));
-        const joinTarget = (s) => {
-          const owner = ownerOfIssue.get(markOf(s));
-          return owner && owner !== s && !markOf(owner) ? owner : null;
-        };
-        const direct = [];
-        const entries = new Map();
-        const own = (s) => ({ leader: s.leader, rest: s.groups.slice(1), owns: true });
-        for (const s of secs) {
-          if (joinTarget(s) || !s.groups.length) continue;
-          entries.set(s.groups[0].issue, { group: s.groups[0], leaders: [own(s)] });
-        }
-        for (const s of secs) {
-          const owner = joinTarget(s);
-          if (owner) entries.get(owner.groups[0].issue).leaders.push({ leader: s.leader, rest: s.groups, owns: false });
-          else if (!s.groups.length) direct.push(s.leader);
-        }
-        const sorted = [...entries.values()].sort((x, y) => Number(x.group.issue) - Number(y.group.issue));
-        return { direct, entries: sorted };
-      };
-      // With 2+ leaders, a group sits under the leader that is the parent of its members (the dev
-      // member first); a group whose parent isn't one of this space's leaders stays in `loose`.
-      const leaderAddresses = new Set(leaders.map((a) => a.address));
-      const ownerOf = (g) => g.members.map((a) => term.get(a.address)?.parent).find((p) => leaderAddresses.has(p));
-      // A PO (tab name "PO ...") sits on top with its child leaders below it and each leader's
-      // groups below that (3 levels). Leaders that aren't a PO's child keep the layout above.
-      // A space without a PO is laid out exactly as before.
-      const allSections = leaders.length > 1 || pos.length ? leaders.map((leader) => ({ leader, groups: groups.filter((g) => ownerOf(g) === leader.address) })) : null;
-      const poTiers = pos.map((po) => {
-        const secs = (allSections ?? []).filter((s) => term.get(s.leader.address)?.parent === po.address);
-        return { po, sections: secs, ...tierOf(secs) };
-      });
-      const underPo = new Set(poTiers.flatMap((p) => p.sections.map((s) => s.leader.address)));
-      const sections = allSections ? allSections.filter((s) => !underPo.has(s.leader.address)) : null;
-      const loose = allSections ? groups.filter((g) => !ownerOf(g)) : groups;
-      const inGroups = (list) => list.flatMap((g) => g.members);
-      const inSections = (list) => list.flatMap((s) => [s.leader, ...inGroups(s.groups)]);
-      plan.push({
-        space,
-        label: members[0].space_name || "",
-        members,
-        leaders,
-        groups,
-        poTiers,
-        sections,
-        loose,
-        others,
-        scheduled,
-        order: [...poTiers.flatMap((p) => [p.po, ...p.direct, ...p.entries.flatMap((e) => e.leaders.flatMap((x) => [x.leader, ...(x.owns ? e.group.members : []), ...inGroups(x.rest)]))]), ...(sections ? inSections(sections) : leaders), ...inGroups(loose), ...others, ...scheduled],
-      });
-    }
-    return plan;
+    return taskPlan(agentList, all, this.tabNames);
   }
 
   // compact: a ! for blocked where a header already says "Needs you".
@@ -635,40 +644,25 @@ export default class Agents extends View {
           .when(!byPriority && top && top !== "idle", (el) => el.child(this.status(t, { status: top }, true)))
           .child(svg("mods/workspace-chrome/chevron-right.svg").size(11).flex_none().text_color(t.dim)));
     };
-    // Task view bodies. A space's leaders sit under its header, each issue group below them, and
-    // agents with no issue number last: under "기타" when groups exist, else plain.
-    // With 2+ leaders each leader is followed by its own groups, pushed `base` px to the right.
+    // Task view bodies. Each leader is one section: a header (the leader's task title), the leader
+    // row, then its team members (dev, review, integration), one step further in. Members whose
+    // parent chain reaches no leader fall back to one group per issue number (`loose`), then "기타".
     const groupRows = (sp, g, base) => {
       const id = `task-${sp.space}-${g.issue}`;
       const out = [header({ id, label: g.title, status: null, members: g.members, indent: 8 + base, count: true })];
       if (!this.folded.has(id)) out.push(...g.members.flatMap((a) => withKids(a, 0, 14 + base)));
       return out;
     };
-    // A PO tops its tier: the PO row, leaders with no member yet right under it, then one group per
-    // anchor issue: the group header, its leader(s), the leader's members and its other groups.
-    const entryRows = (sp, e) => {
-      const g = e.group;
-      const id = `task-${sp.space}-${g.issue}`;
-      const out = [header({ id, label: g.title, status: null, members: g.members, watch: [...e.leaders.flatMap((x) => [x.leader, ...x.rest.flatMap((r) => r.members)]), ...g.members], indent: 8, count: true })];
-      if (!this.folded.has(id)) {
-        for (const x of e.leaders) {
-          out.push(...withKids(x.leader, 0, 14));
-          if (x.owns) out.push(...g.members.flatMap((a) => withKids(a, 0, 22)));
-          out.push(...x.rest.flatMap((r) => groupRows(sp, r, 14)));
-        }
-      }
+    const sectionRows = (sp, s) => {
+      const id = `task-${sp.space}-${s.leader.address}`;
+      const out = [header({ id, label: s.title, status: null, members: [s.leader, ...s.members], indent: 8, count: true })];
+      if (!this.folded.has(id)) out.push(...withKids(s.leader, 0, 14), ...s.members.flatMap((a) => withKids(a, 0, 22)));
       return out;
     };
-    const poRows = (sp) => sp.poTiers.flatMap((p) => [
-      ...withKids(p.po, 0),
-      ...p.direct.flatMap((l) => withKids(l, 0, 8)),
-      ...p.entries.flatMap((e) => entryRows(sp, e)),
-    ]);
+    const poRows = (sp) => sp.poTiers.flatMap((p) => [...withKids(p.po, 0), ...p.sections.flatMap((s) => sectionRows(sp, s))]);
     const planRows = (sp) => {
-      const out = [...poRows(sp), ...(sp.sections
-        ? [...sp.sections.flatMap((s) => [...withKids(s.leader, 0), ...s.groups.flatMap((g) => groupRows(sp, g, 8))]), ...sp.loose.flatMap((g) => groupRows(sp, g, 0))]
-        : [...sp.leaders.flatMap((a) => withKids(a, 0)), ...sp.groups.flatMap((g) => groupRows(sp, g, 0))])];
-      if (!sp.groups.length) out.push(...sp.others.flatMap((a) => withKids(a, 0)));
+      const out = [...poRows(sp), ...sp.sections.flatMap((s) => sectionRows(sp, s)), ...sp.loose.flatMap((g) => groupRows(sp, g, 0))];
+      if (!sp.loose.length) out.push(...sp.others.flatMap((a) => withKids(a, 0)));
       else if (sp.others.length) {
         const id = `misc-${sp.space}`;
         out.push(header({ id, label: OTHER, status: null, members: sp.others, indent: 8, count: true }));
