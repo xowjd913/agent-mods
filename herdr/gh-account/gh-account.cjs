@@ -138,6 +138,65 @@ function repoFromDir(ctx, dir) {
   return null;
 }
 
+// 폴더가 git 저장소가 아니면(여러 저장소를 담은 폴더) 바로 아래에서 .git 이 있는 폴더를 이만큼까지 본다.
+const SCAN_CHILDREN = 50;
+
+// 스페이스 폴더·터미널 폴더들의 github.com 원격을 owner 별로 묶는다.
+// 각 저장소에 지금 매핑에서 쓰는 계정을 붙이고, owner/* 규칙이 있으면 그 계정도 붙인다.
+function spaceOwners(ctx, dirs, map) {
+  const repos = new Map();
+  const add = (dir) => {
+    let r = null;
+    try { r = repoFromDir(ctx, dir); } catch { r = null; }
+    if (r) repos.set(`${r.owner}/${r.repo}`.toLowerCase(), r);
+    return !!r;
+  };
+  const seen = new Set();
+  for (const raw of dirs) {
+    if (!raw || typeof raw !== "string") continue;
+    const dir = path.resolve(ctx.cwd, raw);
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+    let st;
+    try { st = fs.statSync(dir); } catch { continue; }
+    if (!st.isDirectory() || add(dir)) continue;
+    let kids = [];
+    try { kids = fs.readdirSync(dir, { withFileTypes: true }); } catch { kids = []; }
+    let n = 0;
+    for (const k of kids) {
+      if (n >= SCAN_CHILDREN) break;
+      if (!k.isDirectory() || k.name.startsWith(".")) continue;
+      const sub = path.join(dir, k.name);
+      if (!fs.existsSync(path.join(sub, ".git"))) continue;
+      n++;
+      add(sub);
+    }
+  }
+  const owners = new Map();
+  for (const r of [...repos.values()].sort((a, b) => `${a.owner}/${a.repo}`.localeCompare(`${b.owner}/${b.repo}`))) {
+    const key = r.owner.toLowerCase();
+    if (!owners.has(key)) {
+      const rule = map.rules.find((x) => x.match.toLowerCase() === `${key}/*`);
+      owners.set(key, { owner: r.owner, rule: rule ? rule.account : null, repos: [] });
+    }
+    const hit = matchAccount(map, r);
+    owners.get(key).repos.push({ repo: `${r.owner}/${r.repo}`, account: hit ? hit.account : null, by: hit ? hit.by : null, match: hit ? hit.match : null });
+  }
+  return [...owners.values()];
+}
+
+// 폴더들에서 찾은 owner 마다 owner/* 규칙을 그 계정으로 바꾼다. account 가 null 이면 그 owner/* 규칙을 지운다.
+// owner/repo 처럼 저장소 하나만 정한 규칙은 건드리지 않는다.
+function assignOwners(map, owners, account) {
+  const changed = [];
+  for (const o of owners) {
+    const pattern = `${o.owner}/*`;
+    if (account) { setRule(map, pattern, account); changed.push(pattern); }
+    else if (unsetRule(map, pattern)) changed.push(pattern);
+  }
+  return changed;
+}
+
 // gh 인자에서 대상 저장소: -R/--repo, GitHub URL, gh repo <명령> o/r, gh api repos/o/r, GH_REPO 순.
 function repoFromGhArgs(args, env = {}) {
   for (let i = 0; i < args.length; i++) {
@@ -527,6 +586,8 @@ const USAGE = `사용법: gh-account <명령>
   set <owner/* | owner/repo> <계정>     규칙을 더하거나 바꾼다(먼저 적힌 규칙이 이긴다)
   unset <owner/* | owner/repo>          규칙을 지운다
   default <계정 | none>                  규칙에 없는 저장소에 쓸 계정
+  space [--json] <폴더..>                폴더들의 저장소를 owner 별로 묶어 지금 쓰는 계정을 보여 준다
+  assign <계정 | none> <폴더..>          폴더들에서 찾은 owner 마다 owner/* 규칙을 그 계정으로 정한다(none: 지움)
   identity <계정> [--name 이름] [--email 주소] [--off | --auto]  커밋 신원
   sync                                 신원 파일과 git 전역 설정 블록을 다시 만든다
   install [--bin 폴더] | uninstall | status`;
@@ -627,6 +688,39 @@ function main(argv, ctx, io) {
       if (code === 0 && a !== "none") warnLogin(ctx, io, a);
       return code;
     }
+    case "space": {
+      const json = args.includes("--json");
+      const dirs = args.filter((a) => a !== "--json");
+      const m = readMap(P.map);
+      if (!m.ok) {
+        if (json) { io.out(JSON.stringify({ owners: [], error: m.error })); return 0; }
+        io.err(m.error); return 1;
+      }
+      const owners = spaceOwners(ctx, dirs.length ? dirs : [ctx.cwd], m.map);
+      if (json) { io.out(JSON.stringify({ owners, error: null })); return 0; }
+      if (!owners.length) { io.out("이 폴더들에서 github.com 원격을 찾지 못했습니다."); return 0; }
+      for (const o of owners) {
+        io.out(`${o.owner}/*: ${o.rule || "(규칙 없음)"}`);
+        for (const r of o.repos) io.out(`  ${r.repo} -> ${r.account || "(매핑 없음)"}${r.by === "rule" && r.match !== `${o.owner}/*` ? ` (규칙 ${r.match})` : r.by === "default" ? " (default)" : ""}`);
+      }
+      return 0;
+    }
+    case "assign": {
+      const a = args.shift();
+      if (!a || (a !== "none" && !LOGIN.test(a)) || !args.length) { io.err(USAGE); return 2; }
+      const account = a === "none" ? null : a;
+      const m = readMap(P.map);
+      if (!m.ok) { io.err(`${m.error}\n파일을 고치거나 지운 뒤 다시 실행하세요: ${P.map}`); return 1; }
+      const owners = spaceOwners(ctx, args, m.map);
+      if (!owners.length) { io.err("이 폴더들에서 github.com 원격을 찾지 못해 바꾼 규칙이 없습니다."); return 1; }
+      const code = editMap(ctx, io, (map) => {
+        const changed = assignOwners(map, owners, account);
+        if (!changed.length) return "바꾼 규칙이 없습니다.";
+        return account ? `규칙: ${changed.join(", ")} -> ${account}` : `규칙을 지웠습니다: ${changed.join(", ")}`;
+      });
+      if (code === 0 && account) warnLogin(ctx, io, account);
+      return code;
+    }
     case "identity": {
       const login = args.shift();
       if (!login || !LOGIN.test(login)) { io.err(USAGE); return 2; }
@@ -694,7 +788,7 @@ if (require.main === module) {
 
 module.exports = {
   HOST, MARK, BEGIN, END, paths, parseRepo, readMap, writeMap, emptyMap, matchAccount, setRule, unsetRule,
-  repoFromDir, repoFromGhArgs, realGh, tokenFor, resolve, ghToken, credential, parseCredInput,
+  repoFromDir, spaceOwners, assignOwners, repoFromGhArgs, realGh, tokenFor, resolve, ghToken, credential, parseCredInput,
   globalConfigPath, stripBlock, writeBlock, buildBlock, urlPatterns, priorHelpers, identityFor, sync,
   scripts, install, uninstall, main, makeCtx,
 };

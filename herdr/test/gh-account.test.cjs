@@ -233,6 +233,74 @@ test("main set/unset/default: 매핑 파일을 고치고, 깨진 파일은 덮�
   assert.equal(fs.readFileSync(file, "utf8"), "{broken");
 });
 
+// 스페이스 폴더: 저장소가 아닌 폴더 안에 저장소 둘(같은 owner)과 .git 없는 폴더, 따로 있는 다른 owner 저장소.
+function spaceDirs() {
+  const root = tmpdir("gh-space");
+  const ws = path.join(root, "ws");
+  for (const d of ["app", "api", "notes"]) fs.mkdirSync(path.join(ws, d), { recursive: true });
+  for (const d of ["app", "api"]) fs.mkdirSync(path.join(ws, d, ".git"));
+  const solo = path.join(root, "solo");
+  fs.mkdirSync(solo);
+  const remotes = {
+    [path.join(ws, "app")]: "https://github.com/example-org/app.git",
+    [path.join(ws, "api")]: "git@github.com:Example-Org/api.git",
+    [path.join(ws, "notes")]: "https://github.com/other-org/notes.git",
+    [solo]: "https://github.com/acct-a/tool.git",
+  };
+  return { ws, solo, remotes, missing: path.join(root, "gone") };
+}
+
+test("space: 폴더와 그 아래 저장소를 owner 별로 묶고 지금 쓰는 계정을 붙인다", () => {
+  const s = spaceDirs();
+  const { ctx } = setup({ rules: [{ match: "example-org/api", account: "acct-a" }, { match: "example-org/*", account: "acct-b" }], default: null }, { remotes: s.remotes });
+  const t = io();
+  assert.equal(ga.main(["space", "--json", s.ws, s.solo, s.missing, s.ws], ctx, t.io), 0);
+  const out = JSON.parse(t.o.lines[0]);
+  assert.equal(out.error, null);
+  assert.deepEqual(out.owners, [
+    { owner: "acct-a", rule: null, repos: [{ repo: "acct-a/tool", account: null, by: null, match: null }] },
+    { owner: "Example-Org", rule: "acct-b", repos: [
+      { repo: "Example-Org/api", account: "acct-a", by: "rule", match: "example-org/api" },
+      { repo: "example-org/app", account: "acct-b", by: "rule", match: "example-org/*" },
+    ] },
+  ]);
+  // .git 이 없는 하위 폴더(notes)는 원격이 있어도 보지 않는다.
+  assert.ok(!t.o.lines[0].includes("other-org"));
+  const txt = io();
+  ga.main(["space", s.ws], ctx, txt.io);
+  assert.ok(txt.o.lines.some((l) => l.includes("Example-Org/api -> acct-a (규칙 example-org/api)")));
+});
+
+test("assign: 찾은 owner 마다 owner/* 규칙을 정하거나 지우고, 저장소 하나 규칙은 그대로 둔다", () => {
+  const s = spaceDirs();
+  const { app, ctx } = setup({ rules: [{ match: "example-org/api", account: "acct-a" }, { match: "example-org/*", account: "acct-a" }], default: null }, { remotes: s.remotes });
+  const file = path.join(app, "gh-accounts.json");
+  let t = io();
+  assert.equal(ga.main(["assign", "acct-b", s.ws, s.solo], ctx, t.io), 0);
+  let m = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.deepEqual(m.rules, [
+    { match: "example-org/api", account: "acct-a" },
+    { match: "Example-Org/*", account: "acct-b" },
+    { match: "acct-a/*", account: "acct-b" },
+  ]);
+  t = io();
+  assert.equal(ga.main(["assign", "none", s.ws], ctx, t.io), 0);
+  m = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.deepEqual(m.rules, [{ match: "example-org/api", account: "acct-a" }, { match: "acct-a/*", account: "acct-b" }]);
+  // 원격을 못 찾거나 인자가 틀리면 아무것도 바꾸지 않는다.
+  assert.equal(ga.main(["assign", "acct-b", s.missing], ctx, io().io), 1);
+  assert.equal(ga.main(["assign", "bad name", s.ws], ctx, io().io), 2);
+  assert.equal(ga.main(["assign", "acct-b"], ctx, io().io), 2);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).rules, m.rules);
+  // 깨진 매핑 파일은 덮어쓰지 않고, space --json 은 error 를 담아 0 으로 끝난다.
+  fs.writeFileSync(file, "{broken");
+  assert.equal(ga.main(["assign", "acct-b", s.ws], ctx, io().io), 1);
+  assert.equal(fs.readFileSync(file, "utf8"), "{broken");
+  t = io();
+  assert.equal(ga.main(["space", "--json", s.ws], ctx, t.io), 0);
+  assert.ok(JSON.parse(t.o.lines[0]).error);
+});
+
 test("main resolve: 폴더와 -R 로 계정을 보여 준다", () => {
   const { ctx } = setup(MAP);
   let t = io();
