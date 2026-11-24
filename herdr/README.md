@@ -33,7 +33,7 @@ Herdr 탭 줄 오른쪽에는 원래 `Files`와 `Changes` 패널 버튼이 있�
 
 *설치 직후 데모 저장소에서 `예약` 패널을 연 화면*
 
-> 📸 **TODO(스크린샷)**: 탭 줄 오른쪽 버튼을 가까이 찍은 화면. `PRs` 버튼에 숫자가 뜬 상태. 예정 파일 `docs/images/herdr-tabs-mine.png`
+![탭 줄 오른쪽의 Files·Changes·Work·PRs·예약 버튼](../docs/images/herdr-tabs-mine.png)
 
 | 버튼 | 패널 | 출처 |
 | --- | --- | --- |
@@ -115,7 +115,7 @@ Herdr에서 돌고 있는 에이전트 세션을 트리로 보여 줍니다. 세
 
 "평일 아침 9시에 열린 이슈 정리", "금요일 17시에 주간 보고 초안" 같은 일을 예약해 두면, 그 시각에 Herdr가 Claude나 Codex 세션을 띄우고 프롬프트를 보냅니다.
 
-> 📸 **TODO(스크린샷)**: 예약 몇 개와 실행 기록이 찬 예약 패널. 예정 파일 `docs/images/herdr-schedules.png`
+![꺼 둔 예약 세 개(평일 09:00, 매주 월 17:00, cron)가 있는 예약 패널](../docs/images/herdr-schedules.png)
 
 ```text
  예약                                             + 새 예약
@@ -174,11 +174,13 @@ Work나 PRs에서 워크트리 줄을 누르면 뜨는 작은 팝업입니다. �
 
 필요한 사람만 `--extras`(Windows는 `-Extras`)로 설치합니다. 셋 다 Herdr 기본 모드를 복제해 기능을 더한 것이라, 해당 정보가 없으면 기본 모드와 거의 같게 보입니다.
 
-> 📸 **TODO(스크린샷)**: 추가 모드 세 개가 함께 보이는 화면(아래 상태 줄 사용률, 사이드바 작업별 묶음, 칸 머리줄 리더 탭). 예정 파일 `docs/images/herdr-extras.png`
+> 📸 **TODO(스크린샷)**: 사이드바 작업별 묶음과 칸 머리줄 리더 탭이 보이는 화면. 아래 상태 줄 사용률은 아래 usage-status에 있습니다.
 
 #### usage-status: Claude 사용률
 
 위치: 아래 상태 줄. Claude 요금제 한도를 자주 확인하는 사람에게 맞습니다. 상태 줄 오른쪽에 5시간·7일 사용률을 막대로 보여 주고, 80% 이상이면 경고 색으로 바뀝니다.
+
+![아래 상태 줄 오른쪽의 Claude 5h 42%, 7d 16% 사용률 막대](../docs/images/herdr-extras.png)
 
 ```text
  main · 3 terminals                         Claude 5h ▰▰▰▱▱▱▱▱ 42%  7d ▰▱▱▱▱▱▱▱ 16%
