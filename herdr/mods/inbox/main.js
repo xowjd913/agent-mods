@@ -11,7 +11,7 @@
 // by inbox.cjs; this mod only reads them.
 
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, TextView, ScrollHandle } from "gpui-base";
 import { theme, exec, appHome, checking, window, run, terminals, panes, setBadge, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
@@ -30,6 +30,33 @@ const CLIP = "답을 클립보드에 담아 PO 터미널에 붙여 넣습니다(
 
 // Which terminal is a waiting leader. Copied verbatim from inbox.cjs (a test keeps them identical); tabs-mine uses the same line.
 const waitingKind = (t) => (/^lead-/.test(String(t?.name ?? "")) ? (["decision", "verify"].find((k) => k === String(t.labels?.wait ?? "").trim().toLowerCase()) ?? "") : "");
+
+// leaderName:begin
+// The name a person knows a leader by: its Herdr session name. ONE rule for the inbox (cards, rows), agent-groups (leader headers), leader-tabs (tab text) and work (session rows).
+// The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js and agent-groups/main.js
+// (a test keeps them identical). Order: the live terminal title -> the `session` label -> the last name remembered for that leader
+// (`memo`, {<hc name>: name}) -> the hc name ("lead-po-inbox" -> "po inbox"). The "리더 · " prefix is dropped: the place already says
+// it is a leader, and the name then reads as its task.
+const LEADER_PREFIX = /^\s*리더\s*·\s*/;
+const sessionName = (s) => String(s ?? "").replace(/^[^\p{L}\p{N}\p{Ps}\p{Pi}]+/u, "").replace(LEADER_PREFIX, "").trim();
+const liveName = (term) => [term?.title, term?.labels?.session].map(sessionName).find((n) => n && n !== term?.name && n !== term?.address && n.toLowerCase() !== "claude") ?? "";
+const leaderName = (leader, term, memo) => liveName(term) || sessionName(memo?.[leader]) || String(leader ?? "").replace(/^lead-/, "").replace(/-/g, " ").trim() || String(term?.address ?? "");
+// The memo with the live names of `terms` merged in; null when nothing changed. At most `max` leaders are kept (oldest dropped).
+function rememberNames(memo, terms, max = 60) {
+  const next = { ...(memo ?? {}) };
+  let changed = false;
+  for (const t of terms ?? []) {
+    const n = /^lead-/.test(String(t?.name ?? "")) ? liveName(t) : "";
+    if (!n || next[t.name] === n) continue;
+    delete next[t.name]; // re-added last: the newest stay when the cap drops the oldest
+    next[t.name] = n;
+    changed = true;
+  }
+  if (!changed) return null;
+  for (const k of Object.keys(next).slice(0, Math.max(0, Object.keys(next).length - max))) delete next[k];
+  return next;
+}
+// leaderName:end
 
 // The PO of a leader: its terminal's parent, only when that parent has the label role=po (no guessing). Same rule as inbox.cjs
 // findPo; kept here because the mod cannot require a .cjs file.
@@ -77,7 +104,21 @@ const safeProps = () => { try { return props() ?? {}; } catch { return {}; } };
 // A press the mod handles must not start a drag of the floating window.
 const stop = (_e, cx) => cx.stop_propagation();
 
-const shortName = (leader) => String(leader).replace(/^lead-/, "");
+const NAMES_KEY = "leader.names"; // {<hc name>: session name}, shared with agent-groups: a closed leader keeps a readable name
+const namesMemo = () => { try { return shared(NAMES_KEY) ?? {}; } catch { return {}; } };
+// The shown name of a leader (by hc name): live terminal, else remembered, else the hc name.
+function shortName(leader) {
+  let list = [];
+  try { list = terminals() ?? []; } catch {}
+  return leaderName(leader, list.find((t) => t.name === leader), namesMemo());
+}
+// Remember the live names (only changes are written).
+function rememberLeaders() {
+  try {
+    const next = rememberNames(namesMemo(), terminals() ?? []);
+    if (next) setShared(NAMES_KEY, next);
+  } catch {}
+}
 
 // Two shapes of one mod: the small summary pane (lane counts, opens the window) and the full chat view, which runs in a floating
 // window (props().mode === "window") and works the same as a pane.
@@ -95,6 +136,12 @@ export default class Inbox extends View {
     this.inputs = new Map(); // leader -> InputState
     this.msg = null; // {text, bad}
     this.copied = null; // key of the command whose 복사 button just ran
+    // The scroll position of both lists is held by handles the view owns (not only by the element id), and every press that changes the
+    // height of a card or a section asks for that spot to stay in view (see reveal).
+    this.scroll = null; // the window's list
+    this.rowsScroll = null; // the pane's list
+    try { this.scroll = ScrollHandle.new(); this.rowsScroll = ScrollHandle.new(); } catch {}
+    this.at = new Map(); // spot key -> index of that child in the window's list, rebuilt on every frame
     if (checking()) return;
     this.load(cx);
     // The always-on summary pane owns the slow refresh and the badge; the window refreshes faster while it is open.
@@ -137,6 +184,14 @@ export default class Inbox extends View {
       setShared(OPEN_KEY, cur);
     } catch {}
   }
+
+  // Keeps the spot a press changed (a card that opened or closed, a section that folded, an answer box) in view: scroll_to_item moves
+  // nothing while the child is already visible, so a list that kept its place stays still, and one that lost it comes back to that spot
+  // instead of the top. No pixel offset is readable from the handle, so "in view" is the most this can promise.
+  reveal(key) {
+    try { const i = this.at.get(key); if (i !== undefined) this.scroll?.scroll_to_item(i); } catch {}
+  }
+  spot(s, it) { return `c|${this.cardKey(s, it)}`; }
 
   // A command's copy button: exactly that text goes on the clipboard (no paste, no send); the button says "복사됨" for a moment.
   copy(key, text, cx) {
@@ -194,6 +249,7 @@ export default class Inbox extends View {
         if (gen !== this.gen) return;
         this.data = d;
         this.error = null;
+        rememberLeaders();
       } catch (e) { if (gen === this.gen) this.error = `불러오기 실패: ${String(e?.message ?? e).slice(0, 180)}`; }
       finally { if (gen === this.gen) { this.busy = false; this.badge(); cx.notify(); } }
     });
@@ -312,7 +368,7 @@ export default class Inbox extends View {
   heading(t, text, count, first, o = {}) {
     const el = h_flex().id(o.id ?? `sec-${text}`).h(first ? 30 : 38).px(8).pt(first ? 4 : 14).items_center().gap(7).flex_none().cursor_pointer()
       .when(!first, (x) => x.border_t(1).border_color(t.border).mt(6))
-      .on_mouse_down("left", stop).on_click((_e, c) => { o.toggle?.(); c.notify(); }).tooltip(o.folded ? "눌러서 펼칩니다" : "눌러서 접습니다")
+      .on_mouse_down("left", stop).on_click((_e, c) => { o.toggle?.(); this.reveal(o.id); c.notify(); }).tooltip(o.folded ? "눌러서 펼칩니다" : "눌러서 접습니다")
       .child(div().flex_none().w(12).text_size(11).text_color(t.dim).child(o.folded ? "▸" : "▾"))
       .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(text))
       .child(div().flex_none().px(6).h(16).rounded(8).bg(o.hot && count > 0 ? t.blocked + "26" : t.raised).flex().items_center().text_size(10.5)
@@ -366,7 +422,7 @@ export default class Inbox extends View {
     const id = `b-${s.leader}-${it.ts}`;
     const toggle = it.long ? div().id(`tg-${s.leader}-${it.ts}`).flex_none().px(8).h(20).rounded(10).flex().items_center().text_size(10.5).cursor_pointer().bg(t.raised)
       .border(1).border_color(t.border).text_color(t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
-      .on_click((_e, c) => { this.toggleOpen(s, it); c.notify(); }).child(open ? "접기" : "자세히") : null;
+      .on_click((_e, c) => { this.toggleOpen(s, it); this.reveal(this.spot(s, it)); c.notify(); }).child(open ? "접기" : "자세히") : null;
     const box = v_flex().min_w(0).px(10).py(7).gap(5).rounded(10).bg(accent ? accent + "1f" : t.raised).border(1).border_color(accent ? accent + "55" : t.border)
       .text_size(12.5).text_color(t.foreground);
     const headline = it.head || it.lead || it.title;
@@ -406,7 +462,7 @@ export default class Inbox extends View {
     const actions = h_flex().gap(6).pl(this.compact ? 0 : 36).items_center().flex_wrap()
       .when(Boolean(link) && link !== item?.link, (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", (c) => openUrl(link, c))))
       .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c), { primary: true, disabled: a.po ? "" : NO_PO, tip: CLIP })))
-      .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); c.notify(); }, { disabled: a.po ? "" : NO_PO }))
+      .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); this.reveal(this.spot(s, item)); c.notify(); }, { disabled: a.po ? "" : NO_PO }))
       .child(div().text_size(11).text_color(done ? t.working : t.dim).child(done ? "PO에 넣음 — PO에서 Enter로 보내면 사라집니다" : "PO에서 Enter로 보내면 리더가 받고 사라집니다"));
     card.child(head).child(actions);
     if (!a.po) card.child(div().pl(this.compact ? 0 : 36).text_size(11).text_color(t.dim).child(NO_PO));
@@ -471,7 +527,7 @@ export default class Inbox extends View {
         .child(this.button(t, "inbox-open", "창 열기", (c) => { this.clearFocus(); this.openWindow(); c.notify(); }, { tip: "받은편지함 창을 엽니다" })))
       .when(Boolean(this.error), (el) => el.child(div().text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
       .when(Boolean(this.msg), (el) => el.child(div().text_size(11.5).text_color(this.msg.bad ? t.blocked : t.working).child(this.msg.text)))
-      .child(v_flex().id("inbox-rows").flex_1().min_h(0).gap(4).overflow_y_scrollbar().mode("always").children(list));
+      .child(v_flex().id("inbox-rows").flex_1().min_h(0).gap(4).overflow_y_scrollbar().mode("always").when(Boolean(this.rowsScroll), (el) => el.track_scroll(this.rowsScroll)).children(list));
   }
 
   // The full chat view (pane or window): both lanes.
@@ -480,7 +536,10 @@ export default class Inbox extends View {
     const asks = this.asks();
     let reports = this.reports(asks);
     const blocks = [];
-    // The item a pane row opened goes first (the view has no scroll-to): an ask is moved to the top of its lane, a report gets its own
+    const at = new Map(); // spot key -> index in blocks (the direct children of the scroll list)
+    this.at = at;
+    const add = (el, key) => { if (key) at.set(key, blocks.length); blocks.push(el); };
+    // The item a pane row opened goes first (the first pass has no scroll-to; once drawn, reveal() keeps a pressed spot in view): an ask is moved to the top of its lane, a report gets its own
     // spot above the lanes. Its card was opened by the row; "모두 보기" drops the choice.
     const f = this.focusKey();
     const fa = f ? asks.findIndex((a) => this.cardKey(a.s, a.item) === f) : -1;
@@ -492,18 +551,18 @@ export default class Inbox extends View {
         .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child("선택한 보고"))
         .child(div().flex_1())
         .child(this.button(t, "focus-clear", "모두 보기", (c) => { this.clearFocus(); c.notify(); })));
-      blocks.push(this.chatRow(t, pick));
+      add(this.chatRow(t, pick), this.spot(pick.s, pick.it));
     }
     const askFold = this.collapsed("ask", asks.length, fa >= 0);
-    blocks.push(this.heading(t, "결정 필요", asks.length, fr < 0, { id: "sec-ask", hot: true, folded: askFold, toggle: () => this.toggleSection("ask", asks.length, askFold) }));
+    add(this.heading(t, "결정 필요", asks.length, fr < 0, { id: "sec-ask", hot: true, folded: askFold, toggle: () => this.toggleSection("ask", asks.length, askFold) }), "sec-ask");
     if (!askFold) {
-      if (asks.length) asks.forEach((a) => blocks.push(this.askCard(t, a, cx)));
+      if (asks.length) asks.forEach((a) => add(this.askCard(t, a, cx), this.spot(a.s, a.item)));
       else blocks.push(div().flex_none().px(10).pb(8).text_size(12).text_color(t.dim).child(this.data ? "기다리는 결정·확인이 없습니다." : "불러오는 중…"));
     }
     const repFold = this.collapsed("rep", reports.length, false);
-    blocks.push(this.heading(t, "결과 보고", reports.length + (fr >= 0 ? 1 : 0), false, { id: "sec-rep", folded: repFold, toggle: () => this.toggleSection("rep", reports.length, repFold) }));
+    add(this.heading(t, "결과 보고", reports.length + (fr >= 0 ? 1 : 0), false, { id: "sec-rep", folded: repFold, toggle: () => this.toggleSection("rep", reports.length, repFold) }), "sec-rep");
     if (!repFold) {
-      if (reports.length) reports.forEach((r) => blocks.push(this.chatRow(t, r)));
+      if (reports.length) reports.forEach((r) => add(this.chatRow(t, r), this.spot(r.s, r.it)));
       else blocks.push(div().flex_none().px(10).text_size(12).text_color(t.dim).child(this.data ? "받은 보고가 없습니다." : ""));
     }
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
@@ -522,6 +581,6 @@ export default class Inbox extends View {
       .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
       .when(Boolean(this.msg), (el) => el.child(div().id("inbox-msg").px(14).pb(6).text_size(11.5).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
         .on_mouse_down("left", stop).on_click((_e, c) => { this.msg = null; c.notify(); }).child(this.msg.text)))
-      .child(v_flex().id("inbox-list").on_mouse_down("left", stop).flex_1().min_h(0).px(4).overflow_y_scrollbar().mode("always").children(blocks));
+      .child(v_flex().id("inbox-list").on_mouse_down("left", stop).flex_1().min_h(0).px(4).overflow_y_scrollbar().mode("always").when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks));
   }
 }

@@ -372,3 +372,94 @@ test("창 구역 접기와 답함 표시: 머리줄 누름·공유 상태·기�
   assert.match(src, /nameRow\(t, s, item \? \{ \.\.\.item, kind \} : null, null, true\)/); // 대기 카드만 붉은 종류 표시
   assert.match(src, /this\.kindTag\(t, it, kind \?\? it\?\.kind, ask\)/); // 창 보고 줄과 같은 규칙을 창 옆 목록 줄도 쓴다
 });
+
+// ---- 리더 이름(#33): 받은편지함과 에이전트 목록이 같은 규칙으로 세션 이름을 고른다.
+const NAMES = require("../mods/inbox/inbox.cjs");
+
+test("leaderName: 살아 있는 터미널 제목이 있으면 그것을 쓰고 '리더 · ' 머리말은 뗀다", () => {
+  const term = { name: "lead-po-inbox", address: "t137", title: "리더 · 받은편지함 패널" };
+  assert.equal(NAMES.leaderName("lead-po-inbox", term, {}), "받은편지함 패널");
+  assert.equal(NAMES.leaderName("lead-po-inbox", { ...term, title: "리더·받은편지함 패널" }, {}), "받은편지함 패널");
+  assert.equal(NAMES.leaderName("lead-po-inbox", { ...term, title: "✦ 리더 · 받은편지함 패널" }, {}), "받은편지함 패널"); // 상태 기호는 뗀다
+  assert.equal(NAMES.leaderName("lead-po-inbox", { ...term, title: "받은편지함 패널" }, {}), "받은편지함 패널"); // 머리말이 없어도 그대로
+});
+
+test("leaderName: 제목이 비었거나 쓸모없으면 session 라벨, 그다음 기억한 이름, 마지막으로 내부 이름", () => {
+  const base = { name: "lead-po-inbox", address: "t137" };
+  assert.equal(NAMES.leaderName("lead-po-inbox", { ...base, title: "  ", labels: { session: "리더 · 라벨 이름" } }, {}), "라벨 이름");
+  for (const title of ["", undefined, "lead-po-inbox", "t137", "claude", "리더 · "]) {
+    assert.equal(NAMES.leaderName("lead-po-inbox", { ...base, title }, {}), "po inbox", String(title)); // 기억도 없으면 내부 이름
+    assert.equal(NAMES.leaderName("lead-po-inbox", { ...base, title }, { "lead-po-inbox": "리더 · 기억한 이름" }), "기억한 이름", String(title));
+  }
+  assert.equal(NAMES.leaderName("lead-sched-acct", null, undefined), "sched acct");
+  assert.equal(NAMES.leaderName("lead-sched-acct", undefined, null), "sched acct");
+});
+
+test("leaderName: 이미 닫힌 리더(터미널 없음)는 마지막으로 본 이름을 쓴다", () => {
+  assert.equal(NAMES.leaderName("lead-gone", null, { "lead-gone": "닫힌 작업" }), "닫힌 작업");
+  assert.equal(NAMES.leaderName("lead-other", null, { "lead-gone": "닫힌 작업" }), "other"); // 다른 리더의 이름을 가져오지 않는다
+  assert.equal(NAMES.leaderName("", null, {}), "");
+});
+
+test("rememberNames: lead-* 터미널의 읽을 수 있는 제목만 기억하고, 바뀐 것이 없으면 null", () => {
+  const terms = [
+    { name: "lead-a", address: "t1", title: "리더 · 가 작업" },
+    { name: "lead-b", address: "t2", title: "" },
+    { name: "dev-1-x", address: "t3", title: "개발 · #1" }, // 리더가 아니다
+  ];
+  const m = NAMES.rememberNames({}, terms);
+  assert.deepEqual(m, { "lead-a": "가 작업" });
+  assert.equal(NAMES.rememberNames(m, terms), null);
+  assert.deepEqual(NAMES.rememberNames(m, [{ name: "lead-a", address: "t1", title: "리더 · 새 이름" }]), { "lead-a": "새 이름" });
+  assert.equal(NAMES.rememberNames({ "lead-a": "keep" }, [{ name: "lead-b", address: "t2", title: "" }]), null); // 제목이 비면 지우지 않는다
+  assert.equal(NAMES.rememberNames(undefined, undefined), null);
+});
+
+test("rememberNames: 오래된 것부터 버려 상한을 지킨다", () => {
+  const memo = { x1: "1", x2: "2", x3: "3" };
+  const next = NAMES.rememberNames(memo, [{ name: "lead-n", address: "t9", title: "새" }], 3);
+  assert.deepEqual(Object.keys(next), ["x2", "x3", "lead-n"]);
+});
+
+test("leaderName: 받은편지함·에이전트 목록·inbox.cjs가 같은 블록을 쓴다", () => {
+  const block = (f) => {
+    const src = fs.readFileSync(path.join(__dirname, f), "utf8");
+    const a = src.indexOf("// leaderName:begin"), b = src.indexOf("// leaderName:end");
+    assert.ok(a >= 0 && b > a, f);
+    return src.slice(a, b);
+  };
+  const ref = block("../mods/inbox/inbox.cjs");
+  assert.equal(block("../mods/inbox/main.js"), ref);
+  assert.equal(block("../mods/agent-groups/main.js"), ref);
+  assert.equal(block("../mods/leader-tabs/main.js"), ref);
+  assert.equal(block("../mods/work/main.js"), ref);
+});
+
+test("leader-tabs·work: 리더 이름을 hc 이름(lead-x) 그대로 그리지 않는다", () => {
+  const tabs = fs.readFileSync(path.join(__dirname, "../mods/leader-tabs/main.js"), "utf8");
+  assert.match(tabs, /return leaderName\(term\.name, term, namesMemo\(\)\)/);
+  assert.doesNotMatch(tabs, /term\.name \|\| term\.address/);
+  const work = fs.readFileSync(path.join(__dirname, "../mods/work/main.js"), "utf8");
+  assert.match(work, /const label = sessionLabel\(s\)/);
+  // The rule itself: a closed or untitled leader reads as its task, a titled one as its title.
+  assert.equal(NAMES.leaderName("lead-po-inbox", { name: "lead-po-inbox", address: "t1", title: "리더 · 받은편지함 정리" }, {}), "받은편지함 정리");
+  assert.equal(NAMES.leaderName("lead-po-inbox", { name: "lead-po-inbox", address: "t1", title: "lead-po-inbox" }, {}), "po inbox");
+});
+
+// The scroll lists keep their place across presses: handles the view owns, tracked on both lists, and an anchor after every press that
+// changes a card's or a section's height. (The kit gives no way to read a pixel offset, so this checks the wiring, not the pixels.)
+test("받은편지함: 자세히·접기·섹션·답 쓰기가 스크롤을 맨 위로 되돌리지 않게 위치를 붙든다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  assert.match(src, /ScrollHandle\.new\(\)/);
+  assert.match(src, /id\("inbox-list"\)[^\n]*track_scroll\(this\.scroll\)/);
+  assert.match(src, /id\("inbox-rows"\)[^\n]*track_scroll\(this\.rowsScroll\)/);
+  assert.match(src, /scroll_to_item\(i\)/);
+  assert.match(src, /this\.toggleOpen\(s, it\); this\.reveal\(this\.spot\(s, it\)\)/);
+  assert.match(src, /o\.toggle\?\.\(\); this\.reveal\(o\.id\)/);
+  assert.match(src, /this\.reveal\(this\.spot\(s, item\)\)/);
+  // Every child of the list is recorded with the spot key reveal looks up.
+  assert.match(src, /add\(this\.askCard\(t, a, cx\), this\.spot\(a\.s, a\.item\)\)/);
+  assert.match(src, /add\(this\.chatRow\(t, r\), this\.spot\(r\.s, r\.it\)\)/);
+  assert.match(src, /"sec-ask"\)/);
+  assert.match(src, /"sec-rep"\)/);
+});

@@ -95,3 +95,24 @@ test("paneless + taskPlan: 창 없는 리더도 섹션이 되고 loose·중복 �
   assert.equal(sp.others.length, 0);
   assert.equal(new Set(sp.order.map((a) => a.address)).size, sp.order.length);
 });
+
+// 리더 머리줄은 리더의 세션 이름(터미널 제목)으로 나온다. 제목이 없으면 기억한 이름, 그것도 없으면 hc 이름.
+test("taskPlan: 리더 머리줄은 터미널 제목 → 기억한 이름 → hc 이름 순이다", () => {
+  const withTitle = (title) => [
+    term("t28", "po", null, { role: "po" }),
+    { ...term("t137", "lead-po-inbox", "t28", { role: "leader" }), title },
+  ];
+  const list = [agent("t28", 1, "tab1", "PO · repo"), agent("t137", 2, "tab1", "PO · repo")];
+  const head = (all, memo) => taskPlan(list, all, new Map(), memo)[0].poTiers[0].sections[0].title;
+  assert.equal(head(withTitle("리더 · 받은편지함 패널"), {}), "받은편지함 패널");
+  assert.equal(head(withTitle(""), { "lead-po-inbox": "기억한 이름" }), "기억한 이름");
+  assert.equal(head(withTitle(""), {}), "po inbox");
+});
+
+test("paneless: 터미널 제목 없는 리더 행은 기억한 이름으로 '리더 · ' 를 붙여 보인다", () => {
+  const all3 = [term("t28", "po", null, { role: "po" }), term("t137", "lead-po-inbox", "t28", { role: "leader" })];
+  const real = [agent("t28", 1, "tab1", "PO · repo")];
+  assert.equal(paneless(real, all3, new Map(), { "lead-po-inbox": "기억한 이름" })[0].title, "리더 · 기억한 이름");
+  assert.equal(paneless(real, all3, new Map(), {})[0].title, "리더 · po inbox");
+  assert.equal(paneless(real, [all3[0], { ...all3[1], title: "리더 · 받은편지함 패널" }], new Map(), {})[0].title, "리더 · 받은편지함 패널");
+});
