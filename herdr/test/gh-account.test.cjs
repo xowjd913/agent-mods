@@ -16,7 +16,7 @@ function tmpdir(name = "gh-account") { return fs.mkdtempSync(path.join(os.tmpdir
 // 가짜 gh: acct-a, acct-b 만 로그인돼 있다. 그 밖의 명령은 결과를 기록만 한다.
 function fakeRun({ logged = ["acct-a", "acct-b"], remotes = {}, gitVersion = "git version 2.45.0", calls = [] } = {}) {
   return (cmd, args, opts = {}) => {
-    calls.push({ cmd, args, env: opts.env });
+    calls.push({ cmd, args, env: opts.env, opts });
     if (cmd === "fake-gh" && args[0] === "auth" && args[1] === "token") {
       const user = args[args.indexOf("--user") + 1];
       return logged.includes(user) ? { status: 0, stdout: `tok-${user}\n`, stderr: "" } : { status: 1, stdout: "", stderr: "no account" };
@@ -115,6 +115,66 @@ test("credential: 매핑된 저장소는 그 계정 토큰, 아니면 아무것�
   assert.equal(ga.credential({ ...ctx, env: { ...ctx.env, GH_ACCOUNT_OFF: "1" } }, "get", input).out, "");
 });
 
+test("credential: path 는 앞 두 칸(o/r.git/info/lfs 포함)으로 저장소를 정하고 origin 보다 먼저다", () => {
+  const { ctx } = setup(MAP, { remotes: { "/w/repo": "https://github.com/acct-a/tool.git" } });
+  const input = "protocol=https\nhost=github.com\n";
+  assert.equal(ga.credential(ctx, "get", input).out, "");
+  assert.equal(ga.credential(ctx, "get", input + "path=example-org/app.git/info/lfs\n").out, "username=acct-b\npassword=tok-acct-b\n");
+  assert.equal(ga.credential(ctx, "get", input + "path=example-org/app\n").out, "username=acct-b\npassword=tok-acct-b\n");
+  // origin 이 매핑됐어도 다른 주인으로 가는 요청엔 내주지 않는다
+  const m = setup(MAP);
+  assert.equal(ga.credential(m.ctx, "get", input + "path=other-owner/x.git\n").out, "");
+});
+
+test("credential: gh 를 실행하지 못하면 quit 대신 원래 도우미에 넘긴다", () => {
+  const { ctx } = setup(MAP);
+  // -1: 실행 파일 없음, 127: PATH 의 우리 래퍼가 진짜 gh 를 못 찾음
+  for (const status of [-1, 127]) {
+    const run = (cmd, args, opts) => cmd === "fake-gh" ? { status, stdout: "", stderr: "" } : ctx.run(cmd, args, opts);
+    const r = ga.credential({ ...ctx, run }, "get", "protocol=https\nhost=github.com\n");
+    assert.equal(r.out, "");
+    assert.match(r.message, /gh 를 찾지 못해/);
+  }
+});
+
+test("realGh: PATH 에 없으면 설치 때 기록한 경로를 쓴다", () => {
+  const { app, ctx } = setup(MAP);
+  const gh = path.join(app, "real-gh");
+  fs.writeFileSync(gh, "#!/bin/sh\n");
+  fs.mkdirSync(path.join(app, "gh-account"), { recursive: true });
+  fs.writeFileSync(path.join(app, "gh-account", "state.json"), JSON.stringify({ binDir: "/b", prior: [], gh }));
+  const c = { ...ctx, env: { ...ctx.env, GH_ACCOUNT_GH: "" } };
+  assert.equal(ga.realGh(c), gh);
+  fs.rmSync(gh);
+  assert.equal(ga.realGh(c), "gh");
+});
+
+test("priorHelper: 이 도구가 내준 자격 증명의 store·erase 는 버리고 path 줄은 빼서 넘긴다", () => {
+  const calls = [];
+  const { ctx } = setup(MAP, { calls });
+  const sent = () => calls.filter((c) => c.cmd === "/bin/sh");
+  const base = "protocol=https\nhost=github.com\n";
+  // 매핑된 저장소(origin)에서 매핑 계정 이름이면 버린다
+  ga.priorHelper(ctx, "osxkeychain", "store", base + "username=acct-b\npassword=tok-acct-b\n");
+  ga.priorHelper(ctx, "osxkeychain", "erase", base + "username=acct-b\npassword=tok-acct-b\n");
+  assert.equal(sent().length, 0);
+  // 매핑이 없는 저장소라도 비밀번호가 매핑 계정 토큰이면 버린다
+  ga.priorHelper(ctx, "osxkeychain", "store", base + "path=someone/else.git\nusername=acct-b\npassword=tok-acct-b\n");
+  assert.equal(sent().length, 0);
+  // 다른 사용자, 다른 비밀번호는 넘긴다(path 는 빼고)
+  ga.priorHelper(ctx, "osxkeychain", "store", base + "path=someone/else.git\nusername=acct-b\npassword=other\n");
+  ga.priorHelper(ctx, "/abs/helper --x", "store", base + "username=me\npassword=p\n");
+  ga.priorHelper(ctx, "!f() { cat; }; f", "get", base + "path=example-org/app.git\n");
+  assert.deepEqual(sent().map((c) => c.args[1]), ["git credential-osxkeychain store", "/abs/helper --x store", "f() { cat; }; f get"]);
+  assert.ok(sent().every((c) => !/path=/.test(c.opts.input)));
+  // 모르는 동작은 부르지 않는다
+  ga.priorHelper(ctx, "osxkeychain", "rm -rf", base);
+  assert.equal(sent().length, 3);
+  // GH_ACCOUNT_OFF 면 거르지 않고 그대로 넘긴다
+  ga.priorHelper({ ...ctx, env: { ...ctx.env, GH_ACCOUNT_OFF: "1" } }, "osxkeychain", "store", base + "username=acct-b\npassword=tok-acct-b\n");
+  assert.equal(sent().length, 4);
+});
+
 test("credential: 매핑 파일이 깨졌거나 원격이 없으면 비켜 주고, 로그인 안 된 계정은 quit 로 막는다", () => {
   assert.equal(ga.credential(setup("{broken").ctx, "get", "protocol=https\nhost=github.com\n").out, "");
   const none = setup(MAP);
@@ -160,7 +220,9 @@ test("buildBlock: default 를 먼저, 규칙은 거꾸로 써서 첫 규칙이 �
   const lines = block.split("\n");
   assert.equal(lines[0], ga.BEGIN);
   assert.equal(lines.at(-1), ga.END);
-  assert.deepEqual(lines.filter((l) => l.startsWith("\thelper")), ["\thelper =", '\thelper = "/b/git-credential-gh-account"', '\thelper = "osxkeychain"']);
+  // 원래 도우미는 우리 도우미로 감싸 store 를 거른다
+  assert.deepEqual(lines.filter((l) => l.startsWith("\thelper")), ["\thelper =", '\thelper = "/b/git-credential-gh-account"', `\thelper = "/b/git-credential-gh-account prior 'osxkeychain'"`]);
+  assert.ok(lines.includes("\tuseHttpPath = true"));
   const inc = lines.filter((l) => l.startsWith("[includeIf"));
   assert.equal(inc[0], '[includeIf "hasconfig:remote.*.url:https://github.com/**"]');
   assert.ok(inc.includes('[includeIf "hasconfig:remote.*.url:git@github.com:o/r.git"]'));
@@ -269,8 +331,9 @@ test("priorHelpers: 일반 도우미와 github.com 도우미만 순서대로, �
   assert.deepEqual(ga.priorHelpers(ctx, g), ["cache", "!gh auth git-credential"]);
 });
 
-// 실제 git 과 가짜 gh 셸 스크립트로 설치부터 제거까지 확인한다. 공백이 든 경로도 함께 본다.
-test("e2e: 래퍼가 GH_TOKEN 을 넣고 git 자격 증명·커밋 신원이 매핑을 따른다", { skip: !POSIX && "POSIX 전용" }, () => {
+// 실제 git 과 가짜 gh 셸 스크립트로 설치까지 해 둔다. 공백이 든 경로도 함께 본다.
+// prior(root) 는 설치 전 전역 git 설정 내용(원래 자격 증명 도우미)이다.
+function e2eSetup(prior) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "gh account e2e-"));
   const home = path.join(root, "home");
   const app = path.join(home, "app");
@@ -297,7 +360,7 @@ echo "token=$GH_TOKEN args=$*"
   fs.symlinkSync(process.execPath, path.join(tools, "node"));
   const gconf = path.join(home, ".gitconfig");
   // 설치 전부터 있던 도우미는 매핑 없는 저장소에서 그대로 쓰여야 한다
-  fs.writeFileSync(gconf, "[credential]\n\thelper = \"!f() { echo username=prior; echo password=prior-pass; }; f\"\n");
+  fs.writeFileSync(gconf, prior(root));
   const env = {
     HOME: home, HERDR_APP_HOME: app, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0",
     PATH: [bin, fake, tools, "/usr/bin", "/bin"].join(":"), LANG: "C",
@@ -316,6 +379,13 @@ echo "token=$GH_TOKEN args=$*"
     sh("git", ["remote", "add", "origin", url], { cwd: d });
     return d;
   };
+  const fill = (cwd, input = "protocol=https\nhost=github.com\n\n", extra = {}) => sh("git", ["credential", "fill"], { cwd, input, ...extra });
+  return { root, home, app, bin, fake, tools, gconf, sh, repo, fill };
+}
+
+// 설치부터 제거까지 확인한다.
+test("e2e: 래퍼가 GH_TOKEN 을 넣고 git 자격 증명·커밋 신원이 매핑을 따른다", { skip: !POSIX && "POSIX 전용" }, () => {
+  const { app, bin, gconf, sh, repo, fill } = e2eSetup(() => "[credential]\n\thelper = \"!f() { echo username=prior; echo password=prior-pass; }; f\"\n");
   const mapped = repo("mapped", "https://github.com/example-org/app.git");
   const plain = repo("plain", "https://github.com/acct-a/tool.git");
   const missing = repo("missing", "https://github.com/other-org/x.git");
@@ -332,8 +402,10 @@ echo "token=$GH_TOKEN args=$*"
   assert.equal(miss.stdout, "");
   assert.match(miss.stderr, /acct-c 계정으로 매핑돼 있지만/);
 
+  // 저장소와 상관없는 명령은 매핑 계정이 로그인 안 돼 있어도 그대로 넘긴다
+  assert.equal(sh("gh", ["--version"], { cwd: missing }).stdout.trim(), "token= args=--version");
+
   // git 자격 증명
-  const fill = (cwd) => sh("git", ["credential", "fill"], { cwd, input: "protocol=https\nhost=github.com\n\n" });
   assert.match(fill(mapped).stdout, /^username=acct-b\npassword=tok-acct-b$/m);
   assert.match(fill(plain).stdout, /username=prior\npassword=prior-pass/);
   const q = fill(missing);
@@ -361,4 +433,48 @@ echo "token=$GH_TOKEN args=$*"
   assert.equal(fs.readFileSync(gconf, "utf8"), "[credential]\n\thelper = \"!f() { echo username=prior; echo password=prior-pass; }; f\"\n");
   assert.equal(fs.readFileSync(path.join(app, "gh-accounts.json"), "utf8"), "{broken");
   assert.equal(fs.existsSync(path.join(app, "gh-account")), false);
+});
+
+// 리뷰 R1: 원래 도우미에 매핑 토큰을 저장하지 않고, 요청 URL 의 저장소로 계정을 고르고, gh 가 PATH 에 없어도 push 를 막지 않는다.
+test("e2e: 원래 도우미 저장 거르기, URL 경로 우선, gh 가 없을 때 그대로 넘기기", { skip: !POSIX && "POSIX 전용" }, () => {
+  const { root, fake, bin, tools, sh, repo, fill } = e2eSetup((r) => `[credential]\n\thelper = "store --file '${r}/creds'"\n`);
+  const creds = path.join(root, "creds");
+  fs.writeFileSync(creds, "https://prior:prior-pass@github.com\n");
+  const mapped = repo("mapped", "https://github.com/example-org/app.git");
+  const plain = repo("plain", "https://github.com/acct-a/tool.git");
+  const approve = (cwd, input) => sh("git", ["credential", "approve"], { cwd, input });
+
+  // P1: 매핑 토큰은 성공 뒤에도 원래 도우미(store)에 저장되지 않는다
+  const got = fill(mapped);
+  assert.match(got.stdout, /^username=acct-b\npassword=tok-acct-b$/m);
+  assert.equal(approve(mapped, got.stdout + "\n").status, 0);
+  assert.equal(fs.readFileSync(creds, "utf8"), "https://prior:prior-pass@github.com\n");
+  // 다른 계정 이름으로 와도 매핑 계정 토큰이면 거른다
+  approve(plain, "protocol=https\nhost=github.com\nusername=acct-b\npassword=tok-acct-b\n\n");
+  assert.doesNotMatch(fs.readFileSync(creds, "utf8"), /tok-acct/);
+  // 매핑 없는 저장소는 원래 도우미가 읽고 저장한다. path 는 넘기지 않는다
+  assert.match(fill(plain).stdout, /username=prior\npassword=prior-pass/);
+  assert.equal(approve(plain, "protocol=https\nhost=github.com\npath=acct-a/tool.git\nusername=user2\npassword=pass2\n\n").status, 0);
+  const saved = fs.readFileSync(creds, "utf8");
+  assert.match(saved, /^https:\/\/user2:pass2@github\.com$/m);
+  assert.doesNotMatch(saved, /tool\.git/);
+
+  // P3: 요청 URL 의 저장소가 지금 폴더의 origin 보다 먼저다
+  assert.match(fill(plain, "url=https://github.com/example-org/x.git\n\n").stdout, /^username=acct-b$/m);
+  assert.doesNotMatch(fill(mapped, "url=https://github.com/acct-a/tool.git\n\n").stdout, /acct-b/);
+
+  // P2: PATH 에 gh 가 없어도 설치 때 기록한 gh 를 쓴다
+  const noGh = { env: { PATH: [bin, tools, "/usr/bin", "/bin"].join(":") } };
+  assert.match(fill(mapped, undefined, noGh).stdout, /^username=acct-b$/m);
+  // 그 gh 마저 없으면 실패하지 않고 원래 도우미로 넘긴다
+  const away = fake + "-away";
+  fs.renameSync(fake, away);
+  try {
+    const r = fill(mapped, undefined, noGh);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /username=user2|username=prior/);
+    assert.match(r.stderr, /gh 를 찾지 못해/);
+  } finally {
+    fs.renameSync(away, fake);
+  }
 });
