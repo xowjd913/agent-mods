@@ -968,6 +968,15 @@ function identityEmails(deps, root) {
   });
 }
 const identityOk = (emails) => emails.every((e) => NOREPLY.test(e));
+// noreply는 공개(public)·확인 못 한(unknown) 저장소에만 요구한다. 비공개(private)·원격 없는(local) 저장소는 이메일을 그대로 둔다.
+// noreply가 아닐 때만 공개 여부를 물어(gh 호출) 화면을 그릴 때마다 gh를 부르지 않는다.
+const emailPolicy = (deps, root, emails) => {
+  if (identityOk(emails)) return { ok: true, block: false, visibility: null };
+  const visibility = repoVisibility(deps, root);
+  return { ok: false, block: visibility !== "private" && visibility !== "local", visibility };
+};
+const shellArg = (s) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
+const emailFix = (root) => `git -C ${shellArg(root)} config user.email <noreply 주소>`;
 // 비교용 정규화(계정 정보·.git·scp/ssh 표기 차이 제거)와 저장용 정리(URL의 계정:토큰 제거).
 function normRemote(url) {
   let u = String(url ?? "").trim();
@@ -989,7 +998,8 @@ function syncRoot(deps) {
 function syncStatus(deps = defaultDeps()) {
   const r = syncRoot(deps);
   if (r.error) return { ok: true, repo: null, error: readSettings().syncRepo ? r.error : "" };
-  return { ok: true, repo: r.root, name: path.basename(r.root), emailOk: identityOk(identityEmails(deps, r.root)) };
+  const policy = emailPolicy(deps, r.root, identityEmails(deps, r.root));
+  return { ok: true, repo: r.root, name: path.basename(r.root), emailOk: policy.ok, emailBlock: policy.block, ...(policy.block ? { emailFix: emailFix(r.root) } : {}) };
 }
 function setSyncRepo(dir, deps = defaultDeps()) {
   const want = String(dir ?? "").trim();
@@ -1027,14 +1037,16 @@ function record({ id, all = false, confirmPublic = false } = {}, deps = defaultD
   const r = syncRoot(deps);
   if (r.error) return { ok: false, error: r.error };
   const emails = identityEmails(deps, r.root);
-  if (!identityOk(emails)) {
+  const policy = emailPolicy(deps, r.root, emails);
+  if (policy.block) {
     const bad = [...new Set(emails.filter((e) => !NOREPLY.test(e)))].map((e) => e || "설정 없음").join(", ");
-    return { ok: false, code: "email", error: `기록 저장소의 커밋 작성자·커미터 이메일이 GitHub noreply 주소가 아니라 기록하지 않았습니다(${bad}). 그 저장소에서 git config로 user.email(과 author.email·committer.email)을 noreply 주소로 맞추세요.` };
+    const why = policy.visibility === "public" ? "공개 저장소라" : "저장소의 공개 여부를 확인하지 못해";
+    return { ok: false, code: "email", error: `기록 저장소의 커밋 작성자·커미터 이메일이 GitHub noreply 주소가 아니고 ${why} 기록하지 않았습니다(${bad}). 해결: ${emailFix(r.root)} (author.email·committer.email도 설정했다면 같이 맞추세요.)` };
   }
   const autos = loadAutos().automations;
   const picks = all ? autos : autos.filter((x) => x.id === id);
   if (!picks.length) return { ok: false, error: all ? "기록할 예약이 없습니다." : `예약을 찾지 못했습니다: ${id}` };
-  const visibility = repoVisibility(deps, r.root);
+  const visibility = policy.visibility ?? repoVisibility(deps, r.root);
   if (!confirmPublic && visibility !== "private" && visibility !== "local") {
     return { ok: false, needsConfirm: "public", visibility, error: visibility === "public" ? "공개 저장소입니다. 프롬프트가 누구에게나 보입니다. 비공개 저장소를 권장합니다." : "저장소의 공개 여부를 확인하지 못했습니다. 공개 저장소면 프롬프트가 누구에게나 보입니다." };
   }
