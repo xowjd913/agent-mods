@@ -153,7 +153,7 @@ export default class Schedules extends View {
     this.screen = "list"; // list | history
     this.items = null;
     this.confirmDelete = null;
-    this.repo = null; // 기록 저장소 상태({repo, name, emailOk, error}). 없으면 아직 못 읽음
+    this.repo = null; // 기록 저장소 상태({repo, name, emailOk, emailBlock, emailFix, error}). 없으면 아직 못 읽음
     this.repoCustom = false; // "다른 폴더…"로 직접 쓰는 중
     this.repoInput = null;
     this.syncBusy = false;
@@ -262,7 +262,7 @@ export default class Schedules extends View {
     if (!dir) return;
     cx.spawn(async (cx) => {
       const d = await helper(["repo-set", dir]);
-      if (d.ok) { this.repo = d; this.repoCustom = false; this.syncAsk = null; this.say(cx, `기록 저장소를 "${d.name}"(으)로 정했습니다.${d.emailOk ? "" : " 이 저장소의 커밋 이메일이 noreply가 아니라 기록하려면 먼저 바꿔야 합니다."}`, !d.emailOk); }
+      if (d.ok) { this.repo = d; this.repoCustom = false; this.syncAsk = null; this.say(cx, `기록 저장소를 "${d.name}"(으)로 정했습니다.${d.emailBlock ? " 이 저장소의 커밋 이메일이 noreply가 아니라 기록하려면 먼저 바꿔야 합니다." : ""}`, Boolean(d.emailBlock)); }
       else this.say(cx, d.error || "저장소를 정하지 못했습니다.", true);
     });
   }
@@ -293,6 +293,7 @@ export default class Schedules extends View {
       if (d.needsConfirm) this.syncAsk = { kind: "public", args, text: d.error };
       else if (d.ok) this.setMsg(cx, d.changed === false ? "저장소의 기록과 같아서 바뀐 것이 없습니다." : `${d.count}개를 저장소에 기록하고 push했습니다.`);
       else this.setMsg(cx, d.error || "기록하지 못했습니다.", true);
+      this.loadRepo(cx); // 이메일을 고친 뒤 안내가 남지 않게 저장소 상태를 다시 읽는다
       cx.notify();
     });
   }
@@ -851,7 +852,8 @@ export default class Schedules extends View {
         .child(this.button(t, "sync-set", "정하기", (cx) => this.setRepo(this.repoInput.value().trim(), cx)))))
       .when(!this.repoCustom && ready, (el) => el.child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(this.repo.repo)))
       .when(Boolean(this.repo?.error) && !ready, (el) => el.child(this.note(t, this.repo.error, t.blocked)))
-      .when(ready && !this.repo.emailOk, (el) => el.child(this.note(t, "이 저장소의 커밋 이메일이 GitHub noreply 주소가 아니라 기록할 수 없습니다.", t.blocked)))
+      .when(ready && this.repo.emailBlock, (el) => el.child(this.note(t, `이 저장소의 커밋 이메일이 GitHub noreply 주소가 아니고 공개 저장소이거나 공개 여부를 몰라 기록할 수 없습니다. 해결: ${this.repo.emailFix}`, t.blocked)))
+      .when(ready && !this.repo.emailOk && !this.repo.emailBlock, (el) => el.child(this.note(t, "비공개 저장소(또는 원격 없음)라 커밋 이메일을 바꾸지 않아도 기록할 수 있습니다.")))
       .when(!ready && !this.repo?.error, (el) => el.child(this.note(t, "저장소를 고르면 예약을 그 저장소의 herdr-schedules/에 기록할 수 있습니다. 비공개 저장소를 권장합니다.")))
       .child(h_flex().gap(6).items_center().flex_wrap()
         .child(this.button(t, "sync-all", "모두 기록", (cx) => this.record(["--all"], cx), { disabled: !ready || this.syncBusy || !(this.items ?? []).length }))
