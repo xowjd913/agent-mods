@@ -94,14 +94,15 @@ curl -fsSL https://raw.githubusercontent.com/xowjd913/agent-mods/main/herdr/inst
 
 버그 제보, 개선 제안, PR 모두 환영합니다.
 
-1. 이 저장소를 fork하고 브랜치를 만들어 고칩니다.
+1. 이 저장소를 fork하고 `develop`에서 브랜치를 만들어 고칩니다.
 2. 저장소 최상위에서 `node --test`를 돌립니다.
    - 모드를 고쳤다면 설치한 뒤 `herdr-app check <설정 폴더>/mods/<모드>`로 앱에서 확인해 주세요.
-3. `main`으로 PR을 엽니다. 무엇을 왜 바꿨는지, 어떻게 확인했는지 적어 주세요.
+3. `develop`으로 PR을 엽니다. 무엇을 왜 바꿨는지, 어떻게 확인했는지 적어 주세요.
 
 PR이 들어가는 과정:
 
-- `main`에는 PR로만 들어가고, 코드 소유자(CODEOWNERS)가 리뷰·승인합니다.
+- `develop`: 기여 PR이 들어가는 곳입니다. 리뷰 승인이 없어도 합칠 수 있습니다.
+- `main`: 배포할 때 develop→main PR과 버전 태그로만 바뀝니다. 이 PR은 코드 소유자(CODEOWNERS)의 승인이 있어야 합칩니다.
 - 처음 기여하는 분의 PR은 GitHub Actions가 돌기 전에 관리자 승인을 한 번 거칩니다.
 - CI는 macOS·Linux·Windows에서 `node --test`와 설치 스크립트 문법 검사를 돌립니다.
 
