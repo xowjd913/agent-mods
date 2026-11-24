@@ -1085,3 +1085,82 @@ test("shell-path: 로그인 셸의 PATH 를 표시 사이에서 읽고, 못 읽�
   assert.equal(ga.main(["shell-path"], ctx, y.io), 1);
   assert.equal(seen[1][0], "/bin/sh", "상대 경로 SHELL 은 쓰지 않는다");
 });
+
+// ---- 예약별 계정 ----
+
+// 래퍼를 설치한 것처럼: state.json 의 binDir 에 이 도구가 만든 gh 가 있다.
+function fakeInstall(home, app) {
+  const bin = path.join(home, "bin");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, "gh"), "#!/bin/sh\n# gh-account-managed: test\n");
+  fs.mkdirSync(path.join(app, "gh-account"), { recursive: true });
+  fs.writeFileSync(path.join(app, "gh-account", "state.json"), JSON.stringify({ binDir: bin }));
+  return bin;
+}
+
+test("GH_ACCOUNT: 예약에 정한 계정이 규칙·기본 계정을 대신하지만, 로그인된 다른 계정의 저장소는 그 계정을 쓴다", () => {
+  const { ctx, calls } = setup(MAP, { env: { GH_ACCOUNT: "acct-a" } });
+  // example-org/* 규칙은 acct-b 지만 예약이 acct-a 로 정했다
+  assert.deepEqual(ga.ghToken(ctx, ["pr", "list"]), { code: 0, token: "tok-acct-a" });
+  const input = "protocol=https\nhost=github.com\n";
+  assert.equal(ga.credential(ctx, "get", input).out, "username=acct-a\npassword=tok-acct-a\n");
+  assert.equal(ga.resolve(ctx, { dir: "/w/repo" }).hit.by, "schedule");
+  // 로그인된 다른 계정(acct-b)의 저장소에는 예약 계정을 쓰지 않는다
+  assert.equal(ga.ghToken(ctx, ["pr", "list", "-R", "acct-b/notes"]).token, "tok-acct-b");
+  assert.equal(ga.credential(ctx, "get", input + "path=acct-b/notes.git\n").out, "username=acct-b\npassword=tok-acct-b\n");
+  // 매핑 파일이 없어도 예약 계정을 쓴다
+  assert.equal(ga.ghToken(setup(undefined, { env: { GH_ACCOUNT: "acct-b" } }).ctx, ["pr", "list"]).token, "tok-acct-b");
+  // 이름이 이상하면 무시하고 매핑을 따른다
+  assert.equal(ga.ghToken(setup(MAP, { env: { GH_ACCOUNT: "../x y" } }).ctx, ["pr", "list"]).token, "tok-acct-b");
+  // 로그인 안 된 계정이면 다른 계정으로 돌지 않고 3 과 예약 안내
+  const r = ga.ghToken(setup(MAP, { env: { GH_ACCOUNT: "acct-c" } }).ctx, ["pr", "list"]);
+  assert.equal(r.code, 3);
+  assert.match(r.message, /이 예약은 acct-c 계정을 쓰도록 정했지만/);
+  assert.equal(ga.credential(setup(MAP, { env: { GH_ACCOUNT: "acct-c" } }).ctx, "get", input).out, "quit=1\n");
+  for (const c of calls) assert.ok(!c.args.some((x) => /tok-/.test(x)));
+});
+
+test("scheduleAccount/scheduleAccounts: 설치·로그인을 확인하고 gh 의 이름을 돌려주며 토큰은 받지 않는다", () => {
+  const { ctx, home, app, calls } = setup(MAP);
+  assert.deepEqual(ga.scheduleAccounts(ctx), { installed: false, logins: null });
+  assert.match(ga.scheduleAccount(ctx, "acct-a").error, /먼저 계정 패널에서 gh-account 를 설치/);
+  fakeInstall(home, app);
+  assert.deepEqual(ga.scheduleAccounts(ctx), { installed: true, logins: ["acct-a", "acct-b"] });
+  assert.deepEqual(ga.scheduleAccount(ctx, "ACCT-B"), { ok: true, login: "acct-b" });
+  assert.match(ga.scheduleAccount(ctx, "acct-c").error, /acct-c 계정은 gh 에 로그인돼 있지 않습니다/);
+  assert.match(ga.scheduleAccount(ctx, "a b").error, /계정 이름이 올바르지 않습니다/);
+  assert.ok(!calls.some((c) => c.args[0] === "auth" && c.args[1] === "token"), "토큰을 받지 않는다");
+  assert.ok(!calls.some((c) => c.args[0] === "auth" && (c.args[1] === "switch" || c.args[1] === "login")));
+  // 래퍼 자리의 gh 가 이 도구 것이 아니면 설치 안 됨
+  fs.writeFileSync(path.join(home, "bin", "gh"), "#!/bin/sh\necho other\n");
+  assert.equal(ga.scheduleAccounts(ctx).installed, false);
+});
+
+test("scheduleEnv: 래퍼 폴더를 PATH 맨 앞에, 정한 계정은 GH_ACCOUNT, 그 계정 저장소면 커밋 신원 파일을 넣는다", () => {
+  const { ctx, home, app } = setup(MAP, { env: { PATH: ["/usr/bin", "/x"].join(path.delimiter) } });
+  // 설치 전: 자동은 아무것도 더하지 않고, 정한 계정은 실패
+  assert.deepEqual(ga.scheduleEnv(ctx, {}), { ok: true, env: {}, installed: false });
+  assert.equal(ga.scheduleEnv(ctx, { account: "acct-a" }).ok, false);
+  const bin = fakeInstall(home, app);
+  ctx.env.PATH = ["/usr/bin", bin, "/x"].join(path.delimiter);
+  let r = ga.scheduleEnv(ctx, { dir: "/w/repo" });
+  assert.deepEqual(r, { ok: true, env: { PATH: [bin, "/usr/bin", "/x"].join(path.delimiter) }, installed: true });
+  r = ga.scheduleEnv(ctx, { account: "ACCT-A", dir: "/w/repo" });
+  assert.equal(r.ok, true);
+  assert.equal(r.env.GH_ACCOUNT, "acct-a");
+  assert.equal(r.env.GIT_CONFIG_COUNT, undefined, "신원 파일이 없으면 넣지 않는다");
+  const id = path.join(app, "gh-account", "identity", "acct-a.gitconfig");
+  fs.mkdirSync(path.dirname(id), { recursive: true });
+  fs.writeFileSync(id, "[user]\n\tname = acct-a\n");
+  ctx.env.GIT_CONFIG_COUNT = "2";
+  r = ga.scheduleEnv(ctx, { account: "acct-a", dir: "/w/repo" });
+  assert.deepEqual([r.env.GIT_CONFIG_COUNT, r.env.GIT_CONFIG_KEY_2, r.env.GIT_CONFIG_VALUE_2], ["3", "include.path", id]);
+  // 로그인된 다른 계정(acct-b)의 저장소 폴더면 신원을 바꾸지 않는다
+  ctx.run = fakeRun({ remotes: { "/w/b": "https://github.com/acct-b/notes.git" } });
+  r = ga.scheduleEnv(ctx, { account: "acct-a", dir: "/w/b" });
+  assert.equal(r.env.GH_ACCOUNT, "acct-a");
+  assert.equal(r.env.GIT_CONFIG_COUNT, undefined);
+  // 로그인 안 된 계정은 실패, 토큰 모양 값은 env 에 없다
+  assert.match(ga.scheduleEnv(ctx, { account: "acct-c" }).error, /로그인돼 있지 않습니다/);
+  assert.ok(!Object.values(ga.scheduleEnv(ctx, { account: "acct-a", dir: "/w/repo" }).env).some((v) => /tok-/.test(v)));
+});

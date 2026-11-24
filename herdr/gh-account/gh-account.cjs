@@ -344,7 +344,33 @@ function pickAccount(ctx, map, repo) {
   return { hit };
 }
 
+// 예약별 계정: GH_ACCOUNT=<로그인> 이 있으면 이 프로세스와 그 자식에서는 규칙·default 대신 그 계정을 쓴다.
+// owner 안전은 그대로다: 다른 로그인된 계정의 저장소면 pickAccount 가 그 계정을 고른다. 매핑 파일이 없거나 깨져도 쓴다.
+function forcedAccount(ctx) {
+  const a = ctx.env.GH_ACCOUNT;
+  return typeof a === "string" && LOGIN.test(a) ? a : null;
+}
+
+function mapFor(ctx) {
+  const m = readMap(paths(ctx).map);
+  const forced = forcedAccount(ctx);
+  if (!forced) return m;
+  const base = m.ok ? m.map : emptyMap();
+  return { ok: true, forced, map: { ...base, rules: [], default: forced } };
+}
+
+function pickFor(ctx, m, repo) {
+  if (!repo) return { hit: m.forced ? { account: canonicalLogin(ctx, m.forced), by: "schedule", match: null } : null };
+  const pick = pickAccount(ctx, m.map, repo);
+  if (m.forced && pick.hit && pick.hit.by === "default") pick.hit = { ...pick.hit, by: "schedule" };
+  return pick;
+}
+
 function notLoggedIn(repo, hit) {
+  if (hit.by === "schedule") {
+    return `gh-account: 이 예약은 ${hit.account} 계정을 쓰도록 정했지만 이 계정은 gh에 로그인돼 있지 않습니다.\n`
+      + "  로그인: gh auth login   예약 계정 바꾸기: 예약 편집의 '계정'";
+  }
   const how = hit.match ? `gh-account unset ${hit.match}` : "gh-account default none";
   return `gh-account: ${repo.owner}/${repo.repo} 은(는) ${hit.account} 계정으로 매핑돼 있지만 이 계정은 gh에 로그인돼 있지 않습니다.\n`
     + `  로그인: gh auth login   매핑 지우기: ${how}   잠깐 끄기: GH_ACCOUNT_OFF=1`;
@@ -353,22 +379,21 @@ function notLoggedIn(repo, hit) {
 // 저장소 → 계정. 매핑이 없거나 깨졌으면 null.
 function resolve(ctx, { repo, dir } = {}) {
   const P = paths(ctx);
-  const m = readMap(P.map);
+  const m = mapFor(ctx);
   if (!m.ok) return { error: m.error };
   const target = repo || repoFromDir(ctx, dir || ctx.cwd);
   if (!target) return { repo: null, hit: null };
-  return { repo: target, hit: pickAccount(ctx, m.map, target).hit };
+  return { repo: target, hit: pickFor(ctx, m, target).hit };
 }
 
 // gh 래퍼용: 매핑된 계정 토큰을 돌려준다. code 3 은 매핑됐지만 로그인 안 됨.
 function ghToken(ctx, args) {
   if (ctx.env.GH_ACCOUNT_OFF) return { code: 0 };
   if (ctx.env.GH_HOST && ctx.env.GH_HOST.toLowerCase() !== HOST) return { code: 0 };
-  const P = paths(ctx);
-  const m = readMap(P.map);
+  const m = mapFor(ctx);
   if (!m.ok) return { code: 0 };
   const repo = repoFromGhArgs(args, ctx.env) || repoFromDir(ctx, ctx.cwd);
-  const pick = pickAccount(ctx, m.map, repo);
+  const pick = pickFor(ctx, m, repo);
   const hit = pick.hit;
   if (!hit) return { code: 0 };
   const t = pick.token ? { ok: true, token: pick.token } : tokenFor(ctx, hit.account);
@@ -401,10 +426,10 @@ function credential(ctx, op, input) {
   try {
     const a = parseCredInput(input);
     if (a.protocol !== "https" || String(a.host || "").toLowerCase() !== HOST) return { out: "" };
-    const m = readMap(paths(ctx).map);
+    const m = mapFor(ctx);
     if (!m.ok) return { out: "" };
     const repo = credRepo(ctx, a);
-    const pick = pickAccount(ctx, m.map, repo);
+    const pick = pickFor(ctx, m, repo);
     const hit = pick.hit;
     if (!hit) return { out: "" };
     if (a.username && a.username.toLowerCase() !== hit.account.toLowerCase()) return { out: "" };
@@ -423,10 +448,10 @@ const GH_MISSING = "gh-account: gh 를 찾지 못해 이 요청은 원래 자격
 function ourCredential(ctx, a) {
   const user = String(a.username || "").toLowerCase();
   if (!user) return false;
-  const m = readMap(paths(ctx).map);
+  const m = mapFor(ctx);
   if (!m.ok) return false;
   const repo = credRepo(ctx, a);
-  const hit = pickAccount(ctx, m.map, repo).hit;
+  const hit = pickFor(ctx, m, repo).hit;
   if (hit && hit.account.toLowerCase() === user) return true;
   const account = [m.map.default, ...m.map.rules.map((r) => r.account)].find((x) => x && x.toLowerCase() === user);
   if (!account) return false;
@@ -893,6 +918,63 @@ function check(ctx, { repo, dir, test } = {}) {
   }
   if (test && ghAcct) out.test = accessTest(ctx, ghAcct, target);
   return out;
+}
+
+// ---- 예약별 계정 ----
+
+// 래퍼가 설치돼 있으면 그 폴더. state.json 이 있고 그 폴더의 gh 가 우리 래퍼일 때만.
+function wrapperDir(ctx) {
+  const state = readState(paths(ctx).state);
+  const d = state && typeof state.binDir === "string" && path.isAbsolute(state.binDir) ? state.binDir : null;
+  return d && isOurs(path.join(d, "gh")) ? d : null;
+}
+
+// 예약에 정한 계정을 쓸 수 있는가. 토큰은 받지 않고 로그인 목록(gh auth status)만 본다.
+// 돌려주는 login 은 gh 가 쓰는 이름(대소문자 그대로)이다.
+function scheduleAccount(ctx, account) {
+  if (!LOGIN.test(String(account || ""))) return { ok: false, error: `계정 이름이 올바르지 않습니다: ${account}` };
+  if (!wrapperDir(ctx)) return { ok: false, error: "예약별 계정을 쓰려면 먼저 계정 패널에서 gh-account 를 설치하세요." };
+  const logins = ghLogins(ctx);
+  if (!logins) return { ok: false, error: `gh 로그인 목록을 읽지 못해 ${account} 계정을 확인하지 못했습니다.` };
+  const hit = logins.find((l) => same(l.login, account));
+  if (!hit) return { ok: false, error: `${account} 계정은 gh 에 로그인돼 있지 않습니다. 계정 패널의 '계정 추가…'(또는 gh auth login)로 로그인한 뒤 고르세요.` };
+  return { ok: true, login: hit.login };
+}
+
+// 예약 화면의 계정 목록. 토큰은 받지 않는다.
+function scheduleAccounts(ctx) {
+  const installed = !!wrapperDir(ctx);
+  const logins = installed ? ghLogins(ctx) : null;
+  return { installed, logins: logins ? logins.map((l) => l.login).filter((l) => LOGIN.test(String(l))) : null };
+}
+
+// 예약 실행(사전 확인 명령·세션)에 더할 환경 변수. 토큰은 넣지 않는다.
+// - 설치돼 있으면 래퍼 폴더를 PATH 맨 앞에 둔다. Herdr 처럼 PATH 가 짧은 곳에서 띄워도 gh 가 래퍼를 지나 매핑을 따른다.
+// - account 가 있으면 GH_ACCOUNT 로 넘긴다. 래퍼·자격 증명 도우미가 실행 때 그 계정 토큰을 받는다.
+//   이 폴더 저장소가 그 계정을 쓰면 커밋 신원도 그 계정 것으로 맞춘다(신원 파일이 있을 때만).
+function scheduleEnv(ctx, { account, dir } = {}) {
+  const env = {};
+  const bin = wrapperDir(ctx);
+  if (bin) {
+    const rest = String(ctx.env.PATH || "").split(path.delimiter).filter((d) => d && path.resolve(d) !== path.resolve(bin));
+    env.PATH = [bin, ...rest].join(path.delimiter);
+  }
+  if (!account) return { ok: true, env, installed: !!bin };
+  const c = scheduleAccount(ctx, account);
+  if (!c.ok) return { ok: false, error: c.error, installed: !!bin };
+  env.GH_ACCOUNT = c.login;
+  const id = path.join(paths(ctx).identity, `${c.login}.gitconfig`);
+  if (dir && fs.existsSync(id)) {
+    let r = null;
+    try { r = resolve({ ...ctx, env: { ...ctx.env, GH_ACCOUNT: c.login } }, { dir }); } catch { r = null; }
+    if (r && r.hit && same(r.hit.account, c.login)) {
+      const n = Number.parseInt(ctx.env.GIT_CONFIG_COUNT, 10) || 0;
+      env[`GIT_CONFIG_KEY_${n}`] = "include.path";
+      env[`GIT_CONFIG_VALUE_${n}`] = id;
+      env.GIT_CONFIG_COUNT = String(n + 1);
+    }
+  }
+  return { ok: true, env, installed: true, account: c.login };
 }
 
 // ---- 계정 추가(gh auth login) ----
@@ -1396,5 +1478,5 @@ module.exports = {
   globalConfigPath, stripBlock, writeBlock, buildBlock, urlPatterns, priorHelpers, identityFor, sync,
   scripts, install, uninstall, main, makeCtx,
   remoteFromDir, safeUrl, isSshUrl, pathOrder, shellPath, planInstall, planUninstall, statusInfo,
-  ghAccounts: ghLogins, ghLogins, identityOf, accessTest, check, scrub, restoreActive, readLogin, writeLogin, loginStatus, loginStart, loginCancel, loginRun,
+  ghAccounts: ghLogins, ghLogins, scheduleAccount, scheduleAccounts, scheduleEnv, identityOf, accessTest, check, scrub, restoreActive, readLogin, writeLogin, loginStatus, loginStart, loginCancel, loginRun,
 };
