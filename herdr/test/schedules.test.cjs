@@ -747,6 +747,36 @@ test("기록 저장소: 커밋 이메일이 noreply가 아니면 기록을 막�
   assert.ok(!fs.existsSync(path.join(f.repo, "herdr-schedules")));
 });
 
+test("기록 저장소: author·committer 이메일이 noreply가 아니어도 기록을 막고, 둘 다 noreply면 기록한다", () => {
+  for (const key of ["author.email", "committer.email"]) {
+    const f = syncFixture();
+    seed([worktreeAuto(f.work)]);
+    S.setSyncRepo(f.repo, f.deps);
+    git(f.repo, "config", key, "me@company.com");
+    assert.equal(S.syncStatus(f.deps).emailOk, false, key);
+    const rec = S.record({ id: "a1b2c3d4" }, f.deps);
+    assert.deepEqual([rec.ok, rec.code], [false, "email"], key);
+    assert.match(rec.error, /me@company\.com/);
+    assert.ok(!fs.existsSync(path.join(f.repo, "herdr-schedules")), key);
+    git(f.repo, "config", key, NOREPLY_MAIL);
+    assert.equal(S.syncStatus(f.deps).emailOk, true, key);
+    assert.equal(S.record({ id: "a1b2c3d4" }, f.deps).ok, true, key);
+  }
+});
+
+test("기록 저장소: GIT_AUTHOR_EMAIL 환경 변수로 바꾼 이메일도 막는다", () => {
+  const f = syncFixture();
+  seed([worktreeAuto(f.work)]);
+  S.setSyncRepo(f.repo, f.deps);
+  const old = process.env.GIT_AUTHOR_EMAIL;
+  process.env.GIT_AUTHOR_EMAIL = "me@company.com";
+  try {
+    assert.equal(S.record({ id: "a1b2c3d4" }, f.deps).code, "email");
+  } finally {
+    if (old === undefined) delete process.env.GIT_AUTHOR_EMAIL; else process.env.GIT_AUTHOR_EMAIL = old;
+  }
+});
+
 test("기록 저장소: 공개 저장소는 한 번 더 확인해야 기록한다", () => {
   const f = syncFixture("false");
   seed([worktreeAuto(f.work)]);

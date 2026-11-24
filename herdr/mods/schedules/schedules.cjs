@@ -959,6 +959,15 @@ function nextCmd({ id, spec, count }, deps = defaultDeps()) {
 const SYNC_DIR = "herdr-schedules";
 const NOREPLY = /@users\.noreply\.github\.com$/i;
 const readSettings = () => readJson(SETTINGS_FILE, {});
+// 실제로 커밋에 박힐 작성자·커미터 이메일(user.email·author.email·committer.email·GIT_*_EMAIL 반영)을 git에게 직접 묻는다.
+function identityEmails(deps, root) {
+  return ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"].map((v) => {
+    const r = deps.git(root, ["var", v]);
+    const m = r.code === 0 ? r.stdout.match(/<([^>]*)>/) : null;
+    return m ? m[1].trim() : "";
+  });
+}
+const identityOk = (emails) => emails.every((e) => NOREPLY.test(e));
 // 비교용 정규화(계정 정보·.git·scp/ssh 표기 차이 제거)와 저장용 정리(URL의 계정:토큰 제거).
 function normRemote(url) {
   let u = String(url ?? "").trim();
@@ -980,8 +989,7 @@ function syncRoot(deps) {
 function syncStatus(deps = defaultDeps()) {
   const r = syncRoot(deps);
   if (r.error) return { ok: true, repo: null, error: readSettings().syncRepo ? r.error : "" };
-  const email = deps.git(r.root, ["config", "user.email"]).stdout.trim();
-  return { ok: true, repo: r.root, name: path.basename(r.root), emailOk: NOREPLY.test(email) };
+  return { ok: true, repo: r.root, name: path.basename(r.root), emailOk: identityOk(identityEmails(deps, r.root)) };
 }
 function setSyncRepo(dir, deps = defaultDeps()) {
   const want = String(dir ?? "").trim();
@@ -1018,8 +1026,11 @@ function recordOf(a, deps) {
 function record({ id, all = false, confirmPublic = false } = {}, deps = defaultDeps()) {
   const r = syncRoot(deps);
   if (r.error) return { ok: false, error: r.error };
-  const email = deps.git(r.root, ["config", "user.email"]).stdout.trim();
-  if (!NOREPLY.test(email)) return { ok: false, code: "email", error: `기록 저장소의 커밋 이메일이 GitHub noreply 주소가 아니라 기록하지 않았습니다(${email || "설정 없음"}). 그 저장소에서 git config user.email을 noreply 주소로 바꾸세요.` };
+  const emails = identityEmails(deps, r.root);
+  if (!identityOk(emails)) {
+    const bad = [...new Set(emails.filter((e) => !NOREPLY.test(e)))].map((e) => e || "설정 없음").join(", ");
+    return { ok: false, code: "email", error: `기록 저장소의 커밋 작성자·커미터 이메일이 GitHub noreply 주소가 아니라 기록하지 않았습니다(${bad}). 그 저장소에서 git config로 user.email(과 author.email·committer.email)을 noreply 주소로 맞추세요.` };
+  }
   const autos = loadAutos().automations;
   const picks = all ? autos : autos.filter((x) => x.id === id);
   if (!picks.length) return { ok: false, error: all ? "기록할 예약이 없습니다." : `예약을 찾지 못했습니다: ${id}` };
