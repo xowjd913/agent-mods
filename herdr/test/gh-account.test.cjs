@@ -54,6 +54,9 @@ function setup(map, opts = {}) {
   return { home, app, ctx, calls };
 }
 
+// 포함 규칙의 [aA] 글롭을 읽기 쉬운 글자로 되돌린다.
+function plain(s) { return s.replace(/\[([a-z])([A-Z])\]/g, (m, a, b) => (a.toUpperCase() === b ? a : m)); }
+
 function io(stdin = "") {
   const o = { lines: [], errs: [], raw: "" };
   return { o, io: { out: (s) => o.lines.push(s), err: (s) => o.errs.push(s), raw: (s) => { o.raw += s; }, stdin: () => stdin, isTTY: false } };
@@ -232,8 +235,9 @@ test("buildBlock: default 를 먼저, 규칙은 거꾸로 써서 첫 규칙이 �
   assert.ok(lines.includes("\tuseHttpPath = true"));
   const inc = lines.filter((l) => l.startsWith("[includeIf"));
   assert.equal(inc[0], '[includeIf "hasconfig:remote.*.url:https://github.com/**"]');
-  assert.ok(inc.includes('[includeIf "hasconfig:remote.*.url:git@github.com:o/r.git"]'));
-  assert.equal(inc.at(-1), '[includeIf "hasconfig:remote.*.url:ssh://git@github.com/o/**"]');
+  // owner·저장소 이름은 대소문자를 가리지 않게 쓴다
+  assert.ok(inc.includes('[includeIf "hasconfig:remote.*.url:git@github.com:[oO]/[rR].git"]'));
+  assert.equal(inc.at(-1), '[includeIf "hasconfig:remote.*.url:ssh://git@github.com/[oO]/**"]');
   assert.equal(ga.buildBlock({ helper: null, prior: [], includes: [] }), null);
   assert.match(ga.buildBlock({ helper: "/a b/git-credential-gh-account", prior: [], includes: [] }), /helper = "!'\/a b\/git-credential-gh-account'"/);
 });
@@ -264,7 +268,7 @@ test("sync: 신원 파일은 매핑 값 또는 noreply 주소, 끈 계정과 로
   assert.match(fs.readFileSync(path.join(dir, "acct-a.gitconfig"), "utf8"), /name = "Person A"\n\temail = "user@example.com"/);
   assert.match(fs.readFileSync(path.join(dir, "acct-b.gitconfig"), "utf8"), /name = "acct-b"\n\temail = "1098\+acct-b@users.noreply.github.com"/);
   assert.ok(logs.some((l) => l.includes("acct-c")));
-  const g = fs.readFileSync(path.join(home, "gitconfig"), "utf8");
+  const g = plain(fs.readFileSync(path.join(home, "gitconfig"), "utf8"));
   assert.ok(!g.includes("credential"), "설치 전에는 자격 증명 도우미를 쓰지 않는다");
   // example-org 규칙이 첫 규칙이라 맨 뒤에 온다
   const last = g.split("\n").filter((l) => l.startsWith("[includeIf")).at(-1);
@@ -304,7 +308,7 @@ test("sync: 기본 계정 신원은 로그인된 계정의 저장소에 붙지 �
   const map = { rules: [{ match: "example-org/*", account: "acct-b" }], default: "acct-a" };
   const { home, ctx } = setup(map);
   ga.sync(ctx);
-  const inc = fs.readFileSync(path.join(home, "gitconfig"), "utf8").split("\n").filter((l) => l.startsWith("[includeIf"));
+  const inc = plain(fs.readFileSync(path.join(home, "gitconfig"), "utf8")).split("\n").filter((l) => l.startsWith("[includeIf"));
   // default(**) 다음에 acct-b/** (로그인된 acct-b 자신의 저장소), 마지막이 규칙
   const order = inc.map((l) => (/github\.com[:/]\*\*"/.test(l) ? "default" : l.includes("acct-b/**") ? "owner" : l.includes("example-org/**") ? "rule" : "?"));
   assert.ok(order.indexOf("default") < order.indexOf("owner") && order.lastIndexOf("owner") < order.indexOf("rule"), order.join(","));
@@ -313,7 +317,7 @@ test("sync: 기본 계정 신원은 로그인된 계정의 저장소에 붙지 �
   const s2 = setup(map, { noStatus: true });
   const logs = [];
   ga.sync(s2.ctx, (l) => logs.push(l));
-  const g2 = fs.readFileSync(path.join(s2.home, "gitconfig"), "utf8");
+  const g2 = plain(fs.readFileSync(path.join(s2.home, "gitconfig"), "utf8"));
   assert.doesNotMatch(g2, /github\.com[:/]\*\*"/, "기본 계정 catch-all 신원 없음");
   assert.match(g2, /example-org\/\*\*/);
   assert.ok(logs.some((l) => l.includes("기본 계정 신원은 건너뜁니다")));
@@ -324,6 +328,33 @@ test("sync: 기본 계정 신원은 로그인된 계정의 저장소에 붙지 �
   ga.sync(s3.ctx, (l) => logs3.push(l));
   assert.equal(fs.existsSync(path.join(s3.home, "gitconfig")), false);
   assert.ok(logs3.some((l) => l.includes("기본 계정 신원은 건너뜁니다")));
+});
+
+// URL 의 owner 대소문자가 gh 로그인 이름과 달라도 같은 계정이다. gh auth token --user 에는 gh 의 이름을 넘긴다.
+test("로그인 이름 대소문자: sync 가 적어 둔 로그인 목록으로 gh 의 이름을 찾아 토큰·신원에 쓴다", () => {
+  const map = { rules: [{ match: "example-org/*", account: "me-personal" }], default: "acct-b", accounts: { "me-personal": { identity: { email: "user@example.com" } } } };
+  const { app, home, ctx, calls } = setup(map, { logged: ["acct-b", "Me-Personal"] });
+  const r = (o, n) => ga.resolve(ctx, { repo: { owner: o, repo: n } }).hit;
+  // sync 전에는 로그인 목록이 없어 받은 이름 그대로 묻는다(gh 가 모른다고 하면 기본 계정)
+  assert.equal(r("me-personal", "blog").by, "default");
+  ga.sync(ctx);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(app, "gh-account", "logins.json"), "utf8")), { logins: ["acct-b", "Me-Personal"] });
+  assert.deepEqual(r("me-personal", "blog"), { account: "Me-Personal", by: "owner", match: null });
+  assert.deepEqual(r("ME-PERSONAL", "blog"), { account: "Me-Personal", by: "owner", match: null });
+  assert.equal(ga.ghToken(ctx, ["pr", "list", "-R", "me-personal/blog"]).token, "tok-Me-Personal");
+  // 규칙에 적은 이름의 대소문자가 달라도 토큰을 받는다
+  assert.equal(ga.ghToken(ctx, ["pr", "list", "-R", "example-org/app"]).token, "tok-Me-Personal");
+  const tokenUsers = calls.filter((c) => c.args[0] === "auth" && c.args[1] === "token").map((c) => c.args.at(-1));
+  assert.ok(tokenUsers.includes("Me-Personal"));
+  // 신원 파일은 gh 의 이름 하나로 만들고, 매핑에 적은 값(대소문자 달라도)을 쓴다
+  assert.deepEqual(fs.readdirSync(path.join(app, "gh-account", "identity")).sort(), ["Me-Personal.gitconfig", "acct-b.gitconfig"]);
+  assert.match(fs.readFileSync(path.join(app, "gh-account", "identity", "Me-Personal.gitconfig"), "utf8"), /email = "user@example.com"/);
+  // 포함 규칙은 URL 대소문자와 상관없이 맞는다
+  const g = fs.readFileSync(path.join(home, "gitconfig"), "utf8");
+  assert.ok(g.includes('hasconfig:remote.*.url:https://github.com/[mM][eE]-[pP][eE][rR][sS][oO][nN][aA][lL]/**'));
+  // 제거하면 로그인 목록도 지운다
+  ga.uninstall(ctx, { bin: path.join(home, "bin") }, () => {});
+  assert.equal(fs.existsSync(path.join(app, "gh-account", "logins.json")), false);
 });
 
 test("sync: git 2.36 보다 낮으면 신원을 건너뛰고 알린다", () => {
@@ -575,6 +606,51 @@ test("e2e: 래퍼가 GH_TOKEN 을 넣고 git 자격 증명·커밋 신원이 매
   assert.equal(fs.readFileSync(gconf, "utf8"), "[credential]\n\thelper = \"!f() { echo username=prior; echo password=prior-pass; }; f\"\n");
   assert.equal(fs.readFileSync(path.join(app, "gh-accounts.json"), "utf8"), "{broken");
   assert.equal(fs.existsSync(path.join(app, "gh-account")), false);
+});
+
+// gh 래퍼로 로그인·로그아웃하면 sync 를 다시 돌려, 새로 로그인한 계정의 저장소에 기본 계정 신원이 붙지 않게 한다.
+test("e2e: gh auth login·logout 이 성공하면 래퍼가 커밋 신원을 다시 맞춘다", { skip: !POSIX && "POSIX 전용" }, () => {
+  const { app, bin, fake, sh, repo } = e2eSetup(() => "");
+  const logins = path.join(fake, "logins");
+  fs.writeFileSync(logins, "acct-a\n");
+  // 로그인 목록을 파일로 기억하는 가짜 gh. auth login 은 acct-b 를 더하고, auth logout 은 acct-b 를 뺀다.
+  fs.writeFileSync(path.join(fake, "gh"), `#!/bin/sh
+L=${"'" + logins.replace(/'/g, "'\\''") + "'"}
+case "$1 $2" in
+"auth status") printf '{"hosts":{"github.com":['; sep=; while read -r a; do printf '%s{"login":"%s","active":false,"state":"success"}' "$sep" "$a"; sep=,; done < "$L"; echo ']}}'; exit 0 ;;
+"auth token") for a in "$@"; do last="$a"; done; grep -qx "$last" "$L" && { echo "tok-$last"; exit 0; }; echo "no account" >&2; exit 1 ;;
+"auth login") [ -n "$FAKE_FAIL" ] && exit 4; echo acct-b >> "$L"; echo "logged in"; exit 0 ;;
+"auth logout") grep -vx acct-b "$L" > "$L.new"; mv "$L.new" "$L"; exit 0 ;;
+"api user") case "$GH_TOKEN" in tok-acct-a) echo '{"id":1001,"login":"acct-a","name":"Person A"}' ;; tok-acct-b) echo '{"id":1002,"login":"acct-b","name":null}' ;; *) exit 1 ;; esac; exit 0 ;;
+esac
+echo "args=$*"
+`);
+  fs.writeFileSync(path.join(app, "gh-accounts.json"), JSON.stringify({ rules: [], default: "acct-a" }));
+  assert.equal(sh(process.execPath, [CLI, "sync"]).status, 0);
+  const own = repo("own", "https://github.com/acct-b/blog.git");
+  const email = () => sh("git", ["config", "user.email"], { cwd: own }).stdout.trim();
+  const v = sh("git", ["version"]).stdout.match(/(\d+)\.(\d+)/);
+  const identity = Number(v[1]) > 2 || (Number(v[1]) === 2 && Number(v[2]) >= 36);
+  if (identity) assert.equal(email(), "1001+acct-a@users.noreply.github.com", "로그인 전에는 기본 계정 신원");
+
+  // 실패한 로그인은 종료 코드를 그대로 돌려주고 sync 하지 않는다
+  const bad = sh(path.join(bin, "gh"), ["auth", "login"], { env: { FAKE_FAIL: "1" } });
+  assert.equal(bad.status, 4);
+  assert.equal(fs.existsSync(path.join(app, "gh-account", "identity", "acct-b.gitconfig")), false);
+
+  const ok = sh(path.join(bin, "gh"), ["auth", "login"]);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(ok.stdout.trim(), "logged in");
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(app, "gh-account", "logins.json"), "utf8")).logins, ["acct-a", "acct-b"]);
+  if (identity) assert.equal(email(), "1002+acct-b@users.noreply.github.com", "로그인 뒤에는 그 계정 신원");
+
+  // GH_ACCOUNT_OFF 면 그대로 넘기기만 한다
+  assert.equal(sh(path.join(bin, "gh"), ["auth", "logout"], { env: { GH_ACCOUNT_OFF: "1" } }).status, 0);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(app, "gh-account", "logins.json"), "utf8")).logins, ["acct-a", "acct-b"]);
+  fs.writeFileSync(logins, "acct-a\nacct-b\n");
+  assert.equal(sh(path.join(bin, "gh"), ["auth", "logout"]).status, 0);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(app, "gh-account", "logins.json"), "utf8")).logins, ["acct-a"]);
+  if (identity) assert.equal(email(), "1001+acct-a@users.noreply.github.com", "로그아웃 뒤에는 다시 기본 계정 신원");
 });
 
 // 설치한 gh-account 명령 스크립트를 진짜 sh 로 실행한다(예전에는 exec VAR=... 를 명령으로 읽어 실행하지 못했다).
