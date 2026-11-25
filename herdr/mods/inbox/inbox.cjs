@@ -523,21 +523,34 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
     out.push({ key: `w|${w.leader}`, who: `l:${w.leader}`, ms: Number(now) || 0, ts: "", s, leader: w.leader, waiting: w.kind, wait: true });
   }
   if (room && room !== PO_OTHER) for (const x of says ?? []) out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "" });
-  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now) });
+  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now) });
+  // Two entries with the same key (the same text at the same ms) would share one element id: the later ones get a #n suffix.
+  const used = new Map();
+  for (const e of out) {
+    const n = used.get(e.key) ?? 0;
+    used.set(e.key, n + 1);
+    if (n) e.key = `${e.key}#${n}`;
+  }
   return out.map((e, i) => ({ e, i })).sort((a, b) => a.e.ms - b.e.ms || a.i - b.i).map((x) => x.e);
 }
 // What the person sent from the desk, one record per send (answer buttons, option chips and the chat box all go through deliver()):
 // {id, ts, ms, text (what the person wrote: "확인 완료", "1안 선택", the answer, the chat line - never the long "Panel answer" wrapper), line (what was
 // pasted: the retry sends exactly this), to (leader), po (the room), kind: answer | verify | choice | chat, status}. Null when there is nothing to record.
 // status follows the real outcome: sending (pasted, Enter on its way) -> sent | noenter (pasted, Enter did not go);
-// opening (no PO pane yet, sent by itself once it opens) -> nopane (it did not open in time); held (PO blocked: pasted only); failed (paste failed).
+// opening (no PO pane yet, sent by itself once it opens) -> nopane (it did not open in time); held (PO blocked: pasted only); gone (the Enter button found
+// the pasted line no longer in the PO's input: send it again); failed (paste failed).
 const CHAT_KINDS = ["answer", "verify", "choice", "chat"];
-const CHAT_STATUS = ["sending", "opening", "sent", "noenter", "held", "nopane", "failed"];
+const CHAT_STATUS = ["sending", "opening", "sent", "noenter", "held", "gone", "nopane", "failed"];
+// Control characters (except line break and tab), zero-width and bidi-override characters out of text that is shown or sent: a PO screen read
+// back with `hc read` or a typed line must not carry terminal escapes or text-direction tricks into the desk or the PO's input.
+const CTRL_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u2069\uFEFF]/g;
+const cleanText = (s) => String(s ?? "").replace(/\r\n?/g, "\n").replace(CTRL_CHARS, "");
+// ak: the key of the leader's ask card this send answers ("" for none): a resend that goes through marks that card sent again.
 function chatRecord(rec, status, now = 0, seq = "") {
-  const text = String(rec?.text ?? "").trim();
+  const text = cleanText(rec?.text).trim();
   if (!text || !rec?.po) return null;
   const ms = Number(now) || 0;
-  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, line: String(rec.line ?? text).slice(0, 4000), to: String(rec.to ?? ""), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", status: CHAT_STATUS.includes(status) ? status : "failed" };
+  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, line: cleanText(rec.line ?? text).slice(0, 4000), to: String(rec.to ?? ""), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", ak: String(rec.ak ?? ""), status: CHAT_STATUS.includes(status) ? status : "failed" };
 }
 // The list with record `id` set to `status` at `now` (null when there is no such record or it already has it).
 function setChatStatus(list, id, status, now = 0) {
@@ -546,26 +559,70 @@ function setChatStatus(list, id, status, now = 0) {
   if (i < 0 || list[i].status === status) return null;
   return list.map((x, j) => (j === i ? { ...x, status, at: Number(now) || 0 } : x));
 }
-// The small dim note under a bubble that is not (fully) sent: "" when it was sent.
-const MINE_NOTE = { sending: "보내는 중…", opening: "PO 칸을 여는 중 — 열리면 자동으로 보냅니다", held: "PO가 질문 중이라 붙여 넣기만 했습니다 — 아래 질문에 먼저 답하세요", noenter: "붙여 넣었지만 Enter가 눌리지 않았습니다", nopane: "보내지 못함 — PO 칸이 열리지 않았습니다", failed: "보내지 못함 — 붙여 넣기 실패" };
-const mineNote = (status) => MINE_NOTE[status] ?? "";
-// The one button a bubble offers: "resend" (nothing reached the PO: send it again), "enter" (it is pasted into a normal prompt: only Enter is
-// missing), or "". A held one has none: Enter there would answer the PO's question, so that is only offered next to the question itself.
-const mineAct = (status) => (status === "nopane" || status === "failed" ? "resend" : status === "noenter" ? "enter" : "");
+// The small dim note under a bubble that is not (fully) sent: "" when it was sent. `blocked`: the PO still waits on a prompt; `age`: ms since
+// the status last changed (an Enter button older than ENTER_TTL_MS is gone: the pasted line may not be in the input any more).
+const ENTER_TTL_MS = 10 * 60 * 1000;
+const MINE_NOTE = { sending: "보내는 중…", opening: "PO 칸을 여는 중 — 열리면 자동으로 보냅니다", held: "PO가 질문 중이라 붙여 넣기만 했습니다 — 아래 질문에 먼저 답하세요", noenter: "붙여 넣었지만 Enter가 눌리지 않았습니다", gone: "보낸 글이 입력창에 없습니다 — 다시 보내세요", nopane: "보내지 못함 — PO 칸이 열리지 않았습니다", failed: "보내지 못함 — 붙여 넣기 실패" };
+function mineNote(status, blocked = true, age = 0) {
+  const old = Number(age) > ENTER_TTL_MS;
+  if (status === "held" && !blocked) return old ? "오래되어 입력창에 없을 수 있습니다 — 다시 보내세요" : "질문에 답했습니다 — Enter를 눌러 보내거나 다시 보내세요";
+  if (status === "noenter" && old) return "오래되어 입력창에 없을 수 있습니다 — 다시 보내세요";
+  return MINE_NOTE[status] ?? "";
+}
+// The buttons a bubble offers, in order: "resend" (nothing reached the PO, or its pasted line is gone: send it again) and "enter" (it is pasted
+// into a normal prompt: only Enter is missing). A held one offers none while the PO still waits on its question (Enter there would answer the
+// question; that is only offered next to the question itself), and Enter and resend after it was answered. An Enter older than ENTER_TTL_MS
+// becomes a resend.
+function mineActs(status, blocked = false, age = 0) {
+  if (status === "nopane" || status === "failed" || status === "gone") return ["resend"];
+  const fresh = !(Number(age) > ENTER_TTL_MS);
+  if (status === "noenter") return fresh ? ["enter"] : ["resend"];
+  if (status === "held" && !blocked) return fresh ? ["enter", "resend"] : ["resend"];
+  return [];
+}
 // A record that stayed "sending" / "opening" (the desk that was sending it went away) no longer waits: sending -> noenter (maybe pasted, Enter
 // unknown: the Enter button is safe, an empty Enter does nothing), opening -> nopane.
 const SENDING_STALE_MS = 20000;
 const liveStatus = (status, ms, now) => (now - (Number(ms) || 0) <= SENDING_STALE_MS ? status : status === "sending" ? "noenter" : status === "opening" ? "nopane" : status);
-// Who writes the app icon badge: one copy at a time (`lease` {id, ts}, shared). "write" when this copy holds it or its holder went quiet.
-const badgeTurn = (lease, id, now, ttl = 90000) => (!lease || lease.id === id || now - (Number(lease.ts) || 0) > ttl ? "write" : "skip");
+// Who writes the app icon badge: one copy at a time (`lease` {id, ts}, shared). "write" when this copy holds it or its holder went quiet
+// (ttl: a little over two 30 s refreshes, so a closed pane gives the badge to the next copy within about a minute).
+const badgeTurn = (lease, id, now, ttl = 65000) => (!lease || lease.id === id || now - (Number(lease.ts) || 0) > ttl ? "write" : "skip");
 // A PO that waits on a prompt: the last lines of its screen, and the numbered choices on it ("❯ 1. Yes" / "2. No ..."). The desk shows them and the
-// person presses one; nothing is ever pressed by itself. Choices must be one run numbered 1, 2, ... at the end of the screen (else none).
-const promptTail = (text, n = 10) => String(text ?? "").replace(/\r\n?/g, "\n").split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim()).slice(-n).map((l) => (l.length > 140 ? `${l.slice(0, 139)}…` : l));
-function promptOptions(text) {
-  const rows = promptTail(text, 14).map((l) => /^\s*[❯>›]?\s*(\d{1,2})[.)]\s+(\S.*)$/.exec(l));
-  const out = [];
-  for (let i = rows.length - 1; i >= 0 && rows[i]; i--) out.unshift({ key: rows[i][1], label: rows[i][2].trim().slice(0, 80), on: /^\s*[❯›]/.test(promptTail(text, 14)[i]) });
-  return out.length >= 2 && out.every((o, i) => Number(o.key) === i + 1) ? out.slice(0, 6) : [];
+// person presses one; nothing is ever pressed by itself. The choices are the last contiguous run of numbered rows (1, 2, ...) once the footer
+// (hint lines like "Esc to cancel · Tab to amend", box borders) at the bottom of the screen is skipped; else none.
+const promptTail = (text, n = 10) => cleanText(text).split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim()).slice(-n).map((l) => (l.length > 140 ? `${l.slice(0, 139)}…` : l));
+const PROMPT_NUM = /^[\s│┃|]*([❯>›])?\s*(\d{1,2})[.)]\s+(\S.*?)[\s│┃|]*$/;
+const promptFooter = (l) => /^[^\p{L}\p{N}]*$/u.test(l) || (l.length <= 140 && /\b(esc|enter|tab|ctrl|shift|alt)\b|^\s*[↑↓←→]|\? for shortcuts/i.test(l));
+// {options: [{key, label, on}], head: the up to 2 lines right above the choices}. Options only when they are 1..N (2 or more).
+function promptParse(text) {
+  const lines = promptTail(text, 24);
+  const num = lines.map((l) => PROMPT_NUM.exec(l));
+  let end = lines.length - 1;
+  for (let skip = 0; end >= 0 && !num[end] && skip < 6 && promptFooter(lines[end]); skip++) end--;
+  if (end < 0 || !num[end]) return { options: [], head: [] };
+  let start = end;
+  while (start > 0 && num[start - 1]) start--;
+  const options = num.slice(start, end + 1).map((m) => ({ key: m[2], label: m[3].trim().slice(0, 80), on: m[1] === "❯" || m[1] === "›" }));
+  if (options.length < 2 || !options.every((o, i) => Number(o.key) === i + 1)) return { options: [], head: [] };
+  return { options: options.slice(0, 6), head: lines.slice(Math.max(0, start - 2), start) };
+}
+const promptOptions = (text) => promptParse(text).options;
+// What identifies the question on screen: the choices (without which one is highlighted) and the lines above them, whitespace squeezed; when
+// there are no choices, the last 6 lines. Equal before and after means the same question, whatever the status line below it does.
+function promptSig(text) {
+  const p = promptParse(text);
+  const lines = p.options.length ? [...p.head, ...p.options.map((o) => `${o.key}. ${o.label}`)] : promptTail(text, 6);
+  return lines.map((l) => l.replace(/\s+/g, " ").trim()).join("\n");
+}
+// Whether the pasted `line` is still in the PO's input: the start or the end of its text is among the last 14 screen lines (box borders and
+// whitespace ignored), or, for a long / multi-line paste the PO folds into "[Pasted text …]", that marker is.
+function inputHas(screen, line) {
+  const squeeze = (s) => s.replace(/[│┃|]/g, " ").replace(/\s+/g, " ").trim();
+  const want = squeeze(cleanText(line));
+  if (!want) return false;
+  const hay = squeeze(cleanText(screen).split("\n").filter((l) => l.trim()).slice(-14).join("\n"));
+  if (/\n/.test(cleanText(line).trim()) || want.length > 200) return /\[Pasted text/i.test(hay) || hay.includes(want.slice(0, 24)) || hay.includes(want.slice(-24));
+  return hay.includes(want.slice(0, 24)) || hay.includes(want.slice(-24));
 }
 // Slack-style headers: `head` is true for the first entry and whenever the sender changes or the gap to the entry before is over `gap`.
 const groupTimeline = (entries, gap = TL_GAP_MS) => (entries ?? []).map((e, i, a) => ({ ...e, head: i === 0 || a[i - 1].who !== e.who || e.ms - a[i - 1].ms > gap }));
@@ -578,6 +635,20 @@ function seenNext(seenMap, room, entries) {
   if (!room || !(latest > 0) || (Number(seenMap?.[room]) || 0) >= latest) return null;
   return { ...(seenMap ?? {}), [room]: latest };
 }
+// The chat filter chips, in order: [key, label]. 전체 = everything; 안 읽은 것 = messages newer than the room's seen marker as it was when the
+// room was opened (`seen`, a snapshot: opening a room moves the live marker to now, which would empty this filter at once); the rest are the
+// leader reports of one kind (결정 필요 = decision, 최종 확인 요청 = verify, 결과 = done, 멈춤 = stop). resume/start/other show only under
+// 전체. The person's own lines are only under 전체; the made-up "waiting" entry (no report) counts by the kind the leader waits on.
+const CHAT_FILTERS = [["all", "전체"], ["unread", "안 읽은 것"], ["decision", "결정 필요"], ["verify", "최종 확인 요청"], ["done", "결과"], ["stop", "멈춤"]];
+const entryKind = (e) => (e?.who === "po" || e?.who === "me" ? "" : e?.waiting || e?.it?.kind || "");
+function filterEntries(entries, filter, seen) {
+  const list = entries ?? [];
+  if (!filter || filter === "all" || !CHAT_FILTERS.some((f) => f[0] === filter)) return list;
+  if (filter === "unread") return list.filter((e) => e.who !== "me" && !e.wait && e.ms > (Number(seen) || 0));
+  return list.filter((e) => entryKind(e) === filter);
+}
+// {all, unread, decision, verify, done, stop}: how many entries each chip shows.
+const filterCounts = (entries, seen) => Object.fromEntries(CHAT_FILTERS.map(([k]) => [k, filterEntries(entries, k, seen).length]));
 // Follow-the-newest rule: scroll to the bottom when the room changes or the window opens (`seen` is the last key drawn, "" at first),
 // and when a new message arrived while the list was at its bottom; never while the person has scrolled up to read.
 const tlKey = (room, entries) => { const l = (entries ?? [])[(entries ?? []).length - 1]; return `${room}|${(entries ?? []).length}|${l ? `${l.ms}|${l.key}` : ""}`; };
@@ -631,6 +702,6 @@ function decisionOptions(body) {
 }
 // chat:end
 
-module.exports = { PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineAct, liveStatus, badgeTurn, promptTail, promptOptions, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptOptions, promptSig, inputHas, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) process.stdout.write(JSON.stringify(collect()));

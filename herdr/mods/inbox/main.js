@@ -35,6 +35,7 @@ const WIDE_MIN = 520; // two columns (rooms | room) from this width; narrower: t
 const ROOM_W = 168, SLIM_W = 58; // the window's room list / the dock's slim room column (initial circle + badges, the project as the tooltip)
 const PASTE_SETTLE_MS = 350; // the PO terminal takes the paste before Enter is pressed
 const PANE_POLL_MS = 300, PANE_WAIT_MS = 6000; // a send to a PO with no pane: how often / how long to wait for the pane the send opened
+const PROMPT_TIMEOUT_MS = 5000; // a screen read that has not answered by then is given up (the next one may start)
 const PROMPT_REFRESH_MS = 3000, PROMPT_LINES = 40; // a blocked PO's screen is re-read this often while shown (the last PROMPT_LINES lines are read)
 const BADGE_KEY = "inbox.badge"; // {id, ts}: the copy (dock / pane) that writes the app icon badge
 const OPEN_KEY = "inbox.expanded"; // cards the person opened ("자세히"), shared so they stay open across re-renders and window reopens
@@ -236,21 +237,34 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
     out.push({ key: `w|${w.leader}`, who: `l:${w.leader}`, ms: Number(now) || 0, ts: "", s, leader: w.leader, waiting: w.kind, wait: true });
   }
   if (room && room !== PO_OTHER) for (const x of says ?? []) out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "" });
-  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now) });
+  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now) });
+  // Two entries with the same key (the same text at the same ms) would share one element id: the later ones get a #n suffix.
+  const used = new Map();
+  for (const e of out) {
+    const n = used.get(e.key) ?? 0;
+    used.set(e.key, n + 1);
+    if (n) e.key = `${e.key}#${n}`;
+  }
   return out.map((e, i) => ({ e, i })).sort((a, b) => a.e.ms - b.e.ms || a.i - b.i).map((x) => x.e);
 }
 // What the person sent from the desk, one record per send (answer buttons, option chips and the chat box all go through deliver()):
 // {id, ts, ms, text (what the person wrote: "확인 완료", "1안 선택", the answer, the chat line - never the long "Panel answer" wrapper), line (what was
 // pasted: the retry sends exactly this), to (leader), po (the room), kind: answer | verify | choice | chat, status}. Null when there is nothing to record.
 // status follows the real outcome: sending (pasted, Enter on its way) -> sent | noenter (pasted, Enter did not go);
-// opening (no PO pane yet, sent by itself once it opens) -> nopane (it did not open in time); held (PO blocked: pasted only); failed (paste failed).
+// opening (no PO pane yet, sent by itself once it opens) -> nopane (it did not open in time); held (PO blocked: pasted only); gone (the Enter button found
+// the pasted line no longer in the PO's input: send it again); failed (paste failed).
 const CHAT_KINDS = ["answer", "verify", "choice", "chat"];
-const CHAT_STATUS = ["sending", "opening", "sent", "noenter", "held", "nopane", "failed"];
+const CHAT_STATUS = ["sending", "opening", "sent", "noenter", "held", "gone", "nopane", "failed"];
+// Control characters (except line break and tab), zero-width and bidi-override characters out of text that is shown or sent: a PO screen read
+// back with `hc read` or a typed line must not carry terminal escapes or text-direction tricks into the desk or the PO's input.
+const CTRL_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u2069\uFEFF]/g;
+const cleanText = (s) => String(s ?? "").replace(/\r\n?/g, "\n").replace(CTRL_CHARS, "");
+// ak: the key of the leader's ask card this send answers ("" for none): a resend that goes through marks that card sent again.
 function chatRecord(rec, status, now = 0, seq = "") {
-  const text = String(rec?.text ?? "").trim();
+  const text = cleanText(rec?.text).trim();
   if (!text || !rec?.po) return null;
   const ms = Number(now) || 0;
-  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, line: String(rec.line ?? text).slice(0, 4000), to: String(rec.to ?? ""), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", status: CHAT_STATUS.includes(status) ? status : "failed" };
+  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, line: cleanText(rec.line ?? text).slice(0, 4000), to: String(rec.to ?? ""), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", ak: String(rec.ak ?? ""), status: CHAT_STATUS.includes(status) ? status : "failed" };
 }
 // The list with record `id` set to `status` at `now` (null when there is no such record or it already has it).
 function setChatStatus(list, id, status, now = 0) {
@@ -259,26 +273,70 @@ function setChatStatus(list, id, status, now = 0) {
   if (i < 0 || list[i].status === status) return null;
   return list.map((x, j) => (j === i ? { ...x, status, at: Number(now) || 0 } : x));
 }
-// The small dim note under a bubble that is not (fully) sent: "" when it was sent.
-const MINE_NOTE = { sending: "보내는 중…", opening: "PO 칸을 여는 중 — 열리면 자동으로 보냅니다", held: "PO가 질문 중이라 붙여 넣기만 했습니다 — 아래 질문에 먼저 답하세요", noenter: "붙여 넣었지만 Enter가 눌리지 않았습니다", nopane: "보내지 못함 — PO 칸이 열리지 않았습니다", failed: "보내지 못함 — 붙여 넣기 실패" };
-const mineNote = (status) => MINE_NOTE[status] ?? "";
-// The one button a bubble offers: "resend" (nothing reached the PO: send it again), "enter" (it is pasted into a normal prompt: only Enter is
-// missing), or "". A held one has none: Enter there would answer the PO's question, so that is only offered next to the question itself.
-const mineAct = (status) => (status === "nopane" || status === "failed" ? "resend" : status === "noenter" ? "enter" : "");
+// The small dim note under a bubble that is not (fully) sent: "" when it was sent. `blocked`: the PO still waits on a prompt; `age`: ms since
+// the status last changed (an Enter button older than ENTER_TTL_MS is gone: the pasted line may not be in the input any more).
+const ENTER_TTL_MS = 10 * 60 * 1000;
+const MINE_NOTE = { sending: "보내는 중…", opening: "PO 칸을 여는 중 — 열리면 자동으로 보냅니다", held: "PO가 질문 중이라 붙여 넣기만 했습니다 — 아래 질문에 먼저 답하세요", noenter: "붙여 넣었지만 Enter가 눌리지 않았습니다", gone: "보낸 글이 입력창에 없습니다 — 다시 보내세요", nopane: "보내지 못함 — PO 칸이 열리지 않았습니다", failed: "보내지 못함 — 붙여 넣기 실패" };
+function mineNote(status, blocked = true, age = 0) {
+  const old = Number(age) > ENTER_TTL_MS;
+  if (status === "held" && !blocked) return old ? "오래되어 입력창에 없을 수 있습니다 — 다시 보내세요" : "질문에 답했습니다 — Enter를 눌러 보내거나 다시 보내세요";
+  if (status === "noenter" && old) return "오래되어 입력창에 없을 수 있습니다 — 다시 보내세요";
+  return MINE_NOTE[status] ?? "";
+}
+// The buttons a bubble offers, in order: "resend" (nothing reached the PO, or its pasted line is gone: send it again) and "enter" (it is pasted
+// into a normal prompt: only Enter is missing). A held one offers none while the PO still waits on its question (Enter there would answer the
+// question; that is only offered next to the question itself), and Enter and resend after it was answered. An Enter older than ENTER_TTL_MS
+// becomes a resend.
+function mineActs(status, blocked = false, age = 0) {
+  if (status === "nopane" || status === "failed" || status === "gone") return ["resend"];
+  const fresh = !(Number(age) > ENTER_TTL_MS);
+  if (status === "noenter") return fresh ? ["enter"] : ["resend"];
+  if (status === "held" && !blocked) return fresh ? ["enter", "resend"] : ["resend"];
+  return [];
+}
 // A record that stayed "sending" / "opening" (the desk that was sending it went away) no longer waits: sending -> noenter (maybe pasted, Enter
 // unknown: the Enter button is safe, an empty Enter does nothing), opening -> nopane.
 const SENDING_STALE_MS = 20000;
 const liveStatus = (status, ms, now) => (now - (Number(ms) || 0) <= SENDING_STALE_MS ? status : status === "sending" ? "noenter" : status === "opening" ? "nopane" : status);
-// Who writes the app icon badge: one copy at a time (`lease` {id, ts}, shared). "write" when this copy holds it or its holder went quiet.
-const badgeTurn = (lease, id, now, ttl = 90000) => (!lease || lease.id === id || now - (Number(lease.ts) || 0) > ttl ? "write" : "skip");
+// Who writes the app icon badge: one copy at a time (`lease` {id, ts}, shared). "write" when this copy holds it or its holder went quiet
+// (ttl: a little over two 30 s refreshes, so a closed pane gives the badge to the next copy within about a minute).
+const badgeTurn = (lease, id, now, ttl = 65000) => (!lease || lease.id === id || now - (Number(lease.ts) || 0) > ttl ? "write" : "skip");
 // A PO that waits on a prompt: the last lines of its screen, and the numbered choices on it ("❯ 1. Yes" / "2. No ..."). The desk shows them and the
-// person presses one; nothing is ever pressed by itself. Choices must be one run numbered 1, 2, ... at the end of the screen (else none).
-const promptTail = (text, n = 10) => String(text ?? "").replace(/\r\n?/g, "\n").split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim()).slice(-n).map((l) => (l.length > 140 ? `${l.slice(0, 139)}…` : l));
-function promptOptions(text) {
-  const rows = promptTail(text, 14).map((l) => /^\s*[❯>›]?\s*(\d{1,2})[.)]\s+(\S.*)$/.exec(l));
-  const out = [];
-  for (let i = rows.length - 1; i >= 0 && rows[i]; i--) out.unshift({ key: rows[i][1], label: rows[i][2].trim().slice(0, 80), on: /^\s*[❯›]/.test(promptTail(text, 14)[i]) });
-  return out.length >= 2 && out.every((o, i) => Number(o.key) === i + 1) ? out.slice(0, 6) : [];
+// person presses one; nothing is ever pressed by itself. The choices are the last contiguous run of numbered rows (1, 2, ...) once the footer
+// (hint lines like "Esc to cancel · Tab to amend", box borders) at the bottom of the screen is skipped; else none.
+const promptTail = (text, n = 10) => cleanText(text).split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim()).slice(-n).map((l) => (l.length > 140 ? `${l.slice(0, 139)}…` : l));
+const PROMPT_NUM = /^[\s│┃|]*([❯>›])?\s*(\d{1,2})[.)]\s+(\S.*?)[\s│┃|]*$/;
+const promptFooter = (l) => /^[^\p{L}\p{N}]*$/u.test(l) || (l.length <= 140 && /\b(esc|enter|tab|ctrl|shift|alt)\b|^\s*[↑↓←→]|\? for shortcuts/i.test(l));
+// {options: [{key, label, on}], head: the up to 2 lines right above the choices}. Options only when they are 1..N (2 or more).
+function promptParse(text) {
+  const lines = promptTail(text, 24);
+  const num = lines.map((l) => PROMPT_NUM.exec(l));
+  let end = lines.length - 1;
+  for (let skip = 0; end >= 0 && !num[end] && skip < 6 && promptFooter(lines[end]); skip++) end--;
+  if (end < 0 || !num[end]) return { options: [], head: [] };
+  let start = end;
+  while (start > 0 && num[start - 1]) start--;
+  const options = num.slice(start, end + 1).map((m) => ({ key: m[2], label: m[3].trim().slice(0, 80), on: m[1] === "❯" || m[1] === "›" }));
+  if (options.length < 2 || !options.every((o, i) => Number(o.key) === i + 1)) return { options: [], head: [] };
+  return { options: options.slice(0, 6), head: lines.slice(Math.max(0, start - 2), start) };
+}
+const promptOptions = (text) => promptParse(text).options;
+// What identifies the question on screen: the choices (without which one is highlighted) and the lines above them, whitespace squeezed; when
+// there are no choices, the last 6 lines. Equal before and after means the same question, whatever the status line below it does.
+function promptSig(text) {
+  const p = promptParse(text);
+  const lines = p.options.length ? [...p.head, ...p.options.map((o) => `${o.key}. ${o.label}`)] : promptTail(text, 6);
+  return lines.map((l) => l.replace(/\s+/g, " ").trim()).join("\n");
+}
+// Whether the pasted `line` is still in the PO's input: the start or the end of its text is among the last 14 screen lines (box borders and
+// whitespace ignored), or, for a long / multi-line paste the PO folds into "[Pasted text …]", that marker is.
+function inputHas(screen, line) {
+  const squeeze = (s) => s.replace(/[│┃|]/g, " ").replace(/\s+/g, " ").trim();
+  const want = squeeze(cleanText(line));
+  if (!want) return false;
+  const hay = squeeze(cleanText(screen).split("\n").filter((l) => l.trim()).slice(-14).join("\n"));
+  if (/\n/.test(cleanText(line).trim()) || want.length > 200) return /\[Pasted text/i.test(hay) || hay.includes(want.slice(0, 24)) || hay.includes(want.slice(-24));
+  return hay.includes(want.slice(0, 24)) || hay.includes(want.slice(-24));
 }
 // Slack-style headers: `head` is true for the first entry and whenever the sender changes or the gap to the entry before is over `gap`.
 const groupTimeline = (entries, gap = TL_GAP_MS) => (entries ?? []).map((e, i, a) => ({ ...e, head: i === 0 || a[i - 1].who !== e.who || e.ms - a[i - 1].ms > gap }));
@@ -291,6 +349,20 @@ function seenNext(seenMap, room, entries) {
   if (!room || !(latest > 0) || (Number(seenMap?.[room]) || 0) >= latest) return null;
   return { ...(seenMap ?? {}), [room]: latest };
 }
+// The chat filter chips, in order: [key, label]. 전체 = everything; 안 읽은 것 = messages newer than the room's seen marker as it was when the
+// room was opened (`seen`, a snapshot: opening a room moves the live marker to now, which would empty this filter at once); the rest are the
+// leader reports of one kind (결정 필요 = decision, 최종 확인 요청 = verify, 결과 = done, 멈춤 = stop). resume/start/other show only under
+// 전체. The person's own lines are only under 전체; the made-up "waiting" entry (no report) counts by the kind the leader waits on.
+const CHAT_FILTERS = [["all", "전체"], ["unread", "안 읽은 것"], ["decision", "결정 필요"], ["verify", "최종 확인 요청"], ["done", "결과"], ["stop", "멈춤"]];
+const entryKind = (e) => (e?.who === "po" || e?.who === "me" ? "" : e?.waiting || e?.it?.kind || "");
+function filterEntries(entries, filter, seen) {
+  const list = entries ?? [];
+  if (!filter || filter === "all" || !CHAT_FILTERS.some((f) => f[0] === filter)) return list;
+  if (filter === "unread") return list.filter((e) => e.who !== "me" && !e.wait && e.ms > (Number(seen) || 0));
+  return list.filter((e) => entryKind(e) === filter);
+}
+// {all, unread, decision, verify, done, stop}: how many entries each chip shows.
+const filterCounts = (entries, seen) => Object.fromEntries(CHAT_FILTERS.map(([k]) => [k, filterEntries(entries, k, seen).length]));
 // Follow-the-newest rule: scroll to the bottom when the room changes or the window opens (`seen` is the last key drawn, "" at first),
 // and when a new message arrived while the list was at its bottom; never while the person has scrolled up to read.
 const tlKey = (room, entries) => { const l = (entries ?? [])[(entries ?? []).length - 1]; return `${room}|${(entries ?? []).length}|${l ? `${l.ms}|${l.key}` : ""}`; };
@@ -432,6 +504,10 @@ export default class Inbox extends View {
     this.backs = new Map(); // record id -> the pane that had the keyboard before the send (given back after Enter)
     this.prompt = null; // {po, at, text}: the screen tail of the picked room's PO while it waits on a prompt
     this.promptBusy = false;
+    this.promptBusyAt = 0;
+    this.promptGen = 0;
+    this.filt = new Map(); // room -> the chat filter chip picked there (전체 when missing); not saved: a restart shows every message again
+    this.snap = null; // {room, seen}: the room's last-opened marker as it was when this copy opened that room (the 안 읽은 것 filter's base)
     this.heldAt = 0; // the last Enter held back as a possible IME confirm (ms)
     this.nlAt = 0; // the last Shift+Enter handled (ms)
     this.chat.on("change", (_e, c) => {
@@ -601,7 +677,7 @@ export default class Inbox extends View {
   }
 
   // What the window shows: the rooms (the live POs, plus "PO 모름" while a leader or report belongs to none), the picked one with its
-  // timeline, and the dock's lists. `tabs` [{id, label, title, n, unread}]: n = the waiting leaders of that room, unread = its messages newer
+  // timeline, and the dock's lists. `tabs` [{id, label, title, blocked, n, unread}]: blocked = the room's PO waits on a prompt, n = the waiting leaders of that room, unread = its messages newer
   // than the last time the window had it open (0 for the room on screen). `entries` = the picked room's grouped timeline (newest last);
   // `raw` = all of it, before the cut to MAX_ENTRIES.
   view() {
@@ -620,16 +696,19 @@ export default class Inbox extends View {
     const now = Date.now();
     const waits = (id) => all.filter((a) => a.owner === id).map((a) => ({ leader: a.s.leader, ts: a.item?.ts ?? "", kind: a.kind }));
     const room = (id) => timeline(id, leaders, id === PO_OTHER ? [] : this.data?.po?.[id] ?? [], mine, waits(id), now);
-    const rooms = pos.map((p) => ({ id: p.id, label: p.label, title: p.title }));
-    if (hasOther) rooms.push({ id: PO_OTHER, label: OTHER_LABEL, title: "" });
+    const rooms = pos.map((p) => ({ id: p.id, label: p.label, title: p.title, blocked: this.isBlocked(p.address) }));
+    if (hasOther) rooms.push({ id: PO_OTHER, label: OTHER_LABEL, title: "", blocked: false });
     let raw = [];
     const tabs = rooms.map((r) => {
       const entries = room(r.id);
       if (r.id === pick) raw = entries;
       return { ...r, n: all.filter((a) => a.owner === r.id).length, unread: r.id === pick ? 0 : unreadCount(entries, seen[r.id]) };
     });
-    const entries = groupTimeline(raw.filter((e, i) => i >= raw.length - MAX_ENTRIES || e.waiting));
-    return { terms, tabs, pick, raw, entries, asks: all.filter((a) => a.owner === pick), reports: reps.filter((r) => r.owner === pick) };
+    const filter = pick ? this.filt.get(pick) ?? "all" : "all";
+    const base = this.snap?.room === pick ? this.snap.seen : Number(seen[pick]) || 0; // opening a room moves `seen` to now: filter by the marker from before
+    const shown = filterEntries(raw, filter, base);
+    const entries = groupTimeline(shown.filter((e, i) => i >= shown.length - MAX_ENTRIES || e.waiting));
+    return { terms, tabs, pick, raw, shown, filter, counts: filterCounts(raw, base), entries, asks: all.filter((a) => a.owner === pick), reports: reps.filter((r) => r.owner === pick) };
   }
 
   // Remembers that the person has the picked room's newest message on screen. Both the window and the dock show a room, so both
@@ -638,9 +717,30 @@ export default class Inbox extends View {
     if (!this.drawnAt || !this.drawing()) return; // never drawn, or not drawn lately: nobody has seen it
     try {
       const v = this.view();
-      const next = seenNext(shared(SEEN_KEY) ?? {}, v.pick, v.raw);
+      const was = shared(SEEN_KEY) ?? {};
+      if (v.pick && this.snap?.room !== v.pick) this.snap = { room: v.pick, seen: Number(was[v.pick]) || 0 }; // taken before the marker moves
+      const next = seenNext(was, v.pick, v.raw);
       if (next) setShared(SEEN_KEY, next);
     } catch {}
+  }
+
+  setFilter(room, key, c) {
+    if (!room) return;
+    this.filt.set(room, key);
+    c.notify();
+  }
+
+  // The chips above a room's timeline: 전체 | 안 읽은 것 | 결정 필요 | 최종 확인 요청 | 결과 | 멈춤, each with its count (0 = dim, still pressable).
+  filterBar(t, v) {
+    if (!v.pick || !v.raw.length) return null;
+    return h_flex().flex_none().min_w(0).px(10).py(5).gap(5).items_center().flex_wrap().border_b(1).border_color(t.border)
+      .children(CHAT_FILTERS.map(([k, label]) => {
+        const on = v.filter === k, n = v.counts?.[k] ?? 0;
+        return div().id(`flt-${k}`).flex_none().h(22).px(8).rounded(11).flex().items_center().cursor_pointer().text_size(11).on_mouse_down("left", stop)
+          .bg(on ? t.selected : t.raised).border(1).border_color(on ? t.foreground + "40" : t.border).text_color(on ? t.foreground : n ? t.muted : t.dim)
+          .when(!on && !n, (el) => el.opacity(0.6)).hover((x) => x.bg(t.hover).text_color(t.foreground))
+          .on_click((_e, c) => this.setFilter(v.pick, k, c)).tooltip(k === "unread" ? "이 방을 열 때 아직 읽지 않았던 글만" : k === "all" ? "모든 글" : `${label}만 보기`).child(`${label} ${n}`);
+      }));
   }
 
   pickPo(id, c) {
@@ -671,6 +771,7 @@ export default class Inbox extends View {
   // `rec` {text, line, to, po (the room), kind}: what the person wrote, recorded once at "sending" and moved on as the real outcome is known.
   // `id`/`opened`: a resend of that record / the second pass after the pane opened (never opens a pane a second time).
   deliver(po, text, c, rec = null, ok = null, id = "", opened = false) {
+    text = cleanText(text); // nothing but plain text is pasted into a PO
     if (!opened && this.opening.has(po)) { this.say(`PO(${po})의 칸을 여는 중입니다. 열리면 먼저 보낸 글이 자동으로 갑니다.`, true); return "busy"; }
     if (!id) id = this.record({ ...rec, line: text }, "sending");
     try {
@@ -713,10 +814,10 @@ export default class Inbox extends View {
         try { cx.timer.after(PANE_POLL_MS, poll); } catch { giveUp(cx); }
         return;
       }
-      this.opening.delete(po);
-      const go = (c2) => {
+      const go = (c2) => { // `opening` stays set until the delivery is done: a second send in the settle gap is "busy", not a race
         try { const r = this.deliver(po, text, c2, rec, ok, id, true); if (r === "sent" || r === "held") { try { ok?.(r); } catch {} } }
         catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
+        this.opening.delete(po);
         try { c2.notify(); } catch {}
       };
       try { cx.timer.after(PASTE_SETTLE_MS, go); } catch { go(cx); } // the new pane's terminal needs a moment before it takes a paste
@@ -754,27 +855,62 @@ export default class Inbox extends View {
   }
   recordOf(id) { try { return (shared(CHAT_KEY) ?? []).find((x) => x?.id === id) ?? null; } catch { return null; } }
 
-  // The bubble's "다시 보내기": the same text to the same PO, on the same record (no second bubble). Only when nothing reached the PO.
+  // The ask card a send answered (record field `ak`) is marked sent / held, so a resend or Enter that went through closes it like the first send.
+  markAsk(r, how) {
+    if (!r?.ak || !r?.to) return;
+    try { setShared(SENT_KEY, { ...(shared(SENT_KEY) ?? {}), [r.to]: r.ak + (how === "held" ? "|held" : "") }); } catch {}
+  }
+
+  // The PO terminal a record goes to, and the buttons its bubble offers right now (its status, whether the PO is blocked, the age of the status).
+  recordPo(r) { return chatTarget(this.liveTerms(), r.to ? [r.to] : [], r.po).po || chatTarget(this.liveTerms(), [], r.po).po; }
+  recordActs(r, po, now = Date.now()) {
+    const at = Number(r.at ?? r.ms) || 0;
+    return mineActs(liveStatus(r.status, at, now), po ? this.isBlocked(po) : false, now - at);
+  }
+
+  // The bubble's "다시 보내기": the same text to the same PO, on the same record (no second bubble). Only when nothing reached the PO, or the pasted
+  // line is gone. The record is "sending" before anything is pasted, so a second click (still "sending") does nothing: no double paste + Enter.
   resend(id, c) {
     const r = this.recordOf(id);
-    if (!r || mineAct(liveStatus(r.status, r.at ?? r.ms, Date.now())) !== "resend") return;
-    const po = chatTarget(this.liveTerms(), r.to ? [r.to] : [], r.po).po || chatTarget(this.liveTerms(), [], r.po).po;
+    if (!r) return;
+    const po = this.recordPo(r);
+    if (!this.recordActs(r, po).includes("resend")) return;
     if (!po) { this.say(NO_PO, true); c.notify(); return; }
-    try { this.deliver(po, r.line || r.text, c, r, null, id); } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
+    const before = r.status;
+    this.mark(id, "sending");
+    try {
+      const out = this.deliver(po, r.line || r.text, c, r, (r2) => this.markAsk(r, r2), id);
+      if (out === "busy") this.mark(id, before);
+      else if (out === "sent" || out === "held") this.markAsk(r, out);
+    } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
     c.notify();
   }
 
-  // The bubble's "Enter 누르기": the text is in the PO's normal prompt and only Enter is missing. Refused when the PO now waits on a question.
+  // The bubble's "Enter 누르기": the text is in the PO's normal prompt and only Enter is missing. Before the key goes, the PO's screen is read and the
+  // pasted line must still be in its input (else "gone": send it again); refused when the PO now waits on a question (at the click and again right before the key).
   enterNow(id, c) {
     const r = this.recordOf(id);
-    if (!r || mineAct(liveStatus(r.status, r.at ?? r.ms, Date.now())) !== "enter") return;
-    const po = chatTarget(this.liveTerms(), r.to ? [r.to] : [], r.po).po || chatTarget(this.liveTerms(), [], r.po).po;
+    if (!r) return;
+    const po = this.recordPo(r);
+    if (!this.recordActs(r, po).includes("enter")) return;
     if (!po) { this.say(NO_PO, true); c.notify(); return; }
     if (this.isBlocked(po)) { this.say(`PO(${po})가 지금 질문 중이라 Enter를 누르지 않았습니다. 질문에 먼저 답하세요.`, true); c.notify(); return; }
+    const before = r.status;
+    const back = (st, msg) => { this.mark(id, st); if (msg) this.say(msg, true); try { c.notify(); } catch {} };
     this.mark(id, "sending");
-    let p;
-    try { p = hc(["keys", po, "enter"]); } catch { this.mark(id, "noenter"); c.notify(); return; }
-    Promise.resolve(p).then((o) => this.mark(id, o && o.code === 0 ? "sent" : "noenter")).catch(() => this.mark(id, "noenter")).then(() => { try { c.notify(); } catch {} });
+    let rd;
+    try { rd = hc(["read", po, "--lines", String(PROMPT_LINES)]); } catch { back(before, `PO(${po})의 화면을 읽지 못해 Enter를 누르지 않았습니다.`); return; }
+    Promise.resolve(rd).then((o) => {
+      if (!(o && o.code === 0)) { back(before, `PO(${po})의 화면을 읽지 못해 Enter를 누르지 않았습니다.`); return null; }
+      if (!inputHas(String(o.stdout ?? ""), r.line || r.text)) { back("gone", `PO(${po})의 입력창에 보낸 글이 없어 Enter를 누르지 않았습니다. '다시 보내기'를 누르세요.`); return null; }
+      if (this.isBlocked(po)) { back(before, `PO(${po})가 질문 중이 되어 Enter를 누르지 않았습니다. 질문에 먼저 답하세요.`); return null; }
+      return hc(["keys", po, "enter"]);
+    }).then((k) => {
+      if (k === null) return;
+      const okk = Boolean(k && k.code === 0);
+      this.mark(id, okk ? "sent" : "noenter");
+      if (okk) this.markAsk(r, "sent");
+    }).catch(() => back("noenter", "")).then(() => { try { c.notify(); } catch {} });
   }
 
   // ---- A blocked PO's screen in the desk (so the person answers it without opening the terminal). Only shown while the room's PO is "blocked".
@@ -782,20 +918,46 @@ export default class Inbox extends View {
   // the desk itself, and refused unless the PO is still blocked (a stale panel must not answer a different prompt).
   readPrompt(po, cx) {
     const now = Date.now();
-    if (this.promptBusy || (this.prompt?.po === po && now - this.prompt.at < PROMPT_REFRESH_MS)) return;
+    if ((this.promptBusy && now - this.promptBusyAt < PROMPT_TIMEOUT_MS) || (this.prompt?.po === po && now - this.prompt.at < PROMPT_REFRESH_MS)) return;
+    const gen = ++this.promptGen; // a read that comes back after it was given up (or replaced) is ignored
     this.promptBusy = true;
-    const fin = (text) => { this.prompt = { po, at: Date.now(), text }; this.promptBusy = false; try { cx.notify(); cx.timer.after(PROMPT_REFRESH_MS + 100, (c2) => c2.notify()); } catch {} };
+    this.promptBusyAt = now;
+    let done = false;
+    const fin = (text) => {
+      if (done || gen !== this.promptGen) return;
+      done = true;
+      this.promptBusy = false;
+      this.prompt = { po, at: Date.now(), text };
+      try { cx.notify(); cx.timer.after(PROMPT_REFRESH_MS + 100, (c2) => c2.notify()); } catch {}
+    };
+    try { cx.timer.after(PROMPT_TIMEOUT_MS, (c2) => { if (!done && gen === this.promptGen) { this.promptBusy = false; try { c2.notify(); } catch {} } }); } catch {}
     let r;
     try { r = hc(["read", po, "--lines", String(PROMPT_LINES)]); } catch { fin(""); return; }
     Promise.resolve(r).then((o) => fin(o && o.code === 0 ? String(o.stdout ?? "") : "")).catch(() => fin(""));
   }
+  // A key press from the question panel. Never on a stale panel: the PO must still be blocked, and its screen is read again right before the key
+  // and must show the same question the buttons were built from (else the panel is refreshed and no key goes).
   pressPrompt(po, key, c) {
-    if (!this.isBlocked(po)) { this.prompt = null; this.say(`PO(${po})가 이제 질문 중이 아니라 ${key}를 누르지 않았습니다.`, true); c.notify(); return; }
-    let r;
-    try { r = hc(["keys", po, key]); } catch { this.say(`PO(${po})에 ${key}를 누르지 못했습니다.`, true); c.notify(); return; }
-    Promise.resolve(r).then((o) => { this.say(o && o.code === 0 ? `PO(${po})에 ${key}를 눌렀습니다.` : `PO(${po})에 ${key}를 누르지 못했습니다.`, !(o && o.code === 0)); })
-      .catch(() => this.say(`PO(${po})에 ${key}를 누르지 못했습니다.`, true))
-      .then(() => { if (this.prompt) this.prompt.at = 0; try { c.notify(); } catch {} });
+    const say = (text, bad = true) => { this.say(text, bad); try { c.notify(); } catch {} };
+    if (!this.isBlocked(po)) { this.prompt = null; say(`PO(${po})가 이제 질문 중이 아니라 ${key}를 누르지 않았습니다.`); return; }
+    const shown = this.prompt?.po === po ? this.prompt : null;
+    if (!shown) { say(`PO(${po})의 화면을 아직 읽지 못해 ${key}를 누르지 않았습니다. 잠시 뒤 다시 누르세요.`); return; }
+    const want = promptSig(shown.text);
+    const fail = () => say(`PO(${po})의 화면을 다시 읽지 못해 ${key}를 누르지 않았습니다.`);
+    let rd;
+    try { rd = hc(["read", po, "--lines", String(PROMPT_LINES)]); } catch { fail(); return; }
+    Promise.resolve(rd).then((o) => {
+      if (!(o && o.code === 0)) { fail(); return null; }
+      const text = String(o.stdout ?? "");
+      if (promptSig(text) !== want) { this.prompt = { po, at: Date.now(), text }; say("질문이 바뀌었습니다, 다시 확인하세요"); return null; }
+      if (!this.isBlocked(po)) { this.prompt = null; say(`PO(${po})가 이제 질문 중이 아니라 ${key}를 누르지 않았습니다.`); return null; }
+      return hc(["keys", po, key]);
+    }).then((k) => {
+      if (k === null) return;
+      const okk = Boolean(k && k.code === 0);
+      say(okk ? `PO(${po})에 ${key}를 눌렀습니다.` : `PO(${po})에 ${key}를 누르지 못했습니다.`, !okk);
+      if (this.prompt) this.prompt.at = 0;
+    }).catch(() => say(`PO(${po})에 ${key}를 누르지 못했습니다.`));
   }
   promptPanel(t, v, cx) {
     const po = v.pick && v.pick !== PO_OTHER ? chatTarget(v.terms, [], v.pick).po : "";
@@ -806,9 +968,9 @@ export default class Inbox extends View {
     const opts = shown ? promptOptions(shown.text) : [];
     const key = (k, label, tip, primary) => this.button(t, `pp-${k}`, label, (c) => this.pressPrompt(po, k === "esc" ? "esc" : k === "enter" ? "enter" : k, c), { primary, tip });
     return v_flex().id("po-prompt").flex_none().min_w(0).mx(10).mb(6).p(8).gap(6).rounded(8).bg(t.blocked + "14").border(1).border_color(t.blocked + "55")
-      .child(div().min_w(0).truncate().text_size(11).font_semibold().text_color(t.blocked).child("PO가 질문 중입니다 — 화면 끝"))
+      .child(div().min_w(0).truncate().text_size(11).font_semibold().text_color(t.blocked).child(shown ? `PO가 질문 중입니다 — 화면 끝 (${Math.max(0, Math.round((Date.now() - shown.at) / 1000))}초 전 화면)` : "PO가 질문 중입니다 — 화면 끝"))
       .child(v_flex().min_w(0).max_h(120).overflow_hidden().gap(1)
-        .children(lines.length ? lines.map((l, i) => div().id(`pp-l${i}`).min_w(0).truncate().text_size(11).text_color(t.muted).child(l)) : [div().text_size(11).text_color(t.dim).child(shown ? "화면을 읽지 못했습니다. 아래 버튼은 PO가 질문 중일 때만 눌립니다." : "화면을 읽는 중…")]))
+        .children(lines.length ? lines.map((l, i) => div().min_w(0).text_size(11).text_color(t.muted).child(this.text(`pp-l${i}`, chatHtml(l)))) : [div().text_size(11).text_color(t.dim).child(shown ? "화면을 읽지 못했습니다. 아래 버튼은 PO가 질문 중일 때만 눌립니다." : "화면을 읽는 중…")]))
       .child(h_flex().min_w(0).gap(6).items_center().flex_wrap()
         .children(opts.map((o) => this.button(t, `pp-${o.key}`, `${o.key}. ${o.label.length > 22 ? `${o.label.slice(0, 21)}…` : o.label}`, (c) => this.pressPrompt(po, o.key, c), { primary: o.on, tip: o.label })))
         .child(key("enter", "Enter", "화면에서 강조된 선택지를 확정합니다(PO가 질문 중일 때만)"))
@@ -823,7 +985,7 @@ export default class Inbox extends View {
     const po = a.po;
     if (!po) { this.say(NO_PO, true); cx.notify(); return; }
     try {
-      const r = this.deliver(po, answerLine(a.kind, a.s.leader, body, a.link), cx, { text: body, to: a.s.leader, po: a.owner, kind }, (r2) => { this.clearBox(a, r2); });
+      const r = this.deliver(po, answerLine(a.kind, a.s.leader, body, a.link), cx, { text: body, to: a.s.leader, po: a.owner, kind, ak: this.askKey(a) }, (r2) => { this.clearBox(a, r2); });
       if (r === "sent" || r === "held") this.clearBox(a, r);
     } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
     cx.notify();
@@ -924,6 +1086,14 @@ export default class Inbox extends View {
   submitPo(po, c, settle = PASTE_SETTLE_MS, back = "", id = "") {
     const fail = (cx, why) => { this.mark(id, "noenter"); this.say(`PO(${po})에 글은 넣었지만 Enter를 누르지 못했습니다${why ? `(${why})` : ""}. 말풍선의 'Enter 누르기'를 누르세요.`, true); try { cx.notify(); } catch {} };
     const press = (cx) => {
+      if (this.isBlocked(po)) { // a question opened since the paste: Enter would answer it, so the line stays pasted and waits
+        this.mark(id, "held");
+        this.markAsk(this.recordOf(id), "held");
+        this.say(`PO(${po})가 그 사이 질문 중이 되어 Enter를 누르지 않았습니다. 질문에 먼저 답하세요.`, true);
+        try { cx.notify(); } catch {}
+        this.restore(back, cx, id);
+        return;
+      }
       let r;
       try { r = hc(["keys", po, "enter"]); } catch { fail(cx, ""); this.restore(back, cx, id); return; }
       Promise.resolve(r).then((o) => { if (o && o.code !== 0) fail(cx, String(o.stderr ?? "").trim().slice(0, 80)); else this.mark(id, "sent"); }).catch(() => fail(cx, "")).then(() => this.restore(back, cx, id));
@@ -992,6 +1162,7 @@ export default class Inbox extends View {
   // The count badges of a room: unread (green) and waiting leaders (red).
   roomBadges(t, x) {
     return [
+      x.blocked ? div().flex_none().px(5).h(15).rounded(8).bg(t.blocked + "26").flex().items_center().text_size(10).font_semibold().text_color(t.blocked).child("질문") : null,
       x.unread > 0 ? div().flex_none().px(5).h(15).rounded(8).bg(t.working).flex().items_center().text_size(10).font_semibold().text_color(t.chrome).child(String(x.unread)) : null,
       x.n > 0 ? div().flex_none().px(5).h(15).rounded(8).bg(t.blocked + "26").flex().items_center().text_size(10).text_color(t.blocked).child(String(x.n)) : null,
     ].filter(Boolean);
@@ -1157,7 +1328,7 @@ export default class Inbox extends View {
         .children(kind === "decision" ? opts.options.map((n) => this.button(t, `opt-${s.leader}-${n}`, `${n}안 선택`, (c) => this.send(a, `${n}안 선택`, c, "choice"), { primary: n === opts.recommended, disabled: a.po ? "" : NO_PO, tip: CLIP })) : [])
         .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c, "verify"), { primary: true, disabled: a.po ? "" : NO_PO, tip: CLIP })))
         .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); this.reveal(this.spot(s, item)); c.notify(); }, { disabled: a.po ? "" : NO_PO }))
-        .child(div().text_size(11).text_color(done === "sent" ? t.working : done === "held" ? t.blocked : t.dim).child(done === "sent" ? "PO에 보냄 — 리더가 받으면 사라집니다" : done === "held" ? "PO에 넣음 — PO가 질문 중이라 PO에서 Enter로 보내세요" : "누르면 PO에 바로 보내고, 리더가 받으면 사라집니다")));
+        .child(div().text_size(11).text_color(done === "sent" ? t.working : done === "held" ? t.blocked : t.dim).child(done === "sent" ? "PO에 보냄 — 리더가 받으면 사라집니다" : done === "held" ? (this.isBlocked(a.po) ? "PO에 넣음 — PO가 질문 중입니다. 방의 질문에 먼저 답하세요" : "PO에 넣음 — 말풍선의 'Enter 누르기'로 보내세요") : "누르면 PO에 바로 보내고, 리더가 받으면 사라집니다")));
     if (!a.po) box.child(div().text_size(11).text_color(t.dim).child(NO_PO));
     if (writing) {
       const input = this.box(s.leader, cx);
@@ -1176,9 +1347,12 @@ export default class Inbox extends View {
     // The time sits at the bubble's bottom, on its outer side: left of mine, right of everyone else's.
     const when = (ms) => div().flex_none().pb(1).text_size(10).text_color(t.dim).child(ms ? clock(ms) : "");
     if (e.who === "me") {
-      const note = mineNote(e.status);
-      const bad = e.status === "nopane" || e.status === "failed" || e.status === "noenter";
-      const act = mineAct(e.status);
+      const blockedNow = Boolean(v.tabs.find((x) => x.id === v.pick)?.blocked);
+      const age = Date.now() - (Number(e.at) || Number(e.ms) || 0);
+      const note = mineNote(e.status, blockedNow, age);
+      const bad = e.status === "nopane" || e.status === "failed" || e.status === "noenter" || e.status === "gone" || (e.status === "held" && !blockedNow);
+      const acts = mineActs(e.status, blockedNow, age);
+      const ACT = { resend: ["다시 보내기", "같은 글을 같은 PO에게 다시 보냅니다(말풍선은 늘지 않습니다)", (c) => this.resend(e.id, c)], enter: ["Enter 누르기", "PO의 입력창에 보낸 글이 아직 있는지 확인한 뒤 Enter만 누릅니다(PO가 질문 중이면 누르지 않습니다)", (c) => this.enterNow(e.id, c)] };
       return v_flex().id(id).flex_none().px(10).pt(top).gap(2).items_end()
         .when(Boolean(e.to), (el) => el.child(div().max_w("85%").min_w(0).truncate().text_size(10).text_color(t.dim).child(`→ ${shortName(e.to)}`)))
         .child(h_flex().max_w("100%").min_w(0).gap(6).items_end().justify_end()
@@ -1187,9 +1361,7 @@ export default class Inbox extends View {
             .child(this.text(`${id}-t`, chatHtml(e.text)))))
         .when(Boolean(note), (el) => el.child(h_flex().max_w("100%").min_w(0).gap(6).items_center().flex_wrap().justify_end()
           .child(div().min_w(0).text_size(10.5).text_color(bad ? t.blocked : t.dim).child(note))
-          .when(Boolean(act) && Boolean(e.id), (x) => x.child(this.button(t, `ma-${e.id}`, act === "resend" ? "다시 보내기" : "Enter 누르기",
-            (c) => (act === "resend" ? this.resend(e.id, c) : this.enterNow(e.id, c)),
-            { primary: true, tip: act === "resend" ? "같은 글을 같은 PO에게 다시 보냅니다(말풍선은 늘지 않습니다)" : "PO의 입력창에 이미 들어 있는 글에 Enter만 누릅니다(PO가 질문 중이면 누르지 않습니다)" })))));
+          .children(Boolean(e.id) ? acts.map((k, i) => this.button(t, `ma-${k}-${e.id}`, ACT[k][0], ACT[k][2], { primary: i === 0, tip: ACT[k][1] })) : [])));
     }
     if (e.who === "po") {
       return h_flex().flex_none().px(10).pt(top).gap(8).items_start()
@@ -1237,13 +1409,18 @@ export default class Inbox extends View {
       }
       blocks.push(this.entryRow(t, e, v, cx));
     });
+    if (!blocks.length && v.pick && v.filter !== "all" && v.raw.length) {
+      blocks.push(h_flex().flex_none().p(14).gap(8).items_center()
+        .child(div().text_size(12).text_color(t.dim).child("해당 메시지 없음 —"))
+        .child(this.button(t, "flt-reset", "전체 보기", (c) => this.setFilter(v.pick, "all", c), { primary: true })));
+    }
     if (!blocks.length) {
       blocks.push(div().flex_none().p(14).text_size(12).text_color(t.dim)
         .child(!this.data ? "불러오는 중…" : v.pick ? "이 방에는 아직 대화가 없습니다." : "PO가 없습니다."));
     }
     // Follow the newest: a new message scrolls to the bottom when the room just opened or the person already was at the bottom;
     // a person who scrolled up keeps their place. The handle's numbers are those of the last layout.
-    const key = tlKey(v.pick, v.raw);
+    const key = tlKey(`${v.pick}~${v.filter}`, v.shown); // a new filter scrolls to the newest like a new room
     if (this.scroll) {
       let atEnd = true;
       try {
@@ -1262,11 +1439,13 @@ export default class Inbox extends View {
     const head = v.pick === PO_OTHER ? OTHER_LABEL : v.tabs.find((x) => x.id === v.pick)?.label ?? "";
     const lines = v_flex().id("inbox-list").on_mouse_down("left", stop).flex_1().min_h(0).pb(8).overflow_y_scrollbar().mode("always")
       .when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks);
+    const bar = this.filterBar(t, v);
     const panel = this.promptPanel(t, v, cx); // a blocked PO's screen + its keys (null while the room's PO is not waiting on a prompt)
     const room = v_flex().flex_1().min_w(0).min_h(0).when(!strip, (el) => el.h_full()) // beside the rooms the column must fill the row (h_flex centers children)
       .when(!strip && Boolean(head), (el) => el.child(h_flex().flex_none().h(30).px(14).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(head))
         .child(div().flex_none().text_size(10.5).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : `리더 ${new Set(v.raw.filter((e) => e.leader).map((e) => e.leader)).size}명`))))
+      .when(Boolean(bar), (el) => el.child(bar))
       .child(lines)
       .when(Boolean(panel), (el) => el.child(panel))
       .child(this.chatBox(t, v));

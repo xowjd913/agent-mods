@@ -159,7 +159,7 @@ test("main.js: 보내도 PO 데스크는 닫히지 않고(Dock·창·페인), �
   assert.match(rs, /run\("pane\.focus", \{ pane: back \}\)/);
   assert.match(rs, /this\.chat\.focus\(\)/);
   assert.match(sub, /this\.restore\(back, cx, id\)/);
-  assert.equal((sub.match(/this\.restore\(/g) ?? []).length, 2);
+  assert.equal((sub.match(/this\.restore\(/g) ?? []).length, 3); // Enter 뒤, Enter 실패 뒤, 그 사이 질문이 열려 Enter를 건너뛴 뒤
   assert.match(del, /this\.restore\(back, c, id, PASTE_SETTLE_MS\)/); // 막힌 PO에 붙여 넣기만 한 뒤에도 돌려준다
   assert.match(sub, /this\.mark\(id, "sent"\)/); // 기록은 Enter가 지나간 뒤에야 sent
   assert.match(sub, /this\.mark\(id, "noenter"\)/);
@@ -211,7 +211,8 @@ test("main.js: 보고 기록이 없어도 라벨만으로 카드를 만들고 �
   assert.match(src, /shared\(SENT_KEY\)/);
   assert.ok(!/this\.sent\b/.test(src)); // 창 안에만 있던 표시는 없다
   assert.match(src, /PO에 보냄 — 리더가 받으면 사라집니다/); // 보낸 표시(Enter까지 누른 경우)
-  assert.match(src, /PO에 넣음 — PO가 질문 중이라 PO에서 Enter로 보내세요/); // 막힌 PO에는 붙여넣기만
+  assert.match(src, /PO에 넣음 — PO가 질문 중입니다\. 방의 질문에 먼저 답하세요/); // 막힌 PO에는 붙여넣기만(아직 질문 중)
+  assert.match(src, /PO에 넣음 — 말풍선의 'Enter 누르기'로 보내세요/); // 질문에 답한 뒤에는 말풍선 버튼으로
 });
 
 // ---- 읽기 쉬운 본문(parseBody)
@@ -1117,7 +1118,7 @@ test("decisionOptions: inbox.cjs와 main.js의 chat 블록이 같다", () => {
 // ---- 내가 보낸 모든 글을 오른쪽 말풍선으로 (deliver 한 곳에서 한 번 기록)
 test("chatRecord: 사람이 쓴 글만 담고(긴 Panel answer 감싸개 없이), 종류·상태는 정해진 값만", () => {
   const r = I.chatRecord({ text: " 확인 완료 ", to: "lead-a", po: "p1", kind: "verify" }, "held", 1700000000000);
-  assert.deepEqual(r, { id: "1700000000000-", at: 1700000000000, ts: new Date(1700000000000).toISOString(), ms: 1700000000000, text: "확인 완료", line: "확인 완료", to: "lead-a", po: "p1", kind: "verify", status: "held" });
+  assert.deepEqual(r, { id: "1700000000000-", at: 1700000000000, ts: new Date(1700000000000).toISOString(), ms: 1700000000000, text: "확인 완료", line: "확인 완료", to: "lead-a", po: "p1", kind: "verify", status: "held", ak: "" });
   const w = I.chatRecord({ text: "확인 완료", line: 'Panel answer (verify) for lead-a: "확인 완료".', po: "p1" }, "sending", 5, "ab3");
   assert.equal(w.id, "5-ab3"); // 같은 ms에 두 번 보내도 id가 겹치지 않게 seq를 붙인다
   assert.equal(w.text, "확인 완료"); // 말풍선에는 사람이 쓴 글
@@ -1135,6 +1136,11 @@ test("mineNote: 보낸 것은 비고, 붙여 넣기만 했거나 못 보낸 것�
   assert.match(I.mineNote("held"), /붙여 넣기만/);
   assert.match(I.mineNote("nopane"), /보내지 못함/);
   assert.match(I.mineNote("failed"), /보내지 못함/);
+  assert.match(I.mineNote("gone"), /입력창/);
+  assert.match(I.mineNote("held", true), /붙여 넣기만/); // 아직 질문 중
+  assert.match(I.mineNote("held", false, 1000), /질문에 답했습니다/);
+  assert.match(I.mineNote("held", false, 11 * 60000), /다시 보내세요/);
+  assert.match(I.mineNote("noenter", false, 11 * 60000), /다시 보내세요/);
 });
 
 test("timeline: 내 글은 그 방(po)에만, 종류·상태·받는 리더를 달고 오른쪽 말풍선 데이터가 된다(옛 기록은 chat·sent)", () => {
@@ -1156,7 +1162,7 @@ test("main.js: 모든 데스크 보내기는 deliver 한 곳에서 한 번만 �
   assert.equal((del.match(/this\.record\(/g) ?? []).length, 1); // 새 기록은 deliver 한 곳에서 한 번(다시 보내기는 같은 id로 상태만 바꾼다)
   assert.match(del, /if \(!id\) id = this\.record\(\{ \.\.\.rec, line: text \}, "sending"\)/);
   for (const st of ["failed", "held", "nopane"]) assert.match(del, new RegExp(`this\\.mark\\(id, "${st}"\\)`));
-  assert.match(src, /\{ text: body, to: a\.s\.leader, po: a\.owner, kind \}/); // 버튼·칩·답 상자는 사람이 쓴 글(body)을 기록한다
+  assert.match(src, /\{ text: body, to: a\.s\.leader, po: a\.owner, kind, ak: this\.askKey\(a\) \}/); // 버튼·칩·답 상자는 사람이 쓴 글(body)을 기록한다
   assert.match(src, /send\(a, "확인 완료", c, "verify"\)/);
   assert.match(src, /send\(a, `\$\{n\}안 선택`, c, "choice"\)/);
   assert.ok(!/answerLine\([^)]*\)[^;]*kind: "chat"/.test(src));
@@ -1166,7 +1172,7 @@ test("main.js: 모든 데스크 보내기는 deliver 한 곳에서 한 번만 �
   assert.match(row, /bg\(t\.working \+ "33"\)/);
   assert.match(row, /\.child\(when\(e\.ms\)\)\s*\n\s*\.child\(div\(\)\.max_w\("80%"\)/); // 내 말풍선: 시간이 말풍선 앞(왼쪽)
   assert.match(row, /items_end\(\)\s*\n\s*\.child\(div\(\)\.flex_1\(\)\.min_w\(0\)\.px\(10\)/); // PO: 말풍선 뒤(오른쪽)에 시간
-  assert.match(row, /mineNote\(e\.status\)/);
+  assert.match(row, /mineNote\(e\.status, blockedNow, age\)/);
   assert.ok(!/clock\(it\.ms\)/.test(methodOf(src, "  nameRow(t,", "  // What a waiting leader"))); // 머리줄에서 시간이 빠졌다
 });
 
@@ -1181,11 +1187,18 @@ test("setChatStatus: 그 id의 기록만 상태와 시각을 바꾸고, 같은 �
   assert.equal(I.setChatStatus(null, "1-a", "sent", 5), null);
 });
 
-test("mineAct: 아무것도 못 간 것은 다시 보내기, Enter만 빠진 것은 Enter 누르기, 질문 중에 붙여 넣은 것은 버튼 없음", () => {
-  assert.equal(I.mineAct("nopane"), "resend");
-  assert.equal(I.mineAct("failed"), "resend");
-  assert.equal(I.mineAct("noenter"), "enter");
-  for (const st of ["sent", "sending", "opening", "held"]) assert.equal(I.mineAct(st), "", st); // held의 Enter는 PO의 질문에 답하는 것이라 말풍선에는 두지 않는다
+test("mineActs: 아무것도 못 간 것은 다시 보내기, Enter만 빠진 것은 Enter(10분 안)·다시 보내기(오래되면), 질문에 답한 뒤의 held도 버튼이 생긴다", () => {
+  const MIN = 60000;
+  for (const st of ["nopane", "failed", "gone"]) assert.deepEqual(I.mineActs(st), ["resend"], st);
+  assert.deepEqual(I.mineActs("noenter", false, 0), ["enter"]);
+  assert.deepEqual(I.mineActs("noenter", false, 9 * MIN), ["enter"]);
+  assert.deepEqual(I.mineActs("noenter", false, 11 * MIN), ["resend"]); // 10분 지난 Enter 버튼은 사라진다(입력창이 바뀌었을 수 있다)
+  assert.equal(I.ENTER_TTL_MS, 10 * MIN);
+  assert.deepEqual(I.mineActs("held", true, 0), []); // 아직 PO가 질문 중: Enter는 그 질문에 답하는 것이라 버튼 없음
+  assert.deepEqual(I.mineActs("held", false, 1000), ["enter", "resend"]); // 질문에 답한 뒤
+  assert.deepEqual(I.mineActs("held", false, 11 * MIN), ["resend"]);
+  for (const st of ["sent", "sending", "opening"]) assert.deepEqual(I.mineActs(st, false, 0), [], st);
+  assert.equal(I.mineAct, undefined); // 옛 단일 버튼 함수는 없다
 });
 
 test("liveStatus: 20초 넘게 sending/opening에 머문 기록은 각각 noenter/nopane으로 본다(영원히 '보내는 중' 금지)", () => {
@@ -1200,7 +1213,8 @@ test("badgeTurn: 아이콘 배지는 한 번에 한 복사본만 쓴다(주인�
   assert.equal(I.badgeTurn(null, "a", 1000), "write");
   assert.equal(I.badgeTurn({ id: "a", ts: 1000 }, "a", 2000), "write");
   assert.equal(I.badgeTurn({ id: "b", ts: 1000 }, "a", 2000), "skip");
-  assert.equal(I.badgeTurn({ id: "b", ts: 1000 }, "a", 1000 + 91000), "write"); // 주인이 90초 넘게 갱신하지 않음
+  assert.equal(I.badgeTurn({ id: "b", ts: 1000 }, "a", 1000 + 66000), "write"); // 주인이 65초 넘게 갱신하지 않음(창을 닫으면 곧 넘겨받는다)
+  assert.equal(I.badgeTurn({ id: "b", ts: 1000 }, "a", 1000 + 64000), "skip");
 });
 
 test("promptTail·promptOptions: PO 화면 끝줄과 1,2,3…으로 이어진 선택지만(강조 표시 포함), 아니면 없음", () => {
@@ -1226,14 +1240,19 @@ test("timeline: 내 글은 id와 실시간 상태를 달고, 오래 머문 sendi
 test("main.js: 다시 보내기·Enter 누르기·질문 패널은 PO가 지금 질문 중인지로 막고, 배지는 한 곳만 쓴다", () => {
   const src = mainSrc();
   const re = methodOf(src, "  resend(id, c) {", "  // The bubble's \"Enter 누르기\"");
-  assert.match(re, /mineAct\(liveStatus\(r\.status, r\.at \?\? r\.ms, Date\.now\(\)\)\) !== "resend"/);
-  assert.match(re, /this\.deliver\(po, r\.line \|\| r\.text, c, r, null, id\)/); // 같은 기록·같은 줄(새 말풍선 없음)
+  assert.match(re, /includes\("resend"\)/);
+  assert.ok(re.indexOf('this.mark(id, "sending")') > 0 && re.indexOf('this.mark(id, "sending")') < re.indexOf("this.deliver(")); // 붙여 넣기 전에 sending
+  assert.match(re, /this\.deliver\(po, r\.line \|\| r\.text, c, r, \(r2\) => this\.markAsk\(r, r2\), id\)/); // 같은 기록·같은 줄(새 말풍선 없음)
   const en = methodOf(src, "  enterNow(id, c) {", "  // ---- A blocked PO's screen");
+  assert.match(en, /includes\("enter"\)/);
   assert.match(en, /if \(this\.isBlocked\(po\)\) \{.*return; \}/); // 질문 중이면 Enter를 누르지 않는다
-  assert.ok(en.indexOf("isBlocked") < en.indexOf('hc(["keys", po, "enter"])'));
-  assert.match(en, /this\.mark\(id, o && o\.code === 0 \? "sent" : "noenter"\)/);
+  assert.ok(en.indexOf("this.isBlocked(po)") < en.indexOf('hc(["keys", po, "enter"])'));
+  assert.ok(en.indexOf('hc(["read"') < en.indexOf('hc(["keys", po, "enter"])')); // Enter 전에 PO 화면을 읽는다
+  assert.match(en, /inputHas\(/);
+  assert.match(en, /this\.mark\(id, okk \? "sent" : "noenter"\)/);
   const pp = methodOf(src, "  pressPrompt(po, key, c) {", "  promptPanel(t, v, cx) {");
-  assert.ok(pp.indexOf("!this.isBlocked(po)") >= 0 && pp.indexOf("!this.isBlocked(po)") < pp.indexOf('hc(["keys", po, key])')); // 질문이 사라졌으면 키를 누르지 않는다
+  assert.ok(pp.indexOf("!this.isBlocked(po)") >= 0 && pp.lastIndexOf("!this.isBlocked(po)") < pp.indexOf('hc(["keys", po, key])')); // 질문이 사라졌으면 키를 누르지 않는다
+  assert.ok(pp.indexOf('hc(["read"') < pp.indexOf('hc(["keys", po, key])') && /promptSig\(text\) !== want/.test(pp)); // 키 전에 화면을 다시 읽어 같은 질문인지 본다
   const panel = methodOf(src, "  promptPanel(t, v, cx) {", "  // A panel answer:");
   assert.match(panel, /if \(!po \|\| !this\.isBlocked\(po\)\) \{ this\.prompt = null; return null; \}/); // 질문 중일 때만 보인다
   assert.match(panel, /promptOptions\(shown\.text\)/);
@@ -1250,12 +1269,330 @@ test("main.js: 다시 보내기·Enter 누르기·질문 패널은 PO가 지금 
   assert.match(badge, /setShared\(BADGE_KEY/);
 });
 
-test("main.js: 말풍선의 다시 보내기/Enter 누르기 버튼은 mineAct로만 정하고, 막힌 PO가 질문 중일 때 질문 패널이 채팅 상자 위에 붙는다", () => {
+test("main.js: 말풍선의 다시 보내기/Enter 누르기 버튼은 mineActs로만 정하고, 막힌 PO가 질문 중일 때 질문 패널이 채팅 상자 위에 붙는다", () => {
   const src = mainSrc();
   const row = methodOf(src, "  entryRow(t, e, v, cx) {", "  render(cx)");
-  assert.match(row, /mineAct\(e\.status\)/);
+  assert.match(row, /mineActs\(e\.status, blockedNow, age\)/);
   assert.match(row, /this\.resend\(e\.id, c\)/);
   assert.match(row, /this\.enterNow\(e\.id, c\)/);
   assert.match(row, /다시 보내기/);
   assert.match(row, /Enter 누르기/);
+});
+
+// ---- R8: 질문 화면 읽기(실제 샘플), 입력창 확인, 보내기·누르기 직전 재확인
+// 실제 캡처: claude 2.1.332 (빈 CLAUDE_CONFIG_DIR) 로그인 방식 선택 화면(번호가 있는 유일한 화면). 개인 정보 없음.
+const REAL_LOGIN = " Claude Code can be used with your Claude subscription or billed based on API usage through your Console account.\n\n Select login method:\n\n ❯ 1. Claude account with subscription · Individual, Team, or Enterprise\n   2. Anthropic Console account · API usage billing\n   3. 3rd-party platform · Bedrock, Microsoft Foundry, Google Vertex AI\n\n";
+// 실제 캡처: 같은 버전의 폴더 신뢰 화면(경로만 익명화). 이 버전의 선택 메뉴는 번호가 없다.
+const REAL_TRUST = " Do you trust the files in this folder?\n\n /tmp/proj\n\n Claude Code may read, write, or execute files contained in this directory.\n\n ❯ Yes, proceed\n   No, exit\n\n Enter to confirm · Esc to cancel\n";
+// 합성(실제 캡처 아님): 번호 메뉴 + 바닥 힌트줄 + 테두리 — 힌트 문구는 근사치다.
+const SYNTH_FOOTER = "  Do you want to proceed?\n  ❯ 1. Yes\n    2. Yes, and don't ask again\n    3. No, and tell Claude what to do differently (esc)\n\n  Esc to cancel · Tab to amend\n╰──────────────╯\n";
+
+test("promptOptions: 실제 로그인 화면은 3개(1번 강조), 번호 없는 실제 폴더 신뢰 화면은 없음, 바닥 힌트·테두리는 건너뛴다", () => {
+  assert.deepEqual(I.promptOptions(REAL_LOGIN).map((o) => [o.key, o.on]), [["1", true], ["2", false], ["3", false]]);
+  assert.match(I.promptOptions(REAL_LOGIN)[0].label, /^Claude account with subscription/);
+  assert.deepEqual(I.promptOptions(REAL_TRUST), []); // 번호 없는 메뉴는 숫자 키를 추측하지 않는다
+  assert.deepEqual(I.promptOptions(SYNTH_FOOTER).map((o) => o.key), ["1", "2", "3"]);
+  assert.deepEqual(I.promptOptions("  ❯ 1. Yes\n    2. No\n\n  ? for shortcuts\n"), [{ key: "1", label: "Yes", on: true }, { key: "2", label: "No", on: false }]);
+  // 화면 위쪽의 옛 번호 목록은 선택지가 아니다(맨 아래 덩어리만)
+  assert.deepEqual(I.promptOptions("1. old\n2. old\n" + "text\n".repeat(12) + "tail"), []);
+  const two = I.promptOptions("  1. old\n  2. old\n\nresult text\n\nProceed?\n  ❯ 1. Yes\n    2. No\n");
+  assert.deepEqual(two.map((o) => o.label), ["Yes", "No"]);
+});
+
+test("promptSig: 같은 질문이면 같은 값(공백·강조 이동 무관), 질문이 바뀌면 다른 값", () => {
+  assert.equal(I.promptSig(SYNTH_FOOTER), I.promptSig(SYNTH_FOOTER.replace("❯ 1.", "  1.").replace("  2.", "❯ 2.")));
+  assert.notEqual(I.promptSig(SYNTH_FOOTER), I.promptSig(SYNTH_FOOTER.replace("Do you want to proceed?", "Allow this edit?")));
+  assert.notEqual(I.promptSig(SYNTH_FOOTER), I.promptSig(SYNTH_FOOTER.replace("2. Yes, and don't ask again", "2. Yes, always")));
+  assert.notEqual(I.promptSig(REAL_TRUST), I.promptSig(REAL_TRUST.replace("/tmp/proj", "/tmp/other"))); // 번호가 없어도 끝 6줄로 비교
+  assert.equal(I.promptSig(""), "");
+});
+
+test("inputHas: 붙여 넣은 줄이 PO 화면 아래쪽 입력창에 아직 있는지(테두리·공백 무시), 긴 글은 [Pasted text 표시도 인정", () => {
+  const box = "output\n╭──────────────────╮\n│ > 확인 완료 그리고   진행해 │\n╰──────────────────╯\n  ? for shortcuts\n";
+  assert.equal(I.inputHas(box, "확인 완료 그리고 진행해"), true);
+  assert.equal(I.inputHas("output\n  ? for shortcuts\n", "확인 완료 그리고 진행해"), false);
+  assert.equal(I.inputHas(("x\n".repeat(30)) + "> hi\n", "맨 위에 있던 글".repeat(2)), false);
+  const long = "가".repeat(300);
+  assert.equal(I.inputHas("> [Pasted text #1 +1 lines]\n", long), true);
+  assert.equal(I.inputHas("> [Pasted text #1 +1 lines]\n", "짧은 한 줄"), false); // 짧은 한 줄은 표시로 대신하지 않는다
+  assert.equal(I.inputHas("", "x"), false);
+});
+
+test("cleanText: 제어·bidi·제로폭 문자는 지우고 줄바꿈·탭은 둔다(\\r\\n은 \\n)", () => {
+  assert.equal(I.cleanText("a‮b​c\r\nd\u0007e\tf⁦g﻿h\u009bi"), "abc\nde\tfghi");
+  assert.equal(I.cleanText(null), "");
+  const r = I.chatRecord({ text: "답‮변\u0000", line: "줄​", ak: "k|1|l", to: "lead-a", po: "p1" }, "sent", 5);
+  assert.equal(r.text, "답변");
+  assert.equal(r.line, "줄");
+  assert.equal(r.ak, "k|1|l");
+  assert.equal(I.promptTail("a‮b\nc\u0007", 2).join("|"), "ab|c");
+});
+
+test("chatRecord·timeline: gone 상태가 있고, 내 글에 시각(at)이 실린다", () => {
+  assert.ok(I.CHAT_STATUS.includes("gone"));
+  assert.equal(I.chatRecord({ text: "x", po: "p1" }, "gone", 5).status, "gone");
+  const mine = [{ id: "1-a", ts: "t", ms: 1000, at: 4000, text: "x", po: "p1", kind: "chat", status: "gone" }];
+  const e = I.timeline("p1", [], [], mine, [], 5000).find((x) => x.who === "me");
+  assert.equal(e.at, 4000);
+  assert.equal(e.status, "gone");
+});
+
+// main.js 메서드를 가짜 this·전역으로 돌린다(런타임 없이 흐름만 본다).
+const runMethod = (src, head, next, globals) => {
+  const m = methodOf(src, head, next);
+  const names = Object.keys(globals);
+  return new Function(...names, `return ({ ${m.replace(/\n\s*\/\/[^\n]*\s*$/g, "")} });`)(...names.map((k) => globals[k]));
+};
+const tick = () => new Promise((r) => setImmediate(r));
+const mkGlobals = (extra = {}) => ({ hc: () => ({ code: 0, stdout: "" }), liveStatus: I.liveStatus, mineActs: I.mineActs, promptSig: I.promptSig, inputHas: I.inputHas, PROMPT_LINES: 40, NO_PO: "NOPO", chatTarget: null, ...extra });
+
+test("resend: 붙여 넣기 전에 sending으로 바꾸고, sending 중의 두 번째 클릭은 아무것도 보내지 않으며, 같은 카드를 sent로 닫는다", () => {
+  const src = mainSrc();
+  const rec = { id: "1-a", status: "nopane", at: Date.now() - 1000, ms: 1, text: "답", line: "답", to: "lead-a", po: "p1", ak: "decision|t|l" };
+  const log = [];
+  const self = {
+    recordOf: () => rec, recordPo: () => "t5", isBlocked: () => false, say: (m) => log.push(["say", m]),
+    mark: (id, st) => { rec.status = st; log.push(["mark", st]); },
+    deliver: (po, text) => { log.push(["deliver", po, text, rec.status]); return "sent"; },
+    markAsk: (r, how) => log.push(["ask", how]),
+  };
+  self.recordActs = runMethod(src, "  recordActs(r, po", "  // The bubble's \"다시 보내기\"", mkGlobals()).recordActs.bind(self);
+  const { resend } = runMethod(src, "  resend(id, c) {", "  // The bubble's \"Enter 누르기\"", mkGlobals());
+  const c = { notify() {} };
+  resend.call(self, "1-a", c);
+  assert.deepEqual(log.filter((x) => x[0] === "mark" || x[0] === "deliver").map((x) => x[0] === "deliver" ? `deliver:${x[3]}` : `mark:${x[1]}`), ["mark:sending", "deliver:sending"]); // deliver가 시작될 때 이미 sending
+  assert.ok(log.some((x) => x[0] === "ask" && x[1] === "sent"));
+  // sending 중(또 눌러도)
+  rec.status = "sending"; rec.at = Date.now();
+  const before = log.length;
+  resend.call(self, "1-a", c);
+  assert.equal(log.length, before); // 아무 일도 없음
+  // 막혔을 때(busy)는 원래 상태로 되돌린다
+  rec.status = "failed";
+  self.deliver = () => "busy";
+  resend.call(self, "1-a", c);
+  assert.equal(rec.status, "failed");
+});
+
+test("pressPrompt: 키 직전에 화면을 다시 읽어 질문이 바뀌었으면 키를 보내지 않고 패널을 새로 읽는다", async () => {
+  const src = mainSrc();
+  const Q1 = SYNTH_FOOTER, Q2 = SYNTH_FOOTER.replace("Do you want to proceed?", "Allow this edit?");
+  const calls = [];
+  let screen = Q1;
+  const g = mkGlobals({ hc: (a) => { calls.push(a.join(" ")); return { code: 0, stdout: a[0] === "read" ? screen : "" }; } });
+  const { pressPrompt } = runMethod(src, "  pressPrompt(po, key, c) {", "  promptPanel(t, v, cx) {", g);
+  const said = [];
+  const self = { prompt: { po: "t5", at: Date.now(), text: Q1 }, isBlocked: () => true, say: (m, bad) => said.push(m) };
+  const c = { notify() {} };
+  pressPrompt.call(self, "t5", "1", c); await tick(); await tick();
+  assert.deepEqual(calls, ["read t5 --lines 40", "keys t5 1"]); // 같은 질문이면 누른다
+  // 질문이 바뀜
+  calls.length = 0; said.length = 0; screen = Q2; self.prompt = { po: "t5", at: Date.now(), text: Q1 };
+  pressPrompt.call(self, "t5", "2", c); await tick(); await tick();
+  assert.deepEqual(calls, ["read t5 --lines 40"]); // 키 없음
+  assert.ok(said.some((m) => /질문이 바뀌었습니다, 다시 확인하세요/.test(m)));
+  assert.equal(self.prompt.text, Q2); // 패널이 새 화면으로 갱신
+  // 질문이 사라짐(막힘 해제)
+  calls.length = 0; said.length = 0; self.isBlocked = () => false;
+  pressPrompt.call(self, "t5", "1", c); await tick();
+  assert.deepEqual(calls, []);
+  // 화면을 아직 못 읽음
+  self.isBlocked = () => true; self.prompt = null; said.length = 0;
+  pressPrompt.call(self, "t5", "1", c); await tick();
+  assert.deepEqual(calls, []);
+  assert.ok(said.some((m) => /읽지 못해/.test(m)));
+  // 다시 읽기 실패
+  self.prompt = { po: "t5", at: Date.now(), text: Q1 }; screen = Q1;
+  g.hc = null;
+});
+
+test("enterNow: Enter 전에 입력창을 읽어 보낸 글이 없으면 gone으로 두고 Enter를 누르지 않는다, 있으면 누르고 sent + 카드 닫기", async () => {
+  const src = mainSrc();
+  const calls = [];
+  let screen = "╭──╮\n│ > 안녕하세요 PO │\n╰──╯\n";
+  let blockedAfterRead = false;
+  const rec = { id: "1-a", status: "noenter", at: Date.now() - 1000, ms: 1, text: "안녕하세요 PO", line: "안녕하세요 PO", to: "lead-a", po: "p1", ak: "k" };
+  const log = [];
+  const g = mkGlobals({ hc: (a) => { calls.push(a.join(" ")); return { code: 0, stdout: a[0] === "read" ? screen : "" }; } });
+  const self = {
+    recordOf: () => rec, recordPo: () => "t5", say: (m) => log.push(["say", m]),
+    isBlocked: () => blockedAfterRead,
+    mark: (id, st) => { rec.status = st; log.push(["mark", st]); }, markAsk: (r, how) => log.push(["ask", how]),
+  };
+  self.recordActs = runMethod(src, "  recordActs(r, po", "  // The bubble's \"다시 보내기\"", g).recordActs.bind(self);
+  const { enterNow } = runMethod(src, "  enterNow(id, c) {", "  // ---- A blocked PO's screen", g);
+  const c = { notify() {} };
+  enterNow.call(self, "1-a", c); await tick(); await tick(); await tick();
+  assert.deepEqual(calls, ["read t5 --lines 40", "keys t5 enter"]);
+  assert.equal(rec.status, "sent");
+  assert.ok(log.some((x) => x[0] === "ask" && x[1] === "sent"));
+  // 입력창에 글이 없음 → gone
+  calls.length = 0; log.length = 0; rec.status = "noenter"; screen = "output only\n";
+  enterNow.call(self, "1-a", c); await tick(); await tick(); await tick();
+  assert.deepEqual(calls, ["read t5 --lines 40"]);
+  assert.equal(rec.status, "gone");
+  assert.ok(log.some((x) => x[0] === "say" && /입력창에 보낸 글이 없어/.test(x[1])));
+  // 10분 지난 noenter는 Enter 버튼이 없다(아무 일 없음)
+  calls.length = 0; rec.status = "noenter"; rec.at = Date.now() - 11 * 60000; screen = "> 안녕하세요 PO\n";
+  enterNow.call(self, "1-a", c); await tick();
+  assert.deepEqual(calls, []);
+  // 지금 질문 중이면 읽지도 누르지도 않는다
+  rec.at = Date.now() - 1000; blockedAfterRead = true;
+  enterNow.call(self, "1-a", c); await tick();
+  assert.deepEqual(calls, []);
+});
+
+test("main.js: R8 배선 — 방 목록 질문 표시, deliver 정리, awaitPane 순서, readPrompt 시간 제한, submitPo 재확인, ask 카드 표시", () => {
+  const src = mainSrc();
+  // 방 목록(고르개·좁은 목록·방 칸)이 같은 배지 함수로 질문 중 표시를 낸다
+  const rb = methodOf(src, "  roomBadges(t, x) {", "\n  }\n");
+  assert.match(rb, /x\.blocked/);
+  assert.match(rb, /질문/);
+  assert.equal((src.match(/this\.roomBadges\(t, x\)/g) ?? []).length, 3);
+  assert.match(src, /blocked: this\.isBlocked\(p\.address\)/); // 방마다 막힘 여부
+  assert.match(src, /label: OTHER_LABEL, title: "", blocked: false/);
+  // 붙여 넣기 직전 글 정리
+  assert.match(deliverOf(src), /text = cleanText\(text\)/);
+  // opening 표시는 붙여 넣기가 끝난 뒤 지운다(go 안의 try/catch 다음)
+  const ap = methodOf(src, "  awaitPane(", "\n  }\n");
+  assert.ok(ap.indexOf("this.deliver(") < ap.indexOf("this.opening.delete(po)", ap.indexOf("const go"))); // go 안: 붙여 넣기 뒤에 지운다
+  assert.ok(!/this\.opening\.delete\(po\);\s*\n\s*const go/.test(ap)); // go 앞에서 먼저 지우지 않는다
+  // readPrompt: 시간 제한 + 세대 확인
+  const rp = methodOf(src, "  readPrompt(po, cx) {", "  pressPrompt(po, key, c) {");
+  assert.match(rp, /PROMPT_TIMEOUT_MS/);
+  assert.match(rp, /gen !== this\.promptGen/);
+  assert.match(src, /const PROMPT_TIMEOUT_MS = \d+/);
+  // submitPo: Enter 직전 다시 막혔는지 본다
+  const sub = methodOf(src, "  submitPo(po, c, settle", "  sendChat(c) {");
+  assert.ok(sub.indexOf("this.isBlocked(po)") > 0 && sub.indexOf("this.isBlocked(po)") < sub.indexOf('hc(["keys", po, "enter"])'));
+  assert.match(sub, /this\.mark\(id, "held"\)/);
+  // ask 카드: 보낸 표시는 resend·enterNow에서도 닫는다
+  assert.match(src, /markAsk\(r, how\) \{/);
+  assert.match(methodOf(src, "  enterNow(id, c) {", "  // ---- A blocked PO's screen"), /this\.markAsk\(r, "sent"\)/);
+  // 질문 패널은 화면이 몇 초 전 것인지 보여 준다
+  assert.match(methodOf(src, "  promptPanel(t, v, cx) {", "  // A panel answer:"), /초 전 화면/);
+});
+
+// ---- 채팅 필터 (#36, #37)
+const LEAD = (kind, ms, extra = {}) => ({ key: `l|a|${ms}`, who: "l:a", ms, leader: "a", it: { kind, ts: String(ms), ms }, ...extra });
+const MIXED = [
+  LEAD("done", 100), LEAD("decision", 200), LEAD("verify", 300), LEAD("stop", 400), LEAD("resume", 500), LEAD("start", 550), LEAD("other", 600),
+  { key: "po|700|x", who: "po", ms: 700, text: "x" },
+  { key: "me|800|y", who: "me", ms: 800, text: "y", status: "sent" },
+];
+const keysOf = (l) => l.map((e) => e.key);
+test("filterEntries: 칩 6개 순서와 이름", () => {
+  assert.deepEqual(I.CHAT_FILTERS.map((f) => f[1]), ["전체", "안 읽은 것", "결정 필요", "최종 확인 요청", "결과", "멈춤"]);
+  assert.deepEqual(I.CHAT_FILTERS.map((f) => f[0]), ["all", "unread", "decision", "verify", "done", "stop"]);
+});
+test("filterEntries: 종류별 필터는 그 종류의 리더 보고만 — 내 글·PO 글·resume/start/other는 전체에만", () => {
+  assert.equal(I.filterEntries(MIXED, "all", 0).length, MIXED.length);
+  assert.deepEqual(keysOf(I.filterEntries(MIXED, "decision", 0)), ["l|a|200"]);
+  assert.deepEqual(keysOf(I.filterEntries(MIXED, "verify", 0)), ["l|a|300"]);
+  assert.deepEqual(keysOf(I.filterEntries(MIXED, "done", 0)), ["l|a|100"]); // 결과는 done만
+  assert.deepEqual(keysOf(I.filterEntries(MIXED, "stop", 0)), ["l|a|400"]);
+  for (const f of ["decision", "verify", "done", "stop"]) {
+    for (const e of I.filterEntries(MIXED, f, 0)) assert.ok(e.who !== "me" && e.who !== "po");
+  }
+  assert.deepEqual(I.filterEntries(MIXED, "bogus", 0), MIXED); // 모르는 필터는 전체
+  assert.deepEqual(I.filterEntries(undefined, "done", 0), []);
+});
+test("filterEntries: 기다리는 리더는 기다리는 종류로 센다(보고 종류가 달라도, 보고 없는 대기 줄도)", () => {
+  const list = [LEAD("done", 100, { waiting: "decision" }), { key: "w|b", who: "l:b", ms: 900, leader: "b", waiting: "verify", wait: true }];
+  assert.deepEqual(keysOf(I.filterEntries(list, "decision", 0)), ["l|a|100"]);
+  assert.deepEqual(keysOf(I.filterEntries(list, "verify", 0)), ["w|b"]);
+  assert.deepEqual(I.filterEntries(list, "done", 0), []);
+});
+test("filterEntries: 안 읽은 것은 방을 열 때의 기준(snapshot)보다 새 글만, 내 글과 대기 줄은 아니다", () => {
+  const seen = 450; // 방을 열 때 마지막으로 본 시각
+  assert.deepEqual(keysOf(I.filterEntries(MIXED, "unread", seen)), ["l|a|500", "l|a|550", "l|a|600", "po|700|x"]);
+  // 방을 열면 실제 기준은 지금으로 올라간다: 그 값으로 거르면 곧바로 비지만, 열 때의 값으로 걸러야 한다
+  assert.equal(I.filterEntries(MIXED, "unread", 800).length, 0);
+  assert.equal(I.filterCounts(MIXED, seen).unread, 4);
+  const w = { key: "w|b", who: "l:b", ms: 9999, leader: "b", waiting: "decision", wait: true };
+  assert.equal(I.filterEntries([...MIXED, w], "unread", seen).includes(w), false);
+  assert.equal(I.filterEntries(MIXED, "unread", undefined).length, MIXED.length - 1); // 기준 0이면 내 글만 빠진다
+});
+test("filterCounts: 칩마다 개수(0도 키가 있다), 빈 방은 모두 0", () => {
+  assert.deepEqual(I.filterCounts(MIXED, 450), { all: 9, unread: 4, decision: 1, verify: 1, done: 1, stop: 1 });
+  assert.deepEqual(I.filterCounts([], 0), { all: 0, unread: 0, decision: 0, verify: 0, done: 0, stop: 0 });
+  assert.deepEqual(I.filterCounts(null, 0), { all: 0, unread: 0, decision: 0, verify: 0, done: 0, stop: 0 });
+});
+test("timeline: 같은 시각·같은 글이 둘이어도 key(=요소 id)가 겹치지 않는다", () => {
+  const po = [{ ms: 5, ts: "t", text: "same" }, { ms: 5, ts: "t", text: "same" }];
+  const mine = [{ ms: 9, ts: "t", text: "me", po: "r", status: "sent" }, { ms: 9, ts: "t", text: "me", po: "r", status: "sent" }];
+  const keys = keysOf(I.timeline("r", [], po, mine, [], 100));
+  assert.equal(new Set(keys).size, 4);
+  assert.ok(keys.includes("po|5|same") && keys.includes("po|5|same#1"));
+});
+test("main.js: chat 블록(필터 함수 포함)은 inbox.cjs와 같다", () => {
+  const cut = (t) => t.slice(t.indexOf("// chat:begin"), t.indexOf("// chat:end"));
+  const cjs = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8");
+  assert.equal(cut(mainSrc()), cut(cjs));
+  assert.match(cut(mainSrc()), /function filterEntries/);
+});
+test("main.js: 필터 배선 — 방별 상태, 열 때 기준 저장(표시 전환 전), 칩 줄, 빈 화면 '전체 보기', 세 화면 공통", () => {
+  const src = mainSrc();
+  assert.match(src, /this\.filt = new Map\(\)/);
+  // 기준은 읽음 표시를 올리기 전에 잡는다
+  const ms = methodOf(src, "  markSeen() {", "  setFilter(");
+  assert.ok(ms.indexOf("this.snap = ") > 0 && ms.indexOf("this.snap = ") < ms.indexOf("setShared(SEEN_KEY"));
+  // view: 기준으로 거르고, raw(읽음 표시용)는 거르지 않은 전체
+  const vw = methodOf(src, "  view() {", "  // Remembers that the person");
+  assert.match(vw, /filterEntries\(raw, filter, base\)/);
+  assert.match(vw, /this\.snap\?\.room === pick \? this\.snap\.seen/);
+  assert.match(vw, /filterCounts\(raw, base\)/);
+  // 칩 줄: 6칩, 개수, 0이어도 누를 수 있다(on_click은 항상), 누름이 창을 끌지 않게 stop
+  const fb = methodOf(src, "  filterBar(t, v) {", "  pickPo(id, c) {");
+  assert.match(fb, /CHAT_FILTERS\.map/);
+  assert.match(fb, /\$\{label\} \$\{n\}/);
+  assert.match(fb, /on_mouse_down\("left", stop\)/);
+  assert.match(fb, /on_click\(\(_e, c\) => this\.setFilter\(v\.pick, k, c\)\)/);
+  assert.ok(!/disabled/.test(fb));
+  // 빈 상태 + 전체 보기 칩
+  assert.match(src, /해당 메시지 없음 —/);
+  assert.match(src, /"flt-reset", "전체 보기"/);
+  // 한 full()이 Dock·창·페인 모두를 그린다: 칩 줄은 방 칸 안에, 타임라인 위
+  const fl = methodOf(src, "  full(cx) {", "    return v_flex().size_full()");
+  assert.ok(fl.indexOf(".child(el.child(bar))") < 0);
+  assert.ok(fl.indexOf("el.child(bar)") > 0 && fl.indexOf("el.child(bar)") < fl.indexOf(".child(lines)"));
+  assert.equal((src.match(/^  full\(cx\) \{/gm) ?? []).length, 1);
+});
+// 동작: setFilter / markSeen 기준 / view 필터
+test("setFilter: 방마다 따로 기억하고 다시 그린다", () => {
+  const src = mainSrc();
+  let n = 0;
+  const m = runMethod(src, "  setFilter(room, key, c) {", "  // The chips above", mkGlobals()).setFilter;
+  const self = { filt: new Map() };
+  m.call(self, "r1", "done", { notify: () => n++ });
+  m.call(self, "r2", "stop", { notify: () => n++ });
+  m.call(self, "", "stop", { notify: () => n++ });
+  assert.equal(self.filt.get("r1"), "done");
+  assert.equal(self.filt.get("r2"), "stop");
+  assert.equal(self.filt.size, 2);
+  assert.equal(n, 2);
+});
+
+// ---- 글자 드래그 선택 (#36, #37)
+test("글자는 모두 TextView(selectable)로 그린다 — 말풍선·내 글·PO 글·질문 화면 줄, 글자 위 부모에는 누름 처리가 없다", () => {
+  const src = mainSrc();
+  assert.match(methodOf(src, "  text(id, html) {", "  codeBlock("), /TextView\.html\(id, html\)\.selectable\(true\)/);
+  // 질문 패널 화면 줄은 더 이상 그냥 div 글이 아니다
+  const pp = methodOf(src, "  promptPanel(t, v, cx) {", "  // A panel answer:");
+  assert.match(pp, /this\.text\(`pp-l\$\{i\}`, chatHtml\(l\)\)/);
+  assert.ok(!/id\(`pp-l/.test(pp));
+  // 글자를 담는 줄에는 누름 처리가 없다: this.text( 가 있는 줄(말풍선 본문·내 글·PO 글)에 on_click/on_mouse_down이 같이 있으면 안 된다
+  for (const l of src.split("\n")) {
+    if (/this\.text\(/.test(l) && !/^\s*text\(/.test(l)) assert.ok(!/on_click|on_mouse_down/.test(l), l.trim());
+  }
+  // 글자 부모를 감싸는 곳 중 누름을 가로채는 것은 타임라인 목록 하나뿐이고(자식이 먼저 받는다), 나머지 on_mouse_down은 모두 버튼·칩·입력칸 줄이다
+  const downs = src.split("\n").filter((l) => /on_mouse_down\("left", stop\)/.test(l) && /this\.text\(/.test(l));
+  assert.equal(downs.length, 0);
+});
+test("글자 요소 id는 다시 그려도 그대로이고 서로 겹치지 않는다(같은 시각 같은 글 포함)", () => {
+  const po = [{ ms: 5, ts: "t", text: "same" }, { ms: 5, ts: "t", text: "same" }];
+  const a = I.timeline("r", [], po, [], [], 100).map((e) => `tl-${String(e.key).slice(0, 80)}`);
+  const b = I.timeline("r", [], po, [], [], 999).map((e) => `tl-${String(e.key).slice(0, 80)}`); // 나중에 다시 그려도(now만 다름)
+  assert.deepEqual(a, b);
+  assert.equal(new Set(a).size, a.length);
 });
