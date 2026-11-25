@@ -1862,44 +1862,44 @@ export default class Inbox extends View {
     } catch {}
     return { path: "", exists: false, ms: 0, size: 0, text: "" };
   }
-  // One line into the PO's input (paste, then Enter), the way every desk send goes. cb(ok, why). Never into a PO that waits on a prompt.
-  typeLine(po, text, c, cb, still = () => true) {
-    const fin = (ok, why = "") => { try { cb(ok, why); } catch {} };
-    if (this.isBlocked(po)) { fin(false, "PO가 질문 중입니다"); return; }
-    if (!still()) { fin(false, "취소되었습니다"); return; }
+  // The whole run is ONE async function inside cx.spawn: a click's or a timer's cx is only good during its own call, so after an await
+  // only the spawn's cx is used (never the click's c). Waiting is sleepOn (a timer that resolves a promise), never a callback chain.
+  sleepOn(cx, ms) { return new Promise((res) => { try { cx.timer.after(ms, () => res()); } catch { res(); } }); }
+  async readScreen(po, lines) {
+    try { const o = await hc(["read", po, "--lines", String(lines)]); return o && o.code === 0 ? String(o.stdout ?? "") : null; } catch { return null; }
+  }
+  // One line into the PO's input (paste, then Enter), the way every desk send goes. Resolves {ok, why}. Never into a PO that waits on a prompt.
+  async typeLine(po, text, cx, still = () => true) {
+    const no = (why) => ({ ok: false, why });
+    if (this.isBlocked(po)) return no("PO가 질문 중입니다");
+    if (!still()) return no("취소되었습니다");
     let back = "";
     try { back = focused()?.pane ?? ""; } catch {}
     try {
-      c.write_to_clipboard(text);
-      if (!(panes() ?? []).some((p) => p.terminal === po)) { fin(false, "PO 칸이 열려 있지 않습니다"); return; }
+      cx.write_to_clipboard(text);
+      if (!(panes() ?? []).some((p) => p.terminal === po)) return no("PO 칸이 열려 있지 않습니다");
       run("pane.focus", { terminal: po });
-      try { run("terminal.paste", {}); } catch { this.restore(back, c); fin(false, "붙여 넣지 못했습니다"); return; }
-    } catch (e) { fin(false, String(e?.message ?? e).slice(0, 100)); return; }
+      try { run("terminal.paste", {}); } catch { this.restore(back, cx); return no("붙여 넣지 못했습니다"); }
+    } catch (e) { return no(String(e?.message ?? e).slice(0, 100)); }
+    await this.sleepOn(cx, PASTE_SETTLE_MS + Math.min(600, Math.floor(String(text).length / 2)));
     // Enter is pressed only when, right now: the run was not cancelled, the PO is neither on a prompt nor working, and its input holds the
     // pasted line and nothing else (a half-typed text of the person would be sent together with it). Otherwise the pasted line stays in the
     // input for the person to remove.
-    const stop = (cx, why) => { this.restore(back, cx); fin(false, `${why} — PO 입력칸에 붙여 넣은 줄이 남아 있으면 지워 주세요`); };
-    const press = (cx) => {
-      if (!still()) { stop(cx, "취소되어 Enter를 누르지 않았습니다"); return; }
-      const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "").trim().toLowerCase();
-      if (st === "blocked") { stop(cx, "PO가 그 사이 질문 중이 되어 Enter를 누르지 않았습니다"); return; }
-      if (st === "working") { stop(cx, "PO가 그 사이 일을 시작해 Enter를 누르지 않았습니다"); return; }
-      let rd;
-      try { rd = hc(["read", po, "--lines", String(PROMPT_LINES)]); } catch { stop(cx, "PO 화면을 읽지 못해 Enter를 누르지 않았습니다"); return; }
-      Promise.resolve(rd).then((o) => {
-        if (!(o && o.code === 0)) { stop(cx, "PO 화면을 읽지 못해 Enter를 누르지 않았습니다"); return null; }
-        if (!restartInputOnly(String(o.stdout ?? ""), text)) { stop(cx, "PO 입력칸에 붙여 넣은 줄만 있는 것이 아니라서 Enter를 누르지 않았습니다"); return null; }
-        if (!still()) { stop(cx, "취소되어 Enter를 누르지 않았습니다"); return null; }
-        return hc(["keys", po, "enter"]);
-      }).then((k) => {
-        if (k === null) return;
-        this.restore(back, cx);
-        if (k && k.code === 0) fin(true); else fin(false, "Enter를 누르지 못했습니다");
-      }).catch(() => { this.restore(back, cx); fin(false, "Enter를 누르지 못했습니다"); });
-    };
-    try { c.timer.after(PASTE_SETTLE_MS + Math.min(600, Math.floor(String(text).length / 2)), press); } catch { press(c); }
+    const stop = (why) => { this.restore(back, cx); return no(`${why} — PO 입력칸에 붙여 넣은 줄이 남아 있으면 지워 주세요`); };
+    if (!still()) return stop("취소되어 Enter를 누르지 않았습니다");
+    const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "").trim().toLowerCase();
+    if (st === "blocked") return stop("PO가 그 사이 질문 중이 되어 Enter를 누르지 않았습니다");
+    if (st === "working") return stop("PO가 그 사이 일을 시작해 Enter를 누르지 않았습니다");
+    const screen = await this.readScreen(po, PROMPT_LINES);
+    if (screen === null) return stop("PO 화면을 읽지 못해 Enter를 누르지 않았습니다");
+    if (!restartInputOnly(screen, text)) return stop("PO 입력칸에 붙여 넣은 줄만 있는 것이 아니라서 Enter를 누르지 않았습니다");
+    if (!still()) return stop("취소되어 Enter를 누르지 않았습니다");
+    let k = null;
+    try { k = await hc(["keys", po, "enter"]); } catch {}
+    this.restore(back, cx);
+    return k && k.code === 0 ? { ok: true, why: "" } : no("Enter를 누르지 못했습니다");
   }
-  // 새로 시작 / 다시: asks the PO for the note (step 1) and then waits for it.
+  // 새로 시작 / 다시: the click only checks and records the run; everything after runs in cx.spawn.
   restartRun(room, po, id, c) {
     const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "");
     const why = restartBlock({ po, status: st });
@@ -1907,75 +1907,65 @@ export default class Inbox extends View {
     const g = ++this.rgen;
     this.rs.set(room, { phase: "run", n: 0, gen: g, po, id, since: 0, path: "", note: null, quiet: 0, why: "" });
     try { c.notify(); } catch {}
-    this.handoffRead(id).then((note) => {
-      if (!this.restartAlive(room, g)) return;
-      const path = note.path || `~/.herdr-inbox/po/${id}.handoff.md`;
-      const since = Date.now();
-      this.restartSet(room, g, { path, since }, c);
-      this.typeLine(po, handoffAsk(path), c, (ok, w) => {
-        if (!ok) { this.restartFail(room, g, `노트를 요청하지 못했습니다(${w})`, c); return; }
-        if (this.restartSet(room, g, { n: 1 }, c)) this.restartWait(room, g, c);
-      }, () => this.restartAlive(room, g));
+    c.spawn(async (cx) => {
+      try { await this.restartFlow(room, g, po, id, cx); }
+      catch (e) { this.restartFail(room, g, String(e?.message ?? e).slice(0, 100), cx); }
     });
   }
-  // Steps 2-3: look for the note every RESTART_POLL_MS; the note is fresh (written after the request) -> show it; the PO idle after it -> /clear.
-  restartWait(room, g, c) {
-    const tick = (cx) => {
+  // Steps 1-4. Every step checks the run is still the same (gen).
+  async restartFlow(room, g, po, id, cx) {
+    const alive = () => this.restartAlive(room, g);
+    // Step 1: ask for the note.
+    const note0 = await this.handoffRead(id);
+    if (!alive()) return;
+    const path = note0.path || `~/.herdr-inbox/po/${id}.handoff.md`;
+    this.restartSet(room, g, { path, since: Date.now() }, cx);
+    const ask = await this.typeLine(po, handoffAsk(path), cx, alive);
+    if (!alive()) return;
+    if (!ask.ok) { this.restartFail(room, g, `노트를 요청하지 못했습니다(${ask.why})`, cx); return; }
+    if (!this.restartSet(room, g, { n: 1 }, cx)) return;
+    // Steps 2-3: look for the note every RESTART_POLL_MS; the note is fresh (written after the request) -> show it; the PO idle after it -> /clear.
+    for (;;) {
+      await this.sleepOn(cx, RESTART_POLL_MS);
       const r = this.rs.get(room);
       if (!r || r.gen !== g || r.phase !== "run") return;
-      this.handoffRead(r.id).then((note) => {
-        const cur = this.rs.get(room);
-        if (!cur || cur.gen !== g || cur.phase !== "run") return;
-        const status = String(this.liveTerms().find((t) => t.address === cur.po)?.status ?? "");
-        const act = restartPoll({ note, since: cur.since, now: Date.now(), status, quiet: cur.quiet });
-        if (act === "timeout") { this.restartSet(room, g, { phase: "timeout" }, cx); return; }
-        if (act === "wait") { try { cx.timer.after(RESTART_POLL_MS, tick); } catch {} return; }
-        if (!cur.note || cur.note.ms !== note.ms) this.restartSet(room, g, { n: 2, note: { text: note.text, ms: note.ms } }, cx);
-        if (act === "go") { this.restartClear(room, g, cx); return; }
-        const idle = !/^(working|blocked)$/i.test(status.trim());
-        this.rs.set(room, { ...this.rs.get(room), quiet: idle ? (cur.quiet ?? 0) + 1 : 0 }); // the PO must look idle twice in a row
-        try { cx.timer.after(RESTART_POLL_MS, tick); } catch {}
-      }).catch(() => { try { cx.timer.after(RESTART_POLL_MS, tick); } catch {} });
-    };
-    try { c.timer.after(RESTART_POLL_MS, tick); } catch {}
-  }
-  // Step 3: /clear, then read the screen until the request is gone from it (restartCleared); step 4: /PO.
-  restartClear(room, g, c) {
-    const r = this.rs.get(room);
-    if (!r || r.gen !== g) return;
-    this.rs.set(room, { ...r, phase: "clear" });
-    const alive = () => this.restartAlive(room, g);
-    const readAll = (cb) => {
-      let rd;
-      try { rd = hc(["read", r.po, "--lines", String(RESTART_READ_LINES)]); } catch { cb(null); return; }
-      Promise.resolve(rd).then((o) => cb(o && o.code === 0 ? String(o.stdout ?? "") : null)).catch(() => cb(null));
-    };
+      const note = await this.handoffRead(r.id);
+      const cur = this.rs.get(room);
+      if (!cur || cur.gen !== g || cur.phase !== "run") return;
+      const status = String(this.liveTerms().find((t) => t.address === cur.po)?.status ?? "");
+      const act = restartPoll({ note, since: cur.since, now: Date.now(), status, quiet: cur.quiet });
+      if (act === "timeout") { this.restartSet(room, g, { phase: "timeout" }, cx); return; }
+      if (act === "wait") continue;
+      if (!cur.note || cur.note.ms !== note.ms) this.restartSet(room, g, { n: 2, note: { text: note.text, ms: note.ms } }, cx);
+      if (act === "go") break;
+      const idle = !/^(working|blocked)$/i.test(status.trim());
+      this.rs.set(room, { ...this.rs.get(room), quiet: idle ? (cur.quiet ?? 0) + 1 : 0 }); // the PO must look idle twice in a row
+    }
+    // Step 3: /clear, then read the screen until the request is gone from it (restartCleared); step 4: /PO.
+    this.rs.set(room, { ...this.rs.get(room), phase: "clear" });
     // Before /clear: the request marker must be in the PO's whole history, else the desk cannot tell later whether /clear happened.
-    readAll((before) => {
+    const before = await this.readScreen(po, RESTART_READ_LINES);
+    if (!alive()) return;
+    if (before === null) { this.restartFail(room, g, "PO 화면을 읽지 못해 /clear를 보내지 않았습니다", cx); return; }
+    if (!restartHasMark(before)) { this.restartFail(room, g, "PO 기록에서 노트 요청을 찾지 못해 /clear가 실행됐는지 확인할 수 없어 /clear를 보내지 않았습니다", cx); return; }
+    const clr = await this.typeLine(po, "/clear", cx, alive);
+    if (!alive()) return;
+    if (!clr.ok) { this.restartFail(room, g, `/clear를 보내지 못했습니다(${clr.why})`, cx); return; }
+    const t0 = Date.now();
+    for (;;) {
+      await this.sleepOn(cx, 800);
       if (!alive()) return;
-      if (before === null) { this.restartFail(room, g, "PO 화면을 읽지 못해 /clear를 보내지 않았습니다", c); return; }
-      if (!restartHasMark(before)) { this.restartFail(room, g, "PO 기록에서 노트 요청을 찾지 못해 /clear가 실행됐는지 확인할 수 없어 /clear를 보내지 않았습니다", c); return; }
-      this.typeLine(r.po, "/clear", c, (ok, w) => {
-        if (!ok) { this.restartFail(room, g, `/clear를 보내지 못했습니다(${w})`, c); return; }
-        const t0 = Date.now();
-        const look = (cx) => {
-          if (!alive()) return;
-          readAll((after) => {
-            if (!alive()) return;
-            if (after !== null && restartCleared(after)) {
-              this.restartSet(room, g, { n: 3 }, cx);
-              this.typeLine(r.po, "/PO", cx, (ok2, w2) => {
-                if (!ok2) { this.restartFail(room, g, `/PO를 보내지 못했습니다(${w2})`, cx); return; }
-                this.restartSet(room, g, { n: 4, phase: "done" }, cx);
-                this.say("PO를 새로 시작했습니다.");
-              }, alive);
-            } else if (Date.now() - t0 >= RESTART_CLEAR_MS) this.restartFail(room, g, "/clear 뒤에도 이전 대화가 기록에 남아 있어 /PO를 보내지 않았습니다", cx);
-            else try { cx.timer.after(800, look); } catch {}
-          });
-        };
-        try { c.timer.after(800, look); } catch { look(c); }
-      }, alive);
-    });
+      const after = await this.readScreen(po, RESTART_READ_LINES);
+      if (!alive()) return;
+      if (after !== null && restartCleared(after)) break;
+      if (Date.now() - t0 >= RESTART_CLEAR_MS) { this.restartFail(room, g, "/clear 뒤에도 이전 대화가 기록에 남아 있어 /PO를 보내지 않았습니다", cx); return; }
+    }
+    this.restartSet(room, g, { n: 3 }, cx);
+    const fin = await this.typeLine(po, "/PO", cx, alive);
+    if (!alive()) return;
+    if (!fin.ok) { this.restartFail(room, g, `/PO를 보내지 못했습니다(${fin.why})`, cx); return; }
+    this.restartSet(room, g, { n: 4, phase: "done" }, cx);
+    this.say("PO를 새로 시작했습니다.");
   }
   // The strip above the chat box: the button (idle), the confirm line, or the four steps of the run.
   restartRow(t, v, cx) {

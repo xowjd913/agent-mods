@@ -2085,16 +2085,19 @@ test("main.js: PO 새로 시작 배선 — 방별 상태, 버튼은 막힌 이�
   assert.match(src, /restartSteps\(r\.n, failed\)/);
   assert.match(src, /who: "po", head: true, ms: hn\.ms/);
   // typeLine never records a chat bubble and never types into a PO on a prompt
-  const tl = src.slice(src.indexOf("  typeLine("), src.indexOf("  // 새로 시작 / 다시"));
+  const tl = src.slice(src.indexOf("  async typeLine("), src.indexOf("  // 새로 시작 / 다시"));
   assert.match(tl, /if \(this\.isBlocked\(po\)\)/);
   assert.doesNotMatch(tl, /setShared|CHAT_KEY|record/);
   // /PO only after the screen was verified cleared; a timeout/failure clears nothing
-  const cl = src.slice(src.indexOf("  restartClear("), src.indexOf("  // The strip above the chat box"));
-  assert.ok(cl.indexOf("restartCleared(") < cl.indexOf('"/PO"'));
-  assert.match(cl, /\/PO를 보내지 않았습니다/);
-  const w = src.slice(src.indexOf("  restartWait("), src.indexOf("  // Step 3: /clear"));
-  assert.match(w, /act === "timeout"/);
-  assert.ok(!w.includes('"/clear"'));
+  const fl = src.slice(src.indexOf("  async restartFlow("), src.indexOf("  // The strip above the chat box"));
+  assert.ok(fl.indexOf("restartCleared(after)") < fl.indexOf('"/PO"'));
+  assert.ok(fl.indexOf("restartHasMark(before)") < fl.indexOf('"/clear"'));
+  assert.match(fl, /\/PO를 보내지 않았습니다/);
+  assert.match(fl, /act === "timeout"/);
+  // no callback chain after an await: no .then(, and the click's c is only used by restartRun before its spawn
+  const rr = src.slice(src.indexOf("  sleepOn("), src.indexOf("  // The strip above the chat box"));
+  assert.doesNotMatch(rr, /\.then\(/);
+  assert.match(rr, /c\.spawn\(async \(cx\) =>/);
 });
 
 // ---- Claude 사용률 한 줄 (#42)
@@ -2179,66 +2182,114 @@ test("restartHasMark/restartInputOnly: 전체 기록에 표식이 있는지, 입
   assert.equal(I.restartInputOnly("o\n❯ draft " + ask.slice(0, 80), ask), false);
   assert.equal(I.restartInputOnly("o\n❯ [Pasted text #1 +3 lines]", ask), true);
 });
-const typeLineHarness = ({ status = "idle", screen = "❯ /clear", alive = () => true } = {}) => {
+// ---- 새로 시작 전체 흐름: 낡은 cx를 쓰면 던지는 가짜 cx로 4단계를 끝까지 돌린다 (#41) ----
+// A click's or a timer's cx is good only during its own call (the host throws "cx is no longer valid" later); the cx a spawn passes in stays good.
+const strictCx = (log, kind = "sync") => {
+  const cx = { valid: true, kind };
+  const need = (what) => { if (!cx.valid) { const e = new Error(`cx is no longer valid: ${what}`); log.stale.push(what); throw e; } };
+  cx.write_to_clipboard = (t) => { need("write_to_clipboard"); log.clip = t; };
+  cx.notify = () => { need("notify"); };
+  cx.timer = { after: (ms, f) => { need("timer.after"); setImmediate(() => { const c2 = strictCx(log, "timer"); try { f(c2); } finally { c2.valid = false; } }); } };
+  cx.spawn = (f) => { need("spawn"); const sc = strictCx(log, "spawn"); log.spawned++; Promise.resolve().then(() => f(sc)).catch(() => {}); };
+  return cx;
+};
+const restartWorld = ({ clearWorks = true, markInHistory = true, busyAfterPaste = false } = {}) => {
   const src = mainSrc();
-  const calls = [];
-  const timers = [];
+  const log = { stale: [], spawned: 0, keys: [], clip: "", pasted: [], says: [] };
+  const po = { hist: markInHistory ? "older talk" : "older talk", input: "", status: "idle", noteMs: 0, sent: [] };
   const g = mkGlobals({
-    hc: (a) => { calls.push(a[0]); return { code: 0, stdout: a[0] === "read" ? screen : "" }; },
-    focused: () => ({ pane: "pp" }), panes: () => [{ terminal: "t9" }], run: () => {}, PASTE_SETTLE_MS: 350, PROMPT_LINES: 40, restartInputOnly: I.restartInputOnly,
+    RESTART_READ_LINES: 400, RESTART_POLL_MS: 2000, RESTART_CLEAR_MS: 10000, PASTE_SETTLE_MS: 350, RESTART_MARK: I.RESTART_MARK,
+    restartBlock: I.restartBlock, restartPoll: I.restartPoll, restartHasMark: I.restartHasMark, restartCleared: I.restartCleared, restartInputOnly: I.restartInputOnly,
+    handoffAsk: I.handoffAsk, HELPER: () => "h.cjs", focused: () => ({ pane: "pp" }), panes: () => [{ terminal: "t9" }],
+    run: (name) => { if (name === "terminal.paste") { log.pasted.push(log.clip); po.input = log.clip; } },
+    exec: async () => ({ code: 0, stdout: JSON.stringify({ path: "/n.md", exists: po.noteMs > 0, ms: po.noteMs, size: po.noteMs ? 20 : 0, text: po.noteMs ? "note" : "" }) }),
+    hc: async (a) => {
+      if (a[0] === "read") return { code: 0, stdout: `${po.hist}\n❯ ${po.input}` };
+      if (a[0] === "keys") {
+        log.keys.push(po.input);
+        const line = po.input; po.input = "";
+        if (line.startsWith(I.RESTART_MARK)) { po.hist += `\n${line}`; po.noteMs = Date.now() + 5; }
+        else if (line === "/clear") { if (clearWorks) po.hist = "Claude Code"; }
+        else if (line === "/PO") po.hist += "\n/PO";
+        return { code: 0, stdout: "" };
+      }
+      return { code: 0, stdout: "" };
+    },
   });
-  const self = { isBlocked: () => status === "blocked", liveTerms: () => [{ address: "t9", status }], restore: () => {} };
-  const { typeLine } = runMethod(src, "  typeLine(po, text, c, cb, still = () => true) {", "  // 새로 시작 / 다시", g);
-  const c = { write_to_clipboard() {}, timer: { after: (ms, f) => timers.push(f) } };
-  const res = [];
-  typeLine.call(self, "t9", "/clear", c, (ok, why) => res.push([ok, why]), alive);
-  return { calls, res, fire: async () => { timers.shift()(c); await tick(); await tick(); await tick(); } };
-};
-test("typeLine: 붙여 넣은 뒤 Enter 직전에 취소·작업 중·질문 중·다른 글이 있으면 hc keys를 누르지 않는다", async () => {
-  let live = true;
-  let h = typeLineHarness({ alive: () => live });
-  live = false; await h.fire(); // 붙여 넣은 뒤 취소
-  assert.ok(!h.calls.includes("keys"));
-  assert.equal(h.res[0][0], false);
-  assert.match(h.res[0][1], /취소/);
-  h = typeLineHarness({ status: "working" }); await h.fire();
-  assert.ok(!h.calls.includes("keys")); assert.match(h.res[0][1], /일을 시작/);
-  h = typeLineHarness({ status: "blocked" });
-  assert.deepEqual(h.res[0], [false, "PO가 질문 중입니다"]); // 붙여 넣기 전에 이미 막힘
-  h = typeLineHarness({ screen: "❯ my draft/clear" }); await h.fire();
-  assert.ok(!h.calls.includes("keys")); assert.match(h.res[0][1], /붙여 넣은 줄만/);
-  h = typeLineHarness(); await h.fire(); // 정상
-  assert.ok(h.calls.includes("keys"));
-  assert.deepEqual(h.res[0], [true, ""]);
-});
-const clearHarness = ({ reads }) => {
-  const src = mainSrc();
-  const sent = [], fails = [];
-  const timers = [];
-  let n = 0;
-  const g = mkGlobals({ hc: (a) => ({ code: 0, stdout: reads[Math.min(n++, reads.length - 1)] }), RESTART_READ_LINES: 400, RESTART_CLEAR_MS: 10000, restartHasMark: I.restartHasMark, restartCleared: I.restartCleared });
   const self = {
-    rs: new Map([["r", { po: "t9", gen: 1, phase: "run", n: 2 }]]),
-    restartAlive: () => true, restartSet: () => true, say: () => {},
-    restartFail: (room, gen, why) => fails.push(why),
-    typeLine: (po, text, c, cb) => { sent.push(text); cb(true); },
+    rs: new Map(), rgen: 0, chat: { focus() {} },
+    liveTerms: () => [{ address: "t9", status: po.status }], isBlocked: () => po.status === "blocked",
+    say: (m) => log.says.push(m), restore() {},
   };
-  const { restartClear } = runMethod(src, "  restartClear(room, g, c) {", "  // The strip above the chat box", g);
-  const c = { timer: { after: (ms, f) => timers.push(f) } };
-  restartClear.call(self, "r", 1, c);
-  return { sent, fails, step: async () => { await tick(); await tick(); await tick(); const f = timers.shift(); if (f) { f(c); await tick(); await tick(); await tick(); } } };
+  const grab = (head, next) => Object.assign(self, runMethod(src, head, next, g));
+  grab("  restartAlive(room, g)", "  restartSet(");
+  grab("  restartSet(room, g, patch, c) {", "  restartFail(");
+  grab("  restartFail(", "  restartOpen(");
+  grab("  restartClose(", "  // The helper reads");
+  grab("  async handoffRead(id) {", "  // The whole run is ONE");
+  grab("  sleepOn(cx, ms) {", "  async readScreen(");
+  grab("  async readScreen(", "  // One line into the PO's input");
+  grab("  async typeLine(", "  // 새로 시작 / 다시");
+  grab("  restartRun(room, po, id, c) {", "  // Steps 1-4.");
+  grab("  async restartFlow(", "  // The strip above the chat box");
+  self.restrestoreBack = null;
+  const click = () => { const c = strictCx(log); try { self.restartRun("r", "t9", "r", c); } finally { c.valid = false; } };
+  const settle = async (ms = 4000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { await tick(); const r = self.rs.get("r"); if (r && (r.phase === "done" || r.phase === "fail" || r.phase === "timeout")) break; } };
+  return { self, po, log, click, settle };
 };
-test("restartClear: /clear 전 전체 기록에 표식이 없으면 /clear를 보내지 않는다", async () => {
-  const h = clearHarness({ reads: ["only other text"] });
-  await h.step();
-  assert.deepEqual(h.sent, []);
-  assert.match(h.fails[0], /\/clear를 보내지 않았습니다/);
+test("새로 시작 전체 흐름: 노트 요청 → 노트 → /clear → /PO가 4단계 모두 끝나고, 낡은 cx는 한 번도 쓰이지 않는다", async () => {
+  const w = restartWorld();
+  w.click();
+  await w.settle(20000);
+  const r = w.self.rs.get("r");
+  assert.deepEqual(w.log.stale, [], "stale cx used");
+  assert.equal(r.phase, "done", JSON.stringify(r) + w.log.says.join("|"));
+  assert.equal(r.n, 4);
+  assert.equal(w.log.keys.length, 3);
+  assert.ok(w.log.keys[0].startsWith(I.RESTART_MARK));
+  assert.deepEqual(w.log.keys.slice(1), ["/clear", "/PO"]);
+  assert.equal(w.log.spawned, 1); // the click spawned once; nothing else needed a new cx
 });
-test("restartClear: /clear 뒤에도 표식이 기록에 남아 있으면 /PO를 보내지 않고, 사라지면 보낸다", async () => {
-  let h = clearHarness({ reads: [`old\n${I.RESTART_MARK} ask`, `old\n${I.RESTART_MARK} ask`] });
-  await h.step(); await h.step();
-  assert.deepEqual(h.sent, ["/clear"]); // /PO는 아직 아님
-  h = clearHarness({ reads: [`old\n${I.RESTART_MARK} ask`, "Claude Code\n❯ /clear"] });
-  await h.step(); await h.step();
-  assert.deepEqual(h.sent, ["/clear", "/PO"]);
+test("새로 시작 전체 흐름: /clear가 안 먹으면 /PO를 보내지 않고 멈추며, 낡은 cx는 쓰이지 않는다", async () => {
+  const w = restartWorld({ clearWorks: false });
+  w.click();
+  await w.settle(20000);
+  const r = w.self.rs.get("r");
+  assert.deepEqual(w.log.stale, []);
+  assert.equal(r.phase, "fail");
+  assert.deepEqual(w.log.keys.slice(1), ["/clear"]);
+});
+test("새로 시작: 클릭의 c는 낡으면 던지는 것으로 확인 — 클릭 뒤에 c를 쓰면 시험이 실패한다(시험의 감시 장치)", () => {
+  const log = { stale: [], spawned: 0 };
+  const c = strictCx(log);
+  c.valid = false;
+  assert.throws(() => c.write_to_clipboard("x"), /no longer valid/);
+  assert.throws(() => c.timer.after(1, () => {}), /no longer valid/);
+});
+test("typeLine: 붙여 넣은 뒤 Enter 직전에 취소·작업 중·다른 글이 있으면 hc keys를 누르지 않는다", async () => {
+  const mk = () => restartWorld();
+  const go = async (w, still) => { const cx = strictCx(w.log, "spawn"); return w.self.typeLine("t9", "/clear", cx, still); };
+  let w = mk(); let live = true;
+  let p = go(w, () => live); live = false; // cancelled after the paste, before Enter
+  let res = await p;
+  assert.equal(res.ok, false); assert.match(res.why, /취소/); assert.deepEqual(w.log.keys, []);
+  w = mk(); p = go(w, () => true); w.po.status = "working"; res = await p;
+  assert.match(res.why, /일을 시작/); assert.deepEqual(w.log.keys, []);
+  w = mk(); p = go(w, () => true); w.po.status = "blocked"; res = await p;
+  assert.match(res.why, /질문 중/); assert.deepEqual(w.log.keys, []);
+  w = mk(); p = go(w, () => true); w.po.input = "my draft/clear"; res = await p;
+  assert.match(res.why, /붙여 넣은 줄만/); assert.deepEqual(w.log.keys, []);
+  w = mk(); res = await go(w, () => true);
+  assert.deepEqual(res, { ok: true, why: "" }); assert.deepEqual(w.log.keys, ["/clear"]);
+  assert.deepEqual(w.log.stale, []);
+});
+test("restartFlow: /clear 전 기록에 표식이 없으면 /clear를 보내지 않는다", async () => {
+  const w = restartWorld();
+  w.click();
+  // the PO never shows the request in its history (e.g. a different history is on screen)
+  const orig = w.self.typeLine;
+  w.self.typeLine = async (po, text, cx, still) => { const r = await orig.call(w.self, po, text, cx, still); if (text.startsWith(I.RESTART_MARK)) w.po.hist = "other talk"; return r; };
+  await w.settle(20000);
+  assert.equal(w.self.rs.get("r").phase, "fail");
+  assert.deepEqual(w.log.keys.slice(1), []); // no /clear
 });
