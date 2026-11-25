@@ -1436,8 +1436,8 @@ function bubbleCap(colW, minInner = 0) {
 const RESTART_STEPS = ["노트 요청", "노트 작성됨", "대화 비움", "PO 다시 시작"];
 const RESTART_WAIT_MS = 5 * 60 * 1000; // a note that has not appeared by then: 다시 / 취소, nothing is cleared
 const RESTART_POLL_MS = 2000; // how often the note file and the PO's state are looked at
-const RESTART_CLEAR_MS = 10 * 1000; // how long the screen gets to show the cleared conversation after /clear
-const RESTART_MARK = "[desk:handoff]"; // first words of the request: the screen shows it until the conversation is cleared
+const RESTART_CLEAR_MS = 20 * 1000; // how long the PO gets to finish /clear (its turn counter goes up) before /PO is given up on
+const RESTART_MARK = "[desk:handoff]"; // first words of the request (the PO's own history shows it; the desk never reads the screen)
 // Why the button cannot be pressed ("" when it can): the PO must be idle (not working, not on a prompt), a restart of it must not already run.
 function restartBlock({ po = "", status = "", running = false } = {}) {
   const s = String(status ?? "").trim().toLowerCase();
@@ -1462,8 +1462,6 @@ function restartSteps(n = 0, fail = false) {
   const k = Math.max(0, Math.min(RESTART_STEPS.length, Number(n) || 0));
   return RESTART_STEPS.map((label, i) => ({ label, state: i < k ? "done" : i === k ? (fail ? "fail" : "active") : "todo" }));
 }
-// The conversation is cleared once the screen is read (not empty) and the request is no longer on it.
-const restartCleared = (screen) => { const s = cleanText(screen); return s.trim().length > 0 && !s.includes(RESTART_MARK); };
 // The note may be fetched (text, not an empty file) and was written after the request (mtime in ms, 1 s slack for coarse file clocks).
 const restartNoteFresh = (note, since) => Boolean(note && note.exists && Number(note.size) > 0 && Number(note.ms) >= Number(since) - 1000);
 // One poll while the note is awaited: "wait" (no fresh note yet), "timeout" (the time is out), "idle-wait" (the note is there, the PO still works:
@@ -1476,49 +1474,55 @@ function restartPoll({ note, since, now, status, quiet = 0 } = {}) {
   return Number(quiet) >= 1 ? "go" : "idle-wait";
 }
 
-// The request marker is in the PO's whole history (`hc read` with many lines): proof that the history the desk is about to clear is the one it asked.
-const restartHasMark = (screen) => cleanText(screen).includes(RESTART_MARK);
-// The PO's input box as the screen shows it: from the bottom-most prompt row (❯ / >) that has a border row right above it, down to the next border
-// row (a long line wraps into several rows; borders, the sidebar bars and whitespace squeezed). Looking for the prompt row, not for "the last N
-// rows", keeps a tall footer or a narrow pane (many wrapped rows) from pushing the first row out of sight. null = no input box found.
-const RESTART_RULE = /^[╭╰┌└├]?[─━╌╍┄┅]{4,}/;
-const squeezeRow = (s) => String(s).replace(/[│┃|]/g, " ").replace(/\s+/g, " ").trim();
-function restartInputText(screen) {
-  const rows = cleanText(screen).split("\n");
-  const rule = (l) => RESTART_RULE.test(l.trim());
-  const prompt = (l) => /^[❯>›](\s|$)/.test(squeezeRow(l));
-  let at = -1;
-  for (let i = rows.length - 1; i > 0; i--) {
-    if (!prompt(rows[i])) continue;
-    let j = i - 1;
-    while (j >= 0 && !rows[j].trim()) j--;
-    if (j >= 0 && rule(rows[j])) { at = i; break; }
+// ---- Sending goes through `hc send` (the path leaders use), never through the screen: the PO pane may be 2 columns wide, where no row of the
+// screen can be matched. `hc send <t> <text> --json` pastes the text and presses Enter; it prints {"started":true,"status":"idle|done","turn":N}
+// (status and turn as they were BEFORE the send) or {"error":{"kind":"blocked|status_mismatch|...","message":...}}.
+// The result of one `hc send`: ok only on exit code 0 and started === true. `why` is the Korean reason shown to the person, `detail` goes to diag.log.
+function restartSendResult(r) {
+  const code = r && Number.isFinite(Number(r.code)) ? Number(r.code) : -1;
+  const out = String(r?.stdout ?? "").trim(), err = String(r?.stderr ?? "").trim();
+  let j = null;
+  try { j = JSON.parse(out); } catch {}
+  const detail = `code ${code}; stdout ${out.slice(0, 160)}; stderr ${err.slice(0, 160)}`.replace(/\s+/g, " ");
+  if (code === 0 && j && j.started === true) {
+    const turn = Number(j.turn);
+    return { ok: true, turn: Number.isFinite(turn) ? turn : null, status: String(j.status ?? ""), why: "", detail };
   }
-  if (at < 0) return null;
-  const out = [];
-  for (let i = at; i < rows.length && i < at + 40 && (i === at || !rule(rows[i])); i++) out.push(squeezeRow(rows[i]).replace(/^[❯>›]\s*/, ""));
-  return out.filter(Boolean).join(" ");
+  const kind = String(j?.error?.kind ?? "");
+  const why = kind === "blocked" ? "PO가 질문 중이라 받지 않았습니다"
+    : kind === "status_mismatch" ? "PO가 일하는 중이라 받지 않았습니다"
+    : j?.error?.message ? `PO가 받지 않았습니다(${String(j.error.message).slice(0, 80)})`
+    : `hc send가 실패했습니다(종료 코드 ${code})`;
+  return { ok: false, turn: null, status: "", why, detail };
 }
-// The input box is empty (nothing typed; Claude Code's greyed hint `Try "..."` is not text): true / false, null when the box was not found.
-function restartInputEmpty(screen) {
-  const t = restartInputText(screen);
-  return t === null ? null : t === "" || /^Try "/.test(t);
+// `hc get <t> --json` as {live, status, turn}; null when it did not answer. Status and turn do not depend on the pane's size.
+function restartTerm(r) {
+  if (!r || Number(r.code) !== 0) return null;
+  let j = null;
+  try { j = JSON.parse(String(r.stdout ?? "")); } catch { return null; }
+  if (!j || typeof j !== "object") return null;
+  const turn = Number(j.turn);
+  return { live: String(j.state ?? "") === "live" && (j.exit_code === null || j.exit_code === undefined), status: String(j?.status?.state ?? "").trim().toLowerCase(), turn: Number.isFinite(turn) ? turn : null };
 }
-// Whether the PO's input holds the pasted `line` and nothing else before it: the input text is the line itself (a long line: starts with it;
-// a paste the PO folded into "[Pasted text ...]" counts too). Text the person had typed there first would come before the line, so Enter is not pressed over it.
-function restartInputOnly(screen, line) {
-  const want = squeezeRow(cleanText(line));
-  const t = restartInputText(screen);
-  if (!want || t === null) return false;
-  return /^\[Pasted text/i.test(t) || (want.length > 40 ? t.startsWith(want.slice(0, 40)) : t === want);
+// Why nothing is sent now ("" when it can be): the terminal must be known and running, not on a prompt, not working (idle or done are both fine).
+function restartSendBlock(term) {
+  if (!term) return "PO 터미널의 상태를 읽지 못했습니다";
+  if (!term.live) return "PO 터미널이 실행 중이 아닙니다";
+  if (term.status === "blocked") return "PO가 질문 중입니다";
+  if (term.status === "working") return "PO가 일하는 중입니다";
+  return "";
 }
-// The screen tail for diag.log when an input check fails: the last 14 non-empty rows, each trimmed (the next miss can then be read from the log).
-const restartShot = (screen) => cleanText(screen ?? "").split("\n").filter((l) => l.trim()).slice(-14).map((l) => l.replace(/\s+/g, " ").trim().slice(0, 200));
-const RESTART_READ_LINES = 400; // the whole history is read (scrollback included) before and after /clear
+// After `/clear` was sent (`sent` = the turn counter it reported, i.e. from before the command): "wait" while the PO still works or the counter has not
+// gone up, "done" once the PO is idle/done and the counter is higher (/clear counts as one turn), "gone" when the terminal is not running any more.
+function restartClearState(sent, term) {
+  if (!term || !term.live) return "gone";
+  if (term.status === "working" || term.status === "blocked") return "wait";
+  return term.turn !== null && sent !== null && term.turn > sent ? "done" : "wait";
+}
 // chat:end
 
 // Diagnostics for the desk (what the pointer and the selection do), kept in a small capped file the leader can read: <app root>/data/inbox/diag.log,
-// 0600; past DIAG_MAX it is moved to diag.log.1 (the older half is dropped) and a new one starts. Lines carry ids and lengths only, never message text (one exception: a failed restart input check logs the screen tail, see restartShot).
+// 0600; past DIAG_MAX it is moved to diag.log.1 (the older half is dropped) and a new one starts. Lines carry ids and lengths only, never message text (one exception: a failed restart send logs the trimmed `hc send` output, see restartSendResult; never a screen).
 const DIAG_MAX = 64 * 1024;
 function diagAppend(lines, root = appRoot()) {
   const dir = path.join(root, "data", "inbox");
@@ -1549,7 +1553,7 @@ function readHandoff(dir = inboxDir(), id = "") {
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartCleared, restartHasMark, restartInputOnly, restartInputText, restartInputEmpty, restartShot, RESTART_READ_LINES, restartNoteFresh, restartPoll, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)

@@ -95,7 +95,7 @@ const deliverOf = (src) => methodOf(src, '  deliver(po, text, c, rec = null, ok 
 
 test("main.js: 답 버튼·답 상자·N안 칩·채팅은 모두 deliver() 한 길로 붙여넣고 Enter까지 보낸다", () => {
   const src = mainSrc();
-  assert.ok(!/hc\(\["send"/.test(src) && !/terminal\.send|send_key/i.test(src)); // hc send는 <hc from=...> 꼬리표가 붙어 쓰지 않는다
+  assert.ok(!/hc\(\["send"/.test(src.replace('hc(["send", po, text, "--json"])', "")) && !/terminal\.send|send_key/i.test(src)); // chat/answers: no hc send (it adds a <hc from=...> tag); only the restart sendLine uses it (a /clear must run as a command)
   const send = methodOf(src, "  send(a, text, cx, kind = \"answer\") {", "  clearBox(a");
   const chat = methodOf(src, "  sendChat(c) {", "  // The chat footer");
   const del = deliverOf(src);
@@ -334,7 +334,7 @@ test("main.js: 카드는 접힌 채 시작하고, 펼침은 공유 상태에 두
   // 링크: 앱의 open_url 먼저, http(s)만
   assert.match(src, /cx\.open_url\(url\)/);
   assert.match(src, /if \(!\/\^https\?:\\\/\\\/\/i\.test\(url\)\) return;/);
-  assert.ok(!/hc send|hc\(\["send"/.test(src)); // hc send 없이 클립보드로만(채팅의 Enter는 hc keys)
+  assert.ok(!/hc\(\["send"/.test(src.replace('hc(["send", po, text, "--json"])', ""))); // 클립보드로만(채팅의 Enter는 hc keys); 재시작의 sendLine만 hc send
 });
 
 test("toParts·escapeHtml: 글자는 이스케이프하고, 목록은 <ul>로 묶고, 명령은 코드 조각으로 뺀다", () => {
@@ -1001,7 +1001,7 @@ test("main.js: 채팅 입력은 Textarea, Enter는 붙여넣고 hc keys enter까
   assert.match(src, /TextareaState\.new\(/);
   assert.match(src, /Textarea\.new\(this\.chat\)/);
   assert.match(src, /hc\(\["keys", po, "enter"\]\)/);
-  assert.ok(!/hc\(\["send"/.test(src));
+  assert.ok(!/hc\(\["send"/.test(src.replace('hc(["send", po, text, "--json"])', "")));
   assert.match(src, /=== "blocked"/);
   assert.match(src, /enterIntent\(e\?\.key, Boolean\(e\?\.modifiers\?\.shift\)\)/);
   assert.match(src, /PO에 보내기/);
@@ -2038,12 +2038,6 @@ test("restartSteps: 네 단계의 done/active/fail/todo", () => {
   assert.deepEqual(I.restartSteps(1, true).map((s) => s.state), ["done", "fail", "todo", "todo"]);
   assert.deepEqual(I.restartSteps(2).map((s) => s.label), I.RESTART_STEPS);
 });
-test("restartCleared: 비어 있지 않고 요청 표식이 없을 때만 비워진 화면", () => {
-  assert.equal(I.restartCleared(""), false);
-  assert.equal(I.restartCleared("  \n "), false);
-  assert.equal(I.restartCleared(`${I.RESTART_MARK} write a note\n> `), false);
-  assert.equal(I.restartCleared("> \n? for shortcuts"), true);
-});
 test("restartNoteFresh/restartPoll: 요청 전에 있던 노트는 새 것이 아니다, 새 노트 + 쉬는 PO만 go, 5분이면 timeout", () => {
   const since = 1_000_000;
   const old = { exists: true, size: 9, ms: since - 60_000 };
@@ -2084,14 +2078,11 @@ test("main.js: PO 새로 시작 배선 — 방별 상태, 버튼은 막힌 이�
   assert.match(src, /"다시", \(c\) => this\.restartRun\(/);
   assert.match(src, /restartSteps\(r\.n, failed\)/);
   assert.match(src, /who: "po", head: true, ms: hn\.ms/);
-  // typeLine never records a chat bubble and never types into a PO on a prompt
-  const tl = src.slice(src.indexOf("  async typeLine("), src.indexOf("  // 새로 시작 / 다시"));
-  assert.match(tl, /if \(this\.isBlocked\(po\)\)/);
+  // sendLine never records a chat bubble; /PO only after the /clear signal; a timeout/failure clears nothing
+  const tl = src.slice(src.indexOf("  async sendLine("), src.indexOf("  // 새로 시작 / 다시"));
   assert.doesNotMatch(tl, /setShared|CHAT_KEY|record/);
-  // /PO only after the screen was verified cleared; a timeout/failure clears nothing
   const fl = src.slice(src.indexOf("  async restartFlow("), src.indexOf("  // The strip above the chat box"));
-  assert.ok(fl.indexOf("restartCleared(after)") < fl.indexOf('"/PO"'));
-  assert.ok(fl.indexOf("restartHasMark(before)") < fl.indexOf('"/clear"'));
+  assert.ok(fl.indexOf("restartClearState(") < fl.indexOf('"/PO"'));
   assert.match(fl, /\/PO를 보내지 않았습니다/);
   assert.match(fl, /act === "timeout"/);
   // no callback chain after an await: no .then(, and the click's c is only used by restartRun before its spawn
@@ -2181,91 +2172,103 @@ test("usageLine: main.js 배선 — 파일만 읽고(exec·네트워크 없음),
   assert.ok(room.indexOf("child(head)") < room.indexOf("el.child(usage)") && room.indexOf("el.child(usage)") < room.indexOf("el.child(bar)"));
 });
 
-// ---- PO 새로 시작: 리뷰 1회차 보강 (#41) ----
-const rule = "─".repeat(60);
-// A screen the way Claude Code shows it: history, a rule, the input rows (the first with the prompt mark and a no-break space, as the real one has), a rule, a footer.
-const claudeScreen = (inputRows, footer = ["  ⏵⏵ auto mode on (shift+tab to cycle)"], hist = "older talk") =>
-  [hist, rule, ...inputRows.map((r, i) => (i === 0 ? `❯\u00a0${r}` : `  ${r}`)), rule, ...footer].join("\n");
-const wrapRows = (t, w) => t.match(new RegExp(`.{1,${w}}(\\s|$)`, "g")).map((x) => x.trim());
-test("restartHasMark/restartInputOnly: 전체 기록에 표식이 있는지, 입력칸에 붙여 넣은 줄만 있는지", () => {
-  assert.equal(I.restartHasMark(`x\n${I.RESTART_MARK} note\ny`), true);
-  assert.equal(I.restartHasMark("nothing"), false);
-  assert.equal(I.restartInputOnly(claudeScreen(["/clear"]), "/clear"), true);
-  assert.equal(I.restartInputOnly(claudeScreen(["my draft/clear"]), "/clear"), false); // 쓰던 글이 앞에 있으면 아니다
-  assert.equal(I.restartInputOnly(claudeScreen([""]), "/clear"), false);
-  const ask = I.handoffAsk("~/.herdr-inbox/po/x.handoff.md");
-  assert.equal(I.restartInputOnly(claudeScreen(wrapRows(ask, 60)), ask), true);
-  assert.equal(I.restartInputOnly(claudeScreen(wrapRows("draft " + ask, 60)), ask), false);
-  assert.equal(I.restartInputOnly(claudeScreen(["[Pasted text #1 +3 lines]"]), ask), true);
-  assert.equal(I.restartInputOnly("o\n❯ " + ask.slice(0, 80), ask), false, "no rule above the prompt: the input box is not known");
-  // 옛 상자 모양: ╭─ │ > 글 │ ╰─
-  assert.equal(I.restartInputOnly(`o\n╭${"─".repeat(40)}╮\n│ > /clear${" ".repeat(20)}│\n╰${"─".repeat(40)}╯`, "/clear"), true);
+// ---- PO 새로 시작: hc send로 보낸다 — 화면(칸 너비)에 기대지 않는다 (#41, 3차 사용자 확인 실패: PO 칸 2열) ----
+const sendOk = (extra = {}) => ({ code: 0, stdout: JSON.stringify({ started: true, status: "idle", turn: 6, ...extra }), stderr: "" });
+test("restartSendResult: 종료 코드 0과 started === true일 때만 성공이고, 그 밖에는 한국어 이유와 diag용 요약을 준다", () => {
+  const ok = I.restartSendResult(sendOk({ status: "done", turn: 12 }));
+  assert.deepEqual({ ok: ok.ok, turn: ok.turn, status: ok.status, why: ok.why }, { ok: true, turn: 12, status: "done", why: "" });
+  assert.equal(I.restartSendResult(sendOk({ started: false })).ok, false);
+  assert.equal(I.restartSendResult({ code: 1, stdout: JSON.stringify({ started: true }), stderr: "" }).ok, false, "exit code wins");
+  assert.equal(I.restartSendResult({ code: 0, stdout: "not json", stderr: "" }).ok, false);
+  assert.equal(I.restartSendResult({ code: 0, stdout: "", stderr: "" }).ok, false);
+  assert.equal(I.restartSendResult(null).ok, false);
+  const blocked = I.restartSendResult({ code: 1, stdout: JSON.stringify({ error: { kind: "blocked", message: "t9 is blocked" } }), stderr: "" });
+  assert.equal(blocked.ok, false); assert.match(blocked.why, /질문 중/);
+  const mism = I.restartSendResult({ code: 1, stdout: JSON.stringify({ error: { kind: "status_mismatch", message: "t9 is done, not idle" } }), stderr: "" });
+  assert.match(mism.why, /일하는 중/);
+  const other = I.restartSendResult({ code: 1, stdout: JSON.stringify({ error: { kind: "x", message: "boom" } }), stderr: "" });
+  assert.match(other.why, /boom/);
+  const crash = I.restartSendResult({ code: 2, stdout: "", stderr: "e".repeat(500) });
+  assert.match(crash.why, /종료 코드 2/);
+  assert.ok(crash.detail.length < 400 && /code 2/.test(crash.detail), "detail is trimmed: " + crash.detail.length);
+  assert.equal(I.restartSendResult({ code: 0, stdout: JSON.stringify({ started: true, status: "idle" }) }).turn, null, "no turn: null, not NaN");
 });
-test("restartInputOnly: 아래 푸터가 길거나 칸이 좁아 입력 줄이 많이 접혀도 첫 줄을 찾는다(마지막 14줄 창에 갇히지 않는다)", () => {
-  const ask = I.handoffAsk("~/.herdr-inbox/po/devnotes.handoff.md");
-  const rows = wrapRows(ask, 40); // a narrow pane: many rows
-  const footer = Array.from({ length: 8 }, (_, i) => `  status line ${i} │ sidebar`);
-  const scr = claudeScreen(rows, footer);
-  assert.ok(rows.length + 2 + footer.length > 14, "the first input row is beyond the last 14 rows");
-  assert.equal(I.restartInputOnly(scr, ask), true);
-  assert.equal(I.restartInputEmpty(scr), false);
-  assert.equal(I.restartInputOnly(claudeScreen(["x " + rows[0], ...rows.slice(1)], footer), ask), false);
+test("restartTerm/restartSendBlock: hc get의 상태·turn을 읽고, 실행 중이고 질문·작업 중이 아닐 때만 보낸다(idle과 done 모두 허용)", () => {
+  const get = (o) => ({ code: 0, stdout: JSON.stringify({ state: "live", exit_code: null, status: { state: "idle" }, turn: 3, cols: 2, rows: 115, ...o }), stderr: "" });
+  assert.deepEqual(I.restartTerm(get()), { live: true, status: "idle", turn: 3 });
+  assert.deepEqual(I.restartTerm(get({ status: { state: "DONE" } })), { live: true, status: "done", turn: 3 });
+  assert.equal(I.restartTerm(get({ state: "exited", exit_code: 0 })).live, false);
+  assert.equal(I.restartTerm(get({ turn: undefined })).turn, null);
+  assert.equal(I.restartTerm({ code: 1, stdout: "" }), null);
+  assert.equal(I.restartTerm({ code: 0, stdout: "x" }), null);
+  assert.equal(I.restartTerm(null), null);
+  const T = (o) => ({ live: true, status: "idle", turn: 3, ...o });
+  assert.equal(I.restartSendBlock(T()), "");
+  assert.equal(I.restartSendBlock(T({ status: "done" })), "");
+  assert.match(I.restartSendBlock(T({ status: "blocked" })), /질문 중/);
+  assert.match(I.restartSendBlock(T({ status: "working" })), /일하는 중/);
+  assert.match(I.restartSendBlock(T({ live: false })), /실행 중이 아닙니다/);
+  assert.match(I.restartSendBlock(null), /읽지 못했습니다/);
 });
-test("restartInputEmpty: 빈 입력칸(안내 문구 포함)만 비었다 하고, 쓰던 글은 비지 않았다, 상자를 못 찾으면 null", () => {
-  assert.equal(I.restartInputEmpty(claudeScreen([""])), true);
-  assert.equal(I.restartInputEmpty(claudeScreen(['Try "edit <filepath> to…"'])), true);
-  assert.equal(I.restartInputEmpty(claudeScreen(["half typed"])), false);
-  assert.equal(I.restartInputEmpty(claudeScreen(["[Pasted text #1 +3 lines]"])), false);
-  assert.equal(I.restartInputEmpty("no box here\njust output"), null);
-  assert.equal(I.restartInputEmpty(""), null);
-  assert.equal(I.restartInputText("h\n" + rule + "\n│ ❯ a │ side\n" + rule), "a side");
+test("restartClearState: /clear 뒤에는 쉬는 상태(idle/done)이면서 turn이 보낼 때보다 커졌을 때만 done — 칸 너비와 무관한 신호", () => {
+  const T = (o) => ({ live: true, status: "idle", turn: 6, ...o });
+  assert.equal(I.restartClearState(6, T({ status: "idle", turn: 6 })), "wait", "turn not up yet");
+  assert.equal(I.restartClearState(6, T({ status: "working", turn: 6 })), "wait");
+  assert.equal(I.restartClearState(6, T({ status: "working", turn: 7 })), "wait", "counter up but still working");
+  assert.equal(I.restartClearState(6, T({ status: "blocked", turn: 7 })), "wait");
+  assert.equal(I.restartClearState(6, T({ status: "idle", turn: 7 })), "done");
+  assert.equal(I.restartClearState(6, T({ status: "done", turn: 7 })), "done");
+  assert.equal(I.restartClearState(6, T({ turn: null })), "wait");
+  assert.equal(I.restartClearState(null, T({ turn: 7 })), "wait", "no base turn: never done");
+  assert.equal(I.restartClearState(6, T({ live: false })), "gone");
+  assert.equal(I.restartClearState(6, null), "gone");
 });
-test("restartShot: 마지막 14줄만, 줄마다 공백을 줄이고 200자로 자른다", () => {
-  const scr = Array.from({ length: 30 }, (_, i) => `row   ${i} ${"x".repeat(300)}`).join("\n\n");
-  const out = I.restartShot(scr);
-  assert.equal(out.length, 14);
-  assert.ok(out[13].startsWith("row 29 ") && out.every((r) => r.length <= 200));
-  assert.deepEqual(I.restartShot(null), []);
-});
-// ---- 새로 시작 전체 흐름: 낡은 cx를 쓰면 던지는 가짜 cx로 4단계를 끝까지 돌린다 (#41) ----
+// ---- 새로 시작 전체 흐름: 낡은 cx를 쓰면 던지는 가짜 cx로 4단계를 끝까지 돌린다 ----
 // A click's or a timer's cx is good only during its own call (the host throws "cx is no longer valid" later); the cx a spawn passes in stays good.
 const strictCx = (log, kind = "sync") => {
   const cx = { valid: true, kind };
   const need = (what) => { if (!cx.valid) { const e = new Error(`cx is no longer valid: ${what}`); log.stale.push(what); throw e; } };
-  cx.write_to_clipboard = (t) => { need("write_to_clipboard"); log.clip = t; };
   cx.notify = () => { need("notify"); };
   cx.timer = { after: (ms, f) => { need("timer.after"); setImmediate(() => { const c2 = strictCx(log, "timer"); try { f(c2); } finally { c2.valid = false; } }); } };
   cx.spawn = (f) => { need("spawn"); const sc = strictCx(log, "spawn"); log.spawnCx = sc; log.spawned++; Promise.resolve().then(() => f(sc)).catch(() => {}); };
   return cx;
 };
-const restartWorld = ({ clearWorks = true } = {}) => {
+// A fake `hc` that knows only `get` and `send` (a PO pane of any width, even 2 columns: there is no screen at all). Any other hc call is recorded in
+// log.other; the flow must never make one. `poll` counts the status reads after /clear: the counter goes up on the 3rd.
+const restartWorld = ({ clearWorks = true, cols = 2 } = {}) => {
   const src = mainSrc();
-  const log = { stale: [], spawned: 0, keys: [], clip: "", pasted: [], says: [], diag: [] };
-  const po = { hist: "older talk", input: "", status: "idle", noteMs: 0, sent: [] };
+  const log = { stale: [], spawned: 0, sends: [], other: [], says: [], diag: [] };
+  const po = { status: "idle", turn: 6, noteMs: 0, live: true, sendFail: null, clearPoll: -1 };
   const g = mkGlobals({
-    RESTART_READ_LINES: 400, RESTART_POLL_MS: 2000, RESTART_CLEAR_MS: 300, PASTE_SETTLE_MS: 350, RESTART_MARK: I.RESTART_MARK,
-    restartBlock: I.restartBlock, restartPoll: I.restartPoll, restartHasMark: I.restartHasMark, restartCleared: I.restartCleared, restartInputOnly: I.restartInputOnly,
-    restartInputEmpty: I.restartInputEmpty, restartInputText: I.restartInputText, restartShot: I.restartShot, restartNoteFresh: I.restartNoteFresh, cleanText: I.cleanText, PROMPT_LINES: 40,
-    handoffAsk: I.handoffAsk, HELPER: () => "h.cjs", focused: () => ({ pane: "pp" }), panes: () => [{ terminal: "t9" }],
-    run: (name) => { if (name === "terminal.paste") { log.pasted.push(log.clip); po.input = (po.pasteBefore ?? "") + log.clip; } },
+    RESTART_POLL_MS: 2000, RESTART_CLEAR_MS: 300, RESTART_MARK: I.RESTART_MARK,
+    restartBlock: I.restartBlock, restartPoll: I.restartPoll, restartNoteFresh: I.restartNoteFresh,
+    restartSendResult: I.restartSendResult, restartTerm: I.restartTerm, restartSendBlock: I.restartSendBlock, restartClearState: I.restartClearState,
+    handoffAsk: I.handoffAsk, HELPER: () => "h.cjs",
     exec: async () => ({ code: 0, stdout: JSON.stringify({ path: "/n.md", exists: po.noteMs > 0, ms: po.noteMs, size: po.noteMs ? 20 : 0, text: po.noteMs ? "note" : "" }) }),
     hc: async (a) => {
-      if (a[0] === "read") return { code: 0, stdout: `${po.hist}\n${"─".repeat(60)}\n❯\u00a0${po.input}\n${"─".repeat(60)}\n  ⏵⏵ auto mode on` };
-      if (a[0] === "keys") {
-        log.keys.push(po.input);
-        const line = po.input; po.input = "";
-        if (line.startsWith(I.RESTART_MARK)) { po.hist += `\n${line}`; po.noteMs = Date.now() + 5; }
-        else if (line === "/clear") { if (clearWorks) po.hist = "Claude Code"; }
-        else if (line === "/PO") po.hist += "\n/PO";
-        return { code: 0, stdout: "" };
+      if (a[0] === "get") {
+        if (po.clearPoll >= 0 && ++po.clearPoll >= 3 && clearWorks) { po.status = "idle"; po.turn++; po.clearPoll = -1; }
+        return { code: 0, stdout: JSON.stringify({ address: a[1], state: po.live ? "live" : "exited", exit_code: po.live ? null : 0, status: { state: po.status }, turn: po.turn, cols, rows: 115 }), stderr: "" };
       }
+      if (a[0] === "send") {
+        assert.equal(a[3], "--json"); assert.ok(!a.includes("--if"), "no --if: it refuses a PO that is 'done'");
+        const text = a[2];
+        if (po.sendFail) return po.sendFail;
+        log.sends.push(text);
+        const before = { status: po.status, turn: po.turn };
+        if (text.startsWith(I.RESTART_MARK)) { po.noteMs = Date.now() + 5; po.turn++; }
+        else if (text === "/clear") { po.status = "working"; po.clearPoll = 0; }
+        else if (text === "/PO") po.turn++;
+        return { code: 0, stdout: JSON.stringify({ started: true, ...before }), stderr: "" };
+      }
+      log.other.push(a.join(" "));
       return { code: 0, stdout: "" };
     },
   });
   const self = {
-    rs: new Map(), rgen: 0, chat: { focus() {} },
+    rs: new Map(), rgen: 0,
     liveTerms: () => [{ address: "t9", status: po.status }], isBlocked: () => po.status === "blocked",
-    say: (m) => log.says.push(m), restore() {}, diag: (m) => log.diag.push(m),
+    say: (m) => log.says.push(m), diag: (m) => log.diag.push(m),
   };
   const grab = (head, next) => Object.assign(self, runMethod(src, head, next, g));
   grab("  restartAlive(room, g)", "  restartSet(");
@@ -2273,73 +2276,74 @@ const restartWorld = ({ clearWorks = true } = {}) => {
   grab("  restartFail(", "  restartOpen(");
   grab("  restartClose(", "  // The helper reads");
   grab("  async handoffRead(id) {", "  // The whole run is ONE");
-  grab("  sleepOn(cx, ms) {", "  // An input check failed");
-  grab("  diagShot(why, screen) {", "  async readScreen(");
-  grab("  async readScreen(", "  // One line into the PO's input");
-  grab("  async typeLine(", "  // 새로 시작 / 다시");
+  grab("  sleepOn(cx, ms) {", "  // The PO's {live, status, turn}");
+  grab("  async poTerm(po) {", "  // One line to the PO through");
+  grab("  async sendLine(po, text, still", "  // 새로 시작 / 다시");
   grab("  restartRun(room, po, id, c) {", "  // Steps 1-4.");
   grab("  async restartFlow(", "  // The strip above the chat box");
   const click = () => { const c = strictCx(log); try { self.restartRun("r", "t9", "r", c); } finally { c.valid = false; } };
   const settle = async (ms = 4000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { await tick(); const r = self.rs.get("r"); if (r && (r.phase === "done" || r.phase === "fail" || r.phase === "timeout")) break; } };
   return { self, po, log, click, settle };
 };
-test("새로 시작 전체 흐름: 노트 요청 → 노트 → /clear → /PO가 4단계 모두 끝나고, 낡은 cx는 한 번도 쓰이지 않는다", async () => {
-  const w = restartWorld();
+test("새로 시작 전체 흐름(PO 칸 2열): 노트 요청 → 노트 → /clear → /PO가 hc send로만 끝까지 가고, 화면·붙여넣기·키 입력은 한 번도 쓰이지 않는다", async () => {
+  const w = restartWorld({ cols: 2 });
   w.click();
   await w.settle(20000);
   const r = w.self.rs.get("r");
   assert.deepEqual(w.log.stale, [], "stale cx used");
-  assert.equal(r.phase, "done", JSON.stringify(r) + w.log.says.join("|"));
+  assert.equal(r.phase, "done", JSON.stringify(r) + w.log.says.join("|") + w.log.diag.join("|"));
   assert.equal(r.n, 4);
-  assert.equal(w.log.keys.length, 3);
-  assert.ok(w.log.keys[0].startsWith(I.RESTART_MARK));
-  assert.deepEqual(w.log.keys.slice(1), ["/clear", "/PO"]);
-  assert.equal(w.log.spawned, 1); // the click spawned once; nothing else needed a new cx
+  assert.equal(w.log.sends.length, 3);
+  assert.ok(w.log.sends[0].startsWith(I.RESTART_MARK));
+  assert.deepEqual(w.log.sends.slice(1), ["/clear", "/PO"]);
+  assert.deepEqual(w.log.other, [], "only hc get / hc send: no read, no keys");
+  assert.equal(w.log.spawned, 1);
 });
-test("새로 시작 전체 흐름: /clear가 안 먹으면 /PO를 보내지 않고 멈추며, 낡은 cx는 쓰이지 않는다", async () => {
+test("새로 시작: /clear가 끝났다는 신호(turn 증가)가 없으면 /PO를 보내지 않고 멈추며, 이유를 diag에 남긴다", async () => {
   const w = restartWorld({ clearWorks: false });
   w.click();
   await w.settle(20000);
   const r = w.self.rs.get("r");
   assert.deepEqual(w.log.stale, []);
   assert.equal(r.phase, "fail");
-  assert.deepEqual(w.log.keys.slice(1), ["/clear"]);
+  assert.match(r.why, /\/clear가 끝났는지 확인하지 못해/);
+  assert.deepEqual(w.log.sends.slice(1), ["/clear"]);
+  assert.ok(w.log.diag.some((d) => /not confirmed: sent turn 7/.test(d)), w.log.diag.join("|"));
+});
+test("새로 시작: 노트 요청 send가 실패하면 아무것도 더 보내지 않고 멈추며, hc 출력을 짧게 diag에 남긴다(화면은 남기지 않는다)", async () => {
+  const w = restartWorld();
+  w.po.sendFail = { code: 1, stdout: JSON.stringify({ error: { kind: "blocked", message: "t9 is blocked" } }), stderr: "" };
+  w.click();
+  await w.settle(5000);
+  const r = w.self.rs.get("r");
+  assert.equal(r.phase, "fail"); assert.equal(r.n, 0);
+  assert.match(r.why, /노트를 요청하지 못했습니다\(PO가 질문 중이라 받지 않았습니다\)/);
+  assert.deepEqual(w.log.sends, []);
+  assert.ok(w.log.diag.some((d) => /restart send failed: code 1; stdout .*blocked/.test(d)), w.log.diag.join("|"));
+  assert.ok(!w.log.diag.some((d) => /row \d+:/.test(d)), "no screen dump");
+});
+test("새로 시작: 보내기 전에 PO가 질문 중·작업 중·꺼져 있으면 send를 부르지 않는다", async () => {
+  for (const [patch, re] of [[{ status: "blocked" }, /질문 중/], [{ status: "working" }, /일하는 중/], [{ live: false }, /실행 중이 아닙니다/]]) {
+    const w = restartWorld();
+    const c = strictCx(w.log);
+    const res = await w.self.sendLine("t9", "/clear", () => true).catch((e) => e);
+    assert.equal(res.ok, true, "idle PO takes it");
+    w.log.sends.length = 0; Object.assign(w.po, patch);
+    const res2 = await w.self.sendLine("t9", "/clear", () => true);
+    assert.equal(res2.ok, false); assert.match(res2.why, re); assert.match(res2.why, /아무것도 보내지 않았습니다/);
+    assert.deepEqual(w.log.sends, []); c.valid = false;
+  }
+  const w = restartWorld(); w.po.status = "done"; // a PO that just finished is "done": accepted
+  assert.equal((await w.self.sendLine("t9", "x", () => true)).ok, true);
+  const w2 = restartWorld(); // cancelled: nothing is sent
+  assert.equal((await w2.self.sendLine("t9", "x", () => false)).ok, false); assert.deepEqual(w2.log.sends, []);
 });
 test("새로 시작: 클릭의 c는 낡으면 던지는 것으로 확인 — 클릭 뒤에 c를 쓰면 시험이 실패한다(시험의 감시 장치)", () => {
   const log = { stale: [], spawned: 0 };
   const c = strictCx(log);
   c.valid = false;
-  assert.throws(() => c.write_to_clipboard("x"), /no longer valid/);
+  assert.throws(() => c.notify(), /no longer valid/);
   assert.throws(() => c.timer.after(1, () => {}), /no longer valid/);
-});
-test("typeLine: 붙여 넣은 뒤 Enter 직전에 취소·작업 중·다른 글이 있으면 hc keys를 누르지 않는다", async () => {
-  const mk = () => restartWorld();
-  const go = async (w, still) => { const cx = strictCx(w.log, "spawn"); return w.self.typeLine("t9", "/clear", cx, still); };
-  let w = mk(); let live = true;
-  let p = go(w, () => live); live = false; // cancelled after the paste, before Enter
-  let res = await p;
-  assert.equal(res.ok, false); assert.match(res.why, /취소/); assert.deepEqual(w.log.keys, []);
-  w = mk(); p = go(w, () => true); w.po.status = "working"; res = await p;
-  assert.match(res.why, /일을 시작/); assert.deepEqual(w.log.keys, []);
-  w = mk(); p = go(w, () => true); w.po.status = "blocked"; res = await p;
-  assert.match(res.why, /질문 중/); assert.deepEqual(w.log.keys, []);
-  w = mk(); w.po.pasteBefore = "my draft"; res = await go(w, () => true); // typed between the empty check and the paste
-  assert.match(res.why, /붙여 넣은 줄만/); assert.deepEqual(w.log.keys, []);
-  assert.equal(res.unsent, true);
-  assert.ok(w.log.diag.some((d) => /input check/.test(d)) && w.log.diag.some((d) => /row \d+: .*my draft\/clear/.test(d)), "the screen tail is in diag: " + w.log.diag.join("|"));
-  w = mk(); res = await go(w, () => true);
-  assert.deepEqual(res, { ok: true, why: "" }); assert.deepEqual(w.log.keys, ["/clear"]);
-  assert.deepEqual(w.log.stale, []);
-});
-test("restartFlow: /clear 전 기록에 표식이 없으면 /clear를 보내지 않는다", async () => {
-  const w = restartWorld();
-  w.click();
-  // the PO never shows the request in its history (e.g. a different history is on screen)
-  const orig = w.self.typeLine;
-  w.self.typeLine = async (po, text, cx, still) => { const r = await orig.call(w.self, po, text, cx, still); if (text.startsWith(I.RESTART_MARK)) w.po.hist = "other talk"; return r; };
-  await w.settle(20000);
-  assert.equal(w.self.rs.get("r").phase, "fail");
-  assert.deepEqual(w.log.keys.slice(1), []); // no /clear
 });
 test("새로 시작: 흐름 도중 spawn cx가 낡으면(모드 다시 읽힘) 더 확인하지 않고 끝난다", async () => {
   const w = restartWorld();
@@ -2348,7 +2352,6 @@ test("새로 시작: 흐름 도중 spawn cx가 낡으면(모드 다시 읽힘) �
   w.self.handoffRead = async (id) => { reads++; return orig.call(w.self, id); };
   w.po.noteMs = 0;
   w.click();
-  // let the request go in and the first note looks happen, then the host closes the build: the spawn cx throws from now on
   while (reads < 2) await tick();
   w.log.spawnCx.valid = false;
   w.po.noteMs = 0; // no fresh note can show up: only a stopped flow ends here
@@ -2357,57 +2360,29 @@ test("새로 시작: 흐름 도중 spawn cx가 낡으면(모드 다시 읽힘) �
   assert.ok(reads <= at + 1, `handoffRead kept running: ${reads} after ${at}`);
   assert.equal(w.self.rs.get("r").phase, "fail");
 });
-
-test("typeLine: 붙여 넣기 전에 입력칸이 비어 있지 않으면 아무것도 붙여 넣지 않고 비워 달라 하며, 화면 끝을 diag에 남긴다", async () => {
+test("새로 시작: 사람이 닫으면(restartClose) 지켜보기를 끝내고 더 보내지 않는다", async () => {
   const w = restartWorld();
-  w.po.input = "half typed";
-  const res = await w.self.typeLine("t9", "/clear", strictCx(w.log, "spawn"), () => true);
-  assert.equal(res.ok, false); assert.ok(!res.unsent);
-  assert.match(res.why, /PO 입력칸을 비워 주세요/);
-  assert.deepEqual(w.log.pasted, []); assert.deepEqual(w.log.keys, []);
-  assert.ok(w.log.diag.some((d) => /before paste/.test(d)) && w.log.diag.some((d) => /row \d+: .*half typed/.test(d)));
-  assert.equal(w.po.input, "half typed"); // untouched
-});
-test("typeLine: 입력 상자를 화면에서 못 찾으면 붙여 넣지 않고, 읽지 못해도 붙여 넣지 않는다", async () => {
-  let w = restartWorld();
-  const hc0 = w.self.readScreen;
-  w.self.readScreen = async () => "just output\nno box";
-  let res = await w.self.typeLine("t9", "/clear", strictCx(w.log, "spawn"), () => true);
-  assert.match(res.why, /찾지 못해/); assert.deepEqual(w.log.pasted, []);
-  assert.ok(w.log.diag.some((d) => /not found/.test(d)));
-  w = restartWorld();
-  w.self.readScreen = async () => null;
-  res = await w.self.typeLine("t9", "/clear", strictCx(w.log, "spawn"), () => true);
-  assert.match(res.why, /읽지 못해/); assert.deepEqual(w.log.pasted, []);
-  assert.ok(hc0);
-});
-test("새로 시작: Enter가 눌리지 않았어도 사람이 직접 보내 새 노트가 생기면 2~4단계를 이어 간다", async () => {
-  const w = restartWorld();
-  w.po.pasteBefore = "my draft "; // the check after the paste fails: Enter is not pressed
+  const orig = w.self.handoffRead; let reads = 0;
+  w.self.handoffRead = async (id) => { reads++; const r = await orig.call(w.self, id); return { ...r, exists: false, size: 0, ms: 0 }; }; // the note never shows
   w.click();
-  while (!w.log.pasted.length) await tick();
-  while (w.self.rs.get("r")?.phase !== "fail") await tick();
-  assert.deepEqual(w.log.keys, []);
-  assert.match(w.self.rs.get("r").why, /노트를 요청하지 못했습니다/);
-  // the person sends it by hand: the PO now shows the request and writes the note
-  w.po.pasteBefore = ""; w.po.input = ""; w.po.hist += `\n${I.RESTART_MARK} request`; w.po.noteMs = Date.now() + 5;
-  await w.settle(20000);
-  const r = w.self.rs.get("r");
-  assert.deepEqual(w.log.stale, []);
-  assert.equal(r.phase, "done", JSON.stringify(r) + w.log.says.join("|"));
-  assert.equal(r.n, 4);
-  assert.deepEqual(w.log.keys, ["/clear", "/PO"]);
-});
-test("새로 시작: Enter가 눌리지 않았고 노트도 안 생기면 멈춘 채로 남고, 사람이 닫으면 지켜보기를 끝낸다", async () => {
-  const w = restartWorld();
-  w.po.pasteBefore = "my draft ";
-  w.click();
-  while (w.self.rs.get("r")?.phase !== "fail") await tick();
-  for (let i = 0; i < 20; i++) await tick();
-  assert.equal(w.self.rs.get("r").phase, "fail"); assert.equal(w.self.rs.get("r").n, 0);
+  while (reads < 2) await tick();
   const c = strictCx(w.log); w.self.restartClose("r", c); c.valid = false;
-  let reads = 0; const o = w.self.handoffRead; w.self.handoffRead = async (id) => { reads++; return o.call(w.self, id); };
-  for (let i = 0; i < 20; i++) await tick();
-  assert.ok(reads <= 1, "the watch ended after the close: " + reads);
+  const at = reads;
+  for (let i = 0; i < 30; i++) await tick();
+  assert.ok(reads <= at + 1, "stopped after the close: " + (reads - at));
+  assert.equal(w.log.sends.length, 1, "only the note request went out");
   assert.deepEqual(w.log.stale, []);
+});
+test("새로 시작: 재시작 길(sendLine·restartFlow)은 화면 읽기·클립보드·붙여넣기·포커스·hc keys를 쓰지 않고, 화면 모양을 보는 도우미도 없다", () => {
+  const src = mainSrc();
+  const flow = src.slice(src.indexOf("  async poTerm("), src.indexOf("  // The strip above the chat box"));
+  assert.ok(flow.includes("async sendLine(") && flow.includes("async restartFlow("));
+  for (const bad of ["readScreen", "terminal.paste", "write_to_clipboard", "pane.focus", "typeLine", '"keys"', '"read"', "hc keys", "focused(", "panes("]) assert.ok(!flow.includes(bad), `restart path uses ${bad}`);
+  for (const gone of ["restartInputText", "restartInputEmpty", "restartInputOnly", "restartShot", "RESTART_RULE", "squeezeRow", "RESTART_READ_LINES", "restartHasMark", "restartCleared", "diagShot", "readScreen"]) {
+    assert.ok(!src.includes(gone), `${gone} is deleted from main.js`);
+    assert.ok(!(gone in I), `${gone} is not exported`);
+  }
+  assert.match(flow, /hc\(\["send", po, text, "--json"\]\)/);
+  assert.ok(!/"--if"/.test(flow), "no --if: it refuses a PO that is 'done'");
+  assert.ok(flow.indexOf("restartClearState(clr.turn") < flow.indexOf('sendLine(po, "/PO"'), "/PO only after the clear signal");
 });
