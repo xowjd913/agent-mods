@@ -138,8 +138,8 @@ test("main.js: deliver — 막힌 PO(blocked)는 붙여넣기만, 칸 없는 PO�
   // 닫기·지우기는 PO에 닿았을 때(sent·held), 칸을 여는 중이면 글이 가는 순간(ok)에
   const send = methodOf(src, "  send(a, text, cx, kind = \"answer\") {", "  clearBox(a");
   assert.match(send, /r === "sent" \|\| r === "held"/);
-  assert.match(send, /this\.clearBox\(a, r\)/);
-  assert.match(send, /\(r2\) => \{ this\.clearBox\(a, r2\); \}/);
+  assert.match(send, /this\.clearBox\(a, r, sent\)/);
+  assert.match(send, /\(r2\) => \{ this\.clearBox\(a, r2, sent\); \}/);
 });
 
 test("main.js: 보내도 PO 데스크는 닫히지 않고(Dock·창·페인), 페인이면 Enter 뒤에 키보드를 돌려준다", () => {

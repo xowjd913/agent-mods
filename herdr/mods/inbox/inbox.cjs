@@ -155,7 +155,7 @@ function parseBody(text) {
     if (segs.length) blocks.push({ t: kind, segs, ...(mark ? { mark, depth } : {}) });
   };
   for (const raw of src) {
-    const line = raw.replace(/\s+$/, "");
+    const line = raw.trimEnd();
     if (fence) {
       if (/^\s*```/.test(line)) { if (fence.length) blocks.push({ t: "code", text: fence.join("\n") }); fence = null; } else fence.push(line);
       continue;
@@ -848,7 +848,7 @@ const badgeTurn = (lease, id, now, ttl = 65000) => (!lease || lease.id === id ||
 // A spinner / timer row of the PO ("✻ Waiting (12s)", "✻ Thinking… (3s · esc to interrupt)"): it changes every second without the question
 // changing, so it is neither shown nor part of the signature.
 const PROMPT_TIMER = /^[\s│┃|]*[^\p{L}\p{N}\s]?\s*\p{L}[\p{L}\s'-]{0,30}[….]*\s*\((?:\d+\s*[hms]\s*)+[^)]*\)[\s│┃|]*$/u;
-const promptTail = (text, n = 10) => cleanText(text).split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim() && !PROMPT_TIMER.test(l)).slice(-n).map((l) => (l.length > 140 ? `${l.slice(0, 139)}…` : l));
+const promptTail = (text, n = 10) => cleanText(text).split("\n").map((l) => l.trimEnd()).filter((l) => l.trim() && !PROMPT_TIMER.test(l)).slice(-n).map((l) => (l.length > 140 ? `${l.slice(0, 139)}…` : l));
 const PROMPT_NUM = /^[\s│┃|]*([❯>›])?\s*(\d{1,2})[.)]\s+(\S.*?)[\s│┃|]*$/;
 const promptFooter = (l) => /^[^\p{L}\p{N}]*$/u.test(l) || (l.length <= 140 && /\b(esc|enter|tab|ctrl|shift|alt)\b|^\s*[↑↓←→]|\? for shortcuts/i.test(l));
 // {options: [{key, label, on}], head: the up to 2 lines right above the choices}. Options only when they are 1..N (2 or more).
@@ -1049,9 +1049,10 @@ function imgRel(root, p) { return imgOk(root, p) ? IMG_SUB + slashed(p).slice(sl
 // Wrapper tags that are not part of a message: <hc from="..."> ... </hc> (a message another terminal sent to this one) and
 // <pasted_content id="..."> ... </pasted_content id="..."> (what the terminal puts around a paste), also with the backslash forms
 // (<\pasted_content ...>, <\/pasted_content ...>). Only a tag that opens a line, or a closing tag that ends one, is removed: a text that
-// merely mentions a tag in the middle of a sentence keeps it. Pure.
+// merely mentions a tag in the middle of a sentence keeps it. Pure. WRAP_CLOSE starts with (?<![ \t]) so a long run of blanks is tried from its
+// first blank only (without it every blank starts a new attempt that runs to the end: quadratic).
 const WRAP_OPEN = /^[ \t]*<[\\/]{0,2}(?:hc|pasted_content)\b[^<>\n]*>[ \t]*/gim;
-const WRAP_CLOSE = /[ \t]*<\\?\/(?:hc|pasted_content)\b[^<>\n]*>[ \t]*$/gim;
+const WRAP_CLOSE = /(?<![ \t])[ \t]*<\\?\/(?:hc|pasted_content)\b[^<>\n]*>[ \t]*$/gim;
 function unwrapTags(text) {
   const t = String(text ?? "");
   if (!t.includes("<")) return t;

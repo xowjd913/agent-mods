@@ -226,13 +226,13 @@ test("F: the answer box wires paste_other, the 그림 button, drop and the chip 
 });
 
 test("F: the answer carries the pictures as Read-tool lines and in the bubble record; the option buttons carry none", () => {
-  const send = MAIN.slice(MAIN.indexOf("  send(a, text, cx"), MAIN.indexOf("  clearBox("));
+  const send = MAIN.slice(MAIN.indexOf("  send(a, text, cx"), MAIN.indexOf("  clearBox(a, how"));
   assert.match(send, /kind === "answer" \? this\.picsOf\(a\.s\.leader\)/);
   assert.match(send, /pics\.map\(\(x\) => imgLine\(x\.path\)\)/);
   assert.match(send, /imgs: pics\.map\(\(x\) => x\.path\)/);
   assert.match(send, /!body && !pics\.length/, "a picture alone is an answer");
   const clear = MAIN.slice(MAIN.indexOf("  clearBox("), MAIN.indexOf("  box(leader, cx)"));
-  assert.match(clear, /this\.replyPics\.delete\(a\.s\.leader\)/);
+  assert.match(clear, /this\.setPics\(leader, /);
 });
 
 test("F: the answer line plus image lines is the same shape the PO box sends", () => {
@@ -241,4 +241,86 @@ test("F: the answer line plus image lines is the same shape the PO box sends", (
   assert.match(first, /^Panel answer \(decision\) for lead-a: "1안으로"\.$/);
   assert.match(second, /^\[image: .*ab12\.png/);
   assert.equal(rest.length, 0);
+});
+
+// ---- round 16
+test("R16: unwrapTags stays fast on a long run of blanks (no quadratic closing-tag scan)", () => {
+  for (const ch of [" ", "\t", " \t"]) {
+    const run = ch.repeat(80000);
+    for (const t of [`a${run}b <`, `<${run}x`, `a${run}</hc`, `${run}<\\/pasted_content id=1>`, `x${run}<b>`]) {
+      const t0 = process.hrtime.bigint();
+      I.unwrapTags(t);
+      const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+      assert.ok(ms < 100, `${JSON.stringify(t.slice(0, 12))}… took ${ms} ms`);
+    }
+  }
+  // the lookbehind changes nothing for normal text
+  assert.equal(I.unwrapTags("a  </hc>\nb \t<\\/pasted_content id=1>"), "a\nb");
+  assert.equal(I.unwrapTags('<hc from="x">\n  hi  \n</hc>'), "hi");
+});
+
+test("R16: the same closing-tag regex is in the mod copy, and the terminal-line trims are linear", () => {
+  assert.match(MAIN, /const WRAP_CLOSE = \/\(\?<!\[ \\t\]\)\[ \\t\]\*<\\\\\?\\\/\(\?:hc\|pasted_content\)\\b\[\^<>\\n\]\*>\[ \\t\]\*\$\/gim;/);
+  const t0 = process.hrtime.bigint();
+  I.promptTail(`a${" ".repeat(80000)}b`);
+  assert.ok(Number(process.hrtime.bigint() - t0) / 1e6 < 100);
+  assert.doesNotMatch(MAIN, /replace\(\/\\s\+\$\//);
+});
+
+function replyDesk(store = {}) {
+  const grab = (name, end) => { const a = MAIN.indexOf(name), b = MAIN.indexOf(end, a); assert.ok(a > 0 && b > a, name); return MAIN.slice(a, b); };
+  const body = [grab("  picsOf(key = null)", "  bumpBusy("), grab("  pruneReply(asks)", "  pruneSent(asks)"), grab("  clearBox(a, how", "  box(leader, cx)")].join("\n");
+  const make = new Function("shared", "setShared", "SENT_KEY", `return class Desk {
+    constructor() { this.pics = []; this.replyPics = new Map(); this.replyBusy = new Map(); this.inputs = new Map(); this.writing = null; }
+    askKey(a) { return a.kind + "|" + a.link; }
+    ${body}
+  }`);
+  return new (make((k) => store[k], (k, v) => { store[k] = v; }, "sent"))();
+}
+const ASK = (leader) => ({ kind: "decision", link: "l", s: { leader } });
+const fakeInput = (v) => ({ v, value() { return this.v; }, set_value(x) { this.v = x; } });
+
+test("R16: a text-only answer waits while a picture of that box is still being read", () => {
+  const send = MAIN.slice(MAIN.indexOf("  send(a, text, cx"), MAIN.indexOf("  // clearBox") > 0 ? MAIN.indexOf("  // clearBox") : MAIN.indexOf("  clearBox(a, how"));
+  assert.match(send, /kind === "answer" && this\.busyOf\(a\.s\.leader\)/);
+  assert.doesNotMatch(send, /pics\.length && this\.busyOf/);
+  assert.ok(send.indexOf("this.busyOf") < send.indexOf("!body && !pics.length"), "the busy check comes first");
+});
+
+test("R16: answer boxes of leaders that are gone lose their pictures and reads", () => {
+  const d = replyDesk();
+  d.replyPics.set("lead-a", [{ path: "p1" }]); d.replyPics.set("lead-gone", [{ path: "p2" }]);
+  d.replyBusy.set("lead-gone", 1); d.replyBusy.set("lead-a", 1);
+  d.pruneReply([ASK("lead-a")]);
+  assert.deepEqual([...d.replyPics.keys()], ["lead-a"]);
+  assert.deepEqual([...d.replyBusy.keys()], ["lead-a"]);
+  d.pruneReply([]);
+  assert.equal(d.replyPics.size + d.replyBusy.size, 0);
+  assert.match(MAIN, /const all = this\.asks\(\);\n\s*this\.pruneReply\(all\);/, "view() prunes on every draw");
+});
+
+test("R16: a late clear removes only what was sent, not words or pictures added meanwhile", () => {
+  const store = {};
+  const d = replyDesk(store);
+  const a = ASK("lead-a");
+  d.inputs.set("lead-a", fakeInput("new words"));
+  d.setPics("lead-a", [{ path: "sent.png" }, { path: "later.png" }]);
+  d.clearBox(a, "held", { text: "the answer", imgs: ["sent.png"] });
+  assert.equal(d.inputs.get("lead-a").v, "new words", "words typed meanwhile stay");
+  assert.deepEqual(d.picsOf("lead-a").map((x) => x.path), ["later.png"]);
+  assert.equal(store.sent["lead-a"], "decision|l|held", "the ask is still marked");
+  // the box still holding what was sent is emptied
+  d.inputs.get("lead-a").v = "the answer ";
+  d.clearBox(a, "sent", { text: "the answer", imgs: ["later.png"] });
+  assert.equal(d.inputs.get("lead-a").v, "");
+  assert.equal(d.picsOf("lead-a").length, 0);
+  assert.equal(store.sent["lead-a"], "decision|l");
+  // an option button sends its fixed word: a draft stays; a call without `sent` clears everything
+  d.inputs.get("lead-a").v = "draft"; d.setPics("lead-a", [{ path: "x.png" }]);
+  d.clearBox(a, "sent", { text: "1안 선택", imgs: [] });
+  assert.equal(d.inputs.get("lead-a").v, "draft");
+  assert.equal(d.picsOf("lead-a").length, 1);
+  d.clearBox(a, "sent");
+  assert.equal(d.inputs.get("lead-a").v, "");
+  assert.equal(d.picsOf("lead-a").length, 0);
 });

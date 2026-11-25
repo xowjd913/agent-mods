@@ -334,7 +334,7 @@ const badgeTurn = (lease, id, now, ttl = 65000) => (!lease || lease.id === id ||
 // A spinner / timer row of the PO ("✻ Waiting (12s)", "✻ Thinking… (3s · esc to interrupt)"): it changes every second without the question
 // changing, so it is neither shown nor part of the signature.
 const PROMPT_TIMER = /^[\s│┃|]*[^\p{L}\p{N}\s]?\s*\p{L}[\p{L}\s'-]{0,30}[….]*\s*\((?:\d+\s*[hms]\s*)+[^)]*\)[\s│┃|]*$/u;
-const promptTail = (text, n = 10) => cleanText(text).split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim() && !PROMPT_TIMER.test(l)).slice(-n).map((l) => (l.length > 140 ? `${l.slice(0, 139)}…` : l));
+const promptTail = (text, n = 10) => cleanText(text).split("\n").map((l) => l.trimEnd()).filter((l) => l.trim() && !PROMPT_TIMER.test(l)).slice(-n).map((l) => (l.length > 140 ? `${l.slice(0, 139)}…` : l));
 const PROMPT_NUM = /^[\s│┃|]*([❯>›])?\s*(\d{1,2})[.)]\s+(\S.*?)[\s│┃|]*$/;
 const promptFooter = (l) => /^[^\p{L}\p{N}]*$/u.test(l) || (l.length <= 140 && /\b(esc|enter|tab|ctrl|shift|alt)\b|^\s*[↑↓←→]|\? for shortcuts/i.test(l));
 // {options: [{key, label, on}], head: the up to 2 lines right above the choices}. Options only when they are 1..N (2 or more).
@@ -535,9 +535,10 @@ function imgRel(root, p) { return imgOk(root, p) ? IMG_SUB + slashed(p).slice(sl
 // Wrapper tags that are not part of a message: <hc from="..."> ... </hc> (a message another terminal sent to this one) and
 // <pasted_content id="..."> ... </pasted_content id="..."> (what the terminal puts around a paste), also with the backslash forms
 // (<\pasted_content ...>, <\/pasted_content ...>). Only a tag that opens a line, or a closing tag that ends one, is removed: a text that
-// merely mentions a tag in the middle of a sentence keeps it. Pure.
+// merely mentions a tag in the middle of a sentence keeps it. Pure. WRAP_CLOSE starts with (?<![ \t]) so a long run of blanks is tried from its
+// first blank only (without it every blank starts a new attempt that runs to the end: quadratic).
 const WRAP_OPEN = /^[ \t]*<[\\/]{0,2}(?:hc|pasted_content)\b[^<>\n]*>[ \t]*/gim;
-const WRAP_CLOSE = /[ \t]*<\\?\/(?:hc|pasted_content)\b[^<>\n]*>[ \t]*$/gim;
+const WRAP_CLOSE = /(?<![ \t])[ \t]*<\\?\/(?:hc|pasted_content)\b[^<>\n]*>[ \t]*$/gim;
 function unwrapTags(text) {
   const t = String(text ?? "");
   if (!t.includes("<")) return t;
@@ -981,6 +982,11 @@ export default class Inbox extends View {
   askKey(a) { return `${a.kind}|${a.item?.ts ?? ""}|${a.link}`; }
   // "sent" (Enter was pressed), "held" (pasted only, the person presses Enter) or "" (nothing delivered for this ask).
   sentOf(a) { try { const v = shared(SENT_KEY)?.[a.s.leader], k = this.askKey(a); return v === k ? "sent" : v === k + "|held" ? "held" : ""; } catch { return ""; } }
+  // The pictures (and reads in flight) of an answer box whose leader is no longer waiting are dropped, so the two Maps never grow with old leaders.
+  pruneReply(asks) {
+    const live = new Set(asks.map((a) => a.s.leader));
+    for (const m of [this.replyPics, this.replyBusy]) for (const k of [...m.keys()]) if (!live.has(k)) m.delete(k);
+  }
   pruneSent(asks) {
     try {
       const cur = shared(SENT_KEY) ?? {};
@@ -1117,6 +1123,7 @@ export default class Inbox extends View {
     const terms = this.liveTerms();
     const pos = poList(terms);
     const all = this.asks();
+    this.pruneReply(all);
     const reps = this.reports(all);
     const hasOther = all.some((a) => a.owner === PO_OTHER) || reps.some((r) => r.owner === PO_OTHER);
     let last = "";
@@ -1426,23 +1433,29 @@ export default class Inbox extends View {
     // Only a written answer takes the pictures of its box along; the option / 확인 완료 buttons send their fixed word and leave them there.
     const pics = kind === "answer" ? this.picsOf(a.s.leader).slice(0, MAX_IMGS) : [];
     const body = String(text ?? "").trim();
+    // A picture still being read must not miss this answer and ride on the next one, so even a text-only answer waits (as the PO box does).
+    if (kind === "answer" && this.busyOf(a.s.leader)) { this.say("그림을 읽는 중입니다. 잠시 뒤에 다시 보내세요.", true); cx.notify(); return; }
     if (!body && !pics.length) { this.say("답을 먼저 적어 주세요.", true); cx.notify(); return; }
-    if (pics.length && this.busyOf(a.s.leader)) { this.say("그림을 읽는 중입니다. 잠시 뒤에 다시 보내세요.", true); cx.notify(); return; }
     const po = a.po;
     if (!po) { this.say(NO_PO, true); cx.notify(); return; }
     try {
       // The PO reads a picture from its file: each path goes in the answer as a line it can open with the Read tool (as the PO box does).
       const line = [answerLine(a.kind, a.s.leader, body || "(picture only)", a.link), ...pics.map((x) => imgLine(x.path))].join("\n");
-      const r = this.deliver(po, line, cx, { text: body, imgs: pics.map((x) => x.path), to: a.s.leader, po: a.owner, kind, ak: this.askKey(a) }, (r2) => { this.clearBox(a, r2); });
-      if (r === "sent" || r === "held") this.clearBox(a, r);
+      const sent = { text: body, imgs: pics.map((x) => x.path) };
+      const r = this.deliver(po, line, cx, { text: body, imgs: pics.map((x) => x.path), to: a.s.leader, po: a.owner, kind, ak: this.askKey(a) }, (r2) => { this.clearBox(a, r2, sent); });
+      if (r === "sent" || r === "held") this.clearBox(a, r, sent);
     } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
     cx.notify();
   }
 
-  clearBox(a, how = "sent") {
-    try { setShared(SENT_KEY, { ...(shared(SENT_KEY) ?? {}), [a.s.leader]: this.askKey(a) + (how === "held" ? "|held" : "") }); } catch {}
-    this.inputs.get(a.s.leader)?.set_value("");
-    this.replyPics.delete(a.s.leader);
+  // `sent` = what went out ({text, imgs}). The late call (the pane opened after the answer was held) clears only that: words typed or
+  // pictures added meanwhile stay in the box. Without `sent` the whole box is cleared.
+  clearBox(a, how = "sent", sent = null) {
+    const leader = a.s.leader;
+    try { setShared(SENT_KEY, { ...(shared(SENT_KEY) ?? {}), [leader]: this.askKey(a) + (how === "held" ? "|held" : "") }); } catch {}
+    const st = this.inputs.get(leader);
+    if (st && (!sent || String(st.value() ?? "").trim() === sent.text)) st.set_value("");
+    this.setPics(leader, sent ? this.picsOf(leader).filter((x) => !sent.imgs.includes(x.path)) : []);
     if (this.writing === a.s.leader) this.writing = null;
   }
 
