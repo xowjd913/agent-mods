@@ -410,5 +410,32 @@ test("main.js logs selection, press/release and the per-draw TextView count to d
   assert.match(MAIN, /this\.diag\("press /);
   assert.match(MAIN, /this\.diag\("release /);
   assert.match(MAIN, /selectable TextView\(s\)/);
-  assert.match(MAIN, /settled in \$\{id\}: \$\{String\(sel\.text \?\? ""\)\.length\} chars/); // the length only
+  assert.match(MAIN, /settled in \$\{did\}: \$\{String\(sel\.text \?\? ""\)\.length\} chars/); // the length only
+});
+
+test("saveImage never writes through a link, and the picture folder is capped (oldest go first)", () => {
+  const root = tmp();
+  const b = png(30, 20, 10);
+  const f = I.saveImage(b, root);
+  fs.unlinkSync(f);
+  const victim = path.join(root, "victim.txt");
+  fs.writeFileSync(victim, "keep");
+  fs.symlinkSync(victim, f);
+  const g = I.saveImage(b, root);
+  assert.equal(g, f);
+  assert.equal(fs.readFileSync(victim, "utf8"), "keep");
+  assert.ok(fs.lstatSync(f).isFile());
+  // total cap: three 40-byte pictures, cap 130 with the saved 43-byte one -> only the oldest is pruned
+  const dir = I.imgDir(root);
+  const mk = (n, at) => { const p = path.join(dir, `${n.repeat(16)}.png`); fs.writeFileSync(p, Buffer.alloc(40)); fs.utimesSync(p, new Date(at), new Date(at)); return p; };
+  const now = Date.now();
+  const a = mk("a", now - 3000), c = mk("c", now - 2000), d = mk("d", now - 1000);
+  I.pruneImages(dir, now, 130);
+  assert.ok(!fs.existsSync(a));
+  assert.ok(fs.existsSync(c) && fs.existsSync(d));
+});
+
+test("diag never logs a view id (a timeline id holds the message text): kind + hash only", () => {
+  assert.match(MAIN, /diagId\(id\)/);
+  assert.doesNotMatch(MAIN, /settled in \$\{id\}|cleared in \$\{id\}/);
 });

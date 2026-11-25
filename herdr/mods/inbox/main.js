@@ -776,6 +776,13 @@ export default class Inbox extends View {
   }
   // Diagnostics for the leader (the person does not read consoles): lines are buffered and written by inbox.cjs in one call at most every 2s
   // to <app root>/data/inbox/diag.log (capped, 0600). Ids and lengths only, never message text.
+  // A view id for the diagnostics: a kind (its leading letters, "tl", "pp"...) and an 8-hex hash. Never the id itself: a timeline id holds the message text.
+  diagId(id) {
+    const s = String(id ?? "");
+    let h = 5381;
+    for (const ch of s) h = (Math.imul(h, 33) ^ ch.codePointAt(0)) >>> 0;
+    return `${s.match(/^[A-Za-z]{1,8}/)?.[0] ?? "?"}~${h.toString(16).padStart(8, "0")}`;
+  }
   diag(msg, cx) {
     try {
       const q = (this.diagQ ??= []);
@@ -806,8 +813,8 @@ export default class Inbox extends View {
   // A TextView's selection settled (sel) or cleared (null).
   onSel(id, sel, cx) {
     this.ui.selEvents = (this.ui.selEvents ?? 0) + 1; // how often a TextView reported a selection at all (see the console line)
-    this.diag(`selection ${sel ? `settled in ${id}: ${String(sel.text ?? "").length} chars` : `cleared in ${id}`} (#${this.ui.selEvents})`, cx);
-    try { console.log(`[inbox] selection ${sel ? `settled in ${id}: ${String(sel.text ?? "").length} chars` : `cleared in ${id}`} (#${this.ui.selEvents})`); } catch {}
+    { const did = this.diagId(id); this.diag(`selection ${sel ? `settled in ${did}: ${String(sel.text ?? "").length} chars` : `cleared in ${did}`} (#${this.ui.selEvents})`, cx); }
+    try { const did = this.diagId(id); console.log(`[inbox] selection ${sel ? `settled in ${did}: ${String(sel.text ?? "").length} chars` : `cleared in ${did}`} (#${this.ui.selEvents})`); } catch {}
     if (sel) this.ui.sels.set(id, true); else this.ui.sels.delete(id);
     this.ui.sel = this.ui.sels.size > 0;
     if (sel) this.ui.selAt = Date.now();

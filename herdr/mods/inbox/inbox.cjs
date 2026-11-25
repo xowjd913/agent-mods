@@ -377,12 +377,23 @@ function imageDims(root = appRoot()) {
   } catch {}
   return out;
 }
-function pruneImages(folder, now = Date.now()) {
+const IMG_TOTAL_MAX = 200 * 1024 * 1024; // the picture folder as a whole: past this the oldest pictures go
+function pruneImages(folder, now = Date.now(), total = IMG_TOTAL_MAX) {
   try {
+    const files = [];
     for (const n of fs.readdirSync(folder)) {
       if (!/^[0-9a-f]{16}\.(png|jpg|gif|webp)$/.test(n)) continue;
       const f = path.join(folder, n);
-      try { if (now - fs.statSync(f).mtimeMs > IMG_KEEP_MS) fs.unlinkSync(f); } catch {}
+      try {
+        const st = fs.lstatSync(f);
+        if (!st.isFile() || now - st.mtimeMs > IMG_KEEP_MS) { fs.unlinkSync(f); continue; } // an old file, or a link (never followed) goes
+        files.push({ f, size: st.size, at: st.mtimeMs });
+      } catch {}
+    }
+    let sum = files.reduce((a, x) => a + x.size, 0);
+    for (const x of files.sort((a, b) => a.at - b.at)) {
+      if (sum <= total) break;
+      try { fs.unlinkSync(x.f); sum -= x.size; } catch {}
     }
   } catch {}
 }
@@ -393,9 +404,15 @@ function saveImage(buf, root = appRoot(), now = Date.now()) {
   const folder = imgDir(root);
   fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
   const file = path.join(folder, `${require("crypto").createHash("sha256").update(buf).digest("hex").slice(0, 16)}${ext}`);
-  if (fs.existsSync(file)) { try { fs.chmodSync(file, 0o600); fs.utimesSync(file, new Date(now), new Date(now)); } catch {} return file; }
-  pruneImages(folder, now);
-  const fd = fs.openSync(file, "w", 0o600);
+  let st = null;
+  try { st = fs.lstatSync(file); } catch {}
+  if (st) { // the same picture is already there: only a plain file is reused (a link in its place is removed, never written through)
+    if (st.isFile()) { try { fs.chmodSync(file, 0o600); fs.utimesSync(file, new Date(now), new Date(now)); } catch {} return file; }
+    try { fs.unlinkSync(file); } catch { return null; }
+  }
+  pruneImages(folder, now, Math.max(0, IMG_TOTAL_MAX - buf.length));
+  let fd;
+  try { fd = fs.openSync(file, "wx", 0o600); } catch { return null; } // "wx": never opens an existing file or link
   try { try { fs.fchmodSync(fd, 0o600); } catch {} fs.writeSync(fd, buf); } finally { fs.closeSync(fd); }
   return file;
 }
@@ -1098,7 +1115,7 @@ function diagAppend(lines, root = appRoot()) {
   try { try { fs.fchmodSync(fd, 0o600); } catch {} fs.writeSync(fd, text); } finally { fs.closeSync(fd); }
   return f;
 }
-module.exports = { diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)
