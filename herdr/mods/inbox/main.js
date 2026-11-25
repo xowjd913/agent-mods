@@ -889,7 +889,7 @@ function handoffAsk(file) {
 function restartConfirm(decisions = 0, verifies = 0) {
   const d = Math.max(0, Number(decisions) || 0), v = Math.max(0, Number(verifies) || 0);
   const wait = d + v ? `결정 대기 ${d}건 · 확인 대기 ${v}건이 있습니다(새로 시작해도 리더 쪽 대기는 그대로입니다).` : "결정·확인 대기는 없습니다.";
-  return `PO에게 인수인계 노트를 쓰게 한 뒤 대화를 비우고(/clear) /PO로 다시 시작합니다. ${wait}`;
+  return `PO에게 인수인계 노트를 쓰게 한 뒤 대화를 비우고(/clear) /PO로 다시 시작합니다. PO 입력칸은 비어 있어야 합니다(남은 글이 있으면 함께 보내집니다). ${wait}`;
 }
 // The four steps for the room: `n` done, `fail` = the step at index n failed (so it shows as stopped).
 function restartSteps(n = 0, fail = false) {
@@ -946,12 +946,37 @@ function restartSendBlock(term) {
   if (term.status === "working") return "PO가 일하는 중입니다";
   return "";
 }
-// After `/clear` was sent (`sent` = the turn counter it reported, i.e. from before the command): "wait" while the PO still works or the counter has not
-// gone up, "done" once the PO is idle/done and the counter is higher (/clear counts as one turn), "gone" when the terminal is not running any more.
+// After `/clear` was sent (`sent` = the turn counter it reported, i.e. from before the command): "wait" while the PO still works or is on a prompt, or the counter
+// has not gone up, "done" once the PO is idle/done and the counter is higher (/clear counts as one turn), "gone" when the terminal is not running any more.
+// `done` counts too: herdr turns a "done" PO "idle" only once someone looks at its pane. That the line sent was really "/clear" is proven by restartClearCheck.
 function restartClearState(sent, term) {
   if (!term || !term.live) return "gone";
   if (term.status === "working" || term.status === "blocked") return "wait";
   return term.turn !== null && sent !== null && term.turn > sent ? "done" : "wait";
+}
+// `hc send` does not empty the input box: text left there (a draft the person typed, or a chat line the desk only pasted: held / noenter) is sent together with it.
+// The desk cannot read the box (no screen reads), so it blocks on its own records: a held / noenter chat line of this room younger than RESTART_DRAFT_MS.
+const RESTART_DRAFT_MS = 10 * 60 * 1000;
+function restartDraft(mine, room, now) {
+  return (mine ?? []).some((m) => m && m.po === room && (m.status === "held" || m.status === "noenter") && Number(now) - (Number(m.at ?? m.ms) || 0) < RESTART_DRAFT_MS)
+    ? "먼저 PO 입력칸에 남은 글을 보내거나 지우세요(남아 있으면 함께 보내집니다)" : "";
+}
+// What the PO's hook recorded as submitted (UserPromptSubmit -> kind "me" lines of po/<id>.jsonl) is the proof of what `hc send` really sent.
+// The step-1 request must come back as exactly itself: a draft left in the input box is sent in front of it ("<draft><request>"), and the run stops.
+// recs = [{ms, text}] ("me" lines); since = ms just before the send. "wait" = no record yet, "ok", "mismatch" (something else was submitted).
+const RESTART_REC_MS = 12 * 1000; // how long the desk waits for the record of a send (the hook writes it when the prompt is submitted)
+const restartNorm = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
+function restartSubmitCheck(recs, since, expected) {
+  const fresh = (recs ?? []).filter((x) => x && typeof x.text === "string" && Number(x.ms) >= Number(since));
+  if (!fresh.length) return "wait";
+  const e = restartNorm(expected);
+  const same = (x) => { const r = restartNorm(x.text); return r.endsWith("…") ? e.startsWith(r.slice(0, -1).trimEnd()) : r === e; }; // a record longer than the hook's limit ends in "…"
+  return fresh.every(same) ? "ok" : "mismatch";
+}
+// After the `/clear` send: the built-in /clear fires no UserPromptSubmit (verified on a scratch Claude Code: only SessionStart, source "clear"), so ANY new
+// "me" record means the line reached the model as text. "text" = fail (no /PO), "clean" = no such record.
+function restartClearCheck(recs, since) {
+  return (recs ?? []).some((x) => x && Number(x.ms) >= Number(since)) ? "text" : "clean";
 }
 // chat:end
 
@@ -1933,25 +1958,48 @@ export default class Inbox extends View {
   // The whole run is ONE async function inside cx.spawn: a click's or a timer's cx is only good during its own call, so after an await
   // only the spawn's cx is used (never the click's c). Waiting is sleepOn (a timer that resolves a promise), never a callback chain.
   sleepOn(cx, ms) { return new Promise((res, rej) => { try { cx.timer.after(ms, () => res()); } catch (e) { rej(e); } }); } // a cx the host closed throws: the run ends (restartRun's catch)
+  // The PO's "me" records (what its hook saw submitted), read by the helper; [] when none / unreadable.
+  async poMe(id) {
+    try {
+      const r = await exec("node", [HELPER(), "po-me", id], { timeout: 5000 });
+      if (r.code === 0) { const j = JSON.parse(r.stdout); if (Array.isArray(j)) return j; }
+    } catch {}
+    return [];
+  }
+  // Waits (bounded) for the record of a send: resolves the check ("ok" | "mismatch" | "wait" = none arrived).
+  async poProof(cx, id, since, expected, still) {
+    const t0 = Date.now();
+    for (;;) {
+      const st = restartSubmitCheck(await this.poMe(id), since, expected);
+      if (st !== "wait" || !still() || Date.now() - t0 >= RESTART_REC_MS) return st;
+      await this.sleepOn(cx, 500);
+    }
+  }
   // The PO's {live, status, turn} from `hc get` (no screen involved); null when it could not be read.
   async poTerm(po) {
     try { return restartTerm(await hc(["get", po, "--json"])); } catch { return null; }
   }
   // One line to the PO through `hc send` (paste + Enter in one command, the way leaders send). Before it: the PO must be running, not on a prompt, not working
   // (no `--if`: that accepts only "idle", and a PO that just finished is "done"). Resolves {ok, why, turn}: turn = the PO's counter from before the send.
-  // On a failure nothing was typed (hc send either starts the turn or leaves the input alone), and the trimmed output goes to diag.log.
-  async sendLine(po, text, still = () => true) {
+  // On a failure nothing was sent; on success a draft left in the PO's input box would have been sent along (hc send does not empty it), and the trimmed output goes to diag.log.
+  async sendLine(po, text, still = () => true, room = "") {
     const no = (why) => ({ ok: false, why, turn: null });
     if (!still()) return no("취소되었습니다");
+    let mineNow = []; try { mineNow = shared(CHAT_KEY) ?? []; } catch {}
+    const held = room ? restartDraft(mineNow, room, Date.now()) : "";
+    if (held) { this.diag(`restart send blocked: held chat line (po ${po})`); return no(`${held} — 아무것도 보내지 않았습니다`); }
     const term = await this.poTerm(po);
     if (!still()) return no("취소되었습니다");
     const block = restartSendBlock(term);
     if (block) { this.diag(`restart send blocked: ${block} (po ${po})`); return no(`${block} — 아무것도 보내지 않았습니다`); }
     let r = null;
+    const at = Date.now();
+    // hc() has no timeout option and exec() has no kill/abort (herdr.d.ts): a started send cannot be recalled or cut short from here; `hc send` itself waits at most
+    // 60 s for a person's unfinished draft (draft_wait), then sends. Closing the restart strip only stops the steps after it (gen check).
     try { r = await hc(["send", po, text, "--json"]); } catch (e) { r = { code: -1, stdout: "", stderr: String(e?.message ?? e) }; }
     const res = restartSendResult(r);
     if (!res.ok) { this.diag(`restart send failed: ${res.detail} (po ${po})`); return no(res.why); }
-    return { ok: true, why: "", turn: res.turn ?? term.turn };
+    return { ok: true, why: "", turn: res.turn ?? term.turn, at };
   }
   // 새로 시작 / 다시: the click only checks and records the run; everything after runs in cx.spawn.
   restartRun(room, po, id, c) {
@@ -1974,9 +2022,15 @@ export default class Inbox extends View {
     if (!alive()) return;
     const path = note0.path || `~/.herdr-inbox/po/${id}.handoff.md`;
     this.restartSet(room, g, { path, since: Date.now() }, cx);
-    const ask = await this.sendLine(po, handoffAsk(path), alive);
+    const askText = handoffAsk(path);
+    const ask = await this.sendLine(po, askText, alive, room);
     if (!alive()) return;
     if (!ask.ok) { this.restartFail(room, g, `노트를 요청하지 못했습니다(${ask.why})`, cx); return; }
+    // Proof of what was submitted: the PO's hook record of this send must be exactly the request (a draft in the input box is sent in front of it).
+    const proof = await this.poProof(cx, id, ask.at, askText, alive);
+    if (!alive()) return;
+    if (proof === "mismatch") { this.restartFail(room, g, "PO 입력칸에 남아 있던 글이 요청과 함께 보내졌습니다. 입력칸을 비운 뒤 다시 눌러 주세요", cx); return; }
+    if (proof !== "ok") { this.diag(`restart: no hook record of the request (po ${po})`); this.restartFail(room, g, "요청이 그대로 보내졌는지 PO 기록으로 확인하지 못해 /clear를 보내지 않았습니다", cx); return; }
     if (!this.restartSet(room, g, { n: 1 }, cx)) return;
     // Steps 2-3: look for the note every RESTART_POLL_MS; the note is fresh (written after the request) -> show it; the PO idle after it -> /clear.
     for (;;) {
@@ -1998,7 +2052,7 @@ export default class Inbox extends View {
     // Step 3: /clear through hc send. Proof that the right history is cleared: the note is fresh (written after our request) and our request's
     // send returned started:true. Proof that /clear ran (no screen): its send returned started:true, and the PO's turn counter went up with the PO idle/done again.
     this.rs.set(room, { ...this.rs.get(room), phase: "clear" });
-    const clr = await this.sendLine(po, "/clear", alive);
+    const clr = await this.sendLine(po, "/clear", alive, room);
     if (!alive()) return;
     if (!clr.ok) { this.restartFail(room, g, `/clear를 보내지 못했습니다(${clr.why})`, cx); return; }
     const t0 = Date.now();
@@ -2012,10 +2066,15 @@ export default class Inbox extends View {
       if (st === "gone") { this.restartFail(room, g, "/clear를 보낸 뒤 PO 터미널이 실행 중이 아니라 /PO를 보내지 않았습니다", cx); return; }
       if (Date.now() - t0 >= RESTART_CLEAR_MS) { this.diag(`restart /clear not confirmed: sent turn ${clr.turn}, now ${JSON.stringify(term)}`); this.restartFail(room, g, "/clear가 끝났는지 확인하지 못해 /PO를 보내지 않았습니다", cx); return; }
     }
+    // /clear fires no UserPromptSubmit: any new "me" record since the send means it went to the model as text (a draft glued to it, or no command at all).
+    if (restartClearCheck(await this.poMe(id), clr.at) === "text") { this.diag(`restart: /clear reached the model as text (po ${po})`); this.restartFail(room, g, "/clear가 명령이 아니라 글로 PO에게 들어간 것 같아 /PO를 보내지 않았습니다. PO 입력칸을 비운 뒤 다시 눌러 주세요", cx); return; }
+    if (!alive()) return;
     this.restartSet(room, g, { n: 3 }, cx);
-    const fin = await this.sendLine(po, "/PO", alive);
+    const fin = await this.sendLine(po, "/PO", alive, room);
     if (!alive()) return;
     if (!fin.ok) { this.restartFail(room, g, `/PO를 보내지 못했습니다(${fin.why})`, cx); return; }
+    // Report only (no step depends on it): did the hook see the /PO line?
+    try { await this.sleepOn(cx, 1500); this.diag(`restart /PO record: ${restartSubmitCheck(await this.poMe(id), fin.at, "/PO")}`); } catch {}
     this.restartSet(room, g, { n: 4, phase: "done" }, cx);
     this.say("PO를 새로 시작했습니다.");
   }
@@ -2027,7 +2086,8 @@ export default class Inbox extends View {
     const r = this.rs.get(room);
     const st = String(v.terms.find((x) => x.address === po)?.status ?? "");
     const running = Boolean(r && (r.phase === "run" || r.phase === "clear"));
-    const why = restartBlock({ po, status: st, running });
+    let mineNow = []; try { mineNow = shared(CHAT_KEY) ?? []; } catch {}
+    const why = restartBlock({ po, status: st, running }) || (r ? "" : restartDraft(mineNow, room, Date.now()));
     const waiting = (k) => v.asks.filter((a) => a.kind === k).length;
     const box = () => v_flex().id("po-restart").flex_none().min_w(0).mx(10).mb(6).px(10).py(8).gap(6).rounded(8).bg(t.raised).border(1).border_color(t.border).on_mouse_down("left", stop);
     if (!r) {

@@ -1455,7 +1455,7 @@ function handoffAsk(file) {
 function restartConfirm(decisions = 0, verifies = 0) {
   const d = Math.max(0, Number(decisions) || 0), v = Math.max(0, Number(verifies) || 0);
   const wait = d + v ? `결정 대기 ${d}건 · 확인 대기 ${v}건이 있습니다(새로 시작해도 리더 쪽 대기는 그대로입니다).` : "결정·확인 대기는 없습니다.";
-  return `PO에게 인수인계 노트를 쓰게 한 뒤 대화를 비우고(/clear) /PO로 다시 시작합니다. ${wait}`;
+  return `PO에게 인수인계 노트를 쓰게 한 뒤 대화를 비우고(/clear) /PO로 다시 시작합니다. PO 입력칸은 비어 있어야 합니다(남은 글이 있으면 함께 보내집니다). ${wait}`;
 }
 // The four steps for the room: `n` done, `fail` = the step at index n failed (so it shows as stopped).
 function restartSteps(n = 0, fail = false) {
@@ -1512,12 +1512,37 @@ function restartSendBlock(term) {
   if (term.status === "working") return "PO가 일하는 중입니다";
   return "";
 }
-// After `/clear` was sent (`sent` = the turn counter it reported, i.e. from before the command): "wait" while the PO still works or the counter has not
-// gone up, "done" once the PO is idle/done and the counter is higher (/clear counts as one turn), "gone" when the terminal is not running any more.
+// After `/clear` was sent (`sent` = the turn counter it reported, i.e. from before the command): "wait" while the PO still works or is on a prompt, or the counter
+// has not gone up, "done" once the PO is idle/done and the counter is higher (/clear counts as one turn), "gone" when the terminal is not running any more.
+// `done` counts too: herdr turns a "done" PO "idle" only once someone looks at its pane. That the line sent was really "/clear" is proven by restartClearCheck.
 function restartClearState(sent, term) {
   if (!term || !term.live) return "gone";
   if (term.status === "working" || term.status === "blocked") return "wait";
   return term.turn !== null && sent !== null && term.turn > sent ? "done" : "wait";
+}
+// `hc send` does not empty the input box: text left there (a draft the person typed, or a chat line the desk only pasted: held / noenter) is sent together with it.
+// The desk cannot read the box (no screen reads), so it blocks on its own records: a held / noenter chat line of this room younger than RESTART_DRAFT_MS.
+const RESTART_DRAFT_MS = 10 * 60 * 1000;
+function restartDraft(mine, room, now) {
+  return (mine ?? []).some((m) => m && m.po === room && (m.status === "held" || m.status === "noenter") && Number(now) - (Number(m.at ?? m.ms) || 0) < RESTART_DRAFT_MS)
+    ? "먼저 PO 입력칸에 남은 글을 보내거나 지우세요(남아 있으면 함께 보내집니다)" : "";
+}
+// What the PO's hook recorded as submitted (UserPromptSubmit -> kind "me" lines of po/<id>.jsonl) is the proof of what `hc send` really sent.
+// The step-1 request must come back as exactly itself: a draft left in the input box is sent in front of it ("<draft><request>"), and the run stops.
+// recs = [{ms, text}] ("me" lines); since = ms just before the send. "wait" = no record yet, "ok", "mismatch" (something else was submitted).
+const RESTART_REC_MS = 12 * 1000; // how long the desk waits for the record of a send (the hook writes it when the prompt is submitted)
+const restartNorm = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
+function restartSubmitCheck(recs, since, expected) {
+  const fresh = (recs ?? []).filter((x) => x && typeof x.text === "string" && Number(x.ms) >= Number(since));
+  if (!fresh.length) return "wait";
+  const e = restartNorm(expected);
+  const same = (x) => { const r = restartNorm(x.text); return r.endsWith("…") ? e.startsWith(r.slice(0, -1).trimEnd()) : r === e; }; // a record longer than the hook's limit ends in "…"
+  return fresh.every(same) ? "ok" : "mismatch";
+}
+// After the `/clear` send: the built-in /clear fires no UserPromptSubmit (verified on a scratch Claude Code: only SessionStart, source "clear"), so ANY new
+// "me" record means the line reached the model as text. "text" = fail (no /PO), "clean" = no such record.
+function restartClearCheck(recs, since) {
+  return (recs ?? []).some((x) => x && Number(x.ms) >= Number(since)) ? "text" : "clean";
 }
 // chat:end
 
@@ -1553,7 +1578,7 @@ function readHandoff(dir = inboxDir(), id = "") {
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)
@@ -1564,6 +1589,7 @@ if (require.main === module) {
   const shown = (p) => { let d = null; try { const buf = fs.readFileSync(p).subarray(0, 65536); d = imgSize(buf); } catch {} return { path: p || null, ...(d ? { w: d[0], h: d[1] } : {}) }; };
   if (cmd === "clipimg") process.stdout.write(JSON.stringify(shown(clipImage())));
   else if (cmd === "diag") { try { diagAppend(JSON.parse(arg)); } catch {} process.stdout.write("{}"); }
+  else if (cmd === "po-me") { let me = []; try { const f = poFile(inboxDir(), arg); if (f) me = parsePoLines(readTail(f)).filter((x) => x.me).slice(-20).map((x) => ({ ms: x.ms, text: x.text })); } catch {} process.stdout.write(JSON.stringify(me)); }
   else if (cmd === "handoff") process.stdout.write(JSON.stringify(readHandoff(inboxDir(), arg)));
   else if (cmd === "addimg") process.stdout.write(JSON.stringify(shown(importImage(arg))));
   else process.stdout.write(JSON.stringify(collect()));
