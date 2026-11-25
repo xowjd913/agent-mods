@@ -19,7 +19,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, ScrollHandle } from "gpui-base";
-import { theme, exec, appHome, checking, window, run, hc, terminals, panes, focused, setBadge, shared, setShared, props, openOverlay, closeOverlay, watchFolder, pickFiles } from "herdr";
+import { theme, exec, appHome, checking, window, run, hc, terminals, panes, focused, setBadge, shared, setShared, props, openOverlay, closeOverlay, watchFolder, pickFiles, home, readTextFile } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
 const ICON = (name) => `mods/workspace-chrome/${name}.svg`;
@@ -857,6 +857,46 @@ function openFile(path) {
   else exec("xdg-open", [f]);
 }
 
+// usageLine:begin
+// The Claude usage line under the room title: "Claude 5h ▬ 54% · 7d ▬ 34%". It reads ~/.claude/usage-limits.json (written by the Claude Code
+// status line; no network, no exec). The parsing is parseUsage of the usage-status mod plus the reset time; the mods cannot require each
+// other, so it is a copy (a test keeps the rows of both equal). A file not updated for USAGE_STALE_MS is Unknown (null).
+const USAGE_FILE = ".claude/usage-limits.json", USAGE_REFRESH_MS = 60 * 1000, USAGE_STALE_MS = 10 * 60 * 1000;
+const USAGE_WARN = 80, USAGE_LABEL = { five_hour: "5h", seven_day: "7d" };
+const USAGE_TRACK_W = 40, USAGE_TRACK_H = 3, USAGE_MIN_FILL = 2;
+// The filled width (px) of a bar: 0 for <= 0 and NaN, at least USAGE_MIN_FILL above 0, never past the track.
+function usageFill(percent, track = USAGE_TRACK_W) {
+  const p = Number.isFinite(percent) ? Math.max(0, percent) : 0;
+  return p === 0 ? 0 : Math.min(track, Math.max(USAGE_MIN_FILL, Math.round((p / 100) * track)));
+}
+// The file's text -> [{label, percent, resetsAt}] (resetsAt in ms, 0 when unknown) or null (Unknown: none, broken, stale, no 5h/7d row).
+function parseUsage(raw, now) {
+  if (!raw) return null;
+  let data;
+  try { data = JSON.parse(raw); } catch { return null; }
+  const updated = Date.parse(data?.updatedAt ?? "");
+  if (!Number.isFinite(updated) || now - updated > USAGE_STALE_MS) return null;
+  const rows = (Array.isArray(data.limits) ? data.limits : [])
+    .filter((l) => USAGE_LABEL[l?.kind] && Number.isFinite(l.percentUsed))
+    .map((l) => ({ label: USAGE_LABEL[l.kind], percent: Math.round(l.percentUsed), resetsAt: Math.max(0, Date.parse(l.resetsAt ?? "") || 0) }));
+  return rows.length ? rows : null;
+}
+// A reset time in local time: HH:MM when it is today, else month/day HH:MM.
+function usageReset(ms, now) {
+  const d = new Date(ms), n = new Date(now);
+  if (!ms || Number.isNaN(d.getTime())) return "";
+  const p = (x) => String(x).padStart(2, "0");
+  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  return d.toDateString() === n.toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+}
+// The tooltip: the reset time of every row that has one ("5h 리셋 19:20 · 7d 리셋 11/30 22:00"), or why there are no numbers.
+function usageTip(rows, now) {
+  if (!rows) return "사용률을 알 수 없습니다: ~/.claude/usage-limits.json이 없거나 10분 넘게 갱신되지 않았습니다";
+  const parts = rows.filter((r) => r.resetsAt).map((r) => `${r.label} 리셋 ${usageReset(r.resetsAt, now)}`);
+  return parts.length ? parts.join(" · ") : "리셋 시각 정보가 없습니다";
+}
+// usageLine:end
+
 function ago(iso) {
   const m = Math.floor((Date.now() - Date.parse(iso)) / 60000);
   if (!(m >= 0)) return "";
@@ -996,7 +1036,45 @@ export default class Inbox extends View {
     // once the selection / press is over.
     cx.timer.every(PIN_TICK_MS, (cx) => this.pinTick(cx));
     cx.timer.every(DIAG_FLUSH_MS, () => this.flushDiag());
+    this.usage = undefined; // the rows of the usage line: undefined before the first read, null = Unknown, else [{label, percent, resetsAt}]
+    this.usageSig = "";
+    this.loadUsage(cx);
+    cx.timer.every(USAGE_REFRESH_MS, (cx) => this.loadUsage(cx));
     this.diag(`init: ${this.windowed ? "window" : this.paned ? "pane" : "dock"}`);
+  }
+
+  // Reads the usage file (a file read only) and redraws only when what the line shows changed: a redraw drops a drag-select.
+  loadUsage(cx) {
+    cx.spawn(async (cx) => {
+      let raw = null;
+      try { raw = await readTextFile(`${home()}/${USAGE_FILE}`); } catch {}
+      const rows = parseUsage(raw, Date.now());
+      const sig = JSON.stringify(rows);
+      this.usage = rows;
+      if (sig === this.usageSig) return;
+      this.usageSig = sig;
+      this.softNotify(cx);
+    });
+  }
+
+  // The usage line under the room title ("Claude 5h ▬ 54% · 7d ▬ 34%"); 80% and over is drawn in the warning color, the tooltip has the
+  // reset times. Nothing before the first read.
+  usageLine(t) {
+    const rows = this.usage;
+    if (rows === undefined) return null;
+    const track = this.narrow ? 28 : USAGE_TRACK_W;
+    const line = h_flex().id("inbox-usage").flex_none().h(22).px(this.compact ? 10 : 14).gap(6).items_center().overflow_hidden().text_size(11).text_color(t.dim)
+      .tooltip(usageTip(rows, Date.now())).child(div().flex_none().child("Claude"));
+    if (!rows) return line.child(div().flex_none().text_color(t.muted).child("Unknown"));
+    return rows.reduce((el, u, i) => {
+      const warn = u.percent >= USAGE_WARN;
+      return el
+        .when(i > 0, (x) => x.child(div().flex_none().child("·")))
+        .child(div().flex_none().child(u.label))
+        .child(div().flex_none().w(track).h(USAGE_TRACK_H).rounded(USAGE_TRACK_H).bg(t.border)
+          .child(div().h(USAGE_TRACK_H).w(usageFill(u.percent, track)).rounded(USAGE_TRACK_H).bg(warn ? t.blocked : t.foreground)))
+        .child(div().flex_none().text_color(warn ? t.blocked : t.muted).child(`${u.percent}%`));
+    }, line);
   }
 
   // ---- redraw gating (a drag-select must not be rebuilt under the pointer) and the pin to the newest
@@ -2315,11 +2393,13 @@ export default class Inbox extends View {
       .on_mouse_down_out((_e, c) => { this.ui.press = false; if (this.ui.sel) this.dropSel(); if (this.dirty) this.softNotify(c); })
       .when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks);
     const bar = this.filterBar(t, v);
+    const usage = this.usageLine(t); // null before the first read
     const panel = this.promptPanel(t, v, cx); // a blocked PO's screen + its keys (null while the room's PO is not waiting on a prompt)
     const room = v_flex().flex_1().min_w(0).min_h(0).when(!strip, (el) => el.h_full()) // beside the rooms the column must fill the row (h_flex centers children)
       .when(!strip && Boolean(head), (el) => el.child(h_flex().flex_none().h(30).px(14).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(head))
         .child(div().flex_none().text_size(10.5).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : `리더 ${new Set(v.raw.filter((e) => e.leader).map((e) => e.leader)).size}명`))))
+      .when(Boolean(usage), (el) => el.child(usage))
       .when(Boolean(bar), (el) => el.child(bar))
       .child(lines)
       .when(Boolean(panel), (el) => el.child(panel))
