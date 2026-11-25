@@ -790,6 +790,22 @@ function chatTarget(terms, to = [], pick = "") {
 // list (its label alone), placed at `now` (the newest). Reports of kind answered/start are not messages.
 const TL_GAP_MS = 5 * 60 * 1000; // the same sender within this gap shares one header
 const tlShown = (it) => Boolean(it) && it.kind !== "answered" && it.kind !== "start";
+// Memo for the text work a redraw repeats (#47): every render compares each of the person's messages with each sent record and strips the
+// wrapper tags (regex) of every bubble again; one very long paste made that slow enough that the host cut the render off ("interrupted").
+// Keyed by kind + the text itself, bounded (cleared when full). Only for pure functions of the text.
+const TL_MEMO_MAX = 2000;
+const tlMemo = new Map(); // kind -> Map(text -> result); the text itself is the key (no joined key string built per lookup)
+function tlMemoGet(kind, v, make) {
+  const s = String(v ?? "");
+  let m = tlMemo.get(kind);
+  if (!m) tlMemo.set(kind, (m = new Map()));
+  let r = m.get(s);
+  if (r !== undefined) return r;
+  r = make(s);
+  if (m.size >= TL_MEMO_MAX) m.clear();
+  m.set(s, r);
+  return r;
+}
 function timeline(room, leaders, says, mine, waits = [], now = 0) {
   const out = [];
   const seen = new Set();
@@ -816,8 +832,8 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
   const taken = new Set();
   const tnorm = (v) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 2000);
   // Compared without wrapper tags (the terminal's paste wrapper must not make a copy look different) and, as a second chance, by words + pictures.
-  const full = (v) => tnorm(unwrapTags(v));
-  const core = (v) => { const sp = splitImgs(v); return `${tnorm(sp.text)}|${sp.imgs.join(",")}`; };
+  const full = (v) => tlMemoGet("f", v, (s) => tnorm(unwrapTags(s)));
+  const core = (v) => tlMemoGet("c", v, (s) => { const sp = splitImgs(s); return `${tnorm(sp.text)}|${sp.imgs.join(",")}`; });
   if (room && room !== PO_OTHER) for (const x of says ?? []) {
     if (x.me) {
       const t = full(x.text), c = core(x.text);
@@ -1000,7 +1016,8 @@ const tlFollow = (seen, key, atEnd) => key !== (seen ?? "") && (String(seen ?? "
 const atBottom = (y, viewport, content) => (Number(y) || 0) + (Number(viewport) || 0) >= (Number(content) || 0) - 1;
 // A message text as HTML for a TextView: escaped, one paragraph per line, http(s) links clickable (trailing punctuation stays outside).
 const escHtml = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-function chatHtml(text) {
+function chatHtml(text) { return tlMemoGet("h", text, chatHtmlRaw); }
+function chatHtmlRaw(text) {
   return unwrapTags(text).replace(/\r\n?/g, "\n").split("\n").map((line) => {
     let out = "", at = 0;
     for (const m of line.matchAll(/https?:\/\/[^\s<>"]+/g)) {
@@ -1210,8 +1227,20 @@ const WRAP_CLOSE = /(?<![ \t])[ \t]*<\\?\/(?:hc|pasted_content)\b[^<>\n]*>[ \t]*
 function unwrapTags(text) {
   const t = String(text ?? "");
   if (!t.includes("<")) return t;
-  return t.replace(/\r\n?/g, "\n").replace(WRAP_OPEN, "").replace(WRAP_CLOSE, "").replace(/\n{3,}/g, "\n\n").trim();
+  return tlMemoGet("u", t, (s) => s.replace(/\r\n?/g, "\n").replace(WRAP_OPEN, "").replace(WRAP_CLOSE, "").replace(/\n{3,}/g, "\n\n").trim());
 }
+// A long message drawn in a bubble (#47): at most LONG_LINES lines and LONG_CHARS characters until the person presses "더 보기", so one huge
+// paste (a whole log) cannot make every redraw lay out thousands of lines. -> {text, cut: true when something was left out, more: chars left out}.
+// The 복사 chip still copies the whole text. Pure.
+const LONG_LINES = 14, LONG_CHARS = 1500;
+function clipLong(text) {
+  const s = String(text ?? "");
+  let end = Math.min(s.length, LONG_CHARS), n = 0, i = -1;
+  while ((i = s.indexOf("\n", i + 1)) !== -1 && i < end) if (++n >= LONG_LINES) { end = i; break; }
+  if (end >= s.length) return { text: s, cut: false, more: 0 };
+  return { text: s.slice(0, end).trimEnd(), cut: true, more: s.length - end };
+}
+const moreLabel = (more) => `더 보기 · ${String(Math.max(0, Number(more) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}자 더`;
 // Where the **bold** runs of a Markdown text (the string given to TextView.markdown) sit, as [{start,end}] UTF-16 offsets into that same string,
 // markers included. The TextView draws no heavier weight for them (it ignores bold), so main.js paints a tint behind these ranges instead.
 // Fenced blocks and `code spans` are skipped, a \\* is not a marker, an opening ** must be followed and a closing ** preceded by a non-blank.
@@ -1256,7 +1285,8 @@ function boldRanges(md) {
 // A message text as Markdown for a TextView.markdown(...).raw_html(false): wrapper tags removed first (they would print literally), a line that
 // is only 【...】 made bold, images switched off (![x](y) -> a plain link), and single line breaks kept as line breaks (Markdown would join them).
 // Code fences are left as written. Never produces HTML: the view shows tags as text. Pure.
-function mdText(text) {
+function mdText(text) { return tlMemoGet("m", text, mdTextRaw); }
+function mdTextRaw(text) {
   const src = unwrapTags(text).replace(/\r\n?/g, "\n").split("\n");
   let fence = false;
   const rows = src.map((ln) => {
@@ -1269,10 +1299,11 @@ function mdText(text) {
   return rows.map((r, i) => (r.flow && r.s.trim() && rows[i + 1]?.flow && rows[i + 1].s.trim() && !/ {2}$/.test(r.s) ? r.s + "  " : r.s)).join("\n");
 }
 // A message text -> {text without its "[image: ...]" lines, imgs: the paths those lines named}.
-function splitImgs(text) {
+function splitImgs(text) { return tlMemoGet("s", unwrapTags(text), splitImgsRaw); }
+function splitImgsRaw(text) {
   const imgs = [];
   const keep = [];
-  for (const ln of unwrapTags(text).split("\n")) {
+  for (const ln of String(text).split("\n")) {
     const m = IMG_LINE.exec(ln.trim());
     if (m && imgs.length < MAX_IMGS) imgs.push(m[1]); else keep.push(ln);
   }
@@ -1411,7 +1442,7 @@ function diagAppend(lines, root = appRoot()) {
   try { try { fs.fchmodSync(fd, 0o600); } catch {} fs.writeSync(fd, text); } finally { fs.closeSync(fd); }
   return f;
 }
-module.exports = { USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, parseUsage, usageReset, usageTip, unwrapTags, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, parseUsage, usageReset, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)

@@ -111,7 +111,8 @@ test("B/D: the code draws a thumbnail from the app-relative path, and bubbles us
   assert.match(MAIN, /thumb\(t, x\) \{[\s\S]*?imgRel\(this\.data\?\.root \?\? "", x\.path\)/);
   assert.ok(!/image\(x\.path\)/.test(MAIN), "the chip must not pass an absolute path to image()");
   assert.match(MAIN, /TextView\.markdown\(id, m\)\.raw_html\(false\)\.selectable\(true\)\.on_link_click/);
-  assert.match(MAIN, /this\.md\(id, e\.text, t\)/);
+  assert.match(MAIN, /this\.mdFolded\(id, e\.text, t\)/);
+  assert.match(MAIN, /this\.md\(id, open \? src : lc\.text, t\)/); // #47: a long PO message is folded, still through md()
 });
 
 // ---- E: the "···" rows (round 14)
@@ -848,7 +849,7 @@ test("R22 layout: a picture raises the cap only when it still fits beside the ch
 test("R21 layout: my bubble is pinned right and capped; the PO and leader bubbles are capped on the left; the cap follows resizes", () => {
   const row = MAIN.slice(MAIN.indexOf("  entryRow(t, e, v, cx) {"), MAIN.indexOf("  render(cx) {"));
   assert.match(row, /h_flex\(\)\.w_full\(\)\.min_w\(0\)\.gap\(6\)\.items_end\(\)\.justify_end\(\)/, "own row: flush right");
-  assert.match(row, /const width = Math\.min\(Math\.max\(bubbleWidth\(bp\.text\), pics, 64\), cap \?\? Infinity\)/, "own width never above the cap");
+  assert.match(row, /const width = Math\.min\(Math\.max\(bubbleWidth\(words\), pics, 64\), cap \?\? Infinity\)/, "own width never above the cap (words: the folded text, #47)");
   assert.match(row, /\.w\(width\)\.max_w\(cap \?\? "75%"\)\.min_w\(0\)/);
   assert.match(row, /div\(\)\.flex_1\(\)\.min_w\(0\)\.max_w\(this\.capOf\(\) \?\? "75%"\)\.px\(12\)/, "PO bubble");
   assert.match(row, /div\(\)\.flex_1\(\)\.min_w\(0\)\.max_w\(this\.capOf\(\) \?\? "75%"\)\.child\(this\.bubble\(/, "leader bubble");
@@ -1073,4 +1074,34 @@ test("R24: under a settled selection a held-Enter tick marks dirty and calls not
     assert.equal(n, 1);
     assert.equal(d.heldAt, now);
   } finally { Date.now = real; }
+});
+
+// #47: one very long paste (a whole log) in the chat made every redraw slow enough that the host cut the desk render off.
+test("long message: a huge paste is folded to its first lines and the timeline stays fast", () => {
+  const I = require("../mods/inbox/inbox.cjs");
+  const log = Array.from({ length: 6000 }, (_, i) => `2026-11-25T08:00:${String(i % 60).padStart(2, "0")}Z [info] step ${i} <hc from="t9"> value=${"x".repeat(40)}`).join("\n");
+  const pasted = `<pasted_content id="1">\n${log}\n</pasted_content id="1">`;
+  const c = I.clipLong(I.unwrapTags(pasted));
+  assert.equal(c.cut, true);
+  assert.ok(c.text.split("\n").length <= I.LONG_LINES && c.text.length <= I.LONG_CHARS);
+  assert.ok(c.more > 0 && c.text.length + c.more <= I.unwrapTags(pasted).length);
+  assert.match(I.moreLabel(12345), /^더 보기 · 12,345자 더$/);
+  // short texts stay whole
+  assert.deepEqual(I.clipLong("짧은 글\n두 줄"), { text: "짧은 글\n두 줄", cut: false, more: 0 });
+  // the timeline still pairs the typed paste with its sent record, and repeated renders reuse the work
+  const ms = Date.parse("2026-11-25T08:00:00Z");
+  const says = [{ me: true, ms, ts: "", text: pasted }];
+  const mine = [{ id: "a", po: "mascoz", ms: ms - 1000, at: ms - 1000, line: pasted, text: log, status: "sent" }];
+  const first = I.timeline("mascoz", [], says, mine);
+  assert.equal(first.filter((e) => e.who === "me").length, 1);
+  const t0 = Date.now();
+  for (let i = 0; i < 200; i++) I.timeline("mascoz", [], says, mine);
+  assert.ok(Date.now() - t0 < 1000, "200 renders of a huge paste must stay under a second");
+});
+
+test("long message: main.js folds the person's and the PO's bubbles behind 더 보기", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  assert.match(src, /clipLong\(bp\.text\)/);
+  assert.match(src, /mdFolded\(id, e\.text, t\)/);
+  assert.match(src, /moreLabel\(lc\.more\)/);
 });
