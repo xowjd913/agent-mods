@@ -869,15 +869,35 @@ test("parseMention: 글 가운데 @here는 빠지고 남는 공백·문장부호
 const sumOf = (leader, ...items) => ({ leader, items: items.map((i) => ({ ...i, ms: Date.parse(i.ts) })) });
 const T = (m) => new Date(Date.UTC(2026, 0, 1, 0, m)).toISOString();
 
-test("timeline: 방에 속한 리더 보고와 PO 말, 내가 보낸 글이 시간순(오래된 것이 위)으로 한 줄에 섞이고 answered·start는 빠진다", () => {
-  const a = sumOf("lead-a", { ts: T(5), kind: "done" }, { ts: T(1), kind: "decision" }, { ts: T(2), kind: "answered" }, { ts: T(0), kind: "start" });
+test("timeline: 방에 속한 리더 보고와 PO 말, 내가 보낸 글이 시간순(오래된 것이 위)으로 한 줄에 섞이고 answered는 빠진다", () => {
+  const a = sumOf("lead-a", { ts: T(5), kind: "done" }, { ts: T(1), kind: "decision" }, { ts: T(2), kind: "answered" });
   const b = sumOf("lead-b", { ts: T(3), kind: "verify" });
   const says = [{ ts: T(4), ms: Date.parse(T(4)), text: "PO 말", to: "lead-a" }];
   const mine = [{ ts: T(6), ms: Date.parse(T(6)), text: "내 글", to: "lead-a", po: "p1" }];
   const t = I.timeline("p1", [{ s: a, owner: "p1" }, { s: b, owner: "p1" }], says, mine);
   assert.deepEqual(t.map((e) => e.who), ["l:lead-a", "l:lead-b", "po", "l:lead-a", "me"]);
   assert.deepEqual(t.map((e) => e.ms), t.map((e) => e.ms).slice().sort((x, y) => x - y));
-  assert.equal(t.filter((e) => e.it && (e.it.kind === "answered" || e.it.kind === "start")).length, 0);
+  assert.equal(t.filter((e) => e.it && e.it.kind === "answered").length, 0);
+});
+
+// ---- 리더 접수·진행 알림은 PO를 거치지 않고 리더 말풍선으로 바로 (#43)
+test("timeline: 시작·진행 보고는 그 리더 자신의 말풍선으로 나오고, 기다림(waiting)·대기 줄을 만들지 않는다", () => {
+  const a = sumOf("lead-a", { ts: T(0), kind: "start", body: "접수" }, { ts: T(2), kind: "progress", body: "절반" }, { ts: T(3), kind: "answered" });
+  const t = I.timeline("p1", [{ s: a, owner: "p1" }], [], []);
+  assert.deepEqual(t.map((e) => [e.who, e.it.kind]), [["l:lead-a", "start"], ["l:lead-a", "progress"]]);
+  assert.ok(t.every((e) => !e.waiting && !e.wait));
+  assert.deepEqual(I.timeline("p2", [{ s: a, owner: "p1" }], [], []), []); // 다른 PO의 방에는 안 나온다
+});
+test("parseLines·summarize: progress는 아는 종류이고 열린 질문(open)·ask를 만들지 않는다", () => {
+  const s = I.summarize("lead-a", text({ ts: T(0), kind: "start" }, { ts: T(1), kind: "progress", body: "절반" }, { ts: T(2), kind: "bogus" }));
+  assert.deepEqual(s.items.map((i) => i.kind).sort(), ["progress", "start"]);
+  assert.equal(s.open, null);
+  assert.equal(s.ask, null);
+});
+test("main.js: 시작·진행 종류 이름표가 있고, 도크의 보고 목록도 시작을 거르지 않는다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
+  assert.match(src, /start: \["시작", "dim"\], progress: \["진행", "dim"\]/);
+  assert.ok(!/it\.kind === "start"/.test(src));
 });
 
 test("timeline: 다른 PO의 리더·내 글은 들어오지 않고, PO 모름 방에는 PO 말이 없다", () => {

@@ -7,7 +7,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const KINDS = new Set(["start", "done", "decision", "verify", "stop", "resume", "answered", "other"]);
+const KINDS = new Set(["start", "progress", "done", "decision", "verify", "stop", "resume", "answered", "other"]);
 const ASK_KINDS = new Set(["decision", "verify"]);
 const MAX_BYTES = 1024 * 1024; // read at most the last 1 MiB of a file: the panel only shows recent lines
 const KEEP = 40; // per leader, newest lines kept for the chat view
@@ -747,9 +747,10 @@ function chatTarget(terms, to = [], pick = "") {
 // of this room that wait on a decision/verify (ts = the report time of the waited-on ask, "" when no report is known). Entries come
 // oldest first: {key, who ("l:<leader>" | "po" | "me"), ms, ts, s?, leader?, it?, text?, to?, waiting?, wait?}. `waiting` marks the report a
 // waiting leader is blocked on (it carries the answer buttons); `wait` is a made-up entry for a waiting leader with no report in the
-// list (its label alone), placed at `now` (the newest). Reports of kind answered/start are not messages.
+// list (its label alone), placed at `now` (the newest). Reports of kind answered are not messages; start/progress are the leader's own notices
+// (sent to the desk only, never to the PO) and show as its bubble.
 const TL_GAP_MS = 5 * 60 * 1000; // the same sender within this gap shares one header
-const tlShown = (it) => Boolean(it) && it.kind !== "answered" && it.kind !== "start";
+const tlShown = (it) => Boolean(it) && it.kind !== "answered";
 function timeline(room, leaders, says, mine, waits = [], now = 0) {
   const out = [];
   const seen = new Set();
@@ -908,7 +909,7 @@ function seenNext(seenMap, room, entries) {
 }
 // The chat filter chips, in order: [key, label]. 전체 = everything; 안 읽은 것 = messages newer than the room's seen marker as it was when the
 // room was opened (`seen`, a snapshot: opening a room moves the live marker to now, which would empty this filter at once); the rest are the
-// leader reports of one kind (결정 필요 = decision, 최종 확인 요청 = verify, 결과 = done, 멈춤 = stop). resume/start/other show only under
+// leader reports of one kind (결정 필요 = decision, 최종 확인 요청 = verify, 결과 = done, 멈춤 = stop). resume/start/progress/other show only under
 // 전체. The person's own lines are only under 전체; the made-up "waiting" entry (no report) counts by the kind the leader waits on.
 const CHAT_FILTERS = [["all", "전체"], ["unread", "안 읽은 것"], ["decision", "결정 필요"], ["verify", "최종 확인 요청"], ["done", "결과"], ["stop", "멈춤"]];
 const entryKind = (e) => (e?.who === "po" || e?.who === "me" ? "" : e?.waiting || e?.it?.kind || "");
