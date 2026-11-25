@@ -960,7 +960,7 @@ test("R22: no selection overlay machinery is left in main.js or inbox.cjs; the p
   }
   assert.equal(I.tintHex(DARK, "sel"), null, "the selection tint kind is gone");
   assert.ok(I.tintHex(DARK, "bold"), "the bold band stays");
-  assert.match(MAIN, /on_mouse_down_out\(\(_e, c\) => \{ this\.ui\.press = false; if \(this\.ui\.sel\) \{ this\.ui\.sels\.clear\(\); this\.ui\.sel = false; \}/);
+  assert.match(MAIN, /on_mouse_down_out\(\(_e, c\) => \{ this\.ui\.press = false; if \(this\.ui\.sel\) this\.dropSel\(\);/);
 });
 
 
@@ -998,7 +998,7 @@ test("R23 diag: a redraw while a selection is settled is counted and logged", ()
 
 test("R23: the held-Enter redraw timer respects the selection hold (it used to call notify directly under a selection)", () => {
   assert.doesNotMatch(MAIN, /this\.heldAt = 0; try \{ c\.notify\(\); \} catch \{\} \}/);
-  assert.match(MAIN, /!holdShown\(this\.editAt, this\.heldAt\)\) \{ this\.heldAt = 0; this\.softNotify\(c\); \}/);
+  assert.match(MAIN, /heldTick\(c\) \{\s*if \(this\.heldAt && !holdShown\(this\.editAt, this\.heldAt\)\) \{ this\.heldAt = 0; this\.softNotify\(c\); \}/);
   assert.match(MAIN, /on_window_mouse_up\("left", \(e, c\) => this\.pointerUp\(c, e\)\)/);
 });
 
@@ -1018,6 +1018,59 @@ test("R23: a report card carries linkRef next to the leader name; the name itsel
   assert.equal(it.linkRef, "agent-mods#39");
   const [none] = I.parseLines(JSON.stringify({ ts: "2026-01-01T00:00:01Z", leader: "lead-x", kind: "done", title: "[x] 끝", body: "b" }) + "\n").map(I.enrich);
   assert.equal(none.linkRef, "");
-  assert.match(MAIN, /\.when\(!bare && Boolean\(it\?\.linkRef\), \(el\) => el\.child\(div\(\)\.flex_none\(\)\.text_size\(10\.5\)\.text_color\(t\.dim\)\.child\(it\.linkRef\)\)\)/);
+  assert.match(MAIN, /\.when\(!bare && Boolean\(it\?\.linkRef\), \(el\) => el\.child\(div\(\)\.min_w\(0\)\.max_w\(150\)\.truncate\(\)\.text_size\(10\.5\)\.text_color\(t\.dim\)\.child\(it\.linkRef\)\)\)/);
   assert.match(MAIN, /\.child\(shortName\(s\.leader\)\)\)\)/, "the leader name still comes from shortName/leaderName");
+});
+
+test("R24: dropSel clears the selection state and the diag mark together; a draw after a local clear logs no 'redraw while a selection is settled'", () => {
+  const d = r20Desk([]);
+  const cx = { notify() {} };
+  d.onSel("w", { text: "abc", range: { start: 0, end: 3 } }, cx); // settled
+  assert.ok(d.selMark && d.ui.sel);
+  d.noteRedraw(cx);
+  assert.match(d.diagQ.at(-1), /redraw #1 while a selection is settled/, "a draw under a live selection is logged");
+  d.dropSel(); // a press in the list clears it locally (no on_selection_change(null) is guaranteed)
+  assert.equal(d.ui.sel, false);
+  assert.equal(d.ui.sels.size, 0);
+  assert.equal(d.selMark, null);
+  d.diagQ.length = 0;
+  d.noteRedraw(cx);
+  assert.deepEqual(d.diagQ, [], "nothing logged for a selection that is gone");
+  assert.equal(d.renderN, 2, "the draws are still counted");
+});
+
+test("R24: every local clear of the list selection goes through dropSel", () => {
+  const clears = MAIN.match(/\.sels\.clear\(\)/g) ?? [];
+  assert.equal(clears.length, 1, "only dropSel clears the map");
+  assert.match(MAIN, /dropSel\(\) \{\s*this\.ui\.sels\.clear\(\);/);
+  assert.match(MAIN, /on_mouse_down\("left", \(e, c\) => \{ this\.listDown\(e\);[^\n]*this\.dropSel\(\);/);
+  assert.match(MAIN, /on_mouse_down_out\([^\n]*if \(this\.ui\.sel\) this\.dropSel\(\);/);
+});
+
+test("R24: under a settled selection a held-Enter tick marks dirty and calls notify 0 times; once the selection is gone the redraw goes out", () => {
+  const real = Date.now;
+  let now = 1_000_000;
+  Date.now = () => now;
+  try {
+    const d = r20Desk([]);
+    let n = 0;
+    const cx = { notify() { n++; } };
+    d.onSel("w", { text: "abc", range: { start: 0, end: 3 } }, cx);
+    d.heldAt = now - 500;
+    d.editAt = now; // the person typed on after the held Enter: the hint goes away
+    d.heldTick(cx);
+    assert.equal(n, 0, "no direct notify under a selection");
+    assert.equal(d.dirty, true, "the redraw is held back");
+    assert.equal(d.heldAt, 0);
+    d.dropSel();
+    d.heldAt = now - 500;
+    d.editAt = now;
+    d.heldTick(cx);
+    assert.equal(n, 1, "with nothing holding it the redraw goes out");
+    assert.equal(d.dirty, false);
+    d.heldAt = now; d.editAt = now; // still inside the hold window: nothing to do
+    d.heldTick(cx);
+    assert.equal(n, 1);
+    assert.equal(d.heldAt, now);
+  } finally { Date.now = real; }
 });

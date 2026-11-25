@@ -961,7 +961,7 @@ export default class Inbox extends View {
       try { value = this.chat.value(); } catch {}
       const core = editCore(value); // an edit is a change of the text itself: the widget's own line break for an Enter is not one
       if (core !== this.core) { this.core = core; this.editAt = this.changedAt; }
-      if (this.heldAt && !holdShown(this.editAt, this.heldAt)) { this.heldAt = 0; this.softNotify(c); }
+      this.heldTick(c);
       if (strayBreak(value, this.sentAt, this.changedAt)) { try { this.chat.set_value(""); } catch {} return; } // the Enter that sent left a line break
       if (strayHeld(value, this.heldAt, this.changedAt)) { this.dropBreak(value); return; } // the held Enter left a line break
       this.syncMenu(c);
@@ -1053,6 +1053,25 @@ export default class Inbox extends View {
     if (this.selMark) this.selMark.downs++;
     this.diag(`press (list mouse down), click ${e?.click_count ?? "?"}${this.ui.selAt && this.selMark ? `, ${Date.now() - this.ui.selAt}ms after the last settle` : ""}`);
   }
+  // A held Enter whose second Enter never came (the person kept typing): the "한 번 더 Enter" hint goes away. The redraw respects the selection hold.
+  heldTick(c) {
+    if (this.heldAt && !holdShown(this.editAt, this.heldAt)) { this.heldAt = 0; this.softNotify(c); }
+  }
+
+  // The mod's own clear of a list selection (a press in the list, a press outside): the selection state and the diag mark go together, so no
+  // "redraw while a selection is settled" line is written for a selection that is already gone.
+  dropSel() {
+    this.ui.sels.clear();
+    this.ui.sel = false;
+    this.selMark = null;
+  }
+
+  // One count per draw; a draw under a settled selection is logged (it would show a redraw that could clear the selection).
+  noteRedraw(cx) {
+    this.renderN = (this.renderN ?? 0) + 1;
+    if (this.selMark) this.diag(`redraw #${this.renderN} while a selection is settled (${Date.now() - this.ui.selAt}ms after the settle)`, cx);
+  }
+
   pointerUp(cx, e) {
     // A release seen after a settled selection is the clue to what cleared it: a press-and-release a moment after the settle is a second click
     // (the native view clears a selection on any press), not a redraw. Counts and ms only.
@@ -2095,7 +2114,7 @@ export default class Inbox extends View {
     return h_flex().gap(6).items_center().min_w(0)
       .when(!bare, (el) => el.child(div().id(`peek-${s.leader}-${it?.ts ?? ""}`).min_w(0).truncate().text_size(12).font_semibold().text_color(tint(t, s.leader)).cursor_pointer()
         .hover((x) => x.text_color(t.foreground)).on_mouse_down("left", stop).on_click(() => this.peek(s)).tooltip("그 리더 터미널 들여다보기").child(shortName(s.leader))))
-      .when(!bare && Boolean(it?.linkRef), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(it.linkRef)))
+      .when(!bare && Boolean(it?.linkRef), (el) => el.child(div().min_w(0).max_w(150).truncate().text_size(10.5).text_color(t.dim).child(it.linkRef)))
       .when(Boolean(it), (el) => el.child(this.kindTag(t, it, it.kind, waiting)))
       .when(!bare, (el) => el.child(div().flex_1()))
       .when(Boolean(extra), (el) => el.child(extra));
@@ -2231,8 +2250,7 @@ export default class Inbox extends View {
   // The messenger view: rooms (one per PO) beside one room's timeline, and the chat box under it. Narrow: the rooms are a strip on top.
   full(cx) {
     this.tvN = 0;
-    this.renderN = (this.renderN ?? 0) + 1;
-    if (this.selMark) this.diag(`redraw #${this.renderN} while a selection is settled (${Date.now() - this.ui.selAt}ms after the settle)`, cx); // would show a redraw under the selection
+    this.noteRedraw(cx);
     Promise.resolve().then(() => { // once per draw (only when the count changed or 10s passed, so a busy desk does not flood the file)
       const now = Date.now();
       if (this.tvLast !== this.tvN || now - (this.tvLogAt ?? 0) > 10000) { this.tvLast = this.tvN; this.tvLogAt = now; this.diag(`draw: ${this.tvN} selectable TextView(s)`, cx); }
@@ -2292,9 +2310,9 @@ export default class Inbox extends View {
     const waiting = v.tabs.reduce((n, x) => n + x.n, 0); // leaders waiting on a decision, over every room
     const head = v.pick === PO_OTHER ? OTHER_LABEL : v.tabs.find((x) => x.id === v.pick)?.label ?? "";
     const lines = v_flex().id("inbox-list").flex_1().min_h(0).pb(8).overflow_y_scrollbar().mode("always")
-      .on_mouse_down("left", (e, c) => { this.listDown(e); this.ui.press = true; this.ui.pressAt = Date.now(); this.ui.sels.clear(); this.ui.sel = false; c.stop_propagation(); })
+      .on_mouse_down("left", (e, c) => { this.listDown(e); this.ui.press = true; this.ui.pressAt = Date.now(); this.dropSel(); c.stop_propagation(); })
       .on_mouse_up("left", () => { this.ui.press = false; })
-      .on_mouse_down_out((_e, c) => { this.ui.press = false; if (this.ui.sel) { this.ui.sels.clear(); this.ui.sel = false; } if (this.dirty) this.softNotify(c); })
+      .on_mouse_down_out((_e, c) => { this.ui.press = false; if (this.ui.sel) this.dropSel(); if (this.dirty) this.softNotify(c); })
       .when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks);
     const bar = this.filterBar(t, v);
     const panel = this.promptPanel(t, v, cx); // a blocked PO's screen + its keys (null while the room's PO is not waiting on a prompt)

@@ -242,7 +242,7 @@ function enrich(it) {
   it.parts = toParts(it.blocks);
   it.linkLabel = it.link ? linkLabel(it.link) : "";
   it.linkRef = it.link ? linkRef(it.link) : "";
-  it.linkHtml = it.link ?`<a href="${escapeHtml(it.link)}">${escapeHtml(it.linkLabel)}</a>` : "";
+  it.linkHtml = it.link ? `<a href="${escapeHtml(it.link)}">${escapeHtml(it.linkLabel)}</a>` : "";
   it.head = it.title.replace(/^\[[^\]]*\]\s*/, "").trim();
   const first = it.blocks.find((b) => b.t === "p" || b.t === "li");
   let lead = first ? plain(first.segs) : "";
