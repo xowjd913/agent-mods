@@ -236,7 +236,23 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
     const s = (leaders ?? []).find((l) => l.owner === room && l.s?.leader === w.leader)?.s ?? { leader: w.leader, items: [] };
     out.push({ key: `w|${w.leader}`, who: `l:${w.leader}`, ms: Number(now) || 0, ts: "", s, leader: w.leader, waiting: w.kind, wait: true });
   }
-  if (room && room !== PO_OTHER) for (const x of says ?? []) out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "" });
+  // A line the person typed into the PO terminal itself arrives from the PO hook as {me: true} and is shown as their own bubble. The desk's
+  // own sends are pasted into that terminal too, so the hook sees them as well: such a line is dropped when a desk record that reached the PO
+  // (not failed / nopane / gone) has the same text (its `line` or its `text`, whitespace ignored) and came from up to 11 minutes (the Enter
+  // button's life) before to 1 minute after it. One desk record covers one typed line.
+  const sentBy = (mine ?? []).filter((m) => m.po === room && !["failed", "nopane", "gone"].includes(m.status));
+  const taken = new Set();
+  const tnorm = (v) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 2000);
+  if (room && room !== PO_OTHER) for (const x of says ?? []) {
+    if (x.me) {
+      const t = tnorm(x.text);
+      const i = sentBy.findIndex((m, j) => !taken.has(j) && (x.ms - (Number(m.ms) || 0)) >= -60000 && (x.ms - (Number(m.ms) || 0)) <= 11 * 60000 && (tnorm(m.line) === t || tnorm(m.text) === t));
+      if (i >= 0) { taken.add(i); continue; }
+      out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: "", kind: "chat", status: "sent", typed: true });
+      continue;
+    }
+    out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "" });
+  }
   for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now) });
   // Two entries with the same key (the same text at the same ms) would share one element id: the later ones get a #n suffix.
   const used = new Map();

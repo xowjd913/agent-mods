@@ -1596,3 +1596,142 @@ test("글자 요소 id는 다시 그려도 그대로이고 서로 겹치지 않�
   assert.deepEqual(a, b);
   assert.equal(new Set(a).size, a.length);
 });
+
+// ---- PO 훅: PO 터미널의 답·입력을 데스크 파일로 옮긴다 ----
+const HOOK = require("../mods/inbox/po-hook.cjs");
+
+test("hookLine: Stop은 마지막 답을 say로, UserPromptSubmit은 입력을 me로 쓴다(출처·프롬프트 id 포함)", () => {
+  const now = Date.UTC(2026, 0, 1, 0, 0, 0);
+  assert.deepEqual(I.hookLine({ hook_event_name: "Stop", last_assistant_message: "  끝났습니다.\n", prompt_id: "p-1" }, now), { ts: "2026-01-01T00:00:00.000Z", kind: "say", text: "끝났습니다.", src: "hook", pid: "p-1" });
+  assert.deepEqual(I.hookLine({ hook_event_name: "UserPromptSubmit", prompt: "이거 해줘" }, now), { ts: "2026-01-01T00:00:00.000Z", kind: "me", text: "이거 해줘", src: "hook", pid: "" });
+});
+
+test("hookLine: 다른 이벤트·빈 글·Stop 훅이 이어 가는 턴·하네스가 넣은 프롬프트는 쓸 것이 없다", () => {
+  assert.equal(I.hookLine({ hook_event_name: "SubagentStop", last_assistant_message: "x" }), null);
+  assert.equal(I.hookLine({ hook_event_name: "PreToolUse", prompt: "x" }), null);
+  assert.equal(I.hookLine({ hook_event_name: "Stop", last_assistant_message: "  \n " }), null);
+  assert.equal(I.hookLine({ hook_event_name: "Stop" }), null);
+  assert.equal(I.hookLine({ hook_event_name: "Stop", stop_hook_active: true, last_assistant_message: "x" }), null);
+  assert.equal(I.hookLine({ hook_event_name: "UserPromptSubmit", prompt: "<task-notification>done</task-notification>" }), null);
+  assert.equal(I.hookLine({ hook_event_name: "UserPromptSubmit", prompt: "<system-reminder>x" }), null);
+  assert.equal(I.hookLine(null), null);
+  assert.equal(I.hookLine("x"), null);
+  assert.ok(I.hookLine({ hook_event_name: "UserPromptSubmit", prompt: "a < b 를 비교해 줘" }));
+});
+
+test("hookLine: 제어·양방향 문자를 지우고 2000자로 줄이며 끝에 …을 붙인다", () => {
+  const dirty = I.hookLine({ hook_event_name: "Stop", last_assistant_message: "a\u0007b‮c\u001b[31md" });
+  assert.equal(/[\u0000-\u0008\u000b\u000c\u000e-\u001f‪-‮⁦-⁩]/.test(dirty.text), false);
+  assert.ok(dirty.text.startsWith("a") && dirty.text.includes("d"));
+  const big = I.hookLine({ hook_event_name: "Stop", last_assistant_message: "가".repeat(5000), prompt_id: "x".repeat(300) });
+  assert.equal(big.text.length, 2000);
+  assert.ok(big.text.endsWith("…"));
+  assert.equal(big.pid.length, 80);
+});
+
+test("parsePoLines: kind:me 줄은 me 표시를 달고, say 줄은 그대로다", () => {
+  const f = (o) => JSON.stringify(o) + "\n";
+  const got = I.parsePoLines(f({ ts: "2026-01-01T00:00:01Z", kind: "say", text: "답" }) + f({ ts: "2026-01-01T00:00:02Z", kind: "me", text: "내 말" }) + f({ ts: "2026-01-01T00:00:03Z", kind: "other", text: "x" }));
+  assert.deepEqual(got.map((x) => [x.text, !!x.me]), [["답", false], ["내 말", true]]);
+});
+
+test("timeline: 터미널에 직접 친 글(me)은 오른쪽 내 말풍선으로, 데스크가 보낸 같은 글은 두 번 나오지 않는다", () => {
+  const ms = Date.parse(T(10));
+  const typed = (text, at = ms) => ({ ts: new Date(at).toISOString(), ms: at, text, to: "", me: true });
+  const kinds = (t) => t.map((e) => `${e.who}${e.typed ? ":typed" : ""}`);
+  // 데스크에서 보낸 기록이 없으면 직접 친 글이 그대로 보인다
+  const only = I.timeline("p1", [], [typed("직접 쳤어")], []);
+  assert.deepEqual(kinds(only), ["me:typed"]);
+  assert.equal(only[0].id, "");
+  assert.equal(only[0].status, "sent");
+  // 데스크 기록(line 또는 text)과 같은 글이면 하나만 남는다 - 공백 차이는 무시
+  const sent = { id: "m1", ms: ms - 5000, at: ms - 5000, text: "데스크 글", line: "@lead-a  데스크   글", to: "lead-a", po: "p1", status: "sent" };
+  assert.deepEqual(kinds(I.timeline("p1", [], [typed("데스크 글")], [sent])), ["me"]);
+  assert.deepEqual(kinds(I.timeline("p1", [], [typed("@lead-a 데스크 글")], [sent])), ["me"]);
+  // 기록 하나는 직접 친 글 하나만 덮는다
+  assert.deepEqual(kinds(I.timeline("p1", [], [typed("데스크 글"), typed("데스크 글", ms + 1000)], [sent])), ["me", "me:typed"]);
+  // 실패·칸 없음·사라짐 기록은 PO에 닿지 않았으니 덮지 않는다
+  for (const status of ["failed", "nopane", "gone"]) assert.deepEqual(kinds(I.timeline("p1", [], [typed("데스크 글")], [{ ...sent, status }])).sort(), ["me", "me:typed"]);
+  // 다른 PO의 기록, 11분보다 오래된 기록, 훅 줄보다 1분 넘게 나중인 기록은 덮지 않는다
+  assert.equal(I.timeline("p1", [], [typed("데스크 글")], [{ ...sent, po: "p2" }]).length, 1);
+  assert.deepEqual(kinds(I.timeline("p1", [], [typed("데스크 글")], [{ ...sent, ms: ms - 12 * 60000 }])), ["me", "me:typed"]);
+  assert.deepEqual(kinds(I.timeline("p1", [], [typed("데스크 글")], [{ ...sent, ms: ms + 2 * 60000 }])).sort(), ["me", "me:typed"]);
+  // PO 모름 방에는 직접 친 글도 없다
+  assert.equal(I.timeline(I.PO_OTHER, [], [typed("x")], []).length, 0);
+});
+
+test("timeline: me 줄이 아닌 say는 왼쪽 PO 말풍선 그대로다", () => {
+  const ms = Date.parse(T(1));
+  const t = I.timeline("p1", [], [{ ts: T(1), ms, text: "답", to: "" }], []);
+  assert.deepEqual(t.map((e) => e.who), ["po"]);
+});
+
+// po-hook.cjs: `hc get`은 주입한 get으로 바꾸고 HERDR_INBOX_DIR은 임시 폴더로 돌려, 진짜 터미널과 홈은 건드리지 않는다.
+function hookRun(env, payload, term) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "po-hook-"));
+  const prev = process.env.HERDR_INBOX_DIR;
+  process.env.HERDR_INBOX_DIR = dir;
+  let calls = 0;
+  try {
+    const r = HOOK.run(env, payload, I, () => { calls++; return term; }, Date.UTC(2026, 0, 1));
+    return { r, dir, calls, files: fs.existsSync(path.join(dir, "po")) ? fs.readdirSync(path.join(dir, "po")) : [] };
+  } finally { if (prev === undefined) delete process.env.HERDR_INBOX_DIR; else process.env.HERDR_INBOX_DIR = prev; }
+}
+const PO_TERM = { id: "t5", labels: { role: "po", po: "devnotes" } };
+const STOP = { hook_event_name: "Stop", last_assistant_message: "다 했습니다" };
+
+test("po-hook: PO 터미널이면 po/<id>.jsonl에 한 줄을 덧붙이고, 같은 파일에 이어 쓴다", () => {
+  const a = hookRun({ HC_TERMINAL_ID: "t5" }, STOP, PO_TERM);
+  assert.deepEqual(a.files, ["devnotes.jsonl"]);
+  const read = I.parsePoLines(fs.readFileSync(path.join(a.dir, "po", "devnotes.jsonl"), "utf8"));
+  assert.deepEqual(read.map((x) => [x.text, !!x.me]), [["다 했습니다", false]]);
+  process.env.HERDR_INBOX_DIR = a.dir;
+  try { HOOK.run({ HC_TERMINAL_ID: "t5" }, { hook_event_name: "UserPromptSubmit", prompt: "다음 것" }, I, () => PO_TERM, Date.UTC(2026, 0, 1, 0, 1)); } finally { delete process.env.HERDR_INBOX_DIR; }
+  assert.deepEqual(I.parsePoLines(fs.readFileSync(path.join(a.dir, "po", "devnotes.jsonl"), "utf8")).map((x) => !!x.me), [false, true]);
+});
+
+test("po-hook: HC_TERMINAL_ID가 없거나 쓸 글이 없으면 hc를 부르지도 않는다", () => {
+  const none = hookRun({}, STOP, PO_TERM);
+  assert.equal(none.r, null); assert.equal(none.calls, 0); assert.deepEqual(none.files, []);
+  const blank = hookRun({ HC_TERMINAL_ID: "  " }, STOP, PO_TERM);
+  assert.equal(blank.calls, 0);
+  const nothing = hookRun({ HC_TERMINAL_ID: "t5" }, { hook_event_name: "Stop", last_assistant_message: "" }, PO_TERM);
+  assert.equal(nothing.calls, 0); assert.deepEqual(nothing.files, []);
+});
+
+test("po-hook: 리더·워커·id 없는 PO·hc 실패 터미널에는 아무것도 쓰지 않는다", () => {
+  const cases = [
+    { id: "t6", name: "lead-x", parent: "t5", labels: { role: "leader" } },
+    { id: "t7", labels: { session: "s1", where: "main / PO · devnotes" } },
+    { id: "t5", labels: { role: "po" } },
+    { id: "t5", labels: { role: "po", po: "../evil" } },
+    { id: "t5", labels: { role: "po", po: "devnotes" }, parent: "t1" },
+    { id: "t5", name: "lead-po", labels: { role: "po", po: "devnotes" } },
+    null,
+  ];
+  for (const term of cases) {
+    const x = hookRun({ HC_TERMINAL_ID: "t5" }, STOP, term);
+    assert.equal(x.r, null, JSON.stringify(term));
+    assert.deepEqual(x.files, [], JSON.stringify(term));
+  }
+});
+
+test("po-hook: 폴더를 쓸 수 없어도 run은 던지고 진입점은 0으로 끝나며 아무것도 출력하지 않는다(진짜 홈은 건드리지 않음)", () => {
+  const { spawnSync } = require("child_process");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "po-hook-e2e-"));
+  const blocker = path.join(dir, "file");
+  fs.writeFileSync(blocker, "x"); // 폴더가 올 자리에 파일이 있어 mkdir이 실패한다
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "po-hook-bin-"));
+  const hc = path.join(bin, "hc");
+  fs.writeFileSync(hc, '#!/bin/sh\necho \'{"id":"t5","labels":{"role":"po","po":"devnotes"}}\'\n', { mode: 0o755 });
+  const script = path.join(__dirname, "..", "mods", "inbox", "po-hook.cjs");
+  const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, HC_TERMINAL_ID: "t5" };
+  const bad = spawnSync(process.execPath, [script], { input: JSON.stringify(STOP), encoding: "utf8", env: { ...env, HERDR_INBOX_DIR: blocker } });
+  assert.equal(bad.status, 0); assert.equal(bad.stdout, ""); assert.equal(bad.stderr, "");
+  const junk = spawnSync(process.execPath, [script], { input: "not json", encoding: "utf8", env: { ...env, HERDR_INBOX_DIR: dir } });
+  assert.equal(junk.status, 0); assert.equal(junk.stdout, "");
+  // 가짜 hc로 끝까지: 한 줄이 쓰인다
+  const good = spawnSync(process.execPath, [script], { input: JSON.stringify(STOP), encoding: "utf8", env: { ...env, HERDR_INBOX_DIR: path.join(dir, "inbox") } });
+  assert.equal(good.status, 0); assert.equal(good.stdout, "");
+  assert.equal(I.parsePoLines(fs.readFileSync(path.join(dir, "inbox", "po", "devnotes.jsonl"), "utf8"))[0].text, "다 했습니다");
+});

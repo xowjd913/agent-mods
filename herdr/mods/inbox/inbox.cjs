@@ -281,19 +281,37 @@ const MAX_PO = 100; // newest PO lines kept
 const MAX_PO_TEXT = 2000;
 
 // The PO's lines: {ts, kind:"say", text, to?} per line, oldest first. Lenient like parseLines: broken or unknown lines are skipped,
-// unknown fields are ignored. `to` is who the line answers (an hc name or "here"), "" when absent.
+// unknown fields are ignored. `to` is who the line answers (an hc name or "here"), "" when absent. A {kind:"me"} line is what the person
+// typed into the PO terminal itself (written by the PO hook): it comes back with `me: true` and is shown as the person's own bubble.
 function parsePoLines(text) {
   const out = [];
   for (const raw of String(text ?? "").split("\n")) {
     let o;
     try { o = JSON.parse(raw); } catch { continue; }
-    if (!o || o.kind !== "say" || typeof o.text !== "string" || !o.text.trim()) continue;
+    if (!o || (o.kind !== "say" && o.kind !== "me") || typeof o.text !== "string" || !o.text.trim()) continue;
     const ms = Date.parse(o.ts);
     if (!(ms > 0)) continue;
-    out.push({ ts: new Date(ms).toISOString(), ms, text: o.text.trim().slice(0, MAX_PO_TEXT), to: typeof o.to === "string" ? o.to.trim() : "" });
+    out.push({ ts: new Date(ms).toISOString(), ms, text: o.text.trim().slice(0, MAX_PO_TEXT), to: typeof o.to === "string" ? o.to.trim() : "", ...(o.kind === "me" ? { me: true } : {}) });
   }
   out.sort((a, b) => a.ms - b.ms);
   return out.slice(-MAX_PO);
+}
+
+// What the PO hook appends for one hook event (`payload` = the hook's stdin JSON), or null when there is nothing to write:
+//   Stop (the PO's final reply, `last_assistant_message`; not when a Stop hook keeps the turn going) -> {ts, kind:"say", text, src:"hook", pid}
+//   UserPromptSubmit (what was typed or pasted) -> {ts, kind:"me", text, src:"hook", pid}
+// `pid` is the prompt id that pairs a prompt with its reply. Control and bidi characters are dropped; a text longer than MAX_PO_TEXT ends
+// in "…" (the desk shows at most that much). A prompt that is a harness message (<task-notification>, <system-reminder>, ...) is skipped.
+const HARNESS_PROMPT = /^<[a-z][a-z-]*[\s>]/i;
+function hookLine(payload, now = Date.now()) {
+  const ev = payload?.hook_event_name;
+  const stop = ev === "Stop";
+  if (!stop && ev !== "UserPromptSubmit") return null;
+  if (stop && payload.stop_hook_active) return null;
+  let text = cleanText(stop ? payload.last_assistant_message : payload.prompt).trim();
+  if (!text || (!stop && HARNESS_PROMPT.test(text))) return null;
+  if (text.length > MAX_PO_TEXT) text = text.slice(0, MAX_PO_TEXT - 1) + "…";
+  return { ts: new Date(Number(now) || Date.now()).toISOString(), kind: stop ? "say" : "me", text, src: "hook", pid: typeof payload.prompt_id === "string" ? payload.prompt_id.slice(0, 80) : "" };
 }
 
 // The file of one PO's lines, or null when `id` is not a valid PO id (so a label can never reach outside the folder).
@@ -522,7 +540,23 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
     const s = (leaders ?? []).find((l) => l.owner === room && l.s?.leader === w.leader)?.s ?? { leader: w.leader, items: [] };
     out.push({ key: `w|${w.leader}`, who: `l:${w.leader}`, ms: Number(now) || 0, ts: "", s, leader: w.leader, waiting: w.kind, wait: true });
   }
-  if (room && room !== PO_OTHER) for (const x of says ?? []) out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "" });
+  // A line the person typed into the PO terminal itself arrives from the PO hook as {me: true} and is shown as their own bubble. The desk's
+  // own sends are pasted into that terminal too, so the hook sees them as well: such a line is dropped when a desk record that reached the PO
+  // (not failed / nopane / gone) has the same text (its `line` or its `text`, whitespace ignored) and came from up to 11 minutes (the Enter
+  // button's life) before to 1 minute after it. One desk record covers one typed line.
+  const sentBy = (mine ?? []).filter((m) => m.po === room && !["failed", "nopane", "gone"].includes(m.status));
+  const taken = new Set();
+  const tnorm = (v) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 2000);
+  if (room && room !== PO_OTHER) for (const x of says ?? []) {
+    if (x.me) {
+      const t = tnorm(x.text);
+      const i = sentBy.findIndex((m, j) => !taken.has(j) && (x.ms - (Number(m.ms) || 0)) >= -60000 && (x.ms - (Number(m.ms) || 0)) <= 11 * 60000 && (tnorm(m.line) === t || tnorm(m.text) === t));
+      if (i >= 0) { taken.add(i); continue; }
+      out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: "", kind: "chat", status: "sent", typed: true });
+      continue;
+    }
+    out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "" });
+  }
   for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now) });
   // Two entries with the same key (the same text at the same ms) would share one element id: the later ones get a #n suffix.
   const used = new Map();
@@ -702,6 +736,6 @@ function decisionOptions(body) {
 }
 // chat:end
 
-module.exports = { PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptOptions, promptSig, inputHas, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptOptions, promptSig, inputHas, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) process.stdout.write(JSON.stringify(collect()));
