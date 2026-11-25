@@ -19,7 +19,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, ScrollHandle } from "gpui-base";
-import { theme, exec, appHome, checking, window, run, hc, terminals, panes, setBadge, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
+import { theme, exec, appHome, checking, window, run, hc, terminals, panes, focused, setBadge, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
 const ICON = (name) => `mods/workspace-chrome/${name}.svg`;
@@ -31,7 +31,7 @@ const PICK_KEY = "inbox.po"; // the PO id the person picked last (shared, so it 
 const CHAT_KEY = "inbox.chat"; // the lines the person sent through the chat box [{ts, ms, text, to, po}] (po: the PO id they went to)
 const MAX_CHAT = 100, MAX_ENTRIES = 80; // MAX_ENTRIES: the newest timeline entries drawn (a waiting one is always drawn)
 const SEEN_KEY = "inbox.seen"; // {<room id>: ms of the newest message the person had on screen when last opening that room}
-const WIDE_MIN = 520; // the window is two columns (rooms | room) from this width, else the rooms are a strip on top
+const WIDE_MIN = 520; // two columns (rooms | room) from this width; narrower: the window shows the rooms as a strip on top, the dock and a pane as the slim column
 const ROOM_W = 168, SLIM_W = 58; // the window's room list / the dock's slim room column (initial circle + badges, the project as the tooltip)
 const PASTE_SETTLE_MS = 350; // the PO terminal takes the paste before Enter is pressed
 const OPEN_KEY = "inbox.expanded"; // cards the person opened ("자세히"), shared so they stay open across re-renders and window reopens
@@ -39,7 +39,7 @@ const MAX_OPEN = 60;
 const NO_PO = "이 리더의 PO 터미널을 찾지 못했습니다(리더 터미널의 부모가 role=po 라벨이어야 합니다).";
 const OTHER_LABEL = "PO 모름";
 const OTHER_TIP = "PO를 알 수 없는 리더와 보고: 이미 닫힌 리더인데 보고 줄에 po가 없고 그 PO도 지금 없는 것(이 변경 전에 쓴 보고 줄 등). 여기서는 채팅을 보낼 수 없습니다";
-const CLIP = "답을 클립보드에 담아 PO 터미널에 붙여 넣습니다(Enter는 직접 누르세요). 클립보드 내용이 바뀝니다.";
+const CLIP = "답을 클립보드에 담아 PO 터미널에 붙여 넣고 Enter까지 눌러 보냅니다(PO가 질문 중이면 붙여 넣기만 합니다). 클립보드 내용이 바뀝니다.";
 
 // Which terminal is a waiting leader. Copied verbatim from inbox.cjs (a test keeps them identical); tabs-mine uses the same line.
 const waitingKind = (t) => (/^lead-/.test(String(t?.name ?? "")) ? (["decision", "verify"].find((k) => k === String(t.labels?.wait ?? "").trim().toLowerCase()) ?? "") : "");
@@ -267,6 +267,37 @@ function chatHtml(text) {
     return `<p>${out + escHtml(line.slice(at)) || "&nbsp;"}</p>`;
   }).join("");
 }
+// Where "옆에 열기" puts the PO desk. `here`: the panes of the tab being shown (panes() filtered by tab), `f`: focused(), `terms`: terminals().
+// Beside the focused pane if it is a leader, else the newest leader of the tab (created_ms, else the higher base-36 address), else the
+// focused terminal, else any focused pane. A tab that already has an inbox mod pane gets that one focused instead (one per tab).
+// Returns {action: "focus", pane} | {action: "split", pane?}. Pure.
+function dockTarget(here, f, terms) {
+  const list = Array.isArray(here) ? here : [];
+  const byAddr = new Map((Array.isArray(terms) ? terms : []).map((t) => [t.address, t]));
+  const leaders = list.filter((p) => p.terminal && String(byAddr.get(p.terminal)?.labels?.role ?? "").trim().toLowerCase() === "leader");
+  const age = (p) => { const ms = Number(byAddr.get(p.terminal)?.created_ms); return Number.isFinite(ms) ? ms : parseInt(String(p.terminal).replace(/^t/, ""), 36) || 0; };
+  const leader = leaders.find((p) => p.pane === f?.pane) ?? [...leaders].sort((a, b) => age(b) - age(a))[0];
+  const beside = leader ?? list.find((p) => p.pane === f?.pane) ?? list.find((p) => p.focused && p.terminal) ?? list.find((p) => p.focused);
+  const have = list.find((p) => p.mod === "inbox");
+  if (beside && have) return { action: "focus", pane: have.pane };
+  return beside ? { action: "split", pane: beside.pane } : { action: "split" };
+}
+// The options of a decision report, read strictly from its body (the leader report rule: one "N안: ..." line per option, N = 1..3, and
+// optionally a "추천: N안" line). At least two distinct numbers, otherwise none (nothing is guessed: "A:", "1)", "①", "1. step" are not options).
+// -> { options: [1, 2], recommended: 2 | 0 }
+function decisionOptions(body) {
+  const nums = new Set();
+  let rec = 0;
+  for (const line of String(body ?? "").split(/\r?\n/)) {
+    let m = line.match(/^\s*(?:[-*]\s*)?([1-3])안\s*[:：)]\s*\S/);
+    if (m) { nums.add(Number(m[1])); continue; }
+    m = line.match(/^\s*(?:[-*]\s*)?추천\s*[:：]\s*([1-3])안/);
+    if (m && !rec) rec = Number(m[1]);
+  }
+  const options = [...nums].sort((x, y) => x - y);
+  if (options.length < 2) return { options: [], recommended: 0 };
+  return { options, recommended: options.includes(rec) ? rec : 0 };
+}
 // chat:end
 
 // Opens an http(s) link with the app's own open_url when a context is at hand, else through the system opener.
@@ -326,11 +357,14 @@ function rememberLeaders() {
   } catch {}
 }
 
-// One view, two places: the Dock pane (slim room column + timeline + chat box, "창 열기") and the floating window (full room list), which
-// runs as an overlay (props().mode === "window"). Same timeline and chat box in both.
+// One view, three places: the right Dock panel (no props; "창 열기", "옆에 열기"), a pane beside a terminal (`pane.split {mod: "inbox",
+// props: {mode: "pane"}}`, closed by the pane's own header) and the floating window (an overlay, props().mode === "window"). Same
+// timeline and chat box everywhere; the rooms are the full list from WIDE_MIN wide (a narrow window: a strip), else the slim column.
 export default class Inbox extends View {
   init(_props, cx) {
-    this.windowed = safeProps().mode === "window";
+    const mode = safeProps().mode;
+    this.windowed = mode === "window"; // the floating window
+    this.paned = mode === "pane"; // a pane of its own; neither is the Dock (no props), which owns the app-icon badge and the slow refresh
     this.badged = ""; // what this app's icon badge shows: only changes are sent, and a 0 at start leaves other mods' badges alone
     this.data = null;
     this.error = null;
@@ -338,7 +372,7 @@ export default class Inbox extends View {
     this.busyAt = 0;
     this.gen = 0;
     this.compact = false;
-    this.narrow = false; // narrower than WIDE_MIN: the rooms are a strip on top
+    this.narrow = !this.windowed; // narrower than WIDE_MIN (until the first size report: the dock and a pane start narrow, the window wide)
     this.writing = null; // leader whose answer box is open
     this.inputs = new Map(); // leader -> InputState
     this.msg = null; // {text, bad}
@@ -369,12 +403,18 @@ export default class Inbox extends View {
     this.at = new Map(); // spot key -> index of that child in the window's list, rebuilt on every frame
     if (checking()) return;
     this.load(cx);
-    // The always-on Dock pane owns the slow refresh and the badge; the window refreshes faster while it is open.
-    cx.timer.every(this.windowed ? WINDOW_REFRESH_MS : PANE_REFRESH_MS, (cx) => this.load(cx));
+    // The Dock owns the slow refresh and (with any pane) the badge; the window and a pane are read on screen, so they refresh faster,
+    // a pane only while it is being drawn (a pane in a tab nobody looks at does not poll).
+    cx.timer.every(this.refreshMs(), (cx) => { if (!this.paned || this.drawing()) this.load(cx); });
   }
 
-  // The number of leaders that wait on a decision, on the app icon badge. Only the Dock pane sets it (the window would repeat
-  // the same number); tabs-mine counts the wait labels itself for the tab-row button (even with the panel closed).
+  refreshMs() { return this.windowed || this.paned ? WINDOW_REFRESH_MS : PANE_REFRESH_MS; }
+  // Was this copy drawn lately (within two refreshes)? A view that is not drawn is not being read. Never drawn yet counts as drawing.
+  drawing() { return !this.drawnAt || Date.now() - this.drawnAt <= this.refreshMs() * 2 + 2000; }
+
+  // The number of leaders that wait on a decision, on the app icon badge. The Dock and a pane set it (every copy computes the same
+  // number from the same files and only a change is sent, so two writers agree); the window would repeat it and does not.
+  // tabs-mine counts the wait labels itself for the tab-row button (even with the panel closed).
   badge() {
     if (this.windowed) return;
     const asks = this.asks();
@@ -387,7 +427,8 @@ export default class Inbox extends View {
   // The "pasted into the PO" marker lives in shared state (keyed by leader), so the window and the pane see the same one even after
   // the window closed and reopened. It matches only the same ask (kind, report time, link); the pane drops it once the leader stops waiting.
   askKey(a) { return `${a.kind}|${a.item?.ts ?? ""}|${a.link}`; }
-  sentOf(a) { try { return shared(SENT_KEY)?.[a.s.leader] === this.askKey(a); } catch { return false; } }
+  // "sent" (Enter was pressed), "held" (pasted only, the person presses Enter) or "" (nothing delivered for this ask).
+  sentOf(a) { try { const v = shared(SENT_KEY)?.[a.s.leader], k = this.askKey(a); return v === k ? "sent" : v === k + "|held" ? "held" : ""; } catch { return ""; } }
   pruneSent(asks) {
     try {
       const cur = shared(SENT_KEY) ?? {};
@@ -424,6 +465,20 @@ export default class Inbox extends View {
     this.copied = key;
     cx.notify();
     try { cx.timer.after(1800, (c) => { if (this.copied === key) { this.copied = null; c.notify(); } }); } catch {}
+  }
+
+  // "옆에 열기": the PO desk as a pane beside the tab's leader (else the focused terminal); a tab that has one already focuses it.
+  // From the window the window closes after (the pane would otherwise be hidden under it).
+  openBeside() {
+    this.msg = null;
+    try {
+      const f = focused();
+      const here = (panes() ?? []).filter((p) => p.tab === f?.tab); // panes() lists every tab: only the one being shown
+      const d = dockTarget(here, f, terminals() ?? []);
+      if (d.action === "focus") run("pane.focus", { pane: d.pane });
+      else run("pane.split", { direction: "right", mod: "inbox", props: { mode: "pane" }, ...(d.pane ? { pane: d.pane } : {}) });
+      if (this.windowed) { try { closeOverlay(safeProps().overlay); } catch {} }
+    } catch (e) { this.say(`옆에 열지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); }
   }
 
   openWindow() {
@@ -524,7 +579,7 @@ export default class Inbox extends View {
   // Remembers that the person has the picked room's newest message on screen. Both the window and the dock show a room, so both
   // count — but only while the view is being drawn (a hidden dock keeps loading; that is not reading).
   markSeen() {
-    if (Date.now() - this.drawnAt > (this.windowed ? WINDOW_REFRESH_MS : PANE_REFRESH_MS) * 2 + 2000) return;
+    if (!this.drawnAt || !this.drawing()) return; // never drawn, or not drawn lately: nobody has seen it
     try {
       const v = this.view();
       const next = seenNext(shared(SEEN_KEY) ?? {}, v.pick, v.raw);
@@ -548,32 +603,48 @@ export default class Inbox extends View {
 
   say(text, bad = false) { this.msg = { text, bad }; }
 
-  // Delivers the answer as the person's own input: clipboard -> focus the PO pane -> paste. Enter is left to the person.
+  // The ONE way the panel puts text into a PO terminal (answer buttons, the answer box, option chips and the chat box):
+  // clipboard -> focus the PO pane -> terminal.paste -> Enter after PASTE_SETTLE_MS (submitPo). Returns what happened:
+  //   "sent"   pasted and Enter is on its way
+  //   "held"   the PO is blocked on a prompt (Enter would answer it): pasted only, the person presses Enter
+  //   "nopane" the PO has no pane: the pane was opened, nothing was pasted or sent (the text stays on the clipboard)
+  //   "failed" the paste command failed: nothing was sent (the text stays on the clipboard)
+  deliver(po, text, c) {
+    c.write_to_clipboard(text);
+    if (!(panes() ?? []).some((p) => p.terminal === po)) {
+      run("terminal.keep", { terminal: po }); // finishes in the background
+      this.say(`PO(${po})에 창이 없어 열기만 했고 보내지는 않았습니다. 글은 클립보드에 있으니 칸이 열리면 PO 터미널에 붙여넣고 Enter를 누르세요.`, true);
+      return "nopane";
+    }
+    const blocked = String(this.liveTerms().find((t) => t.address === po)?.status ?? "").toLowerCase() === "blocked"; // a prompt waits there: Enter would answer it
+    let back = ""; // where the keyboard is now: if that is a mod pane (this desk as a pane), it is given back after Enter
+    try { const fp = focused()?.pane; if (fp && (panes() ?? []).some((p) => p.pane === fp && p.mod)) back = fp; } catch {}
+    run("pane.focus", { terminal: po }); // terminal.paste has no terminal argument: it pastes into the focused terminal
+    try { run("terminal.paste", {}); }
+    catch { this.say(`PO(${po})에 붙여 넣지 못해 보내지 않았습니다. 글은 클립보드에 있으니 PO 터미널에 붙여넣고 Enter를 누르세요.`, true); return "failed"; }
+    if (blocked) { this.say(`PO(${po})가 질문에 답을 기다리는 중이라 붙여 넣기만 했습니다. PO 터미널에서 확인하고 Enter를 누르세요.`); return "held"; }
+    this.submitPo(po, c, PASTE_SETTLE_MS + Math.min(600, Math.floor(String(text).length / 2)), back); // a longer paste gets longer to land
+    this.say(`PO(${po})에 보냈습니다.`);
+    return "sent";
+  }
+
+  // A panel answer: the answer line goes through deliver(). The box is cleared and the ask marked only when it reached the PO.
   send(a, text, cx) {
     const body = String(text ?? "").trim();
     if (!body) { this.say("답을 먼저 적어 주세요.", true); cx.notify(); return; }
     const po = a.po;
     if (!po) { this.say(NO_PO, true); cx.notify(); return; }
-    const line = answerLine(a.kind, a.s.leader, body, a.link);
     try {
-      cx.write_to_clipboard(line);
-      if (!(panes() ?? []).some((p) => p.terminal === po)) {
-        run("terminal.keep", { terminal: po }); // finishes in the background: the person focuses the pane and pastes
-        this.clearBox(a);
-        this.say(`PO(${po})에 창이 없어 열었습니다. 다른 것을 복사하기 전에 PO 터미널에서 붙여넣고 Enter를 누르세요(글은 클립보드에 있습니다).`);
-      } else {
-        run("pane.focus", { terminal: po });
-        try { run("terminal.paste", {}); this.say(`PO(${po})에 붙여 넣었습니다. PO 터미널에서 Enter를 눌러 보내세요.`); }
-        catch { this.say(`PO(${po})를 열었습니다. 글은 클립보드에 있으니 붙여넣고 Enter를 누르세요.`); }
-        this.clearBox(a);
-        if (this.windowed) { try { closeOverlay(safeProps().overlay); } catch {} } // the PO pane takes the keyboard
+      const r = this.deliver(po, answerLine(a.kind, a.s.leader, body, a.link), cx);
+      if (r === "sent" || r === "held") {
+        this.clearBox(a, r);
       }
     } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
     cx.notify();
   }
 
-  clearBox(a) {
-    try { setShared(SENT_KEY, { ...(shared(SENT_KEY) ?? {}), [a.s.leader]: this.askKey(a) }); } catch {}
+  clearBox(a, how = "sent") {
+    try { setShared(SENT_KEY, { ...(shared(SENT_KEY) ?? {}), [a.s.leader]: this.askKey(a) + (how === "held" ? "|held" : "") }); } catch {}
     this.inputs.get(a.s.leader)?.set_value("");
     if (this.writing === a.s.leader) this.writing = null;
   }
@@ -588,7 +659,7 @@ export default class Inbox extends View {
     return s;
   }
 
-  // ---- PO chat: the text goes to the PO's prompt the same way a panel answer does, then Enter is pressed for the person (submitPo).
+  // ---- PO chat: the text goes to the PO's prompt through deliver(), the same path as a panel answer.
   liveTerms() { try { return terminals() ?? []; } catch { return []; } }
 
   // Opens, updates or closes the "@" menu from the text before the cursor.
@@ -661,17 +732,22 @@ export default class Inbox extends View {
     c.notify();
   }
 
-  // Presses Enter in the PO terminal once the paste has landed (`hc keys`, no <hc ...> tag), and reports a failure in the box's message.
-  // The window stays open until then (closing it could drop the timer) and is closed afterwards.
-  submitPo(po, c) {
+  // Presses Enter in the PO terminal once the paste has landed (`hc keys`, no <hc ...> tag; it needs no focus), reports a failure in the
+  // box's message, and gives the keyboard back to this desk when it is a pane (`back`). The desk itself is never closed by a send:
+  // the dock, the window and the pane all stay open.
+  submitPo(po, c, settle = PASTE_SETTLE_MS, back = "") {
     const fail = (cx, why) => { this.say(`PO(${po})에 글은 넣었지만 Enter를 누르지 못했습니다${why ? `(${why})` : ""}. PO 터미널에서 직접 누르세요.`, true); cx.notify(); };
-    const done = () => { if (this.windowed) { try { closeOverlay(safeProps().overlay); } catch {} } };
+    const done = (cx) => {
+      if (back) { try { run("pane.focus", { pane: back }); } catch {} }
+      try { this.chat.focus(); } catch {}
+      try { cx.notify(); } catch {}
+    };
     const press = (cx) => {
       let r;
-      try { r = hc(["keys", po, "enter"]); } catch { fail(cx, ""); done(); return; }
-      Promise.resolve(r).then((o) => { if (o && o.code !== 0) fail(cx, String(o.stderr ?? "").trim().slice(0, 80)); }).catch(() => fail(cx, "")).then(done);
+      try { r = hc(["keys", po, "enter"]); } catch { fail(cx, ""); done(cx); return; }
+      Promise.resolve(r).then((o) => { if (o && o.code !== 0) fail(cx, String(o.stderr ?? "").trim().slice(0, 80)); }).catch(() => fail(cx, "")).then(() => done(cx));
     };
-    try { c.timer.after(PASTE_SETTLE_MS, press); } catch { press(c); }
+    try { c.timer.after(settle, press); } catch { press(c); }
   }
 
   sendChat(c) {
@@ -691,28 +767,16 @@ export default class Inbox extends View {
       return;
     }
     const po = tgt.po;
-    let later = false; // the window is closed by submitPo, after Enter
     try {
-      c.write_to_clipboard(p.text);
-      if (!(panes() ?? []).some((x) => x.terminal === po)) {
-        run("terminal.keep", { terminal: po });
-        this.say(`PO(${po})에 창이 없어 열었습니다. 다른 것을 복사하기 전에 PO 터미널에서 붙여넣고 Enter를 누르세요(글은 클립보드에 있습니다).`);
-      } else {
-        const blocked = String(terms.find((t) => t.address === po)?.status ?? "").toLowerCase() === "blocked"; // a prompt waits there: Enter would answer it
-        run("pane.focus", { terminal: po });
+      const r = this.deliver(po, p.text, c);
+      if (r === "sent" || r === "held") {
         try {
-          run("terminal.paste", {});
-          if (blocked) this.say(`PO(${po})가 질문에 답을 기다리는 중이라 붙여 넣기만 했습니다. PO 터미널에서 확인하고 Enter를 누르세요.`);
-          else { this.submitPo(po, c); later = true; this.say(`PO(${po})에 보냈습니다.`); }
-        } catch { this.say(`PO(${po})를 열었습니다. 글은 클립보드에 있으니 붙여넣고 Enter를 누르세요.`); }
+          const now = Date.now();
+          setShared(CHAT_KEY, [...(shared(CHAT_KEY) ?? []), { ts: new Date(now).toISOString(), ms: now, text: p.text, to: p.to[0] ?? "", po: v.pick }].slice(-MAX_CHAT));
+        } catch {}
+        this.chat.set_value("");
+        this.menu = null;
       }
-      try {
-        const now = Date.now();
-        setShared(CHAT_KEY, [...(shared(CHAT_KEY) ?? []), { ts: new Date(now).toISOString(), ms: now, text: p.text, to: p.to[0] ?? "", po: v.pick }].slice(-MAX_CHAT));
-      } catch {}
-      this.chat.set_value("");
-      this.menu = null;
-      if (this.windowed && !later) { try { closeOverlay(safeProps().overlay); } catch {} } // the PO pane takes the keyboard
     } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
     c.notify();
   }
@@ -913,9 +977,10 @@ export default class Inbox extends View {
     const box = v_flex().min_w(0).gap(6)
       .child(h_flex().gap(6).items_center().flex_wrap()
         .when(Boolean(link) && link !== item?.link, (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", (c) => openUrl(link, c))))
+        .children(kind === "decision" ? decisionOptions(item?.body).options.map((n) => this.button(t, `opt-${s.leader}-${n}`, `${n}안 선택`, (c) => this.send(a, `${n}안 선택`, c), { primary: n === decisionOptions(item?.body).recommended, disabled: a.po ? "" : NO_PO, tip: CLIP })) : [])
         .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c), { primary: true, disabled: a.po ? "" : NO_PO, tip: CLIP })))
         .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); this.reveal(this.spot(s, item)); c.notify(); }, { disabled: a.po ? "" : NO_PO }))
-        .child(div().text_size(11).text_color(done ? t.working : t.dim).child(done ? "PO에 넣음 — PO에서 Enter로 보내면 사라집니다" : "PO에서 Enter로 보내면 리더가 받고 사라집니다")));
+        .child(div().text_size(11).text_color(done === "sent" ? t.working : done === "held" ? t.blocked : t.dim).child(done === "sent" ? "PO에 보냄 — 리더가 받으면 사라집니다" : done === "held" ? "PO에 넣음 — PO가 질문 중이라 PO에서 Enter로 보내세요" : "누르면 PO에 바로 보내고, 리더가 받으면 사라집니다")));
     if (!a.po) box.child(div().text_size(11).text_color(t.dim).child(NO_PO));
     if (writing) {
       const input = this.box(s.leader, cx);
@@ -972,7 +1037,7 @@ export default class Inbox extends View {
     const t = theme();
     const v = this.view();
     this.drawnAt = Date.now();
-    const strip = this.windowed && this.narrow; // a narrow window: the rooms are a strip on top; the dock always has the slim column
+    const strip = this.windowed && this.narrow; // a narrow window: the rooms are a strip on top; the dock and a pane use the slim column when narrow
     const blocks = [];
     const at = new Map(); // spot key -> index in blocks (the direct children of the scroll list)
     this.at = at;
@@ -1021,13 +1086,14 @@ export default class Inbox extends View {
       })
       .child(h_flex().h(38).px(this.compact ? 10 : 14).flex_none().items_center().justify_between()
         .child(h_flex().gap(6).items_center()
-          .child(div().text_size(15).font_semibold().text_color(t.foreground).child("PO 데스크"))
+          .when(!this.paned, (el) => el.child(div().text_size(15).font_semibold().text_color(t.foreground).child("PO 데스크"))) // a pane's own header already says it
           .when(!this.windowed && waiting > 0, (el) => el.child(this.tag(t, `대기 ${waiting}`, "blocked")))
           .child(div().id("inbox-refresh").p(3).rounded(5).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
             .on_mouse_down("left", stop).on_click((_e, c) => { this.gen++; this.busy = false; this.load(c); }).tooltip("새로고침")
             .child(this.busy ? svg(ICON("spinner")).size(13).spin(900) : div().text_size(14).child("↻"))))
         .child(h_flex().gap(8).items_center()
           .child(div().text_size(11).text_color(t.dim).child(this.data ? ago(this.data.at) : ""))
+          .when(!this.paned, (el) => el.child(this.button(t, "inbox-beside", "옆에 열기", (c) => { this.openBeside(); c.notify(); }, { tip: "리더 옆 창(페인)으로 엽니다. 리더가 없으면 지금 터미널 옆, 이 탭에 이미 있으면 그쪽으로 갑니다" })))
           .when(!this.windowed, (el) => el.child(this.button(t, "inbox-open", "창 열기", (c) => { this.openWindow(); c.notify(); }, { tip: "PO 데스크 창을 엽니다" })))
           .when(this.windowed, (el) => el.child(div().id("inbox-close").p(4).rounded(5).text_color(t.dim).cursor_pointer().hover((x) => x.bg(t.hover).text_color(t.foreground))
             .on_mouse_down("left", stop).on_click((_e, c) => { try { closeOverlay(safeProps().overlay); } catch {} c.notify(); }).tooltip("닫기")
@@ -1037,6 +1103,6 @@ export default class Inbox extends View {
       .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
       .when(Boolean(this.msg), (el) => el.child(div().id("inbox-msg").px(14).pb(6).text_size(11.5).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
         .on_mouse_down("left", stop).on_click((_e, c) => { this.msg = null; c.notify(); }).child(this.msg.text)))
-      .child(strip ? room : h_flex().flex_1().min_h(0).items_stretch().child(this.windowed ? this.roomList(t, v) : this.slimRooms(t, v)).child(room));
+      .child(strip ? room : h_flex().flex_1().min_h(0).items_stretch().child(this.narrow ? this.slimRooms(t, v) : this.roomList(t, v)).child(room));
   }
 }

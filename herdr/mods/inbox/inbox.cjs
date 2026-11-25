@@ -557,8 +557,39 @@ function chatHtml(text) {
     return `<p>${out + escHtml(line.slice(at)) || "&nbsp;"}</p>`;
   }).join("");
 }
+// Where "옆에 열기" puts the PO desk. `here`: the panes of the tab being shown (panes() filtered by tab), `f`: focused(), `terms`: terminals().
+// Beside the focused pane if it is a leader, else the newest leader of the tab (created_ms, else the higher base-36 address), else the
+// focused terminal, else any focused pane. A tab that already has an inbox mod pane gets that one focused instead (one per tab).
+// Returns {action: "focus", pane} | {action: "split", pane?}. Pure.
+function dockTarget(here, f, terms) {
+  const list = Array.isArray(here) ? here : [];
+  const byAddr = new Map((Array.isArray(terms) ? terms : []).map((t) => [t.address, t]));
+  const leaders = list.filter((p) => p.terminal && String(byAddr.get(p.terminal)?.labels?.role ?? "").trim().toLowerCase() === "leader");
+  const age = (p) => { const ms = Number(byAddr.get(p.terminal)?.created_ms); return Number.isFinite(ms) ? ms : parseInt(String(p.terminal).replace(/^t/, ""), 36) || 0; };
+  const leader = leaders.find((p) => p.pane === f?.pane) ?? [...leaders].sort((a, b) => age(b) - age(a))[0];
+  const beside = leader ?? list.find((p) => p.pane === f?.pane) ?? list.find((p) => p.focused && p.terminal) ?? list.find((p) => p.focused);
+  const have = list.find((p) => p.mod === "inbox");
+  if (beside && have) return { action: "focus", pane: have.pane };
+  return beside ? { action: "split", pane: beside.pane } : { action: "split" };
+}
+// The options of a decision report, read strictly from its body (the leader report rule: one "N안: ..." line per option, N = 1..3, and
+// optionally a "추천: N안" line). At least two distinct numbers, otherwise none (nothing is guessed: "A:", "1)", "①", "1. step" are not options).
+// -> { options: [1, 2], recommended: 2 | 0 }
+function decisionOptions(body) {
+  const nums = new Set();
+  let rec = 0;
+  for (const line of String(body ?? "").split(/\r?\n/)) {
+    let m = line.match(/^\s*(?:[-*]\s*)?([1-3])안\s*[:：)]\s*\S/);
+    if (m) { nums.add(Number(m[1])); continue; }
+    m = line.match(/^\s*(?:[-*]\s*)?추천\s*[:：]\s*([1-3])안/);
+    if (m && !rec) rec = Number(m[1]);
+  }
+  const options = [...nums].sort((x, y) => x - y);
+  if (options.length < 2) return { options: [], recommended: 0 };
+  return { options, recommended: options.includes(rec) ? rec : 0 };
+}
 // chat:end
 
-module.exports = { PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, tlKey, tlFollow, atBottom, chatHtml, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, tlKey, tlFollow, atBottom, chatHtml, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) process.stdout.write(JSON.stringify(collect()));
