@@ -241,6 +241,7 @@ function tlMemoGet(kind, v, make) {
   m.set(s, r);
   return r;
 }
+const TL_CUT_MIN = 500;
 function timeline(room, leaders, says, mine, waits = [], now = 0) {
   const out = [];
   const seen = new Set();
@@ -269,10 +270,14 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
   // Compared without wrapper tags (the terminal's paste wrapper must not make a copy look different) and, as a second chance, by words + pictures.
   const full = (v) => tlMemoGet("f", v, (s) => tnorm(unwrapTags(s)));
   const core = (v) => tlMemoGet("c", v, (s) => { const sp = splitImgs(s); return `${tnorm(sp.text)}|${sp.imgs.join(",")}`; });
+  // The PO hook keeps at most 2000 characters of a typed line and ends a longer one in "…" (#49), so its copy of a long desk send is only the
+  // start of that send: a line ending in "…" also matches a record whose text starts with what is left (at least TL_CUT_MIN characters after
+  // whitespace is squeezed, so a short line that merely ends in "…" does not hide a longer send). "" when the line is not such a cut.
+  const cut = (v) => { const s = String(v ?? ""); if (!s.endsWith("…")) return ""; const p = full(s.slice(0, -1)); return p.length >= TL_CUT_MIN ? p : ""; };
   if (room && room !== PO_OTHER) for (const x of says ?? []) {
     if (x.me) {
-      const t = full(x.text), c = core(x.text);
-      const i = sentBy.findIndex((m, j) => !taken.has(j) && (x.ms - (Number(m.ms) || 0)) >= -60000 && (x.ms - (Number(m.ms) || 0)) <= 11 * 60000 && (full(m.line) === t || full(m.text) === t || (c.length > 1 && (core(m.line) === c || core(m.text) === c))));
+      const t = full(x.text), c = core(x.text), p = cut(x.text);
+      const i = sentBy.findIndex((m, j) => !taken.has(j) && (x.ms - (Number(m.ms) || 0)) >= -60000 && (x.ms - (Number(m.ms) || 0)) <= 11 * 60000 && (full(m.line) === t || full(m.text) === t || (c.length > 1 && (core(m.line) === c || core(m.text) === c)) || (p && (full(m.line).startsWith(p) || full(m.text).startsWith(p)))));
       if (i >= 0) { taken.add(i); continue; }
       out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
       continue;
@@ -996,19 +1001,20 @@ function parseUsage(raw, now) {
     .map((l) => ({ label: USAGE_LABEL[l.kind], percent: Math.round(l.percentUsed), resetsAt: Math.max(0, Date.parse(l.resetsAt ?? "") || 0) }));
   return rows.length ? rows : null;
 }
-// A reset time in local time: HH:MM when it is today, else month/day HH:MM.
-function usageReset(ms, now) {
-  const d = new Date(ms), n = new Date(now);
-  if (!ms || Number.isNaN(d.getTime())) return "";
-  const p = (x) => String(x).padStart(2, "0");
-  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
-  return d.toDateString() === n.toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+// The time left until a reset as "2시간 15분" / "5일 4시간 41분" (zero units dropped); "1분 미만" under a minute, "" when unknown or past.
+function usageLeft(ms, now) {
+  const mins = Math.floor((ms - now) / 60000);
+  if (!ms || !Number.isFinite(mins) || mins < 0) return "";
+  if (mins === 0) return "1분 미만";
+  const unit = [[Math.floor(mins / 1440), "일"], [Math.floor(mins / 60) % 24, "시간"], [mins % 60, "분"]];
+  return unit.filter(([n]) => n > 0).map(([n, u]) => n + u).join(" ");
 }
-// The tooltip: the reset time of every row that has one ("5h 리셋 19:20 · 7d 리셋 11/30 22:00"), or why there are no numbers.
+// The tooltip: the time left until the reset of every row that has one ("5h 초기화까지 2시간 15분 · 7d 초기화까지 5일 4시간 41분"), or why there are no numbers.
+// It is computed when the line is drawn, so it is as fresh as the last redraw.
 function usageTip(rows, now) {
   if (!rows) return "사용률을 알 수 없습니다: ~/.claude/usage-limits.json이 없거나 10분 넘게 갱신되지 않았습니다";
-  const parts = rows.filter((r) => r.resetsAt).map((r) => `${r.label} 리셋 ${usageReset(r.resetsAt, now)}`);
-  return parts.length ? parts.join(" · ") : "리셋 시각 정보가 없습니다";
+  const parts = rows.filter((r) => r.resetsAt).map((r) => { const left = usageLeft(r.resetsAt, now); return left ? `${r.label} 초기화까지 ${left}` : `${r.label} 초기화 시각이 지났습니다`; });
+  return parts.length ? parts.join(" · ") : "초기화 시각 정보가 없습니다";
 }
 // usageLine:end
 
@@ -1161,13 +1167,13 @@ export default class Inbox extends View {
     this.diag(`init: ${this.windowed ? "window" : this.paned ? "pane" : "dock"}`);
   }
 
-  // Reads the usage file (a file read only) and redraws only when what the line shows changed: a redraw drops a drag-select.
+  // Reads the usage file (a file read only) and redraws only when what the line shows (the rows or the tooltip text) changed: a redraw drops a drag-select.
   loadUsage(cx) {
     cx.spawn(async (cx) => {
       let raw = null;
       try { raw = await readTextFile(`${home()}/${USAGE_FILE}`); } catch {}
       const rows = parseUsage(raw, Date.now());
-      const sig = JSON.stringify(rows);
+      const sig = JSON.stringify([rows, usageTip(rows, Date.now())]);
       this.usage = rows;
       if (sig === this.usageSig) return;
       this.usageSig = sig;
@@ -1176,7 +1182,7 @@ export default class Inbox extends View {
   }
 
   // The usage line under the room title ("Claude 5h ▬ 54% · 7d ▬ 34%"); 80% and over is drawn in the warning color, the tooltip has the
-  // reset times. Nothing before the first read.
+  // time left until each reset. Nothing before the first read.
   usageLine(t) {
     const rows = this.usage;
     if (rows === undefined) return null;
