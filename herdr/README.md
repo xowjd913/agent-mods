@@ -14,6 +14,7 @@
   - [필요한 것](#필요한-것)
   - [설치 명령](#설치-명령)
   - [모드 골라 설치](#모드-골라-설치)
+- [저장소별 GitHub 계정](#저장소별-github-계정)
 - [업데이트와 제거](#업데이트와-제거)
 - [동작 방식](#동작-방식)
 - [데이터가 저장되는 곳](#데이터가-저장되는-곳)
@@ -35,6 +36,7 @@
 | 작업별 묶음 (`agent-groups`) | 사이드바에서 터미널을 리더별로 묶고 리더 아래에 팀원을 둡니다 | 추가 | [agent-groups](../docs/mods/agent-groups.md) |
 | 리더 탭 (`leader-tabs`) | 리더 세션이 둘 이상이면 칸 머리줄에 리더 탭을 띄웁니다 | 추가 | [leader-tabs](../docs/mods/leader-tabs.md) |
 | 경로 메뉴 (`path-menu`) | 터미널의 파일 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄웁니다 | 추가 | [path-menu](../docs/mods/path-menu.md) |
+| 계정 (`gh-accounts`) | 스페이스·저장소마다 쓸 GitHub 계정을 보고 고릅니다([gh-account](../docs/gh-account.md) 도구 필요) | 추가 | [gh-accounts](../docs/mods/gh-accounts.md) |
 | PO 데스크 (`inbox`) | 리더 결과 보고를 채팅처럼 보여 주고, 결정이 필요한 보고에 답하거나 채팅칸에서 `@리더`로 말하면 PO 터미널에 입력으로 전해 줍니다 | 추가 | [inbox](../docs/mods/inbox.md) |
 
 <!-- 새 모드: docs/mods/<모드>.md를 같은 틀(제목, 한 줄 소개, 스크린샷, 사용법, 필요한 것, 설치, 돌아가기 링크)로 만들고 위 표와 ../README.md 모드 표에 한 줄씩 더합니다. -->
@@ -109,7 +111,7 @@ sh agent-mods/herdr/install.sh --extras   # Windows: .\agent-mods\herdr\install.
 | macOS·Linux | Windows | 하는 일 |
 | --- | --- | --- |
 | (옵션 없음) | (옵션 없음) | 설치된 모드만 갱신합니다. 처음이면 기본 모드 5개를 설치합니다. |
-| `--extras` | `-Extras` | 모드 9개를 모두 설치합니다. |
+| `--extras` | `-Extras` | 모드 11개를 모두 설치합니다. |
 | `--only <모드>` | `-Only <모드>` | 고른 모드만 설치·갱신합니다. 이미 설치된 다른 모드는 그대로 둡니다. |
 | `--add <모드>` | `-Add <모드>` | 설치된 모드에 고른 모드를 더합니다. |
 | `--remove <모드>` | `-Remove <모드>` | 고른 모드를 지우고, 그 모드가 바꾼 레이아웃 블록을 되돌립니다. |
@@ -155,11 +157,32 @@ Windows는 `.\agent-mods\herdr\install.ps1 -Only usage-status`입니다.
   - `work`: `tabs-mine`, `wt-menu`
   - `prs`: `work`, `tabs-mine`, `wt-menu`
   - `schedules`: `tabs-mine`
+  - `gh-accounts`: `tabs-mine`
   - `inbox`: `tabs-mine`
 - 남은 모드가 쓰는 모드는 지우지 않습니다.
   - 예: `work`가 설치돼 있으면 `--remove wt-menu`는 아무것도 지우지 않고, 함께 지울 이름을 알려 줍니다.
 - `--remove`(Windows는 `-Remove`)는 고른 모드 폴더를 지우고, 그 모드가 바꾼 레이아웃 블록을 되돌립니다.
   - 모드 폴더 밖의 예약 기록, PRs `옆에 열기` 기록, 캐시는 남습니다([데이터가 저장되는 곳](#데이터가-저장되는-곳)).
+
+---
+
+## 저장소별 GitHub 계정
+
+gh에 계정을 여러 개 로그인해 두고 저장소 주인(owner)마다 쓸 계정을 정하는 도구(`gh-account`)입니다.
+Herdr 모드가 아니라서 따로 설치하며, 모든 터미널의 `gh` 명령, `git push`의 HTTPS 인증, 커밋 작성자에 함께 쓰입니다.
+
+```sh
+sh herdr/install.sh --gh-account            # 설치 (~/.local/bin)
+gh-account set example-org/* acct-b         # example-org 저장소는 acct-b 계정
+gh-account resolve                          # 지금 폴더에서 쓸 계정 확인
+sh herdr/install.sh --gh-account-uninstall  # 제거
+```
+
+- gh 활성 계정은 바꾸지 않고(패널의 계정 추가만 로그인 직후 원래대로 되돌림), 토큰은 저장하지 않습니다.
+- 매핑이 없거나 깨졌으면 `gh`와 `git`은 원래대로 동작합니다.
+- macOS·Linux만 지원하고, HTTPS 원격만 인증합니다.
+- 오른쪽 패널에서 보고 고르려면 계정 패널을 더합니다: `sh herdr/install.sh --add gh-accounts` ([gh-accounts](../docs/mods/gh-accounts.md)). 도구 설치·되돌리기와 계정 추가도 패널 버튼으로 할 수 있습니다.
+- 자세한 사용법과 한계: [gh-account](../docs/gh-account.md)
 
 ---
 
@@ -233,7 +256,7 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
    - `main`을 복제하고, 그 레이아웃으로 바꿉니다.
 3. **블록 넣기**: `dashboard`에 설치된 모드의 블록을 넣습니다.
    - `tabs-mine`: 탭 줄 `tabs`를 `tabs-mine`으로 바꿉니다.
-   - `work`·`prs`·`schedules`·`inbox`: 오른쪽 패널에 `work-board`, `pr-board`, `schedules-board`, `inbox-board`를 더합니다.
+   - `work`·`prs`·`schedules`·`gh-accounts`·`inbox`: 오른쪽 패널에 `work-board`, `pr-board`, `schedules-board`, `accounts-board`, `inbox-board`를 더합니다.
    - `agent-groups`: `agents`를 `agent-groups`로 바꿉니다.
    - `usage-status`: `workspace-status`를 `usage-status`로 바꿉니다.
    - `leader-tabs`: 칸 머리줄 `pane`을 `leader-tabs`로 바꿉니다.
@@ -276,6 +299,8 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
 | `<설정 폴더>/schedules/` | 예약(`automations.json`)과 실행 기록(`runs.json`) | 지우면 예약이 사라집니다 |
 | `<설정 폴더>/data/prs/` | PRs `옆에 열기` 상태 | 언제든 |
 | `~/.claude/settings.json` (또는 `$CLAUDE_CONFIG_DIR/settings.json`) | `inbox` 설치 때 `hook` 명령이 `Stop`·`UserPromptSubmit` 두 이벤트에 더하는 PO 답 훅 명령 하나(`po-hook.cjs`) | 설치기가 쓰기 전에 `settings.json.bak-herdr-<시각>`으로 백업합니다. `--remove inbox`나 `node install.cjs hook --remove`가 우리 줄만 뺍니다 |
+| `<설정 폴더>/gh-accounts.json` | gh-account 저장소별 계정 매핑 | 지우면 매핑이 사라집니다. 제거해도 남습니다 |
+| `<설정 폴더>/gh-account/` | gh-account 프로그램, 설치 상태, 계정별 커밋 신원 파일 | gh-account 제거할 때 지웁니다 |
 | `~/.claude/usage-limits.json` | usage-status가 읽는 파일(다른 도구가 씀) | 이 저장소가 만들지 않습니다 |
 | `~/.herdr-inbox/<리더>.jsonl` | inbox가 읽는 리더 보고 기록(`report`가 씀) | 이 저장소가 만들지 않습니다. 지우면 그 리더의 보고가 사라집니다 |
 | `~/.herdr-inbox/po/<po id>.jsonl` | PO 데스크 채팅이 읽는 그 PO의 답(`{ts, kind:"say" 또는 "me", text, to?}` 한 줄씩. `me`는 터미널에 직접 친 글). PO 답 훅(`po-hook.cjs`)도 여기에 씁니다(프롬프트 글이 들어가므로 `0600`, 1 MiB를 넘으면 가장 새 256 KiB만 남깁니다). 붙여 넣거나 터미널에서 붙인 그림은 앱 폴더 안 `data/inbox/img/`(`image()`는 앱 폴더 기준 상대 경로만 읽습니다, 설치가 지우지 않는 모드 상태 폴더)에 `0600`으로 저장되고(한 장 5MB, 한 글 4장, 14일 뒤 정리) 데스크 말풍선에 그려집니다. id는 PO 터미널의 `po` 라벨(소문자·숫자·`-`, 1~40자) | 이 저장소가 만들지 않습니다. 없으면 답이 없는 것으로 봅니다. 옛 `po.jsonl`은 읽지 않습니다 |

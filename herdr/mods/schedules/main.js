@@ -399,6 +399,7 @@ export default class Schedules extends View {
       program: a?.program ?? "claude",
       model: a?.model ?? "",
       effort: a?.effort ?? "",
+      account: a?.account ?? "",
       kind: s.kind === "preset" ? s.preset : s.kind,
       weekday: Number(s.weekday ?? 1),
       hour: Number.isFinite(hh) ? hh : 9,
@@ -478,6 +479,22 @@ export default class Schedules extends View {
     return withCurrent([{ value: "", label: "기본값" }, ...this.effortList().map((e) => ({ value: e, label: e }))], this.f.effort, (e) => e);
   }
 
+  // 계정: 비우면 공용 owner→계정 매핑을 따른다. 고를 수 있는 것은 gh 에 로그인된 계정뿐이다(이름만 저장).
+  accountItems() {
+    const logins = this.opts?.accounts?.logins ?? [];
+    return withCurrent([{ value: "", label: "자동 (매핑 따름)" }, ...logins.map((l) => ({ value: l, label: l }))], this.f.account, (l) => `${l} (로그인 안 됨)`);
+  }
+
+  accountNote(t) {
+    const a = this.opts?.accounts, f = this.f;
+    if (!a) return null;
+    if (!a.installed) return this.note(t, f.account ? "gh-account 가 설치돼 있지 않아 이 계정으로 실행할 수 없습니다. 계정 패널에서 설치하세요." : "계정을 고르려면 계정 패널에서 gh-account 를 설치하세요.", f.account ? t.blocked : undefined);
+    if (a.old) return this.note(t, "설치된 gh-account 가 옛 판입니다. 계정 패널에서 업데이트하세요.", t.blocked);
+    if (!a.logins) return this.note(t, "gh 로그인 목록을 읽지 못했습니다.", t.blocked);
+    if (f.account && !a.logins.some((l) => l.toLowerCase() === f.account.toLowerCase())) return this.note(t, `${f.account} 계정은 gh 에 로그인돼 있지 않습니다.`, t.blocked);
+    return this.note(t, f.account ? "이 예약의 gh·git push·커밋 신원은 이 계정을 씁니다." : "저장소 owner 에 맞춘 계정(계정 패널의 매핑)을 씁니다.");
+  }
+
   folderItems() {
     const f = this.f;
     const seen = new Set();
@@ -538,7 +555,7 @@ export default class Schedules extends View {
     const command = f.precheck.value().trim();
     const spec = {
       name: f.name.value().trim(), enabled: f.enabled, program: f.program, prompt: f.prompt.value(),
-      model: f.model, effort: f.effort, schedule, timezone: f.tz || undefined,
+      model: f.model, effort: f.effort, account: f.account, schedule, timezone: f.tz || undefined,
       graceMinutes: f.grace,
       notify: f.notify,
       precheck: command ? { command, timeoutSec: f.precheckSec } : null,
@@ -697,6 +714,7 @@ export default class Schedules extends View {
         .child(h_flex().flex_none().gap(8)
           .child(div().flex_1().min_w(0).child(this.field(t, "모델", dd("model", this.modelItems(), f.model, "model", 240))))
           .child(div().flex_1().min_w(0).child(this.field(t, "에포트", dd("effort", this.effortItems(), f.effort, "effort", 160)))))
+        .child(this.field(t, "계정", dd("account", this.accountItems(), f.account, "account", 240), this.accountNote(t)))
         .child(this.field(t, "폴더",
           dd("path", this.folderItems(), f.pathMode === "custom" ? CUSTOM : f.path, "path", 300),
           f.pathMode === "custom"
@@ -894,6 +912,8 @@ export default class Schedules extends View {
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(`${when(first)}${ago(first) ? ` (${ago(first)})` : ""}`))
         .child(this.tag(t, r.trigger, r.trigger === "놓친 실행" ? "idle" : "dim"))
         .child(this.tag(t, r.status, color)))
+      // 예약에 정한 GitHub 계정(이름만). 자동이면 적지 않는다.
+      .when(Boolean(r.account), (el) => el.child(div().text_size(11).text_color(t.dim).truncate().child(`GitHub 계정 ${r.account}`)))
       .when(Boolean(detail), (el) => el.child(div().text_size(11).text_color(t.muted).truncate().child(detail)))
       .when(Boolean(r.terminal), (el) => el.child(h_flex().gap(6).items_center().text_size(11).text_color(t.dim)
         .child(svg(ICON("terminal")).size(11).flex_none())
