@@ -1525,7 +1525,7 @@ function restartClearState(sent, term) {
 const RESTART_DRAFT_MS = 10 * 60 * 1000;
 function restartDraft(mine, room, now) {
   return (mine ?? []).some((m) => m && m.po === room && (m.status === "held" || m.status === "noenter") && Number(now) - (Number(m.at ?? m.ms) || 0) < RESTART_DRAFT_MS)
-    ? "먼저 PO 입력칸에 남은 글을 보내거나 지우세요(남아 있으면 함께 보내집니다)" : "";
+    ? "먼저 PO 입력칸에 남은 글을 보내거나 지우세요(남아 있으면 함께 보내집니다). 채팅 말풍선의 Enter 버튼으로 보낼 수 있습니다" : "";
 }
 // What the PO's hook recorded as submitted (UserPromptSubmit -> kind "me" lines of po/<id>.jsonl) is the proof of what `hc send` really sent.
 // The step-1 request must come back as exactly itself: a draft left in the input box is sent in front of it ("<draft><request>"), and the run stops.
