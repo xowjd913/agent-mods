@@ -311,12 +311,22 @@ function parsePoLines(text) {
 }
 
 // ---- picture files (Node side; the pure rules - which path may be drawn - are imgOk/splitImgs in the chat block)
-// Every picture lives in <inbox dir>/po/img/, written 0600 in a 0700 folder, named by its content hash (the same picture is the same file, so
-// writing it twice is harmless), at most 5 MB each and 4 per message; files older than 14 days are removed on the next save.
+// Every picture lives in <app root>/data/inbox/img/ (the app root is ~/.config/herdr-app): the desk's `image()` only loads paths relative to the
+// app root, and data/<mod>/ is Herdr's own per-mod state, which a mod save (hot reload) and the installer leave alone. Written 0600 in a 0700
+// folder, named by its content hash (the same picture is the same file, so writing it twice is harmless), at most 5 MB each and 4 per message;
+// files older than 14 days are removed on the next save.
 const MAX_IMG_BYTES = 5 * 1024 * 1024;
 const IMG_KEEP_MS = 14 * 24 * 3600 * 1000;
 const MIME_EXT = { "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp" };
-const imgDir = (dir = inboxDir()) => path.join(dir, PO_DIR, "img");
+// The app root that `image()` resolves against: HERDR_APP_HOME, else the folder this mod is installed in (<root>/mods/inbox), else ~/.config/herdr-app.
+function appRoot() {
+  if (process.env.HERDR_APP_HOME) return process.env.HERDR_APP_HOME;
+  const up = path.dirname(__dirname);
+  if (path.basename(up) === "mods") return path.dirname(up);
+  return path.join(os.homedir(), ".config", "herdr-app");
+}
+const IMG_REL = "data/inbox/img"; // under the app root; what `image()` is given (plus the file name)
+const imgDir = (root = appRoot()) => path.join(root, ...IMG_REL.split("/"));
 // The extension a picture's own first bytes say, or "" when they are not a PNG / JPEG / GIF / WebP.
 function sniffExt(buf) {
   if (!Buffer.isBuffer(buf) || buf.length < 12) return "";
@@ -353,8 +363,8 @@ function imgSize(buf) {
   return null;
 }
 // {<file path>: [w, h]} for the newest 30 pictures of the folder (what the bubbles may draw), so a bubble can be given the picture's shape.
-function imageDims(dir = inboxDir()) {
-  const folder = imgDir(dir);
+function imageDims(root = appRoot()) {
+  const folder = imgDir(root);
   const out = {};
   try {
     const names = fs.readdirSync(folder).filter((n) => IMG_EXT.test(n)).map((n) => { try { return { n, m: fs.statSync(path.join(folder, n)).mtimeMs }; } catch { return null; } }).filter(Boolean).sort((a, b) => b.m - a.m).slice(0, 30);
@@ -376,11 +386,11 @@ function pruneImages(folder, now = Date.now()) {
     }
   } catch {}
 }
-// Saves picture bytes as <inbox dir>/po/img/<hash>.<ext> (0600) and returns the path, or null when it is not a picture or is over 5 MB.
-function saveImage(buf, dir = inboxDir(), now = Date.now()) {
+// Saves picture bytes as <app root>/data/inbox/img/<hash>.<ext> (0600) and returns the path, or null when it is not a picture or is over 5 MB.
+function saveImage(buf, root = appRoot(), now = Date.now()) {
   const ext = sniffExt(buf);
   if (!ext || buf.length > MAX_IMG_BYTES) return null;
-  const folder = imgDir(dir);
+  const folder = imgDir(root);
   fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
   const file = path.join(folder, `${require("crypto").createHash("sha256").update(buf).digest("hex").slice(0, 16)}${ext}`);
   if (fs.existsSync(file)) { try { fs.chmodSync(file, 0o600); fs.utimesSync(file, new Date(now), new Date(now)); } catch {} return file; }
@@ -390,17 +400,17 @@ function saveImage(buf, dir = inboxDir(), now = Date.now()) {
   return file;
 }
 // A picture file the person picked or dropped -> a copy in the picture folder (path), or null.
-function importImage(src, dir = inboxDir()) {
+function importImage(src, root = appRoot()) {
   try {
     if (!IMG_EXT.test(String(src))) return null;
     const st = fs.statSync(src);
     if (!st.isFile() || st.size > MAX_IMG_BYTES) return null;
-    return saveImage(fs.readFileSync(src), dir);
+    return saveImage(fs.readFileSync(src), root);
   } catch { return null; }
 }
 // The picture on the system clipboard -> its saved path, or null when there is none (or no tool to read it). macOS: AppleScript writes the
 // clipboard's PNG; Windows: PowerShell saves the clipboard bitmap; Linux: wl-paste or xclip.
-function clipImage(dir = inboxDir()) {
+function clipImage(root = appRoot()) {
   const { execFileSync } = require("child_process");
   const run = (cmd, args, env) => execFileSync(cmd, args, { timeout: 8000, stdio: ["ignore", "pipe", "ignore"], windowsHide: true, maxBuffer: MAX_IMG_BYTES + 1024, env: { ...process.env, ...(env ?? {}) } });
   try {
@@ -413,14 +423,14 @@ function clipImage(dir = inboxDir()) {
         } else {
           run("powershell", ["-NoProfile", "-NonInteractive", "-Command", "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $i=[System.Windows.Forms.Clipboard]::GetImage(); if($i){$i.Save($env:PO_CLIP,[System.Drawing.Imaging.ImageFormat]::Png)}"], { PO_CLIP: tmp });
         }
-        return saveImage(fs.readFileSync(tmp), dir);
+        return saveImage(fs.readFileSync(tmp), root);
       } finally {
         try { fs.unlinkSync(tmp); } catch {}
         try { fs.rmdirSync(tmpd); } catch {}
       }
     }
     for (const [cmd, args] of [["wl-paste", ["--type", "image/png"]], ["xclip", ["-selection", "clipboard", "-t", "image/png", "-o"]]]) {
-      try { const p = saveImage(run(cmd, args), dir); if (p) return p; } catch {}
+      try { const p = saveImage(run(cmd, args), root); if (p) return p; } catch {}
     }
   } catch {}
   return null;
@@ -428,7 +438,7 @@ function clipImage(dir = inboxDir()) {
 // The pictures of one prompt in a Claude Code transcript (jsonl): the user entry whose promptId is `promptId` (else the newest user entry that
 // carries a picture and whose text starts like `promptText`) holds {type:"image", source:{type:"base64", media_type, data}} blocks next to its
 // "[Image #N]" text. Each is saved (capped) and the paths come back. Only the last 32 MiB of the transcript are read.
-function transcriptImages(file, promptId, promptText, dir = inboxDir(), now = Date.now()) {
+function transcriptImages(file, promptId, promptText, root = appRoot(), now = Date.now()) {
   let text = "";
   try {
     const st = fs.statSync(file);
@@ -453,7 +463,7 @@ function transcriptImages(file, promptId, promptText, dir = inboxDir(), now = Da
   const out = [];
   for (const b of (pick ?? []).slice(0, MAX_IMGS)) {
     if (b.source.data.length > MAX_IMG_BYTES * 1.4) continue;
-    const p = saveImage(Buffer.from(b.source.data, "base64"), dir, now);
+    const p = saveImage(Buffer.from(b.source.data, "base64"), root, now);
     if (p && !out.includes(p)) out.push(p);
   }
   return out;
@@ -510,7 +520,7 @@ function readPo(dir = inboxDir()) {
 
 function collect(dir = inboxDir()) {
   let names = [];
-  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== OLD_PO_FILE); } catch { return { at: new Date().toISOString(), dir, leaders: [], po: {}, imgd: {} }; }
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== OLD_PO_FILE); } catch { return { at: new Date().toISOString(), dir, leaders: [], po: {}, imgd: {}, root: appRoot() }; }
   const leaders = [];
   for (const n of names) {
     try {
@@ -519,7 +529,7 @@ function collect(dir = inboxDir()) {
     } catch {}
   }
   leaders.sort((a, b) => (b.last?.ms ?? 0) - (a.last?.ms ?? 0));
-  return { at: new Date().toISOString(), dir, leaders, po: readPo(dir), imgd: imageDims(dir) };
+  return { at: new Date().toISOString(), dir, root: appRoot(), leaders, po: readPo(dir), imgd: imageDims() };
 }
 
 // Which terminal is a waiting leader: a terminal named lead-* with the wait label decision|verify; returns that kind or "".
@@ -991,20 +1001,24 @@ function statusSig(terms) {
   return rows.sort().join("\n");
 }
 // ---- images (pasted, picked or dropped in the box; or pasted in the PO terminal and read back by the hook)
-// A picture lives in <inbox dir>/po/img/ (0600, written by this helper); a line of the desk's message names it as "[image: <path> — ...]" so the
-// PO (Claude) can open it with Read, and the bubble shows the picture. Only a path inside that folder is ever drawn.
+// A picture lives in <app root>/data/inbox/img/ (0600, written by this helper); a line of the desk's message names it as "[image: <path> — ...]"
+// so the PO (Claude) can open it with Read, and the bubble shows the picture (`image()` takes the path relative to the app root, imgRel).
+// Only a path inside that folder is ever drawn.
 const IMG_EXT = /\.(png|jpe?g|gif|webp)$/i;
 const MAX_IMGS = 4;
 const imgLine = (p) => `[image: ${p} — open it with the Read tool]`;
 const IMG_LINE = /^\[image: (.+?)(?: — [^\]]*)?\]$/;
 const slashed = (x) => String(x ?? "").replace(/\\/g, "/");
-function imgOk(dir, p) {
-  const d = slashed(dir).replace(/\/+$/, "");
+const IMG_SUB = "data/inbox/img/";
+function imgOk(root, p) {
+  const d = slashed(root).replace(/\/+$/, "");
   const s = slashed(p);
   if (!d || !s || s.includes("..") || /[\u0000-\u001F]/.test(s)) return false;
-  const pre = `${d}/po/img/`;
+  const pre = `${d}/${IMG_SUB}`;
   return s.startsWith(pre) && IMG_EXT.test(s) && s.length > pre.length && !s.slice(pre.length).includes("/");
 }
+// The path `image()` loads: relative to the app root ("data/inbox/img/<file>"), or "" when the picture may not be drawn.
+function imgRel(root, p) { return imgOk(root, p) ? IMG_SUB + slashed(p).slice(slashed(root).replace(/\/+$/, "").length + 1 + IMG_SUB.length) : ""; }
 // A message text -> {text without its "[image: ...]" lines, imgs: the paths those lines named}.
 function splitImgs(text) {
   const imgs = [];
@@ -1017,12 +1031,16 @@ function splitImgs(text) {
 }
 // What a bubble draws for `text` (+ `extra`, the paths the hook read back): the words, the pictures that may be drawn, and the numbers of
 // "[Image #N]" placeholders (a picture pasted in the PO terminal) that have no picture to show - drawn as a small chip, never as raw text.
-function bubbleParts(text, extra, dir) {
+function bubbleParts(text, extra, root) {
   const sp = splitImgs(text);
   const nums = [...sp.text.matchAll(/\[Image #(\d+)\]/g)].map((m) => Number(m[1]));
   const words = sp.text.replace(/\[Image #\d+\][ \t]*/g, "").replace(/\n{3,}/g, "\n\n").trim();
-  const imgs = [...sp.imgs, ...(Array.isArray(extra) ? extra : [])].filter((x, i, a) => imgOk(dir, x) && a.indexOf(x) === i).slice(0, MAX_IMGS);
-  return { text: words, imgs, chips: nums.slice(imgs.length) };
+  const all = [...sp.imgs, ...(Array.isArray(extra) ? extra : [])].filter((x, i, a) => a.indexOf(x) === i);
+  const imgs = all.filter((x) => imgOk(root, x)).slice(0, MAX_IMGS);
+  // pictures that may not be drawn (saved by an older version outside the app folder) and placeholders without one stay small chips
+  const lost = all.length - imgs.length;
+  const chips = [...nums.slice(imgs.length), ...Array.from({ length: Math.max(0, lost - nums.length) }, (_, i) => nums.length + i + 1)].slice(0, MAX_IMGS);
+  return { text: words, imgs, chips };
 }
 // The shape a picture is drawn in: fits [w,h] into maxW x maxH keeping its proportions (never enlarged); unknown size -> 4:3.
 function fitImg(w, h, maxW = 240, maxH = 200) {
@@ -1041,7 +1059,7 @@ function bubbleWidth(text, min = 64) {
     for (const ch of ln) w += ch.charCodeAt(0) < 0x250 ? 7.4 : 13.5;
     widest = Math.max(widest, w);
   }
-  return Math.max(min, Math.ceil(widest * 1.05) + 24);
+  return Math.max(min, Math.ceil(widest * 1.05) + 28);
 }
 // ---- scroll: stay pinned to the newest while it is at the bottom
 const PIN_SLACK = 40; // "at the bottom" means within this many px of it
@@ -1065,7 +1083,7 @@ const quietNow = (st, now) => Boolean((st?.sel && now - (st.selAt || 0) < SEL_HO
 
 // chat:end
 
-module.exports = { fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)

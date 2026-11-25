@@ -3,7 +3,7 @@
 // so the person never has to read the terminal:
 //   Stop              -> {kind:"say", text: the PO's final reply}      (a left PO bubble)
 //   UserPromptSubmit  -> {kind:"me",  text: what was typed/pasted}    (a right bubble; the desk drops the ones it sent itself)
-//   a prompt with "[Image #N]" (a picture pasted in the terminal) also gets {kind:"img", pid, imgs:[<0600 files in po/img/>]}: the prompt
+//   a prompt with "[Image #N]" (a picture pasted in the terminal) also gets {kind:"img", pid, imgs:[<0600 files in <app root>/data/inbox/img/>]}: the prompt
 //   carries only the placeholder, so the pictures are read from the transcript (transcript_path) by a short detached worker that waits for the
 //   transcript to hold the prompt, and once more at Stop. A picture that cannot be found stays a small "picture" chip on the desk.
 // appended to <inbox dir>/po/<po id>.jsonl (HERDR_INBOX_DIR, else ~/.herdr-inbox). Installed by `install.cjs hook`.
@@ -59,10 +59,10 @@ const IMG_WAIT_MS = 25000, IMG_POLL_MS = 1000;
 // Reads the pictures of every pending "[Image #N]" prompt of `file` from the transcript and appends one {kind:"img"} line per prompt that has some.
 // Returns how many prompts are still without pictures.
 function fillImages(file, transcript, I = require("./inbox.cjs"), now = Date.now()) {
-  const dir = I.inboxDir();
+  const root = I.appRoot();
   let left = 0;
   for (const { pid, text } of I.pendingImagePids(file)) {
-    const imgs = transcript ? I.transcriptImages(transcript, pid, text.replace(/\[Image #\d+\]/g, "").trim() || text, dir, now) : [];
+    const imgs = transcript ? I.transcriptImages(transcript, pid, text.replace(/\[Image #\d+\]/g, "").trim() || text, root, now) : [];
     if (imgs.length) appendLine(file, JSON.stringify({ ts: new Date(now).toISOString(), kind: "img", pid, imgs, src: "hook" }) + "\n");
     else left++;
   }

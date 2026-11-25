@@ -22,32 +22,51 @@ const png = (w = 30, h = 20, pad = 0) => {
   return b;
 };
 
-test("imgOk: only a picture directly inside <dir>/po/img/", () => {
-  const d = "/home/u/.herdr-inbox";
-  assert.equal(I.imgOk(d, `${d}/po/img/ab12.png`), true);
-  assert.equal(I.imgOk(d, `${d}/po/img/ab12.JPG`), true);
-  assert.equal(I.imgOk(d, `${d}/po/img/../x.png`), false);
-  assert.equal(I.imgOk(d, `${d}/po/img/sub/x.png`), false);
-  assert.equal(I.imgOk(d, `${d}/po/img/x.txt`), false);
+test("imgOk: only a picture directly inside <app root>/data/inbox/img/ (what image() can load)", () => {
+  const d = "/home/u/.config/herdr-app";
+  const img = `${d}/data/inbox/img`;
+  assert.equal(I.imgOk(d, `${img}/ab12.png`), true);
+  assert.equal(I.imgOk(d, `${img}/ab12.JPG`), true);
+  assert.equal(I.imgOk(d, `${img}/../x.png`), false);
+  assert.equal(I.imgOk(d, `${img}/sub/x.png`), false);
+  assert.equal(I.imgOk(d, `${img}/x.txt`), false);
   assert.equal(I.imgOk(d, `/etc/passwd.png`), false);
-  assert.equal(I.imgOk(d, `${d}/po/img/x\n.png`), false);
-  assert.equal(I.imgOk(d, `${d}/po/img/.png`), true);
+  assert.equal(I.imgOk(d, `${img}/x\n.png`), false);
+  assert.equal(I.imgOk(d, `${img}/.png`), true);
+  assert.equal(I.imgOk(d, `${d}/po/img/x.png`), false); // the old store (outside the app folder's data/) is not drawn
+  assert.equal(I.imgOk(d, `/home/u/.herdr-inbox/po/img/x.png`), false);
   assert.equal(I.imgOk(d, ""), false);
-  assert.equal(I.imgOk("", `/po/img/x.png`), false);
+  assert.equal(I.imgOk("", `/data/inbox/img/x.png`), false);
+});
+
+test("imgRel: the app-root-relative path image() loads, '' when the picture may not be drawn; appRoot follows HERDR_APP_HOME", () => {
+  const d = "/home/u/.config/herdr-app";
+  assert.equal(I.imgRel(d, `${d}/data/inbox/img/ab12.png`), "data/inbox/img/ab12.png");
+  assert.equal(I.imgRel(d + "/", `${d}/data/inbox/img/ab12.png`), "data/inbox/img/ab12.png");
+  assert.equal(I.imgRel(d, `${d}/po/img/ab12.png`), "");
+  assert.equal(I.imgRel(d, `${d}/data/inbox/img/../../x.png`), "");
+  const prev = process.env.HERDR_APP_HOME;
+  process.env.HERDR_APP_HOME = "/x/app";
+  try { assert.equal(I.appRoot(), "/x/app"); } finally { if (prev === undefined) delete process.env.HERDR_APP_HOME; else process.env.HERDR_APP_HOME = prev; }
+  delete process.env.HERDR_APP_HOME;
+  try {
+    // run from <root>/mods/inbox, the app root is <root>
+    assert.equal(I.appRoot(), path.resolve(__dirname, ".."));
+  } finally { if (prev !== undefined) process.env.HERDR_APP_HOME = prev; }
 });
 
 test("splitImgs / imgLine: the message line round-trips and is cut from the text", () => {
-  const p = "/d/po/img/a.png";
+  const p = "/d/data/inbox/img/a.png";
   const { text, imgs } = I.splitImgs(`안녕\n${I.imgLine(p)}\n끝`);
   assert.equal(text, "안녕\n끝");
   assert.deepEqual(imgs, [p]);
-  const many = Array.from({ length: 6 }, (_, i) => I.imgLine(`/d/po/img/${i}.png`)).join("\n");
+  const many = Array.from({ length: 6 }, (_, i) => I.imgLine(`/d/data/inbox/img/${i}.png`)).join("\n");
   assert.equal(I.splitImgs(many).imgs.length, I.MAX_IMGS);
 });
 
-test("bubbleParts: pictures that may be drawn, placeholders without a picture become chips, no raw '[Image #N]'", () => {
+test("bubbleParts: pictures that may be drawn, placeholders / legacy pictures without a drawable file become chips, no raw '[Image #N]'", () => {
   const d = "/d";
-  const a = "/d/po/img/a.png";
+  const a = "/d/data/inbox/img/a.png";
   let r = I.bubbleParts(`[Image #30] 이거 봐줘`, [a], d);
   assert.equal(r.text, "이거 봐줘");
   assert.deepEqual(r.imgs, [a]);
@@ -62,6 +81,11 @@ test("bubbleParts: pictures that may be drawn, placeholders without a picture be
   r = I.bubbleParts(`[Image #1] [Image #2]`, [a], d); // one picture covers the first placeholder only
   assert.deepEqual(r.chips, [2]);
   assert.ok(!/Image #/.test(r.text));
+  // a picture saved by an older version (outside data/inbox/img) is a small chip, not lost silently
+  r = I.bubbleParts(`그림`, ["/home/u/.herdr-inbox/po/img/old.png"], d);
+  assert.deepEqual(r.imgs, []);
+  assert.equal(r.chips.length, 1);
+  assert.equal(r.text, "그림");
 });
 
 test("fitImg keeps proportions, never enlarges, and has a size for an unknown picture", () => {
@@ -136,7 +160,7 @@ test("parsePoLines: an img line goes to the 'me' line with the same prompt id, e
   const t0 = Date.UTC(2026, 0, 1, 0, 0, 0);
   const iso = (s) => new Date(t0 + s * 1000).toISOString();
   const L = (o) => JSON.stringify(o);
-  const a = "/d/po/img/a.png", b = "/d/po/img/b.png";
+  const a = "/d/data/inbox/img/a.png", b = "/d/data/inbox/img/b.png";
   const text = [
     L({ ts: iso(0), kind: "me", text: "[Image #1] 첫째", pid: "p1" }),
     L({ ts: iso(5), kind: "me", text: "[Image #2] 둘째", pid: "p2" }),
@@ -169,7 +193,7 @@ test("sniffExt / imgSize read the type and size from the first bytes", () => {
   assert.deepEqual(I.imgSize(gif), [64, 32]);
 });
 
-test("saveImage: 0600 file in a 0700 folder under po/img, same bytes -> same file, not a picture / too big -> null", () => {
+test("saveImage: 0600 file in a 0700 folder under <root>/data/inbox/img, same bytes -> same file, not a picture / too big -> null", () => {
   const d = tmp();
   try {
     const p = I.saveImage(png(10, 10), d, Date.now());
@@ -240,7 +264,9 @@ test("pendingImagePids: prompts with a placeholder and no img line yet", () => {
 test("fillImages: appends an img line (0600 file) for a pending prompt, returns how many are still without", () => {
   const d = tmp();
   const prev = process.env.HERDR_INBOX_DIR;
+  const prevApp = process.env.HERDR_APP_HOME;
   process.env.HERDR_INBOX_DIR = d;
+  process.env.HERDR_APP_HOME = d;
   try {
     fs.mkdirSync(path.join(d, "po"), { recursive: true });
     const f = path.join(d, "po", "pa.jsonl");
@@ -259,13 +285,15 @@ test("fillImages: appends an img line (0600 file) for a pending prompt, returns 
     const out = I.parsePoLines(fs.readFileSync(f, "utf8"));
     assert.equal(out.length, 1);
     assert.deepEqual(out[0].imgs, img.imgs);
-  } finally { if (prev === undefined) delete process.env.HERDR_INBOX_DIR; else process.env.HERDR_INBOX_DIR = prev; fs.rmSync(d, { recursive: true, force: true }); }
+  } finally { if (prev === undefined) delete process.env.HERDR_INBOX_DIR; else process.env.HERDR_INBOX_DIR = prev; if (prevApp === undefined) delete process.env.HERDR_APP_HOME; else process.env.HERDR_APP_HOME = prevApp; fs.rmSync(d, { recursive: true, force: true }); }
 });
 
 test("hook run: a prompt with '[Image #N]' spawns the image worker; one without does not; Stop reads the transcript once", () => {
   const d = tmp();
   const prev = process.env.HERDR_INBOX_DIR;
+  const prevApp = process.env.HERDR_APP_HOME;
   process.env.HERDR_INBOX_DIR = d;
+  process.env.HERDR_APP_HOME = d;
   try {
     const term = { labels: { role: "po", po: "pa" }, name: "po-a" };
     const spawned = [];
@@ -287,7 +315,7 @@ test("hook run: a prompt with '[Image #N]' spawns the image worker; one without 
     assert.ok(lines.some((x) => x.kind === "img" && x.pid === "p1" && x.imgs.length === 1));
     assert.equal(spawned.length, 1);
     assert.equal(fs.statSync(r.file).mode & 0o777, 0o600);
-  } finally { if (prev === undefined) delete process.env.HERDR_INBOX_DIR; else process.env.HERDR_INBOX_DIR = prev; fs.rmSync(d, { recursive: true, force: true }); }
+  } finally { if (prev === undefined) delete process.env.HERDR_INBOX_DIR; else process.env.HERDR_INBOX_DIR = prev; if (prevApp === undefined) delete process.env.HERDR_APP_HOME; else process.env.HERDR_APP_HOME = prevApp; fs.rmSync(d, { recursive: true, force: true }); }
 });
 
 test("chat block of main.js is identical to inbox.cjs (the pure picture / pin / bubble code included)", () => {
@@ -333,4 +361,23 @@ test("the pure chat block never reaches for Node modules (a mod cannot require t
   const CJS = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8");
   const blk = CJS.slice(CJS.indexOf("// chat:begin"), CJS.indexOf("// chat:end"));
   assert.ok(!/require\(/.test(blk));
+});
+
+test("main.js: the picture is drawn from the app-root-relative path as a small thumbnail that opens full on click", () => {
+  assert.match(MAIN, /image\(imgRel\(root, /);
+  assert.match(MAIN, /fitImg\([^)]*240, 180\)/);
+  assert.match(MAIN, /openFile\(/);
+});
+
+test("main.js: the pending-question card scrolls inside a max height; the pointer is tracked at the window; selection events are logged", () => {
+  assert.match(MAIN, /PROMPT_MAX_H/);
+  assert.match(MAIN, /id\("po-prompt-lines"\)[^\n]*overflow_y_scrollbar\(\)/);
+  assert.match(MAIN, /\.on_window_mouse_move\(/);
+  assert.match(MAIN, /\.on_window_mouse_up\("left"/);
+  assert.match(MAIN, /console\.log\(`\[inbox\] selection/);
+});
+
+test("main.js: spacing between chat rows (same sender 8, new sender 18) and bubble padding 12x9", () => {
+  assert.match(MAIN, /const top = e\.head \? 18 : 8/);
+  assert.ok((MAIN.match(/px\(12\)\.py\(9\)\.gap\(6\)\.rounded\(12\)/g) || []).length >= 2);
 });

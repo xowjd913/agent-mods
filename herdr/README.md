@@ -278,6 +278,6 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
 | `~/.claude/settings.json` (또는 `$CLAUDE_CONFIG_DIR/settings.json`) | `inbox` 설치 때 `hook` 명령이 `Stop`·`UserPromptSubmit` 두 이벤트에 더하는 PO 답 훅 명령 하나(`po-hook.cjs`) | 설치기가 쓰기 전에 `settings.json.bak-herdr-<시각>`으로 백업합니다. `--remove inbox`나 `node install.cjs hook --remove`가 우리 줄만 뺍니다 |
 | `~/.claude/usage-limits.json` | usage-status가 읽는 파일(다른 도구가 씀) | 이 저장소가 만들지 않습니다 |
 | `~/.herdr-inbox/<리더>.jsonl` | inbox가 읽는 리더 보고 기록(`report`가 씀) | 이 저장소가 만들지 않습니다. 지우면 그 리더의 보고가 사라집니다 |
-| `~/.herdr-inbox/po/<po id>.jsonl` | PO 데스크 채팅이 읽는 그 PO의 답(`{ts, kind:"say" 또는 "me", text, to?}` 한 줄씩. `me`는 터미널에 직접 친 글). PO 답 훅(`po-hook.cjs`)도 여기에 씁니다(프롬프트 글이 들어가므로 `0600`, 1 MiB를 넘으면 가장 새 256 KiB만 남깁니다). 붙여 넣거나 터미널에서 붙인 그림은 `~/.herdr-inbox/po/img/`에 `0600`으로 저장되고(한 장 5MB, 한 글 4장, 14일 뒤 정리) 데스크 말풍선에 그려집니다. id는 PO 터미널의 `po` 라벨(소문자·숫자·`-`, 1~40자) | 이 저장소가 만들지 않습니다. 없으면 답이 없는 것으로 봅니다. 옛 `po.jsonl`은 읽지 않습니다 |
+| `~/.herdr-inbox/po/<po id>.jsonl` | PO 데스크 채팅이 읽는 그 PO의 답(`{ts, kind:"say" 또는 "me", text, to?}` 한 줄씩. `me`는 터미널에 직접 친 글). PO 답 훅(`po-hook.cjs`)도 여기에 씁니다(프롬프트 글이 들어가므로 `0600`, 1 MiB를 넘으면 가장 새 256 KiB만 남깁니다). 붙여 넣거나 터미널에서 붙인 그림은 앱 폴더 안 `data/inbox/img/`(`image()`는 앱 폴더 기준 상대 경로만 읽습니다, 설치가 지우지 않는 모드 상태 폴더)에 `0600`으로 저장되고(한 장 5MB, 한 글 4장, 14일 뒤 정리) 데스크 말풍선에 그려집니다. id는 PO 터미널의 `po` 라벨(소문자·숫자·`-`, 1~40자) | 이 저장소가 만들지 않습니다. 없으면 답이 없는 것으로 봅니다. 옛 `po.jsonl`은 읽지 않습니다 |
 
 패널 선택이나 토글 같은 화면 설정은 Herdr가 모드마다 따로 보관합니다.

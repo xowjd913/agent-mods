@@ -511,20 +511,24 @@ function statusSig(terms) {
   return rows.sort().join("\n");
 }
 // ---- images (pasted, picked or dropped in the box; or pasted in the PO terminal and read back by the hook)
-// A picture lives in <inbox dir>/po/img/ (0600, written by this helper); a line of the desk's message names it as "[image: <path> — ...]" so the
-// PO (Claude) can open it with Read, and the bubble shows the picture. Only a path inside that folder is ever drawn.
+// A picture lives in <app root>/data/inbox/img/ (0600, written by this helper); a line of the desk's message names it as "[image: <path> — ...]"
+// so the PO (Claude) can open it with Read, and the bubble shows the picture (`image()` takes the path relative to the app root, imgRel).
+// Only a path inside that folder is ever drawn.
 const IMG_EXT = /\.(png|jpe?g|gif|webp)$/i;
 const MAX_IMGS = 4;
 const imgLine = (p) => `[image: ${p} — open it with the Read tool]`;
 const IMG_LINE = /^\[image: (.+?)(?: — [^\]]*)?\]$/;
 const slashed = (x) => String(x ?? "").replace(/\\/g, "/");
-function imgOk(dir, p) {
-  const d = slashed(dir).replace(/\/+$/, "");
+const IMG_SUB = "data/inbox/img/";
+function imgOk(root, p) {
+  const d = slashed(root).replace(/\/+$/, "");
   const s = slashed(p);
   if (!d || !s || s.includes("..") || /[\u0000-\u001F]/.test(s)) return false;
-  const pre = `${d}/po/img/`;
+  const pre = `${d}/${IMG_SUB}`;
   return s.startsWith(pre) && IMG_EXT.test(s) && s.length > pre.length && !s.slice(pre.length).includes("/");
 }
+// The path `image()` loads: relative to the app root ("data/inbox/img/<file>"), or "" when the picture may not be drawn.
+function imgRel(root, p) { return imgOk(root, p) ? IMG_SUB + slashed(p).slice(slashed(root).replace(/\/+$/, "").length + 1 + IMG_SUB.length) : ""; }
 // A message text -> {text without its "[image: ...]" lines, imgs: the paths those lines named}.
 function splitImgs(text) {
   const imgs = [];
@@ -537,12 +541,16 @@ function splitImgs(text) {
 }
 // What a bubble draws for `text` (+ `extra`, the paths the hook read back): the words, the pictures that may be drawn, and the numbers of
 // "[Image #N]" placeholders (a picture pasted in the PO terminal) that have no picture to show - drawn as a small chip, never as raw text.
-function bubbleParts(text, extra, dir) {
+function bubbleParts(text, extra, root) {
   const sp = splitImgs(text);
   const nums = [...sp.text.matchAll(/\[Image #(\d+)\]/g)].map((m) => Number(m[1]));
   const words = sp.text.replace(/\[Image #\d+\][ \t]*/g, "").replace(/\n{3,}/g, "\n\n").trim();
-  const imgs = [...sp.imgs, ...(Array.isArray(extra) ? extra : [])].filter((x, i, a) => imgOk(dir, x) && a.indexOf(x) === i).slice(0, MAX_IMGS);
-  return { text: words, imgs, chips: nums.slice(imgs.length) };
+  const all = [...sp.imgs, ...(Array.isArray(extra) ? extra : [])].filter((x, i, a) => a.indexOf(x) === i);
+  const imgs = all.filter((x) => imgOk(root, x)).slice(0, MAX_IMGS);
+  // pictures that may not be drawn (saved by an older version outside the app folder) and placeholders without one stay small chips
+  const lost = all.length - imgs.length;
+  const chips = [...nums.slice(imgs.length), ...Array.from({ length: Math.max(0, lost - nums.length) }, (_, i) => nums.length + i + 1)].slice(0, MAX_IMGS);
+  return { text: words, imgs, chips };
 }
 // The shape a picture is drawn in: fits [w,h] into maxW x maxH keeping its proportions (never enlarged); unknown size -> 4:3.
 function fitImg(w, h, maxW = 240, maxH = 200) {
@@ -561,7 +569,7 @@ function bubbleWidth(text, min = 64) {
     for (const ch of ln) w += ch.charCodeAt(0) < 0x250 ? 7.4 : 13.5;
     widest = Math.max(widest, w);
   }
-  return Math.max(min, Math.ceil(widest * 1.05) + 24);
+  return Math.max(min, Math.ceil(widest * 1.05) + 28);
 }
 // ---- scroll: stay pinned to the newest while it is at the bottom
 const PIN_SLACK = 40; // "at the bottom" means within this many px of it
@@ -585,6 +593,8 @@ const quietNow = (st, now) => Boolean((st?.sel && now - (st.selAt || 0) < SEL_HO
 
 // chat:end
 
+// The pending-question card: the screen lines scroll inside it (all options stay reachable), the buttons stay under them.
+const PROMPT_LINES_H = 240, PROMPT_MAX_H = 340;
 const PIN_TICK_MS = 250; // how often the timeline checks that it still sits at the newest
 const LOAD_REDRAW_MS = 25000; // an unchanged load still redraws this often (the "5분 전" clocks)
 
@@ -757,6 +767,18 @@ export default class Inbox extends View {
     } catch {}
   }
 
+  // The pointer, seen by the window itself (passively, even over a TextView that takes its own presses): a left button held anywhere in the
+  // desk is a press, so redraws and the bottom pin wait until it is released. The press gate used to live on the list's own mouse-down,
+  // which a TextView that handles the press itself never lets through - the pin and redraws then ran under a drag and dropped the selection.
+  pointer(e, cx) {
+    if (e?.pressed_button === "left") { this.ui.press = true; this.ui.pressAt = Date.now(); return; }
+    if (this.ui.press) { this.ui.press = false; if (this.dirty) this.softNotify(cx); }
+  }
+  pointerUp(cx) {
+    this.ui.press = false;
+    if (this.dirty && !this.ui.sel) this.softNotify(cx);
+  }
+
   // A background redraw: held back while a selection or a press is held (pinTick lets it go afterwards).
   softNotify(cx) {
     if (quietNow(this.ui, Date.now())) { this.dirty = true; return; }
@@ -766,6 +788,8 @@ export default class Inbox extends View {
 
   // A TextView's selection settled (sel) or cleared (null).
   onSel(id, sel, cx) {
+    this.ui.selEvents = (this.ui.selEvents ?? 0) + 1; // how often a TextView reported a selection at all (see the console line)
+    try { console.log(`[inbox] selection ${sel ? `settled in ${id}: ${String(sel.text ?? "").length} chars` : `cleared in ${id}`} (#${this.ui.selEvents})`); } catch {}
     if (sel) this.ui.sels.set(id, true); else this.ui.sels.delete(id);
     this.ui.sel = this.ui.sels.size > 0;
     if (sel) this.ui.selAt = Date.now();
@@ -1298,15 +1322,15 @@ export default class Inbox extends View {
     if (!po || !this.isBlocked(po)) { this.prompt = null; return null; }
     this.readPrompt(po, cx);
     const shown = this.prompt?.po === po ? this.prompt : null;
-    const lines = shown ? promptTail(shown.text, 8) : [];
+    const lines = shown ? promptTail(shown.text, 40) : [];
     const opts = shown ? promptOptions(shown.text) : [];
     const key = (k, label, tip, primary) => this.button(t, `pp-${k}`, label, (c) => this.pressPrompt(po, k === "esc" ? "esc" : k === "enter" ? "enter" : k, c), { primary, tip });
-    return v_flex().id("po-prompt").flex_none().min_w(0).mx(10).mb(6).p(8).gap(6).rounded(8).bg(t.blocked + "14").border(1).border_color(t.blocked + "55").on_mouse_down("left", stop)
+    return v_flex().id("po-prompt").flex_none().min_w(0).max_h(PROMPT_MAX_H).mx(10).mb(6).p(10).gap(8).rounded(8).bg(t.blocked + "14").border(1).border_color(t.blocked + "55").on_mouse_down("left", stop)
       .child(div().min_w(0).truncate().text_size(11).font_semibold().text_color(t.blocked).child("PO가 질문 중입니다 — 화면 끝"))
-      .child(v_flex().min_w(0).max_h(120).overflow_hidden().gap(1)
+      .child(v_flex().id("po-prompt-lines").min_w(0).min_h(0).max_h(PROMPT_LINES_H).overflow_y_scrollbar().gap(2)
         .children(lines.length ? lines.map((l, i) => div().min_w(0).text_size(11).text_color(t.muted).child(this.text(`pp-l${i}`, chatHtml(l)))) : [div().text_size(11).text_color(t.dim).child(shown ? "화면을 읽지 못했습니다. 아래 버튼은 PO가 질문 중일 때만 눌립니다." : "화면을 읽는 중…")]))
       .child(h_flex().min_w(0).gap(6).items_center().flex_wrap()
-        .children(opts.map((o) => this.button(t, `pp-${o.key}`, `${o.key}. ${o.label.length > 22 ? `${o.label.slice(0, 21)}…` : o.label}`, (c) => this.pressPrompt(po, o.key, c), { primary: o.on, tip: o.label })))
+        .children(opts.map((o) => this.button(t, `pp-${o.key}`, `${o.key}. ${o.label.length > 32 ? `${o.label.slice(0, 31)}…` : o.label}`, (c) => this.pressPrompt(po, o.key, c), { primary: o.on, tip: o.label })))
         .child(key("enter", "Enter", "화면에서 강조된 선택지를 확정합니다(PO가 질문 중일 때만)"))
         .child(key("esc", "Esc", "질문을 취소합니다(PO가 질문 중일 때만)")));
   }
@@ -1654,7 +1678,7 @@ export default class Inbox extends View {
     const toggle = it.long ? div().id(`tg-${s.leader}-${it.ts}`).flex_none().px(8).h(20).rounded(10).flex().items_center().text_size(10.5).cursor_pointer().bg(t.raised)
       .border(1).border_color(t.border).text_color(t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
       .on_click((_e, c) => { this.toggleOpen(s, it); this.reveal(this.spot(s, it)); c.notify(); }).child(open ? "접기" : "자세히") : null;
-    const box = v_flex().min_w(0).px(10).py(7).gap(5).rounded(10).bg(accent ? accent + "1f" : t.raised).border(1).border_color(accent ? accent + "55" : t.border)
+    const box = v_flex().min_w(0).px(12).py(9).gap(6).rounded(12).bg(accent ? accent + "1f" : t.raised).border(1).border_color(accent ? accent + "55" : t.border)
       .text_size(12.5).text_color(t.foreground);
     const headline = it.head || it.lead || it.title;
     box.child(div().min_w(0).child(this.heading_text(t, `${id}-h`, it.headHtml, 16)));
@@ -1706,7 +1730,7 @@ export default class Inbox extends View {
   // One timeline entry (a grouped entry: `head` says whether the sender's name line is drawn). Leaders and the PO are on the left with a
   // circle, the person ("나") on the right. A leader's message that it waits on is red and carries its answer buttons.
   entryRow(t, e, v, cx) {
-    const top = e.head ? 10 : 2;
+    const top = e.head ? 18 : 8; // a new sender gets more air than a follow-up of the same sender
     const id = tlId(e.key);
     // The time sits at the bubble's bottom, on its outer side: left of mine, right of everyone else's.
     const when = (ms) => div().flex_none().pb(1).text_size(10).text_color(t.dim).child(ms ? clock(ms) : "");
@@ -1717,19 +1741,20 @@ export default class Inbox extends View {
       const bad = e.status === "nopane" || e.status === "failed" || e.status === "noenter" || e.status === "gone" || (e.status === "held" && !blockedNow);
       const acts = mineActs(e.status, blockedNow, age);
       const ACT = { resend: ["다시 보내기", "같은 글을 같은 PO에게 다시 보냅니다(말풍선은 늘지 않습니다)", (c) => this.resend(e.id, c)], enter: ["Enter 누르기", "PO의 입력창에 보낸 글이 아직 있는지 확인한 뒤 Enter만 누릅니다(PO가 질문 중이면 누르지 않습니다)", (c) => this.enterNow(e.id, c)] };
-      const bp = bubbleParts(e.text, e.imgs, this.data?.dir ?? "");
-      const sizes = bp.imgs.map((p) => { const d = this.data?.imgd?.[p] ?? this.imgd.get(p); return fitImg(d?.[0], d?.[1]); });
+      const root = this.data?.root ?? "";
+      const bp = bubbleParts(e.text, e.imgs, root);
+      const sizes = bp.imgs.map((p) => { const d = this.data?.imgd?.[p] ?? this.imgd.get(p); return fitImg(d?.[0], d?.[1], 240, 180); });
       // The bubble asks for its text's width (up to 80% of the row, like the left bubbles) and never less than its widest picture: a
       // percentage max inside a content-sized box collapsed to ~3 characters, so the row is full width and the bubble has a width of its own.
-      const width = Math.max(bubbleWidth(bp.text), ...sizes.map((f) => f.w + 22), 64);
+      const width = Math.max(bubbleWidth(bp.text), ...sizes.map((f) => f.w + 26), 64);
       return v_flex().id(id).flex_none().px(10).pt(top).gap(2).items_end()
         .when(Boolean(e.to), (el) => el.child(div().max_w("85%").min_w(0).truncate().text_size(10).text_color(t.dim).child(`→ ${shortName(e.to)}`)))
         .child(h_flex().w_full().min_w(0).gap(6).items_end().justify_end()
           .child(when(e.ms))
-          .child(v_flex().flex_none().w(width).max_w("80%").min_w(0).px(10).py(6).gap(4).rounded(10).bg(t.working + "33").border(1).border_color((bad ? t.blocked : t.working) + "66").text_size(12.5).text_color(t.foreground)
+          .child(v_flex().flex_none().w(width).max_w("80%").min_w(0).px(12).py(9).gap(6).rounded(12).bg(t.working + "33").border(1).border_color((bad ? t.blocked : t.working) + "66").text_size(12.5).text_color(t.foreground)
             .children(bp.imgs.map((p, i) => div().id(`${id}-img${i}`).flex_none().w(sizes[i].w).h(sizes[i].h).rounded(6).overflow_hidden().cursor_pointer().on_mouse_down("left", stop)
               .on_click(() => openFile(p)).tooltip("눌러서 그림 열기")
-              .child(image(p).w(sizes[i].w).h(sizes[i].h))))
+              .child(image(imgRel(root, p)).w(sizes[i].w).h(sizes[i].h)))) // image() loads only paths under the app folder: data/inbox/img/<file>
             .when(bp.chips.length > 0, (el) => el.child(h_flex().gap(4).flex_wrap().children(bp.chips.map((n) => div().flex_none().px(6).h(17).rounded(5).flex().items_center().bg(t.raised).text_size(10.5).text_color(t.muted).child(`사진 #${n}`)))))
             .when(Boolean(bp.text), (el) => el.child(this.text(`${id}-t`, chatHtml(bp.text))))))
         .when(Boolean(note), (el) => el.child(h_flex().max_w("100%").min_w(0).gap(6).items_center().flex_wrap().justify_end()
@@ -1744,7 +1769,7 @@ export default class Inbox extends View {
             .child(div().text_size(12).font_semibold().text_color(t.working).child("PO"))
             .when(Boolean(e.to), (x) => x.child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(`→ ${shortName(e.to)}`)))))
           .child(h_flex().min_w(0).gap(6).items_end()
-            .child(div().flex_1().min_w(0).px(10).py(6).rounded(10).bg(t.raised).border(1).border_color(t.border).text_size(12.5).text_color(t.foreground)
+            .child(div().flex_1().min_w(0).px(12).py(9).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(12.5).text_color(t.foreground)
               .child(this.text(id, chatHtml(e.text))))
             .child(when(e.ms))));
     }
@@ -1768,11 +1793,11 @@ export default class Inbox extends View {
   typingRow(t, x) {
     const po = x.who === "po";
     const color = po ? t.working : tint(t, x.who.slice(2));
-    return h_flex().id(`typing-${tlId(x.who)}`).flex_none().px(10).pt(10).gap(8).items_start()
+    return h_flex().id(`typing-${tlId(x.who)}`).flex_none().px(10).pt(18).gap(8).items_start()
       .child(po ? this.circle(t, t.working, "P") : this.avatar(t, x.who.slice(2)))
       .child(v_flex().min_w(0).gap(3)
         .child(div().min_w(0).truncate().text_size(12).font_semibold().text_color(color).child(po ? "PO" : x.name))
-        .child(div().px(12).py(4).rounded(10).bg(t.raised).border(1).border_color(t.border).text_size(16).text_color(t.dim).child("···")));
+        .child(div().px(14).py(5).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(16).text_color(t.dim).child("···")));
   }
 
   render(cx) { return this.full(cx); }
@@ -1848,6 +1873,8 @@ export default class Inbox extends View {
       .when(Boolean(panel), (el) => el.child(panel))
       .child(this.chatBox(t, v));
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
+      .on_window_mouse_move((e, c) => this.pointer(e, c))
+      .on_window_mouse_up("left", (_e, c) => this.pointerUp(c))
       .on_size_change((size, c) => {
         const x = size.width < 360, n = size.width < WIDE_MIN;
         if (x !== this.compact || n !== this.narrow) { this.compact = x; this.narrow = n; c.notify(); }
