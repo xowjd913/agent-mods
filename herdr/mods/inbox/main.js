@@ -19,11 +19,11 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, ScrollHandle } from "gpui-base";
-import { theme, exec, appHome, checking, window, run, hc, terminals, panes, focused, setBadge, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
+import { theme, exec, appHome, checking, window, run, hc, terminals, panes, focused, setBadge, shared, setShared, props, openOverlay, closeOverlay, watchFolder } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
 const ICON = (name) => `mods/workspace-chrome/${name}.svg`;
-const LOAD_TIMEOUT = 20000, LOAD_STALL_MS = 30000, WINDOW_REFRESH_MS = 5000, PANE_REFRESH_MS = 30000;
+const LOAD_TIMEOUT = 20000, LOAD_STALL_MS = 30000, WINDOW_REFRESH_MS = 5000, PANE_REFRESH_MS = 30000, STATUS_POLL_MS = 1500, WATCH_DEBOUNCE_MS = 250;
 const KIND = { done: ["완료", "working"], decision: ["결정", "blocked"], verify: ["확인", "blocked"], stop: ["중단", "idle"], resume: ["재개", "dim"], other: ["알림", "dim"], start: ["시작", "dim"] };
 const WINDOW = { mod: "inbox", kind: "window", key: "inbox", keep: true, width: 720, height: 680, props: { mode: "window" } };
 const SENT_KEY = "inbox.sent";
@@ -134,6 +134,12 @@ const imeHold = (value, changedAt, heldAt, now) => {
   if (Number(now) - Number(changedAt) < IME_MS) return true;
   return IME_TAIL.test(String(value ?? "").trimEnd());
 };
+// The line break the widget itself puts in the box for a held Enter (it may add it before or after the key handler runs): the held Enter
+// must not leave it there, or the person sees a blank line appear before the second Enter. `heldAt`, `now`: ms; HELD_BREAK_MS covers both orders.
+const HELD_BREAK_MS = 150;
+const strayHeld = (value, heldAt, now) => Number(heldAt) > 0 && Number(now) - Number(heldAt) < HELD_BREAK_MS && /\n$/.test(String(value ?? ""));
+// The text with its trailing line breaks cut: what "an edit" is measured on (the widget's own line break for an Enter is not an edit).
+const editCore = (value) => String(value ?? "").replace(/\n+$/, "");
 const holdShown = (changedAt, heldAt) => Number(heldAt) > 0 && Number(changedAt) <= Number(heldAt) + 100; // a held Enter is still waiting for its second one
 // The "@query" being typed right before `cursor` (offsets into the box text), or null. Not inside a chip, not in the middle of a word.
 function mentionQuery(text, cursor, tokens = []) {
@@ -468,6 +474,41 @@ function decisionOptions(body) {
   if (options.length < 2) return { options: [], recommended: 0 };
   return { options, recommended: options.includes(rec) ? rec : 0 };
 }
+// Who is writing right now: the room's PO and its leaders whose terminal status is "working" -> [{who, name}] (PO first, then the leaders by
+// shown name). `who` is the timeline owner key ("po" or "l:<hc name>"), the same the entries use. Pure; the dots bubbles read this, never
+// the unread counts. For the "PO 모름" room only leaders count (there is no PO terminal to watch).
+const isWorking = (t) => String(t?.status ?? "").trim().toLowerCase() === "working";
+function typingNow(terms, room, memo) {
+  const list = terms ?? [];
+  const out = [];
+  if (!room) return out;
+  if (room !== PO_OTHER) {
+    const po = poList(list).find((p) => p.id === room);
+    const term = po ? list.find((t) => t.address === po.address) : null;
+    if (term && isWorking(term)) out.push({ who: "po", name: po.label });
+  }
+  const seen = new Set();
+  const leaders = [];
+  for (const t of list) {
+    const n = String(t?.name ?? "");
+    if (!/^lead-/.test(n) || seen.has(n) || !isWorking(t) || leaderOwner(list, n, t.address) !== room) continue;
+    seen.add(n);
+    leaders.push({ who: `l:${n}`, name: leaderName(n, t, memo) });
+  }
+  leaders.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return [...out, ...leaders];
+}
+// A short text that changes exactly when something the desk shows from the terminals changes: the status, the wait label and the shown
+// name of every PO and leader. The 1.5 s poll redraws a copy only when this differs from the last one (no redraw on a quiet second).
+function statusSig(terms) {
+  const rows = [];
+  for (const t of terms ?? []) {
+    const lead = /^lead-/.test(String(t?.name ?? ""));
+    if (!lead && !poId(t)) continue;
+    rows.push(`${t.address}|${String(t.status ?? "")}|${lead ? waitingKind(t) : ""}|${lead ? liveName(t) : ""}`);
+  }
+  return rows.sort().join("\n");
+}
 // chat:end
 
 // Opens an http(s) link with the app's own open_url when a context is at hand, else through the system opener.
@@ -564,10 +605,17 @@ export default class Inbox extends View {
     this.filt = new Map(); // room -> the chat filter chip picked there (전체 when missing); not saved: a restart shows every message again
     this.heldAt = 0; // the last Enter held back as a possible IME confirm (ms)
     this.nlAt = 0; // the last Shift+Enter handled (ms)
+    this.core = ""; // the box text without trailing line breaks, as of the last change
+    this.editAt = 0; // the last time that text changed (ms); the IME hold reads this, not changedAt
     this.chat.on("change", (_e, c) => {
       this.changedAt = Date.now();
-      if (this.heldAt && !holdShown(this.changedAt, this.heldAt)) { this.heldAt = 0; try { c.notify(); } catch {} }
-      try { if (strayBreak(this.chat.value(), this.sentAt, this.changedAt)) { this.chat.set_value(""); return; } } catch {} // the Enter that sent left a line break
+      let value = "";
+      try { value = this.chat.value(); } catch {}
+      const core = editCore(value); // an edit is a change of the text itself: the widget's own line break for an Enter is not one
+      if (core !== this.core) { this.core = core; this.editAt = this.changedAt; }
+      if (this.heldAt && !holdShown(this.editAt, this.heldAt)) { this.heldAt = 0; try { c.notify(); } catch {} }
+      if (strayBreak(value, this.sentAt, this.changedAt)) { try { this.chat.set_value(""); } catch {} return; } // the Enter that sent left a line break
+      if (strayHeld(value, this.heldAt, this.changedAt)) { this.dropBreak(value); return; } // the held Enter left a line break
       this.syncMenu(c);
     });
     // The widget's own submit event: with Shift it is a line break, otherwise Enter. Both also arrive as a key press (inputKey); each
@@ -582,10 +630,65 @@ export default class Inbox extends View {
     try { this.scroll = ScrollHandle.new(); } catch {}
     this.at = new Map(); // spot key -> index of that child in the window's list, rebuilt on every frame
     if (checking()) return;
+    this.watch = null; // the pending watchFolder call on the inbox folder (null: not watching)
+    this.watchGen = 0;
+    this.debounced = false;
+    this.again = false; // a load was asked for while one ran: run it again when that one ends
+    this.sig = null; // statusSig of the terminals at the last status poll
     this.load(cx);
     // The Dock owns the slow refresh and (with any pane) the badge; the window and a pane are read on screen, so they refresh faster,
     // a pane only while it is being drawn (a pane in a tab nobody looks at does not poll).
     cx.timer.every(this.refreshMs(), (cx) => { if (!this.paned || this.drawing()) this.load(cx); });
+    // The folder watch makes a new report or PO line appear at once; the timer above stays as the fallback (a watch that cannot start or
+    // dies). The status poll makes the "···" bubbles, the blocked dots and the names follow the terminals within seconds.
+    cx.timer.every(STATUS_POLL_MS, (cx) => this.pollStatus(cx));
+  }
+
+  // The watch runs only while this copy is drawn; a copy nobody looks at releases it (a closed copy is released by the runtime).
+  stopWatch() {
+    this.watchGen++;
+    const w = this.watch;
+    this.watch = null;
+    try { w?.cancel(); } catch {}
+  }
+
+  // Starts watching the inbox folder (its path comes from the collector) unless it already is. A change reloads after a short quiet
+  // time (a burst of writes is one load). An error or a watch that ended on its own leaves the timer to read and the next poll to retry.
+  startWatch(cx) {
+    const dir = this.data?.dir;
+    if (this.watch || !dir || typeof dir !== "string") return;
+    const mine = ++this.watchGen;
+    cx.spawn(async (cx) => {
+      while (mine === this.watchGen) {
+        let w;
+        try { w = watchFolder(dir); } catch { break; }
+        this.watch = w;
+        let paths = [];
+        try { paths = await w; } catch { paths = []; }
+        if (mine !== this.watchGen) return; // cancelled (not drawn, or a newer watch took over)
+        if (!Array.isArray(paths) || !paths.length) break;
+        if (!this.debounced) {
+          this.debounced = true;
+          try { cx.timer.after(WATCH_DEBOUNCE_MS, (c) => { this.debounced = false; if (mine === this.watchGen) this.load(c); }); } catch { this.debounced = false; }
+        }
+      }
+      if (mine === this.watchGen) this.watch = null;
+    });
+  }
+
+  // Every STATUS_POLL_MS: keep the watch while drawn (release it when not), and redraw only when what the desk shows from the terminals
+  // (statuses, wait labels, names) changed since the last poll.
+  pollStatus(cx) {
+    if (!this.drawing()) { this.stopWatch(); return; }
+    this.startWatch(cx);
+    let sig = "";
+    try { sig = statusSig(this.liveTerms()); } catch { return; }
+    if (sig === this.sig) return;
+    const first = this.sig === null;
+    this.sig = sig;
+    if (first) return;
+    this.badge();
+    cx.notify();
   }
 
   refreshMs() { return this.windowed || this.paned ? WINDOW_REFRESH_MS : PANE_REFRESH_MS; }
@@ -673,7 +776,8 @@ export default class Inbox extends View {
   }
 
   load(cx) {
-    if (this.busy && Date.now() - this.busyAt < LOAD_STALL_MS) return;
+    if (this.busy && Date.now() - this.busyAt < LOAD_STALL_MS) { this.again = true; return; }
+    this.again = false;
     const gen = ++this.gen;
     this.busy = true;
     this.busyAt = Date.now();
@@ -687,8 +791,9 @@ export default class Inbox extends View {
         this.error = null;
         rememberLeaders();
         this.markSeen();
+        if (this.drawing()) this.startWatch(cx);
       } catch (e) { if (gen === this.gen) this.error = `불러오기 실패: ${String(e?.message ?? e).slice(0, 180)}`; }
-      finally { if (gen === this.gen) { this.busy = false; this.badge(); cx.notify(); } }
+      finally { if (gen === this.gen) { this.busy = false; this.badge(); cx.notify(); if (this.again) this.load(cx); } }
     });
   }
 
@@ -1114,12 +1219,26 @@ export default class Inbox extends View {
       if (now - this.pickedAt <= 250 || now - this.sentAt <= 250 || now - this.heldAt < 150) return; // (the key and the submit event of one press are one Enter)
       let value = "";
       try { value = this.chat.value(); } catch {}
-      if (value.trim() && imeHold(value, this.changedAt, this.heldAt, now)) { this.heldAt = now; c.notify(); return; } // maybe the IME's confirming Enter: only this once
+      if (value.trim() && imeHold(value, this.editAt, this.heldAt, now)) { // maybe the IME's confirming Enter: only this once
+        this.heldAt = now;
+        if (strayHeld(value, now, now) && now - this.changedAt <= 25) this.dropBreak(value); // the widget already added its line break
+        c.notify();
+        return;
+      }
       this.sendChat(c);
     } else if (intent === "newline" && now - this.nlAt > 80) {
       this.nlAt = now;
       try { c.timer.after(40, () => { if (needsNewline(this.changedAt, now)) { try { this.chat.replace("\n"); } catch {} } }); } catch {}
     }
+  }
+
+  // Takes the one trailing line break the widget added out of the box (the cursor goes to the end, where it was).
+  dropBreak(value) {
+    try {
+      const next = String(value).replace(/\n$/, "");
+      this.chat.set_value(next);
+      this.chat.set_selected_range({ start: next.length, end: next.length });
+    } catch {}
   }
 
   // Keys of the box: the open menu's keys first, then Enter / Shift+Enter.
@@ -1455,6 +1574,17 @@ export default class Inbox extends View {
         .when(Boolean(a), (el) => el.child(this.askActions(t, a, cx))));
   }
 
+  // One "···" bubble: a PO or leader that is writing now. A plain div (no text view): nothing in it can be selected or steal a drag.
+  typingRow(t, x) {
+    const po = x.who === "po";
+    const color = po ? t.working : tint(t, x.who.slice(2));
+    return h_flex().id(`typing-${tlId(x.who)}`).flex_none().px(10).pt(10).gap(8).items_start()
+      .child(po ? this.circle(t, t.working, "P") : this.avatar(t, x.who.slice(2)))
+      .child(v_flex().min_w(0).gap(3)
+        .child(div().min_w(0).truncate().text_size(12).font_semibold().text_color(color).child(po ? "PO" : x.name))
+        .child(div().px(12).py(4).rounded(10).bg(t.raised).border(1).border_color(t.border).text_size(16).text_color(t.dim).child("···")));
+  }
+
   render(cx) { return this.full(cx); }
 
   // The messenger view: rooms (one per PO) beside one room's timeline, and the chat box under it. Narrow: the rooms are a strip on top.
@@ -1482,6 +1612,9 @@ export default class Inbox extends View {
       blocks.push(div().flex_none().p(14).text_size(12).text_color(t.dim)
         .child(!this.data ? "불러오는 중…" : v.pick ? "이 방에는 아직 대화가 없습니다." : "PO가 없습니다."));
     }
+    // The "···" bubbles of whoever is writing now (the room's PO and leaders whose status is working): only in the 전체 filter, after the
+    // last message, and nothing else reads them (not the unread counts, not `seenNext`, not the follow key, not the spot map).
+    if (v.filter === "all") for (const x of typingNow(v.terms, v.pick, namesMemo())) blocks.push(this.typingRow(t, x));
     // Follow the newest: a new message scrolls to the bottom when the room just opened or the person already was at the bottom;
     // a person who scrolled up keeps their place. The handle's numbers are those of the last layout.
     const key = tlKey(`${v.pick}~${v.filter}`, v.shown); // a new filter scrolls to the newest like a new room

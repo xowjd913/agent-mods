@@ -188,7 +188,7 @@ Windows는 `.\agent-mods\herdr\install.ps1 -Only usage-status`입니다.
    - 예약과 실행 기록: `<설정 폴더>/schedules/`
    - 캐시: `<설정 폴더>/cache/collect.json`
    - PRs의 `옆에 열기` 기록: `<설정 폴더>/data/prs/`
-   - inbox를 `--remove`가 아니라 폴더로 지웠다면, Claude 설정(`~/.claude/settings.json`)의 `Stop`·`UserPromptSubmit`에서 `po-hook.cjs` 줄도 직접 지웁니다(없는 파일을 부르는 줄은 아무 일도 하지 않지만 남습니다).
+   - inbox를 `--remove`가 아니라 폴더로 지웠다면, Claude 설정(`~/.claude/settings.json`)의 `Stop`·`UserPromptSubmit`에서 `po-hook.cjs` 줄도 직접 지웁니다(없는 파일을 부르는 줄이 남으면 훅 오류 표시가 날 수 있습니다).
 
 `<설정 폴더>`는 `HERDR_APP_HOME`이고, 지정하지 않았다면 `~/.config/herdr-app`입니다.
 
@@ -228,7 +228,7 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
 1. **모드 복사**: `herdr/mods/<모드>/`를 `<설정 폴더>/mods/<모드>/`에 복사합니다.
    - `.installed-by-herdr-installer` 표시 파일을 남깁니다.
    - 표시가 없는 같은 이름 폴더는 직접 만든 모드로 보고 덮어쓰지 않습니다.
-   - `inbox`는 PO 답 훅도 더합니다: `mods/inbox/po-hook.cjs`가 복사된 뒤 `install.cjs hook`이 Claude Code 설정(`~/.claude/settings.json`, 또는 `$CLAUDE_CONFIG_DIR`)의 `Stop`·`UserPromptSubmit`에 한 줄씩 넣습니다. 다른 훅은 그대로 두고 여러 번 실행해도 한 번만 들어가며, 쓰기 전에 백업합니다. 설정 파일이 올바른 JSON이 아니면 아무것도 쓰지 않고 안내만 합니다(설치 자체는 계속됩니다). `--remove inbox`는 우리 줄만 뺍니다. 이미 켜진 PO 세션은 다시 시작해야 합니다. 자세한 규칙은 [inbox](../docs/mods/inbox.md#po-답-훅-터미널을-안-보고-답-받기)에 있습니다.
+   - `inbox`는 PO 답 훅도 더합니다: `mods/inbox/po-hook.cjs`가 복사된 뒤 `install.cjs hook`이 Claude Code 설정(`~/.claude/settings.json`, 또는 `$CLAUDE_CONFIG_DIR`)에 **훅 명령 하나**를 두 이벤트(`Stop`, `UserPromptSubmit`)에 넣습니다. 명령이 정확히 `node "<경로>/mods/inbox/po-hook.cjs"`인 줄만 우리 것으로 알아봅니다. 다른 훅은 그대로 두고 여러 번 실행해도 한 번만 들어가며, 쓰기 전에 백업합니다. 설정 파일이 올바른 JSON이 아니면 아무것도 쓰지 않고 안내만 합니다(설치 자체는 계속됩니다). `--remove inbox`는 우리 줄만 뺍니다. 이미 켜진 PO 세션은 다시 시작해야 합니다. 자세한 규칙은 [inbox](../docs/mods/inbox.md#po-답-훅-터미널을-안-보고-답-받기)에 있습니다.
 2. **레이아웃 만들기**: `dashboard` 레이아웃이 없으면 실행 중인 앱에 `herdr-app do layout.clone`을 보냅니다.
    - `main`을 복제하고, 그 레이아웃으로 바꿉니다.
 3. **블록 넣기**: `dashboard`에 설치된 모드의 블록을 넣습니다.
@@ -258,6 +258,7 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
   - 답(`확인 완료`·`답 쓰기`·`N안 선택` 칩)과 채팅은 한 길로 클립보드에 담아 PO 칸(리더 터미널의 부모, `role=po` 라벨 필수)에 붙여 넣고 `hc keys <PO> enter`까지 눌러 보냅니다. PO가 질문 중(`blocked`)이면 붙여 넣기만 하고, 보내도 PO 데스크는 닫히지 않습니다. `Enter 누르기` 버튼은 누르기 전에 입력창에 글이 있는지 `hc read`로 확인하고(없으면 누르지 않음), 10분이 지난 기록은 `다시 보내기`만 남깁니다.
     - 보낸 글은 `deliver` 한 곳에서 한 번만 기록되어 내 말풍선(오른쪽, 리더·PO는 왼쪽)으로 나오고, 상태(`보내는 중`·`Enter 안 눌림`·`보내지 못함`·`질문 중이라 붙여 넣기만`)는 Enter 결과가 나온 뒤에 바뀝니다. `다시 보내기`·`Enter 누르기` 버튼이 붙습니다.
     - PO 칸이 없으면 열고 칸이 생기면 한 번만 자동으로 보냅니다(6초 안에 안 열리면 `다시 보내기`). 보내기 전에 키보드가 있던 칸은 Dock·창·페인 모두 Enter 뒤에 돌려줍니다.
+    - PO·리더가 일하는 중이면 `전체` 타임라인 아래에 `···` 말풍선이 뜨고, 인박스 폴더를 지켜봐 새 글이 바로 올라옵니다. 입력칸은 Enter로 보내고 Shift+Enter로 줄을 바꿉니다. 자세한 내용과 확인하지 못한 것은 [inbox](../docs/mods/inbox.md#방의-타임라인)에 있습니다.
     - PO가 질문 중이면 방에 질문 패널(`hc read` 화면 끝 + 번호·Enter·Esc 버튼)이 떠서 터미널 없이 답할 수 있습니다. 키는 누를 때마다 PO가 아직 질문 중일 때만 눌리고, 스스로 승인하지 않습니다. 자세한 내용과 확인하지 못한 것은 [inbox](../docs/mods/inbox.md#막힌-po의-질문에-답하기)에 있습니다.
   - 결정 보고 본문에 `1안: …` 줄이 서로 다른 번호로 둘 이상이면 `N안 선택` 칩이 나오고, `추천: N안` 줄이 가리키는 칩만 강조됩니다(형식은 리더 보고 규칙, agent-playbook #380).
 - 예약 패널은 `mods/schedules/schedules.cjs`를 30초마다 불러 때가 된 예약을 실행합니다.
@@ -274,9 +275,9 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
 | `<설정 폴더>/cache/collect.json` | Work·PRs 캐시 | 언제든. 다시 만들어집니다 |
 | `<설정 폴더>/schedules/` | 예약(`automations.json`)과 실행 기록(`runs.json`) | 지우면 예약이 사라집니다 |
 | `<설정 폴더>/data/prs/` | PRs `옆에 열기` 상태 | 언제든 |
-| `~/.claude/settings.json` (또는 `$CLAUDE_CONFIG_DIR/settings.json`) | `inbox` 설치 때 `hook` 명령이 `Stop`·`UserPromptSubmit`에 더하는 PO 답 훅 한 줄씩(`po-hook.cjs`) | 설치기가 쓰기 전에 `settings.json.bak-herdr-<시각>`으로 백업합니다. `--remove inbox`나 `node install.cjs hook --remove`가 우리 줄만 뺍니다 |
+| `~/.claude/settings.json` (또는 `$CLAUDE_CONFIG_DIR/settings.json`) | `inbox` 설치 때 `hook` 명령이 `Stop`·`UserPromptSubmit` 두 이벤트에 더하는 PO 답 훅 명령 하나(`po-hook.cjs`) | 설치기가 쓰기 전에 `settings.json.bak-herdr-<시각>`으로 백업합니다. `--remove inbox`나 `node install.cjs hook --remove`가 우리 줄만 뺍니다 |
 | `~/.claude/usage-limits.json` | usage-status가 읽는 파일(다른 도구가 씀) | 이 저장소가 만들지 않습니다 |
 | `~/.herdr-inbox/<리더>.jsonl` | inbox가 읽는 리더 보고 기록(`report`가 씀) | 이 저장소가 만들지 않습니다. 지우면 그 리더의 보고가 사라집니다 |
-| `~/.herdr-inbox/po/<po id>.jsonl` | PO 데스크 채팅이 읽는 그 PO의 답(`{ts, kind:"say" 또는 "me", text, to?}` 한 줄씩. `me`는 터미널에 직접 친 글). PO 답 훅(`po-hook.cjs`)도 여기에 씁니다. id는 PO 터미널의 `po` 라벨(소문자·숫자·`-`, 1~40자) | 이 저장소가 만들지 않습니다. 없으면 답이 없는 것으로 봅니다. 옛 `po.jsonl`은 읽지 않습니다 |
+| `~/.herdr-inbox/po/<po id>.jsonl` | PO 데스크 채팅이 읽는 그 PO의 답(`{ts, kind:"say" 또는 "me", text, to?}` 한 줄씩. `me`는 터미널에 직접 친 글). PO 답 훅(`po-hook.cjs`)도 여기에 씁니다(프롬프트 글이 들어가므로 `0600`, 1 MiB를 넘으면 가장 새 256 KiB만 남깁니다). id는 PO 터미널의 `po` 라벨(소문자·숫자·`-`, 1~40자) | 이 저장소가 만들지 않습니다. 없으면 답이 없는 것으로 봅니다. 옛 `po.jsonl`은 읽지 않습니다 |
 
 패널 선택이나 토글 같은 화면 설정은 Herdr가 모드마다 따로 보관합니다.

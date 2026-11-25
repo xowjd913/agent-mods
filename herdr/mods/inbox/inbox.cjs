@@ -333,7 +333,7 @@ function readPo(dir = inboxDir()) {
 
 function collect(dir = inboxDir()) {
   let names = [];
-  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== OLD_PO_FILE); } catch { return { at: new Date().toISOString(), leaders: [], po: {} }; }
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== OLD_PO_FILE); } catch { return { at: new Date().toISOString(), dir, leaders: [], po: {} }; }
   const leaders = [];
   for (const n of names) {
     try {
@@ -342,7 +342,7 @@ function collect(dir = inboxDir()) {
     } catch {}
   }
   leaders.sort((a, b) => (b.last?.ms ?? 0) - (a.last?.ms ?? 0));
-  return { at: new Date().toISOString(), leaders, po: readPo(dir) };
+  return { at: new Date().toISOString(), dir, leaders, po: readPo(dir) };
 }
 
 // Which terminal is a waiting leader: a terminal named lead-* with the wait label decision|verify; returns that kind or "".
@@ -437,6 +437,12 @@ const imeHold = (value, changedAt, heldAt, now) => {
   if (Number(now) - Number(changedAt) < IME_MS) return true;
   return IME_TAIL.test(String(value ?? "").trimEnd());
 };
+// The line break the widget itself puts in the box for a held Enter (it may add it before or after the key handler runs): the held Enter
+// must not leave it there, or the person sees a blank line appear before the second Enter. `heldAt`, `now`: ms; HELD_BREAK_MS covers both orders.
+const HELD_BREAK_MS = 150;
+const strayHeld = (value, heldAt, now) => Number(heldAt) > 0 && Number(now) - Number(heldAt) < HELD_BREAK_MS && /\n$/.test(String(value ?? ""));
+// The text with its trailing line breaks cut: what "an edit" is measured on (the widget's own line break for an Enter is not an edit).
+const editCore = (value) => String(value ?? "").replace(/\n+$/, "");
 const holdShown = (changedAt, heldAt) => Number(heldAt) > 0 && Number(changedAt) <= Number(heldAt) + 100; // a held Enter is still waiting for its second one
 // The "@query" being typed right before `cursor` (offsets into the box text), or null. Not inside a chip, not in the middle of a word.
 function mentionQuery(text, cursor, tokens = []) {
@@ -771,8 +777,43 @@ function decisionOptions(body) {
   if (options.length < 2) return { options: [], recommended: 0 };
   return { options, recommended: options.includes(rec) ? rec : 0 };
 }
+// Who is writing right now: the room's PO and its leaders whose terminal status is "working" -> [{who, name}] (PO first, then the leaders by
+// shown name). `who` is the timeline owner key ("po" or "l:<hc name>"), the same the entries use. Pure; the dots bubbles read this, never
+// the unread counts. For the "PO 모름" room only leaders count (there is no PO terminal to watch).
+const isWorking = (t) => String(t?.status ?? "").trim().toLowerCase() === "working";
+function typingNow(terms, room, memo) {
+  const list = terms ?? [];
+  const out = [];
+  if (!room) return out;
+  if (room !== PO_OTHER) {
+    const po = poList(list).find((p) => p.id === room);
+    const term = po ? list.find((t) => t.address === po.address) : null;
+    if (term && isWorking(term)) out.push({ who: "po", name: po.label });
+  }
+  const seen = new Set();
+  const leaders = [];
+  for (const t of list) {
+    const n = String(t?.name ?? "");
+    if (!/^lead-/.test(n) || seen.has(n) || !isWorking(t) || leaderOwner(list, n, t.address) !== room) continue;
+    seen.add(n);
+    leaders.push({ who: `l:${n}`, name: leaderName(n, t, memo) });
+  }
+  leaders.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return [...out, ...leaders];
+}
+// A short text that changes exactly when something the desk shows from the terminals changes: the status, the wait label and the shown
+// name of every PO and leader. The 1.5 s poll redraws a copy only when this differs from the last one (no redraw on a quiet second).
+function statusSig(terms) {
+  const rows = [];
+  for (const t of terms ?? []) {
+    const lead = /^lead-/.test(String(t?.name ?? ""));
+    if (!lead && !poId(t)) continue;
+    rows.push(`${t.address}|${String(t.status ?? "")}|${lead ? waitingKind(t) : ""}|${lead ? liveName(t) : ""}`);
+  }
+  return rows.sort().join("\n");
+}
 // chat:end
 
-module.exports = { PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) process.stdout.write(JSON.stringify(collect()));

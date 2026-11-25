@@ -842,7 +842,7 @@ test("collect: po/<id>.jsonl을 PO별로 읽고, 옛 po.jsonl과 잘못된 파�
   assert.deepEqual(d.po.devnotes.map((x) => [x.text, x.to]), [["안녕하세요", "here"]]);
   assert.deepEqual(d.po.mascoz.map((x) => x.text), ["마스코즈"]);
   assert.deepEqual(I.readPo(dir), d.po);
-  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, leaders: [], po: {} });
+  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, dir: path.join(dir, "none"), leaders: [], po: {} });
 });
 
 test("chat 블록: main.js가 inbox.cjs와 한 글자도 다르지 않은 같은 블록을 쓴다", () => {
@@ -1051,7 +1051,7 @@ test("poFile: 앞뒤 공백이 낀 id는 다듬은 id로 파일을 만든다", (
 
 test("main.js: Enter 전송은 imeHold를 거치고, PO 라벨이 없으면 안내를 보인다", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8");
-  assert.match(src, /imeHold\(value, this\.changedAt, this\.heldAt, now\)/);
+  assert.match(src, /imeHold\(value, this\.editAt, this\.heldAt, now\)/); // 글자가 바뀐 때 기준(위젯이 넣은 줄바꿈은 편집이 아니다)
   assert.match(src, /id\("po-hint"\)/);
   assert.match(src, /\.child\(this\.picker\(t, v\)\)/); // 전체 보기는 PO가 0개여도 안내를 그린다
 });
@@ -1068,7 +1068,7 @@ test("main.js: 붙든 Enter 안내를 그리고, PO를 고르거나 보내면 he
   assert.match(src, /한 번 더 Enter로 보냅니다/);
   assert.match(src, /pickPo\(id, c\) \{\n\s+this\.heldAt = 0;/);
   assert.match(src, /sendChat\(c\) \{\n\s+this\.sentAt = Date\.now\(\);\n\s+this\.heldAt = 0;/);
-  assert.match(src, /this\.heldAt = now; c\.notify\(\)/);
+  assert.match(src, /this\.heldAt = now;\n[^\n]*\n\s+c\.notify\(\);/);
 });
 
 // ---- 결정 보고의 N안 칩(리더 보고 규칙의 고정 형식 "1안: …" / "추천: N안")
@@ -1836,4 +1836,168 @@ test("po-hook: 쓰는 파일은 0600이고(이미 있던 파일도 조인다), 1
   for (const l of text.trim().split("\n")) JSON.parse(l); // 잘린 줄이 남지 않는다
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   assert.deepEqual(fs.readdirSync(dir), ["devnotes.jsonl"]); // 임시 파일이 남지 않는다
+});
+
+// ---- (C) 입력 중 "···" 말풍선, 폴더 감시로 바로 갱신, Enter(한글 IME)
+const tm = (o) => ({ address: "t1", name: "", labels: {}, status: "idle", parent: "", where: "", title: "", ...o });
+const poT = (o = {}) => tm({ address: "tp", name: "po-a", labels: { role: "po", po: "pa" }, where: "공간 / PO · 데스크", ...o });
+const leadT = (n, o = {}) => tm({ address: `t-${n}`, name: n, parent: "tp", ...o });
+
+test("typingNow: 방의 PO와 그 방 리더 중 working인 것만, 이름순으로 낸다", () => {
+  const terms = [poT({ status: "working" }), leadT("lead-b", { status: "working", title: "베타 작업" }), leadT("lead-a", { status: "working", title: "알파 작업" }), leadT("lead-c", { status: "idle" }), leadT("lead-d", { status: "blocked" })];
+  assert.deepEqual(I.typingNow(terms, "pa", {}), [{ who: "po", name: "데스크" }, { who: "l:lead-b", name: "베타 작업" }, { who: "l:lead-a", name: "알파 작업" }]); // PO 먼저, 리더는 이름(가나다)순
+  assert.deepEqual(I.typingNow([poT({ status: "idle" }), leadT("lead-c", { status: "done" })], "pa", {}), []); // 쓰는 중이 아니면 없다
+  assert.deepEqual(I.typingNow([poT({ status: " Working " })], "pa", {}).map((x) => x.who), ["po"]); // 대소문자·공백 무시
+});
+
+test("typingNow: 다른 방의 리더·PO는 내지 않고, PO 모름 방에는 PO 줄이 없다", () => {
+  const other = { address: "tq", name: "po-b", labels: { role: "po", po: "pb" }, status: "working", where: "공간 / PO · 다른", parent: "" };
+  const terms = [poT(), other, leadT("lead-x", { status: "working" }), { address: "t9", name: "lead-orphan", labels: {}, status: "working", parent: "" }];
+  assert.deepEqual(I.typingNow(terms, "pa", {}).map((x) => x.who), ["l:lead-x"]);
+  assert.deepEqual(I.typingNow(terms, "pb", {}).map((x) => x.who), ["po"]);
+  assert.deepEqual(I.typingNow(terms, I.PO_OTHER, {}).map((x) => x.who), ["l:lead-orphan"]); // PO 모름: PO 줄 없음
+  assert.deepEqual(I.typingNow(terms, "", {}), []);
+  assert.deepEqual(I.typingNow(null, "pa", {}), []);
+  assert.deepEqual(I.typingNow([poT({ status: "working" }), leadT("lead-x", { status: "working" }), leadT("lead-x", { address: "t-dup", status: "working" })], "pa", {}).filter((x) => x.who === "l:lead-x").length, 1); // 같은 이름은 한 번
+});
+
+test("statusSig: 상태·기다림 라벨·이름이 바뀔 때만 달라지고, 순서와 상관없는 터미널은 무시한다", () => {
+  const a = [poT(), leadT("lead-a", { title: "알파", status: "working" })];
+  const base = I.statusSig(a);
+  assert.equal(I.statusSig([...a].reverse()), base); // 순서와 무관
+  assert.equal(I.statusSig([...a, tm({ address: "tz", name: "shell", status: "working" })]), base); // PO도 리더도 아닌 터미널
+  assert.notEqual(I.statusSig([poT(), leadT("lead-a", { title: "알파", status: "idle" })]), base); // 상태
+  assert.notEqual(I.statusSig([poT(), leadT("lead-a", { title: "알파", status: "working", labels: { wait: "decision" } })]), base); // 기다림
+  assert.notEqual(I.statusSig([poT(), leadT("lead-a", { title: "새 이름", status: "working" })]), base); // 이름
+  assert.notEqual(I.statusSig([poT({ status: "working" }), a[1]]), base); // PO 상태
+  assert.equal(I.statusSig(null), "");
+});
+
+test("collect: 읽은 폴더 경로(dir)를 돌려준다(폴더 감시용) — 폴더가 없어도", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "inbox-dir-"));
+  assert.equal(I.collect(dir).dir, dir);
+  assert.equal(I.collect(path.join(dir, "nope")).dir, path.join(dir, "nope"));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("main.js: 폴더 감시는 그려질 때만 걸고, 안 그려지면 풀며, 감시가 끝나면 타이머가 대신한다", () => {
+  const src = mainSrc();
+  assert.match(src, /import \{[^}]*\bwatchFolder\b[^}]*\} from "herdr"/);
+  assert.match(src, /cx\.timer\.every\(STATUS_POLL_MS, \(cx\) => this\.pollStatus\(cx\)\)/);
+  assert.match(src, /cx\.timer\.every\(this\.refreshMs\(\)/); // 타이머는 그대로
+  const poll = methodOf(src, "  pollStatus(cx) {", "  refreshMs()");
+  assert.match(poll, /if \(!this\.drawing\(\)\) \{ this\.stopWatch\(\); return; \}/);
+  assert.match(poll, /statusSig\(this\.liveTerms\(\)\)/);
+  assert.match(poll, /if \(first\) return;/); // 처음 한 번은 다시 그리지 않는다
+  const start = methodOf(src, "  startWatch(cx) {", "  pollStatus(cx)");
+  assert.match(start, /watchFolder\(dir\)/);
+  assert.match(start, /if \(this\.watch \|\| !dir/); // 이미 걸려 있으면 또 걸지 않는다
+  assert.match(start, /mine !== this\.watchGen/); // 취소된 감시는 아무것도 하지 않는다
+  assert.match(start, /!paths\.length\) break/); // []로 끝나면 루프를 접고 다음 poll이 다시 건다
+  assert.match(methodOf(src, "  stopWatch() {", "  startWatch(cx)"), /watchGen\+\+[\s\S]*cancel\(\)/);
+  assert.match(src, /if \(this\.busy\) \{ this\.again = true; return; \}|this\.again = true/); // 읽는 중이면 한 번 더
+  assert.match(src, /if \(this\.again\)/);
+});
+
+test("startWatch·stopWatch·pollStatus: 가짜 런타임으로 감시 한 번, 취소, 변화 때만 다시 그리기", async () => {
+  const src = mainSrc();
+  const calls = { watch: 0, cancel: 0 };
+  let resolve;
+  const mkWatch = () => { calls.watch++; const p = new Promise((r) => { resolve = r; }); p.cancel = () => { calls.cancel++; resolve([]); }; return p; };
+  const g = mkGlobals({ watchFolder: mkWatch, statusSig: I.statusSig, STATUS_POLL_MS: 1500, WATCH_DEBOUNCE_MS: 5, Array });
+  const m = {
+    ...runMethod(src, "  stopWatch() {", "  // Starts watching", g),
+    ...runMethod(src, "  startWatch(cx) {", "  // Every STATUS_POLL_MS", g),
+    ...runMethod(src, "  pollStatus(cx) {", "  refreshMs()", g),
+  };
+  const loads = [];
+  let drawing = true, terms = [poT()], notified = 0, badged = 0;
+  const self = { watch: null, watchGen: 0, debounced: false, sig: null, data: { dir: "/x/inbox" }, drawing: () => drawing, liveTerms: () => terms, badge: () => badged++, load: (c) => loads.push(c) };
+  for (const k of Object.keys(m)) self[k] = m[k].bind(self);
+  const cx = { spawn: (f) => f({ timer: { after: (ms, fn) => setTimeout(() => fn({}), ms) } }), notify: () => notified++, timer: { after: (ms, fn) => setTimeout(() => fn({}), ms) } };
+  self.pollStatus(cx); await tick();
+  assert.equal(calls.watch, 1); // 그려지는 동안 감시를 건다
+  self.pollStatus(cx); await tick();
+  assert.equal(calls.watch, 1); // 두 번 걸지 않는다
+  assert.equal(notified, 0); // 처음 poll은 다시 그리지 않는다
+  terms = [poT({ status: "working" })];
+  self.pollStatus(cx);
+  assert.equal(notified, 1); assert.equal(badged, 1); // 바뀌면 한 번
+  self.pollStatus(cx);
+  assert.equal(notified, 1); // 가만하면 다시 그리지 않는다
+  // 폴더에 변화가 오면 짧은 뒤 한 번 읽는다(여러 번 와도 한 번)
+  const first = resolve; first(["/x/inbox/a.jsonl"]); await tick();
+  resolve(["/x/inbox/b.jsonl"]); await tick();
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(loads.length, 1);
+  assert.equal(calls.watch, 3); // 변화 묶음마다 다음 변화를 위해 다시 기다린다(1 + 묶음 2)
+  // 안 그려지면 감시를 푼다
+  drawing = false;
+  self.pollStatus(cx); await tick();
+  assert.equal(calls.cancel, 1); assert.equal(self.watch, null);
+  const w = calls.watch;
+  self.pollStatus(cx); await tick();
+  assert.equal(calls.watch, w); // 풀린 뒤에는 걸지 않는다
+  drawing = true;
+  self.pollStatus(cx); await tick();
+  assert.equal(calls.watch, w + 1); // 다시 그려지면 다시 건다
+  self.stopWatch();
+});
+
+test("typingRow·full: ··· 말풍선은 전체 필터에서만 그리고, 안 읽은 수·따라가기·위치 지도에는 넣지 않는다", () => {
+  const src = mainSrc();
+  assert.match(src, /if \(v\.filter === "all"\) for \(const x of typingNow\(v\.terms, v\.pick, namesMemo\(\)\)\) blocks\.push\(this\.typingRow\(t, x\)\);/);
+  const row = methodOf(src, "  typingRow(t, x) {", "  render(cx)");
+  assert.match(row, /"···"/);
+  assert.ok(!/on_mouse_down|text_view|TextView|selectable/.test(row)); // 드래그를 가로채지 않는다
+  const full = methodOf(src, "  full(cx) {", "const waiting = v.tabs");
+  const typingAt = full.indexOf("typingRow"), keyAt = full.indexOf("const key = tlKey(");
+  assert.ok(typingAt > 0 && typingAt < keyAt); // 따라가기 키를 만들기 전에 붙이되
+  assert.ok(!/typingNow|typingRow/.test(full.slice(keyAt))); // 키·안 읽은 것·seenNext는 건드리지 않는다
+  assert.ok(!/at\.set\([^)]*typing/.test(full));
+  const cjs = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8");
+  assert.ok(!/typingNow|isWorking/.test(cjs.slice(0, cjs.indexOf("// chat:begin")))); // 순수 블록 안에만 있다
+});
+
+test("editCore·strayHeld: 위젯이 넣은 줄바꿈은 편집이 아니고, 붙든 Enter가 남긴 줄바꿈만 걷어낸다", () => {
+  assert.equal(I.editCore("안녕\n"), "안녕");
+  assert.equal(I.editCore("안녕\n\n"), "안녕");
+  assert.equal(I.editCore("안\n녕"), "안\n녕"); // 가운데 줄바꿈은 글이다
+  assert.equal(I.editCore(null), "");
+  assert.equal(I.strayHeld("안녕\n", 1000, 1050), true); // 붙든 직후 끝의 줄바꿈
+  assert.equal(I.strayHeld("안녕", 1000, 1050), false); // 줄바꿈이 없다
+  assert.equal(I.strayHeld("안녕\n", 1000, 1000 + I.HELD_BREAK_MS), false); // 오래 지났다
+  assert.equal(I.strayHeld("안녕\n", 0, 1050), false); // 붙든 적 없다(Shift+Enter 줄바꿈은 건드리지 않는다)
+});
+
+test("Enter 흐름: 위젯이 넣은 줄바꿈은 IME 붙들기를 매번 켜지 않아, 한글 뒤 Enter 한 번에 보내고 이중 Enter는 붙들지 않는다", () => {
+  // 사용자 보고: 그냥 Enter를 치면 줄바꿈이 되고 보내지지 않는다. 원인 후보 — 위젯이 Enter에 "\n"을 넣고 change를 내면
+  // changedAt이 '방금'이 되어 imeHold가 첫 Enter를 늘 붙든다. editAt은 줄바꿈을 뗀 글이 바뀐 때만 움직인다.
+  const hold = (value, editAt, heldAt, now) => I.imeHold(value, editAt, heldAt, now);
+  const typedAt = 10_000;
+  // 끝이 한글이 아니면 잠깐 쉰 뒤의 Enter는 바로 보낸다 — 위젯이 "\n"을 넣어 change가 now에 났어도 편집 시각(editAt)은 그대로다
+  assert.equal(hold("hello", typedAt, 0, typedAt + 1000), false);
+  // 끝이 한글이면 IME가 아직 글자를 조합 중인지 키 이벤트로는 알 수 없어(KeyEvent에 composing 표시가 없다) 첫 Enter는 한 번 붙든다
+  assert.equal(hold("가나다", typedAt, 0, typedAt + 1000), true);
+  // 방금(500ms 안) 글이 바뀌었으면 IME 확정 Enter일 수 있으니 한 번 붙든다 — 끝이 한글이면
+  assert.equal(hold("가나다", typedAt, 0, typedAt + 100), true);
+  // 붙든 뒤 둘째 Enter는 보낸다
+  assert.equal(hold("가나다", typedAt, typedAt + 100, typedAt + 400), false);
+  // 편집 시각을 줄바꿈 뗀 글로 재는 흐름을 가짜 change 이벤트로 돌린다
+  let core = "", editAt = 0;
+  const change = (value, now) => { const c = I.editCore(value); if (c !== core) { core = c; editAt = now; } };
+  change("가나다", typedAt);
+  change("가나다\n", typedAt + 1000); // 위젯의 줄바꿈
+  assert.equal(editAt, typedAt);
+  assert.equal(hold("hello\n", typedAt, 0, typedAt + 1000), false);
+  // 붙든 Enter가 위젯의 줄바꿈 change(편집 시각은 그대로)를 만들어도 둘째 Enter는 붙들지 않는다
+  assert.equal(hold("가나다\n", editAt, typedAt + 1000, typedAt + 1500), false);
+  change("가나다\n라", typedAt + 1100); // 진짜 편집
+  assert.equal(editAt, typedAt + 1100);
+  // main.js 배선: 줄바꿈 뗀 글이 바뀔 때만 editAt이 움직이고, 보내기 판단은 editAt을 쓴다
+  const src = mainSrc();
+  assert.match(src, /if \(core !== this\.core\) \{ this\.core = core; this\.editAt = this\.changedAt; \}/);
+  assert.match(src, /dropBreak\(value\) \{/);
+  assert.match(src, /if \(strayHeld\(value, now, now\) && now - this\.changedAt <= 25\) this\.dropBreak\(value\)/);
+  assert.match(src, /needsNewline\(this\.changedAt, now\)/); // Shift+Enter의 줄바꿈 보충은 원래 시각(changedAt) 그대로
 });
