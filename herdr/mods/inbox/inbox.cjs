@@ -1020,6 +1020,37 @@ function busyAddrs(terms) {
   }
   return hot;
 }
+// What each address has at or below it, from the hc status of the terminals only: Map<address, {self, work, block}> where self is its own
+// "working"/"blocked" (or null), work/block say that it or any terminal below it (the `parent` chain) is working / blocked.
+function workStates(terms) {
+  const list = terms ?? [];
+  const byAddr = new Map();
+  for (const t of list) if (t?.address) byAddr.set(t.address, t);
+  const st = new Map();
+  const get = (a) => { let e = st.get(a); if (!e) { e = { self: null, work: false, block: false }; st.set(a, e); } return e; };
+  for (const t of list) {
+    if (!isBusy(t) || !t.address) continue;
+    const s = String(t.status).trim().toLowerCase();
+    get(t.address).self = s;
+    let cur = t;
+    for (let i = 0; cur && i <= TYPING_HOPS; i++) {
+      const e = get(cur.address);
+      if (s === "blocked") e.block = true; else e.work = true;
+      cur = cur.parent ? byAddr.get(cur.parent) : null;
+    }
+  }
+  return st;
+}
+// The short label (5 chars at most) beside the dots, from real status only; "" when nothing is worth saying. Priority: waiting for an
+// approval (itself or a member) > its own work > a team member's work > only the grace of the last work left (nobody works now).
+const LABEL_BLOCKED = "승인 대기", LABEL_WORKING = "작업중", LABEL_TEAM = "팀원 작업", LABEL_GRACE = "잠시 대기";
+function typingLabel(states, address) {
+  const e = states?.get(address);
+  if (e?.block) return LABEL_BLOCKED;
+  if (e?.self === "working") return LABEL_WORKING;
+  if (e?.work) return LABEL_TEAM;
+  return LABEL_GRACE;
+}
 // The newest shown report of every leader as ms: Map<hc name, ms> from the loaded summaries [{leader, items}].
 function leaderSaid(leaders) {
   const m = new Map();
@@ -1071,9 +1102,9 @@ function typingNow(terms, room, memo, track = null, now = 0) {
   if (room !== PO_OTHER) {
     const po = poList(list).find((p) => p.id === room);
     const term = po ? list.find((t) => t.address === po.address) : null;
-    if (term && isWorking(term)) out.push({ who: "po", name: po.label });
+    if (term && isWorking(term)) out.push({ who: "po", name: po.label, label: LABEL_WORKING });
   }
-  const hot = busyAddrs(list);
+  const hot = busyAddrs(list), states = workStates(list);
   const seen = new Set();
   const leaders = [];
   for (const t of list) {
@@ -1081,7 +1112,7 @@ function typingNow(terms, room, memo, track = null, now = 0) {
     if (!/^lead-/.test(n) || seen.has(n) || leaderOwner(list, n, t.address) !== room) continue;
     if (!hot.has(t.address) && !typingGrace(track?.get(n), now)) continue;
     seen.add(n);
-    leaders.push({ who: `l:${n}`, name: leaderName(n, t, memo) });
+    leaders.push({ who: `l:${n}`, name: leaderName(n, t, memo), label: typingLabel(states, t.address) });
   }
   leaders.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return [...out, ...leaders];
@@ -1091,11 +1122,11 @@ function typingNow(terms, room, memo, track = null, now = 0) {
 // differs from the last one (no redraw on a quiet second).
 function statusSig(terms) {
   const rows = [];
-  const hot = busyAddrs(terms);
+  const hot = busyAddrs(terms), states = workStates(terms);
   for (const t of terms ?? []) {
     const lead = /^lead-/.test(String(t?.name ?? ""));
     if (!lead && !poId(t)) continue;
-    rows.push(`${t.address}|${String(t.status ?? "")}|${lead ? waitingKind(t) : ""}|${lead ? liveName(t) : ""}|${lead && hot.has(t.address) ? 1 : 0}`);
+    rows.push(`${t.address}|${String(t.status ?? "")}|${lead ? waitingKind(t) : ""}|${lead ? liveName(t) : ""}|${lead && hot.has(t.address) ? 1 : 0}|${lead && hot.has(t.address) ? typingLabel(states, t.address) : ""}`);
   }
   return rows.sort().join("\n");
 }
@@ -1257,6 +1288,14 @@ const HL_KINDS = {
   sel: { alpha: 0xb8, floor: 0x60, tokens: ["accent", "ansi4", "working"] }, // about 72%: stronger than bold, so a selected area stands out
 };
 const HEX6 = /^#[0-9a-f]{6}$/i;
+// A theme colour as "#rrggbb": "#rgb" is expanded and "#rrggbbaa" loses its alpha (the tint sets its own); anything else -> null.
+const hex6 = (c) => {
+  if (typeof c !== "string") return null;
+  if (HEX6.test(c)) return c.toLowerCase();
+  if (/^#[0-9a-f]{3}$/i.test(c)) return "#" + [...c.slice(1)].map((x) => x + x).join("").toLowerCase();
+  if (/^#[0-9a-f]{8}$/i.test(c)) return c.slice(0, 7).toLowerCase();
+  return null;
+};
 const rgbOf = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
 const lumOf = (h) => {
   const [r, g, b] = rgbOf(h).map((v) => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
@@ -1264,23 +1303,40 @@ const lumOf = (h) => {
 };
 const contrastOf = (a, b) => { const x = lumOf(a), y = lumOf(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
 const blendHex = (top, under, a) => { const u = rgbOf(under); return "#" + rgbOf(top).map((v, i) => Math.round(v * a + u[i] * (1 - a)).toString(16).padStart(2, "0")).join(""); };
-// kind -> "#rrggbbaa", or null when the theme has no usable token (the caller then paints nothing).
+// kind -> "#rrggbbaa", or null when the theme has no usable token (the caller then paints nothing and logs it once, see tintMiss).
 function tintHex(t, kind) {
   const k = HL_KINDS[kind];
-  const base = k && (k.tokens.map((n) => t?.[n]).find((c) => typeof c === "string" && HEX6.test(c)));
+  const base = k && k.tokens.map((n) => hex6(t?.[n])).find(Boolean);
   if (!base) return null;
   let a = k.alpha;
-  if (HEX6.test(String(t.background)) && HEX6.test(String(t.foreground))) {
-    while (a > k.floor && contrastOf(t.foreground, blendHex(base, t.background, a / 255)) < HL_MIN_CONTRAST) a -= 8;
+  const bg = hex6(t.background), fg = hex6(t.foreground);
+  if (bg && fg) {
+    while (a > k.floor && contrastOf(fg, blendHex(base, bg, a / 255)) < HL_MIN_CONTRAST) a = Math.max(k.floor, a - 8);
   }
   return base + a.toString(16).padStart(2, "0");
 }
+// Why tintHex gave nothing: the tokens it looked at and what they held (colours only), for one diag line.
+const tintMiss = (t, kind) => `highlight ${kind}: no usable theme token (${(HL_KINDS[kind]?.tokens ?? []).map((n) => `${n}=${JSON.stringify(t?.[n] ?? null)}`).join(" ")}); nothing painted`;
 // A TextView selection event -> {start, end} (UTF-16 offsets into the Markdown source), or null when it carries no usable range.
 // `len` is the length of the string the view was given: a range past it belongs to an older text and is dropped.
 function selRangeOf(sel, len) {
   const r = sel?.range ?? sel;
   const a = Number(r?.start), b = Number(r?.end);
   return Number.isInteger(a) && Number.isInteger(b) && a >= 0 && b > a && b <= len ? { start: a, end: b } : null;
+}
+
+// ---- bubble width: every message bubble (mine on the right, the PO's and the leaders' on the left) stops at a share of the chat column, so a long
+// text wraps inside it and never reaches the opposite edge. `colW` is the chat column's width in px (null = not known yet).
+const BUBBLE_SHARE = 0.75, BUBBLE_SIDE = 90, BUBBLE_MIN_CAP = 120;
+// The chat column: the view's width less the room list beside it (none in a strip).
+const chatColW = (winW, strip, narrow, roomW, slimW) => { const w = Number(winW); return Number.isFinite(w) && w > 0 ? Math.max(0, w - (strip ? 0 : narrow ? slimW : roomW)) : null; };
+// The px a bubble may take: 75% of the column, and always leaving BUBBLE_SIDE px (the copy chip, the time, the gutters) on its other side.
+// `minInner` keeps room for the widest picture in it. null: width unknown, the caller uses a percentage.
+function bubbleCap(colW, minInner = 0) {
+  const w = Number(colW);
+  if (!(Number.isFinite(w) && w > 0)) return null;
+  const cap = Math.max(BUBBLE_MIN_CAP, Math.min(Math.floor(w * BUBBLE_SHARE), Math.floor(w - BUBBLE_SIDE)));
+  return Math.max(cap, Math.ceil(Number(minInner) || 0));
 }
 
 // chat:end
@@ -1300,7 +1356,7 @@ function diagAppend(lines, root = appRoot()) {
   try { try { fs.fchmodSync(fd, 0o600); } catch {} fs.writeSync(fd, text); } finally { fs.closeSync(fd); }
   return f;
 }
-module.exports = { unwrapTags, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, tintHex, selRangeOf, HL_MIN_CONTRAST, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { unwrapTags, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)

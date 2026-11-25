@@ -487,7 +487,7 @@ test("R18: main.js loads and init() runs to the end: the flush timer is set and 
 test("R18: the tint constants are defined as numbers/hex alpha, and md() paints with them (no stub injects them)", () => {
   assert.match(MAIN, /^const DIAG_FLUSH_MS = \d+/m);
   assert.doesNotMatch(MAIN, /BOLD_TINT/, "the fixed 20% foreground tint is gone");
-  assert.match(MAIN, /^const HL_ECHO_MS = \d+/m);
+  assert.doesNotMatch(MAIN, /HL_ECHO_MS/, "R21: the echo guard is gone");
   const calls = [];
   const tv = { raw_html() { return this; }, selectable() { return this; }, on_link_click() { return this; }, on_selection_change() { return this; }, highlight_range(a, b, c) { calls.push([a, b, c]); return this; } };
   const Inbox = loadInbox({ base: { TextView: { markdown: () => tv } } });
@@ -677,7 +677,7 @@ function recTv(calls) {
   const tv = { raw_html() { return this; }, selectable() { return this; }, on_link_click() { return this; }, on_selection_change() { return this; }, highlight_range(a, b, c) { calls.push([a, b, c]); return this; } };
   return { markdown: () => tv, html: () => tv };
 }
-const freshUi = () => ({ sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0, hl: null, hlAt: 0 });
+const freshUi = () => ({ sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0, hl: null, hlSkip: null });
 const r20Desk = (calls) => { const d = new (loadInbox({ base: { TextView: recTv(calls) } }))(); d.ui = freshUi(); return d; };
 
 test("R20: tintHex takes the theme accent at a strong alpha on a dark and a light theme, and the text stays readable on it", () => {
@@ -702,7 +702,8 @@ test("R20: tintHex lowers the alpha when a bright accent would hide the text, an
   assert.ok(alphaOf(I.tintHex(bright, "sel")) < 0xb8, "stepped down");
   assert.ok(alphaOf(I.tintHex(bright, "sel")) >= 0x60, "but not below the floor");
   assert.equal(I.tintHex({ foreground: "#e6e6e6", background: "#1e1e1e" }, "bold").slice(0, 7), "#e6e6e6", "no accent: the foreground colour");
-  assert.equal(I.tintHex({ accent: "#3b82f680", foreground: "#e6e6e6" }, "sel"), null, "9-char token is not used, and sel has no foreground fallback");
+  assert.match(I.tintHex({ accent: "#3b82f680", foreground: "#e6e6e6" }, "sel"), /^#3b82f6[0-9a-f]{2}$/, "R21: #rrggbbaa is normalized (its own alpha dropped)");
+  assert.equal(I.tintHex({ accent: "oops", foreground: "#e6e6e6" }, "sel"), null, "sel has no foreground fallback");
   assert.equal(I.tintHex({}, "bold"), null);
   assert.equal(I.tintHex(undefined, "bold"), null);
   assert.match(I.tintHex({ accent: "#3b82f6" }, "bold"), /^#3b82f673$/, "no background known: the starting alpha");
@@ -761,30 +762,122 @@ function selDesk() {
   return { d, cx, calls, notes: () => notes };
 }
 
-test("R20: a settled selection adds the overlay once and repaints once; the same range again repaints nothing", () => {
+test("R21: a settle marks the overlay for the next redraw and never notifies by itself; the same range again changes nothing", () => {
   const { d, cx, notes } = selDesk();
   d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
   assert.deepEqual(d.ui.hl && { id: d.ui.hl.id, start: d.ui.hl.start, end: d.ui.hl.end }, { id: "m1", start: 8, end: 13 });
-  assert.equal(notes(), 1);
-  assert.equal(d.ui.sel, true, "the selection hold (quietNow) is on");
+  assert.equal(notes(), 0, "no cx.notify on settle: the selection (quietNow) holds the redraw");
+  assert.equal(d.dirty, true, "the redraw is owed");
+  assert.equal(d.ui.sel, true);
   d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
-  assert.equal(notes(), 1);
+  assert.equal(notes(), 0);
+  const hl = d.ui.hl;
   d.onSel("m1", { text: "orld ag", range: { start: 9, end: 16 } }, cx);
-  assert.equal(notes(), 2, "a changed range repaints");
+  assert.notEqual(d.ui.hl, hl, "a changed range replaces the overlay");
+  assert.equal(notes(), 0);
 });
 
-test("R20: the null right after our own repaint is ignored; a real clear later removes the overlay and redraws", () => {
+test("R21: a settle with nothing holding the redraw goes through softNotify once (the only notify path)", () => {
+  const { d, cx, notes } = selDesk();
+  d.ui.sel = false;
+  d.softNotify = (c) => { d.sawSoft = (d.sawSoft ?? 0) + 1; };
+  d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
+  assert.equal(d.sawSoft, 1);
+  assert.equal(notes(), 0);
+});
+
+test("R21: a null after a settle means the selection is gone: overlay off, ui.sel false, the redraw owed (no echo guard)", () => {
   const { d, cx, notes } = selDesk();
   d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
-  d.onSel("m1", null, cx); // the echo of the repaint
-  assert.ok(d.ui.hl, "overlay kept");
-  assert.equal(d.ui.sel, true);
-  d.ui.hlAt = Date.now() - 5000; // later: the user clicked elsewhere
-  const before = notes();
-  d.onSel("m1", null, cx);
+  d.dirty = false;
+  d.onSel("m1", null, cx); // right away: still a clear
   assert.equal(d.ui.hl, null);
   assert.equal(d.ui.sel, false);
-  assert.equal(notes(), before + 1, "redrawn without the overlay");
+  assert.equal(notes(), 1, "dirty, and nothing holds now (selection gone): the overlay-less redraw goes out via softNotify");
+  assert.equal(d.dirty, false, "owed redraw was sent");
+  assert.deepEqual(d.ui.hlSkip, { id: "m1", start: 8, end: 13 }, "the cleared range is remembered");
+});
+
+test("R21: hlSkip stops a settle -> repaint -> clear -> settle loop; a press or another range resets it", () => {
+  const { d, cx } = selDesk();
+  const S = { text: "world", range: { start: 8, end: 13 } };
+  d.onSel("m1", S, cx);
+  d.onSel("m1", null, cx);
+  d.onSel("m1", S, cx); // the same range reported again after the clear
+  assert.equal(d.ui.hl, null, "not painted again");
+  d.onSel("m1", null, cx);
+  d.onSel("m1", S, cx);
+  assert.equal(d.ui.hl, null, "still not (no loop)");
+  d.onSel("m1", { text: "orld", range: { start: 9, end: 13 } }, cx); // the user selects something else
+  assert.deepEqual(d.ui.hl && [d.ui.hl.start, d.ui.hl.end], [9, 13]);
+  assert.equal(d.ui.hlSkip, null);
+  d.onSel("m1", null, cx);
+  assert.ok(d.ui.hlSkip);
+  d.pointer({ pressed_button: "left" }, cx); // a new press: a fresh drag may select that range again
+  d.onSel("m1", { text: "orld", range: { start: 9, end: 13 } }, cx);
+  assert.ok(d.ui.hl, "painted after a press");
+});
+
+test("R21: a clear in another bubble does not touch this overlay", () => {
+  const { d, cx } = selDesk();
+  d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
+  d.onSel("h1", null, cx);
+  assert.ok(d.ui.hl);
+});
+
+test("R21: the press paths (window move, list mouse-down, press outside) clear the overlay AND set dirty", () => {
+  for (const act of [(d, cx) => d.pointer({ pressed_button: "left" }, cx), (d) => d.dropHl()]) {
+    const { d, cx } = selDesk();
+    d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
+    d.dirty = false;
+    act(d, cx);
+    assert.equal(d.ui.hl, null);
+    assert.equal(d.dirty, true, "dirty: the next redraw drops the overlay");
+  }
+  const { d } = selDesk();
+  d.dirty = false;
+  d.dropHl(); // nothing up: nothing owed
+  assert.equal(d.dirty, false);
+});
+
+test("R21: diag.log gets the settled, cleared, skipped and painted lines with the bubble label and a timestamp", () => {
+  const { d, cx } = selDesk();
+  d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
+  d.onSel("m1", null, cx);
+  d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
+  const q = d.diagQ.join("\n");
+  assert.match(q, /selection settled in m~[0-9a-f]+ id=m1: 5 chars, range 8-13/);
+  assert.match(q, /selection cleared in m~[0-9a-f]+ id=m1, \d+ms after the last settle, overlay was on/);
+  assert.match(q, /selection overlay skipped in m~/);
+  for (const line of d.diagQ) assert.match(line, /^\d{4}-\d\d-\d\dT/, "timestamped");
+  const calls = [];
+  const e = r20Desk(calls);
+  e.ui.hl = { id: "m1", start: 8, end: 13 };
+  e.md("m1", "hello **world** again", DARK);
+  e.md("m1", "hello **world** again", DARK);
+  assert.equal(e.diagQ.filter((l) => /selection overlay painted in m~/.test(l)).length, 1, "painted is logged once per overlay");
+});
+
+test("R21: bold alpha never drops below its floor, even for white text on white", () => {
+  for (const c of ["#ffffff", "#000000", "#808080"]) {
+    const a = alphaOf(I.tintHex({ foreground: c, background: c, accent: c }, "bold"));
+    assert.ok(a >= 0x40, `${c}: ${a.toString(16)}`);
+  }
+  const t = I.tintHex({ foreground: "#ffffff", background: "#ffffff", accent: "#ffffff" }, "sel");
+  assert.ok(alphaOf(t) >= 0x60);
+});
+
+test("R21: hex6 / tintHex normalize #rgb and #rrggbbaa; tintMiss and tintWarn say once when no token is usable", () => {
+  assert.equal(I.tintHex({ accent: "#38f" }, "bold").slice(0, 7), "#3388ff");
+  assert.equal(I.tintHex({ accent: "#3B82F6CC" }, "bold").slice(0, 7), "#3b82f6");
+  assert.equal(I.tintHex({ accent: "blue", ansi4: "rgb(1,2,3)", foreground: 5 }, "bold"), null);
+  assert.match(I.tintMiss({ accent: "blue" }, "bold"), /^highlight bold: no usable theme token \(accent="blue" ansi4=null foreground=null\); nothing painted$/);
+  const calls = [];
+  const d = r20Desk(calls);
+  d.md("x", "a **b**", { accent: "blue" });
+  d.md("x", "a **b**", { accent: "blue" });
+  assert.equal(calls.length, 0);
+  assert.equal(d.diagQ.filter((l) => /highlight bold: no usable theme token/.test(l)).length, 1, "one line, not one per redraw");
 });
 
 test("R20: no overlay (and no repaint) for a non-Markdown view or a selection without a range; a new press clears it", () => {
@@ -811,6 +904,112 @@ test("R20: background redraws still wait while the selection overlay is up (soft
 });
 
 test("R20: the list's own press and a press outside also drop the overlay (wiring)", () => {
-  assert.match(MAIN, /this\.ui\.sels\.clear\(\); this\.ui\.sel = false; this\.ui\.hl = null; c\.stop_propagation\(\);/);
-  assert.match(MAIN, /on_mouse_down_out\(\(_e, c\) => \{[^\n]*this\.ui\.hl = null; this\.dirty = true;/);
+  assert.match(MAIN, /this\.ui\.sels\.clear\(\); this\.ui\.sel = false; this\.dropHl\(\); c\.stop_propagation\(\);/);
+  assert.match(MAIN, /on_mouse_down_out\(\(_e, c\) => \{[^\n]*this\.dropHl\(\);/);
+  assert.equal((MAIN.match(/this\.ui\.hl = null/g) ?? []).length, 1, "R21: the only clear is inside dropHl (which sets dirty)");
+});
+
+// ---- R21: a short status label (5 chars at most) beside the "···" bubble, from hc status only
+const labelOf = (terms, track = null, now = 0) => I.typingNow(terms, "pa", {}, track, now).find((x) => x.who === "l:lead-po-inbox")?.label;
+
+test("R21 label: its own work -> 작업중; a team member's work -> 팀원 작업; any blocked -> 승인 대기", () => {
+  assert.equal(labelOf([po28(), lead137({ status: "working" })]), "작업중");
+  assert.equal(labelOf([po28(), lead137({ status: "done" }), worker({ status: "working" })]), "팀원 작업");
+  assert.equal(labelOf([po28(), lead137({ status: "blocked" })]), "승인 대기");
+  assert.equal(labelOf([po28(), lead137({ status: "done" }), worker({ status: "blocked" })]), "승인 대기");
+  assert.equal(labelOf([po28(), lead137({ status: "done" }), worker({ status: " Working " })]), "팀원 작업", "case and spaces ignored");
+});
+
+test("R21 label: priority 승인 대기 > 작업중 > 팀원 작업 > grace", () => {
+  const deep = (o) => tmT({ address: "t600", name: "rev-36", parent: "t500", ...o }); // a member of a member: the chain counts
+  assert.equal(labelOf([po28(), lead137({ status: "working" }), worker({ status: "blocked" })]), "승인 대기", "blocked beats its own work");
+  assert.equal(labelOf([po28(), lead137({ status: "blocked" }), worker({ status: "working" })]), "승인 대기");
+  assert.equal(labelOf([po28(), lead137({ status: "working" }), worker({ status: "working" })]), "작업중", "own work beats a member's");
+  assert.equal(labelOf([po28(), lead137({ status: "done" }), worker({ status: "done" }), deep({ status: "working" })]), "팀원 작업", "two levels down");
+  assert.equal(labelOf([po28(), lead137({ status: "done" }), worker({ status: "working" }), deep({ status: "blocked" })]), "승인 대기");
+  assert.equal(labelOf([po28(), lead137({ status: "done" }), worker({ parent: "t999", status: "working" })]), undefined, "an unrelated terminal gives nothing");
+});
+
+test("R21 label: only the 30 s grace left -> 잠시 대기 (nobody works now); gone after the grace; the PO's own dots say 작업중", () => {
+  const track = new Map();
+  I.typingSync(track, [po28(), lead137({ status: "working" })], new Map(), 1000);
+  const idle = [po28(), lead137({ status: "done" })];
+  I.typingSync(track, idle, new Map(), 5000);
+  assert.equal(labelOf(idle, track, 5000), "잠시 대기");
+  assert.equal(labelOf(idle, track, 1000 + I.TYPING_GRACE_MS + 1), undefined, "grace over: no dots, no label");
+  assert.equal(I.typingNow([po28({ status: "working" })], "pa", {}).find((x) => x.who === "po").label, "작업중");
+});
+
+test("R21 label: every label fits in 5 characters and the labels are the only states shown (no invented 생각중/리뷰중)", () => {
+  for (const l of [I.LABEL_BLOCKED, I.LABEL_WORKING, I.LABEL_TEAM, I.LABEL_GRACE]) assert.ok([...l].length <= 5, l);
+  assert.deepEqual([I.LABEL_BLOCKED, I.LABEL_WORKING, I.LABEL_TEAM, I.LABEL_GRACE], ["승인 대기", "작업중", "팀원 작업", "잠시 대기"]);
+  assert.doesNotMatch(MAIN, /생각중|리뷰중/);
+});
+
+test("R21 label: statusSig changes with the label (member working -> blocked, own work -> member's) and not otherwise", () => {
+  const sig = (...xs) => I.statusSig([po28(), lead137({ status: "done" }), ...xs]);
+  const w = sig(worker({ status: "working" })), b = sig(worker({ status: "blocked" }));
+  assert.notEqual(w, b, "팀원 작업 -> 승인 대기 redraws");
+  assert.equal(sig(worker({ status: "working", title: "x" })), w, "unrelated change: same sig, no storm");
+  assert.notEqual(I.statusSig([po28(), lead137({ status: "working" }), worker({ status: "working" })]), I.statusSig([po28(), lead137({ status: "working" }), worker({ status: "blocked" })]), "label 작업중 -> 승인 대기 while the leader's own status stays working");
+  assert.notEqual(I.statusSig([po28(), lead137({ status: "done" }), worker({ status: "working" })]), I.statusSig([po28(), lead137({ status: "working" }), worker({ status: "done" })]));
+});
+
+test("R21 label: typingRow draws the label next to the dots (source) and nothing when the label is empty", () => {
+  const row = MAIN.slice(MAIN.indexOf("  typingRow(t, x) {"), MAIN.indexOf("  render(cx) {"));
+  assert.match(row, /\.child\("···"\)/);
+  assert.match(row, /x\.label \? div\(\)\.flex_none\(\)\.text_size\(11\)[^\n]*\.child\(x\.label\) : div\(\)/);
+  assert.match(row, /x\.label === LABEL_BLOCKED \? t\.blocked : t\.dim/);
+});
+
+// ---- R21: the right-pinned, width-capped bubbles
+test("R21 layout: chatColW leaves out the room list (none in a strip) and says null when the width is unknown", () => {
+  assert.equal(I.chatColW(720, false, false, 168, 58), 552);
+  assert.equal(I.chatColW(500, false, true, 168, 58), 442, "narrow: the slim column");
+  assert.equal(I.chatColW(500, true, true, 168, 58), 500, "a strip on top takes no width");
+  assert.equal(I.chatColW(100, false, false, 168, 58), 0, "never negative");
+  for (const bad of [undefined, null, 0, -5, NaN, "x"]) assert.equal(I.chatColW(bad, false, false, 168, 58), null);
+});
+
+test("R21 layout: bubbleCap is 75% of the column, leaves 90px for the chip and time, and follows a resize", () => {
+  assert.equal(I.bubbleCap(552), 414, "75% of 552");
+  assert.equal(I.bubbleCap(1200), 900);
+  assert.equal(I.bubbleCap(300), 210);
+  assert.equal(I.bubbleCap(200), 120, "90px kept beside it, with the floor");
+  assert.equal(I.bubbleCap(100), 120, "tiny widths: the floor, never zero");
+  assert.equal(I.bubbleCap(null), null);
+  assert.equal(I.bubbleCap(0), null);
+  assert.equal(I.bubbleCap(552, 500), 500, "a picture wider than the cap keeps its room");
+  assert.equal(I.bubbleCap(552, 100), 414);
+  let last = 0;
+  for (let w = 160; w <= 1600; w += 16) { const c = I.bubbleCap(w); assert.ok(c >= last, `grows with the window at ${w}`); assert.ok(c <= Math.max(120, w * 0.75), `<= 75% at ${w}`); last = c; }
+});
+
+test("R21 layout: my bubble is pinned right and capped; the PO and leader bubbles are capped on the left; the cap follows resizes", () => {
+  const row = MAIN.slice(MAIN.indexOf("  entryRow(t, e, v, cx) {"), MAIN.indexOf("  render(cx) {"));
+  assert.match(row, /h_flex\(\)\.w_full\(\)\.min_w\(0\)\.gap\(6\)\.items_end\(\)\.justify_end\(\)/, "own row: flush right");
+  assert.match(row, /const width = Math\.min\(Math\.max\(bubbleWidth\(bp\.text\), pics, 64\), cap \?\? Infinity\)/, "own width never above the cap");
+  assert.match(row, /\.w\(width\)\.max_w\(cap \?\? "75%"\)\.min_w\(0\)/);
+  assert.match(row, /div\(\)\.flex_1\(\)\.min_w\(0\)\.max_w\(this\.capOf\(\) \?\? "75%"\)\.px\(12\)/, "PO bubble");
+  assert.match(row, /div\(\)\.flex_1\(\)\.min_w\(0\)\.max_w\(this\.capOf\(\) \?\? "75%"\)\.child\(this\.bubble\(/, "leader bubble");
+  assert.match(MAIN, /capOf\(minInner = 0\) \{[^}]*bubbleCap\(chatColW\(this\.winW, strip, this\.narrow, ROOM_W, SLIM_W\), minInner\)/);
+  const sz = MAIN.slice(MAIN.indexOf("on_size_change"), MAIN.indexOf("on_size_change") + 700);
+  assert.match(sz, /this\.winW = /);
+  assert.match(sz, /softNotify\(c\)/, "a resize redraws (held while selecting)");
+});
+
+test("R21 layout: the cap sits on the box only; the Markdown given to a TextView is the same string, so offsets and the overlay are unaffected", () => {
+  const calls = [];
+  const d = r20Desk(calls);
+  d.winW = 400; d.narrow = false; d.windowed = true;
+  const src = "a long message with **bold words** that will wrap inside the cap";
+  const before = I.boldRanges(I.mdText(src));
+  d.ui.hl = { id: "w", start: 3, end: 9 };
+  d.md("w", src, DARK);
+  d.winW = 1200; // resized: only the box width changes
+  const calls2 = calls.splice(0);
+  d.md("w", src, DARK);
+  assert.deepEqual(calls.map((c) => [c[0], c[1]]), calls2.map((c) => [c[0], c[1]]));
+  assert.deepEqual(calls2.slice(0, before.length).map((c) => [c[0], c[1]]), before.map((r) => [r.start, r.end]));
+  assert.deepEqual(calls2[calls2.length - 1].slice(0, 2), [3, 9]);
 });

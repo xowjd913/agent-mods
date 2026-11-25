@@ -506,6 +506,37 @@ function busyAddrs(terms) {
   }
   return hot;
 }
+// What each address has at or below it, from the hc status of the terminals only: Map<address, {self, work, block}> where self is its own
+// "working"/"blocked" (or null), work/block say that it or any terminal below it (the `parent` chain) is working / blocked.
+function workStates(terms) {
+  const list = terms ?? [];
+  const byAddr = new Map();
+  for (const t of list) if (t?.address) byAddr.set(t.address, t);
+  const st = new Map();
+  const get = (a) => { let e = st.get(a); if (!e) { e = { self: null, work: false, block: false }; st.set(a, e); } return e; };
+  for (const t of list) {
+    if (!isBusy(t) || !t.address) continue;
+    const s = String(t.status).trim().toLowerCase();
+    get(t.address).self = s;
+    let cur = t;
+    for (let i = 0; cur && i <= TYPING_HOPS; i++) {
+      const e = get(cur.address);
+      if (s === "blocked") e.block = true; else e.work = true;
+      cur = cur.parent ? byAddr.get(cur.parent) : null;
+    }
+  }
+  return st;
+}
+// The short label (5 chars at most) beside the dots, from real status only; "" when nothing is worth saying. Priority: waiting for an
+// approval (itself or a member) > its own work > a team member's work > only the grace of the last work left (nobody works now).
+const LABEL_BLOCKED = "승인 대기", LABEL_WORKING = "작업중", LABEL_TEAM = "팀원 작업", LABEL_GRACE = "잠시 대기";
+function typingLabel(states, address) {
+  const e = states?.get(address);
+  if (e?.block) return LABEL_BLOCKED;
+  if (e?.self === "working") return LABEL_WORKING;
+  if (e?.work) return LABEL_TEAM;
+  return LABEL_GRACE;
+}
 // The newest shown report of every leader as ms: Map<hc name, ms> from the loaded summaries [{leader, items}].
 function leaderSaid(leaders) {
   const m = new Map();
@@ -557,9 +588,9 @@ function typingNow(terms, room, memo, track = null, now = 0) {
   if (room !== PO_OTHER) {
     const po = poList(list).find((p) => p.id === room);
     const term = po ? list.find((t) => t.address === po.address) : null;
-    if (term && isWorking(term)) out.push({ who: "po", name: po.label });
+    if (term && isWorking(term)) out.push({ who: "po", name: po.label, label: LABEL_WORKING });
   }
-  const hot = busyAddrs(list);
+  const hot = busyAddrs(list), states = workStates(list);
   const seen = new Set();
   const leaders = [];
   for (const t of list) {
@@ -567,7 +598,7 @@ function typingNow(terms, room, memo, track = null, now = 0) {
     if (!/^lead-/.test(n) || seen.has(n) || leaderOwner(list, n, t.address) !== room) continue;
     if (!hot.has(t.address) && !typingGrace(track?.get(n), now)) continue;
     seen.add(n);
-    leaders.push({ who: `l:${n}`, name: leaderName(n, t, memo) });
+    leaders.push({ who: `l:${n}`, name: leaderName(n, t, memo), label: typingLabel(states, t.address) });
   }
   leaders.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return [...out, ...leaders];
@@ -577,11 +608,11 @@ function typingNow(terms, room, memo, track = null, now = 0) {
 // differs from the last one (no redraw on a quiet second).
 function statusSig(terms) {
   const rows = [];
-  const hot = busyAddrs(terms);
+  const hot = busyAddrs(terms), states = workStates(terms);
   for (const t of terms ?? []) {
     const lead = /^lead-/.test(String(t?.name ?? ""));
     if (!lead && !poId(t)) continue;
-    rows.push(`${t.address}|${String(t.status ?? "")}|${lead ? waitingKind(t) : ""}|${lead ? liveName(t) : ""}|${lead && hot.has(t.address) ? 1 : 0}`);
+    rows.push(`${t.address}|${String(t.status ?? "")}|${lead ? waitingKind(t) : ""}|${lead ? liveName(t) : ""}|${lead && hot.has(t.address) ? 1 : 0}|${lead && hot.has(t.address) ? typingLabel(states, t.address) : ""}`);
   }
   return rows.sort().join("\n");
 }
@@ -743,6 +774,14 @@ const HL_KINDS = {
   sel: { alpha: 0xb8, floor: 0x60, tokens: ["accent", "ansi4", "working"] }, // about 72%: stronger than bold, so a selected area stands out
 };
 const HEX6 = /^#[0-9a-f]{6}$/i;
+// A theme colour as "#rrggbb": "#rgb" is expanded and "#rrggbbaa" loses its alpha (the tint sets its own); anything else -> null.
+const hex6 = (c) => {
+  if (typeof c !== "string") return null;
+  if (HEX6.test(c)) return c.toLowerCase();
+  if (/^#[0-9a-f]{3}$/i.test(c)) return "#" + [...c.slice(1)].map((x) => x + x).join("").toLowerCase();
+  if (/^#[0-9a-f]{8}$/i.test(c)) return c.slice(0, 7).toLowerCase();
+  return null;
+};
 const rgbOf = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
 const lumOf = (h) => {
   const [r, g, b] = rgbOf(h).map((v) => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
@@ -750,17 +789,20 @@ const lumOf = (h) => {
 };
 const contrastOf = (a, b) => { const x = lumOf(a), y = lumOf(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
 const blendHex = (top, under, a) => { const u = rgbOf(under); return "#" + rgbOf(top).map((v, i) => Math.round(v * a + u[i] * (1 - a)).toString(16).padStart(2, "0")).join(""); };
-// kind -> "#rrggbbaa", or null when the theme has no usable token (the caller then paints nothing).
+// kind -> "#rrggbbaa", or null when the theme has no usable token (the caller then paints nothing and logs it once, see tintMiss).
 function tintHex(t, kind) {
   const k = HL_KINDS[kind];
-  const base = k && (k.tokens.map((n) => t?.[n]).find((c) => typeof c === "string" && HEX6.test(c)));
+  const base = k && k.tokens.map((n) => hex6(t?.[n])).find(Boolean);
   if (!base) return null;
   let a = k.alpha;
-  if (HEX6.test(String(t.background)) && HEX6.test(String(t.foreground))) {
-    while (a > k.floor && contrastOf(t.foreground, blendHex(base, t.background, a / 255)) < HL_MIN_CONTRAST) a -= 8;
+  const bg = hex6(t.background), fg = hex6(t.foreground);
+  if (bg && fg) {
+    while (a > k.floor && contrastOf(fg, blendHex(base, bg, a / 255)) < HL_MIN_CONTRAST) a = Math.max(k.floor, a - 8);
   }
   return base + a.toString(16).padStart(2, "0");
 }
+// Why tintHex gave nothing: the tokens it looked at and what they held (colours only), for one diag line.
+const tintMiss = (t, kind) => `highlight ${kind}: no usable theme token (${(HL_KINDS[kind]?.tokens ?? []).map((n) => `${n}=${JSON.stringify(t?.[n] ?? null)}`).join(" ")}); nothing painted`;
 // A TextView selection event -> {start, end} (UTF-16 offsets into the Markdown source), or null when it carries no usable range.
 // `len` is the length of the string the view was given: a range past it belongs to an older text and is dropped.
 function selRangeOf(sel, len) {
@@ -769,12 +811,25 @@ function selRangeOf(sel, len) {
   return Number.isInteger(a) && Number.isInteger(b) && a >= 0 && b > a && b <= len ? { start: a, end: b } : null;
 }
 
+// ---- bubble width: every message bubble (mine on the right, the PO's and the leaders' on the left) stops at a share of the chat column, so a long
+// text wraps inside it and never reaches the opposite edge. `colW` is the chat column's width in px (null = not known yet).
+const BUBBLE_SHARE = 0.75, BUBBLE_SIDE = 90, BUBBLE_MIN_CAP = 120;
+// The chat column: the view's width less the room list beside it (none in a strip).
+const chatColW = (winW, strip, narrow, roomW, slimW) => { const w = Number(winW); return Number.isFinite(w) && w > 0 ? Math.max(0, w - (strip ? 0 : narrow ? slimW : roomW)) : null; };
+// The px a bubble may take: 75% of the column, and always leaving BUBBLE_SIDE px (the copy chip, the time, the gutters) on its other side.
+// `minInner` keeps room for the widest picture in it. null: width unknown, the caller uses a percentage.
+function bubbleCap(colW, minInner = 0) {
+  const w = Number(colW);
+  if (!(Number.isFinite(w) && w > 0)) return null;
+  const cap = Math.max(BUBBLE_MIN_CAP, Math.min(Math.floor(w * BUBBLE_SHARE), Math.floor(w - BUBBLE_SIDE)));
+  return Math.max(cap, Math.ceil(Number(minInner) || 0));
+}
+
 // chat:end
 
 // The pending-question card: the screen lines scroll inside it (all options stay reachable), the buttons stay under them.
 const PROMPT_LINES_H = 240, PROMPT_MAX_H = 340;
 const DIAG_FLUSH_MS = 2000; // the diag queue is written out this often (one timer started in init)
-const HL_ECHO_MS = 700; // a "selection cleared" this soon after our own overlay repaint is the rebuilt view's echo, not the user's click
 const PIN_TICK_MS = 250; // how often the timeline checks that it still sits at the newest
 const LOAD_REDRAW_MS = 25000; // an unchanged load still redraws this often (the "5분 전" clocks)
 
@@ -889,7 +944,7 @@ export default class Inbox extends View {
     this.replyPics = new Map(); // leader -> pictures waiting in that leader's answer box (same shape as this.pics)
     this.replyBusy = new Map(); // leader -> pictures being read for that answer box
     this.imgd = new Map(); // path -> [w, h] of pictures added here (the helper's list covers the others)
-    this.ui = { sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0, hl: null, hlAt: 0 }; // a drag-select in the list: redraws wait while it is held
+    this.ui = { sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0, hl: null, hlSkip: null }; // a drag-select in the list: redraws wait while it is held
     this.dirty = false; // a redraw was held back
     this.pin = { pinned: true, ct: 0 }; // the timeline's pin to the newest (see pinStep)
     this.lastIdx = 0; // index of the last child of the list
@@ -959,7 +1014,7 @@ export default class Inbox extends View {
   // desk is a press, so redraws and the bottom pin wait until it is released. The press gate used to live on the list's own mouse-down,
   // which a TextView that handles the press itself never lets through - the pin and redraws then ran under a drag and dropped the selection.
   pointer(e, cx) {
-    if (e?.pressed_button === "left") { if (!this.ui.press) { this.diag("press (left held, window move)", cx); this.ui.hl = null; } this.ui.press = true; this.ui.pressAt = Date.now(); return; }
+    if (e?.pressed_button === "left") { if (!this.ui.press) { this.diag("press (left held, window move)", cx); this.dropHl(); } this.ui.press = true; this.ui.pressAt = Date.now(); return; }
     if (this.ui.press) { this.diag("release (move without button)", cx); this.ui.press = false; if (this.dirty) this.softNotify(cx); }
   }
   // Diagnostics for the leader (the person does not read consoles): lines are buffered and written by inbox.cjs in one call at most every 2s
@@ -1002,27 +1057,48 @@ export default class Inbox extends View {
     try { cx.notify(); } catch {}
   }
 
-  // A TextView's selection settled (sel) or cleared (null).
+  // The overlay goes away (and the next redraw must say so): a new press, a click outside, a selection that cleared. `skip` remembers a cleared
+  // range so the very same range is not painted again (a settle -> repaint -> cleared -> settle loop).
+  dropHl(skip = false) {
+    const h = this.ui.hl;
+    if (!h) { if (!skip) this.ui.hlSkip = null; return; }
+    this.ui.hl = null;
+    this.ui.hlSkip = skip ? { id: h.id, start: h.start, end: h.end } : null;
+    this.dirty = true;
+  }
+
+  // One diag line per kind when the theme gave nothing to paint with (the next redraws stay quiet).
+  tintWarn(t, kind) {
+    const w = (this.tintWarned ??= new Set());
+    if (w.has(kind)) return;
+    w.add(kind);
+    this.diag(tintMiss(t, kind));
+  }
+
+  // A TextView's selection settled (sel) or cleared (null). The view reports null only when the selection it reported is gone, so a null always
+  // clears: the overlay, ui.sel and the hold on redraws. The overlay is drawn by the next redraw, never by a notify of its own here: a rebuild
+  // was seen to drop the native selection (docs), so a settle only marks `dirty` and the redraw waits like any other (softNotify / quietNow).
   onSel(id, sel, cx) {
     this.ui.selEvents = (this.ui.selEvents ?? 0) + 1; // how often a TextView reported a selection at all (see the console line)
-    { const did = this.diagId(id); this.diag(`selection ${sel ? `settled in ${did}: ${String(sel.text ?? "").length} chars` : `cleared in ${did}`} (#${this.ui.selEvents})`, cx); }
-    try { const did = this.diagId(id); console.log(`[inbox] selection ${sel ? `settled in ${did}: ${String(sel.text ?? "").length} chars` : `cleared in ${did}`} (#${this.ui.selEvents})`); } catch {}
-    const now = Date.now();
-    // The null that our own overlay repaint may cause (the rebuilt view reports no selection) must not wipe the overlay again.
-    if (!sel && this.ui.hl && now - (this.ui.hlAt || 0) < HL_ECHO_MS) return;
+    const did = this.diagId(id), now = Date.now();
+    const held = this.ui.selAt ? now - this.ui.selAt : -1; // ms since the last settle (a clear's age)
+    const rg = sel && this.mdSeen?.has(id) ? selRangeOf(sel, Infinity) : null;
+    const h0 = this.ui.hl;
+    this.diag(sel
+      ? `selection settled in ${did} id=${String(id).slice(0, 40)}: ${String(sel.text ?? "").length} chars, range ${rg ? `${rg.start}-${rg.end}` : "missing"}${this.mdSeen?.has(id) ? "" : " (not markdown)"} (#${this.ui.selEvents})`
+      : `selection cleared in ${did} id=${String(id).slice(0, 40)}${held >= 0 ? `, ${held}ms after the last settle` : ""}, overlay ${h0 && h0.id === id ? "was on" : "off"} (#${this.ui.selEvents})`, cx);
+    try { console.log(`[inbox] selection ${sel ? `settled in ${did}: ${String(sel.text ?? "").length} chars` : `cleared in ${did}`} (#${this.ui.selEvents})`); } catch {}
     if (sel) this.ui.sels.set(id, true); else this.ui.sels.delete(id);
     this.ui.sel = this.ui.sels.size > 0;
     if (sel) this.ui.selAt = now;
     this.ui.press = false;
-    // A settled selection in a Markdown bubble gets a strong overlay on its range (the native highlight is faint); cleared with the selection.
-    const rg = sel && this.mdSeen?.has(id) ? selRangeOf(sel, Infinity) : null;
-    if (sel) this.diag(`selection range ${rg ? "ok" : "missing"}`, cx);
-    if (sel && !rg && this.ui.hl) { this.ui.hl = null; this.dirty = true; }
-    if (rg) {
-      const h = this.ui.hl;
-      if (!h || h.id !== id || h.start !== rg.start || h.end !== rg.end) { this.ui.hl = { id, ...rg }; this.ui.hlAt = now; try { cx.notify(); } catch {} }
-    } else if (!sel && this.ui.hl && this.ui.hl.id === id) { this.ui.hl = null; this.dirty = true; }
-    if (!this.ui.sel && this.dirty) this.softNotify(cx);
+    if (sel) {
+      // A settled selection in a Markdown bubble gets a strong overlay on its range (the native highlight is faint), painted by the next redraw.
+      const sk = this.ui.hlSkip, same = sk && sk.id === id && rg && sk.start === rg.start && sk.end === rg.end;
+      if (!rg || same) { if (h0) this.dropHl(); if (same) this.diag(`selection overlay skipped in ${did}: that range was just cleared`, cx); }
+      else if (!h0 || h0.id !== id || h0.start !== rg.start || h0.end !== rg.end) { this.ui.hl = { id, ...rg }; this.ui.hlSkip = null; this.dirty = true; }
+    } else if (h0 && h0.id === id) this.dropHl(true);
+    if (this.dirty) this.softNotify(cx); // held back (dirty only) while a selection or a press is held; pinTick lets it go afterwards
   }
 
   // ---- pictures in the box
@@ -1948,9 +2024,13 @@ export default class Inbox extends View {
       try {
         const bc = tintHex(t, "bold"); // theme accent at ~45% (less when the text would stop being readable), see HL_KINDS
         if (bc) for (const r of boldRanges(m)) tv = tv.highlight_range(r.start, r.end, bc);
+        else this.tintWarn(t, "bold");
         // The settled selection of this very bubble, drawn over the bold bands (the later range wins where they meet).
         const h = this.ui?.hl, sc = h && h.id === id && h.end <= m.length ? tintHex(t, "sel") : null;
-        if (sc) tv = tv.highlight_range(h.start, h.end, sc);
+        if (sc) {
+          tv = tv.highlight_range(h.start, h.end, sc);
+          if (!h.painted) { h.painted = true; this.diag(`selection overlay painted in ${this.diagId(id)} id=${String(id).slice(0, 40)}: ${h.start}-${h.end} ${sc}`); }
+        } else if (h && h.id === id && h.end <= m.length) this.tintWarn(t, "sel");
       } catch {}
     }
     (this.mdSeen ??= new Set()).add(id); // ids drawn as Markdown: only their selection ranges mean offsets into the source
@@ -2060,6 +2140,12 @@ export default class Inbox extends View {
     return box;
   }
 
+  // The most px a message bubble may take (see bubbleCap). null before the first size report: the bubbles then use a percentage.
+  capOf(minInner = 0) {
+    const strip = this.windowed && this.narrow;
+    return bubbleCap(chatColW(this.winW, strip, this.narrow, ROOM_W, SLIM_W), minInner);
+  }
+
   // One timeline entry (a grouped entry: `head` says whether the sender's name line is drawn). Leaders and the PO are on the left with a
   // circle, the person ("나") on the right. A leader's message that it waits on is red and carries its answer buttons.
   entryRow(t, e, v, cx) {
@@ -2079,12 +2165,16 @@ export default class Inbox extends View {
       const sizes = bp.imgs.map((p) => { const d = this.data?.imgd?.[p] ?? this.imgd.get(p); return fitImg(d?.[0], d?.[1], 240, 180); });
       // The bubble asks for its text's width (up to 80% of the row, like the left bubbles) and never less than its widest picture: a
       // percentage max inside a content-sized box collapsed to ~3 characters, so the row is full width and the bubble has a width of its own.
-      const width = Math.max(bubbleWidth(bp.text), ...sizes.map((f) => f.w + 26), 64);
+      // It is also capped (capOf: 75% of the chat column, in px): a long message wraps inside the cap and never reaches the left side, so the
+      // bubble, with the 복사 chip and the time on its left, always reads as right-aligned. A picture keeps its own width as the floor.
+      const pics = Math.max(0, ...sizes.map((f) => f.w + 26));
+      const cap = this.capOf(pics);
+      const width = Math.min(Math.max(bubbleWidth(bp.text), pics, 64), cap ?? Infinity);
       return v_flex().id(id).flex_none().px(10).pt(top).gap(2).items_end()
         .when(Boolean(e.to), (el) => el.child(div().max_w("85%").min_w(0).truncate().text_size(10).text_color(t.dim).child(`→ ${shortName(e.to)}`)))
-        .child(h_flex().w_full().min_w(0).gap(6).items_end().justify_end()
+        .child(h_flex().w_full().min_w(0).gap(6).items_end().justify_end() // always the right edge: the chip and the time are left of the bubble
           .child(this.sideTools(t, id, e.text, e.ms))
-          .child(v_flex().flex_none().w(width).max_w("80%").min_w(0).px(12).py(9).gap(6).rounded(12).bg(t.working + "33").border(1).border_color((bad ? t.blocked : t.working) + "66").text_size(12.5).text_color(t.foreground)
+          .child(v_flex().flex_none().w(width).max_w(cap ?? "75%").min_w(0).px(12).py(9).gap(6).rounded(12).bg(t.working + "33").border(1).border_color((bad ? t.blocked : t.working) + "66").text_size(12.5).text_color(t.foreground)
             .children(bp.imgs.map((p, i) => div().id(`${id}-img${i}`).flex_none().w(sizes[i].w).h(sizes[i].h).rounded(6).overflow_hidden().cursor_pointer().on_mouse_down("left", stop)
               .on_click(() => openFile(p)).tooltip("눌러서 그림 열기")
               .child(image(imgRel(root, p)).w(sizes[i].w).h(sizes[i].h)))) // image() loads only paths under the app folder: data/inbox/img/<file>
@@ -2102,7 +2192,7 @@ export default class Inbox extends View {
             .child(div().text_size(12).font_semibold().text_color(t.working).child("PO"))
             .when(Boolean(e.to), (x) => x.child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(`→ ${shortName(e.to)}`)))))
           .child(h_flex().min_w(0).gap(6).items_end()
-            .child(div().flex_1().min_w(0).px(12).py(9).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(12.5).text_color(t.foreground)
+            .child(div().flex_1().min_w(0).max_w(this.capOf() ?? "75%").px(12).py(9).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(12.5).text_color(t.foreground)
               .child(this.md(id, e.text, t)))
             .child(this.sideTools(t, id, e.text, e.ms))));
     }
@@ -2116,7 +2206,7 @@ export default class Inbox extends View {
       .child(v_flex().flex_1().min_w(0).gap(4)
         .child(hdr)
         .child(e.it ? h_flex().min_w(0).gap(6).items_end()
-          .child(div().flex_1().min_w(0).child(this.bubble(t, e.s, wait, e.waiting ? t.blocked : null)))
+          .child(div().flex_1().min_w(0).max_w(this.capOf() ?? "75%").child(this.bubble(t, e.s, wait, e.waiting ? t.blocked : null)))
           .child(when(e.it.ms))
           : div().text_size(12).text_color(t.dim).child("보고 기록 없이 대기 표시만 있습니다. 링크를 열거나 터미널을 들여다보세요."))
         .when(Boolean(a), (el) => el.child(this.askActions(t, a, cx))));
@@ -2130,7 +2220,9 @@ export default class Inbox extends View {
       .child(po ? this.circle(t, t.working, "P") : this.avatar(t, x.who.slice(2)))
       .child(v_flex().min_w(0).gap(3)
         .child(div().min_w(0).truncate().text_size(12).font_semibold().text_color(color).child(po ? "PO" : x.name))
-        .child(div().px(14).py(5).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(16).text_color(t.dim).child("···")));
+        .child(h_flex().min_w(0).gap(6).items_center()
+          .child(div().px(14).py(5).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(16).text_color(t.dim).child("···"))
+          .child(x.label ? div().flex_none().text_size(11).text_color(x.label === LABEL_BLOCKED ? t.blocked : t.dim).child(x.label) : div())));
   }
 
   render(cx) { return this.full(cx); }
@@ -2197,9 +2289,9 @@ export default class Inbox extends View {
     const waiting = v.tabs.reduce((n, x) => n + x.n, 0); // leaders waiting on a decision, over every room
     const head = v.pick === PO_OTHER ? OTHER_LABEL : v.tabs.find((x) => x.id === v.pick)?.label ?? "";
     const lines = v_flex().id("inbox-list").flex_1().min_h(0).pb(8).overflow_y_scrollbar().mode("always")
-      .on_mouse_down("left", (_e, c) => { this.ui.press = true; this.ui.pressAt = Date.now(); this.ui.sels.clear(); this.ui.sel = false; this.ui.hl = null; c.stop_propagation(); })
+      .on_mouse_down("left", (_e, c) => { this.ui.press = true; this.ui.pressAt = Date.now(); this.ui.sels.clear(); this.ui.sel = false; this.dropHl(); c.stop_propagation(); })
       .on_mouse_up("left", () => { this.ui.press = false; })
-      .on_mouse_down_out((_e, c) => { this.ui.press = false; if (this.ui.sel) { this.ui.sels.clear(); this.ui.sel = false; } if (this.ui.hl) { this.ui.hl = null; this.dirty = true; } if (this.dirty) this.softNotify(c); })
+      .on_mouse_down_out((_e, c) => { this.ui.press = false; if (this.ui.sel) { this.ui.sels.clear(); this.ui.sel = false; } this.dropHl(); if (this.dirty) this.softNotify(c); })
       .when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks);
     const bar = this.filterBar(t, v);
     const panel = this.promptPanel(t, v, cx); // a blocked PO's screen + its keys (null while the room's PO is not waiting on a prompt)
@@ -2216,7 +2308,10 @@ export default class Inbox extends View {
       .on_window_mouse_up("left", (_e, c) => this.pointerUp(c))
       .on_size_change((size, c) => {
         const x = size.width < 360, n = size.width < WIDE_MIN;
-        if (x !== this.compact || n !== this.narrow) { this.compact = x; this.narrow = n; this.softNotify(c); }
+        const wb = Math.round(size.width / 16); // the bubble cap follows the width in 16px steps (a redraw per step, not per pixel)
+        const grew = wb !== this.winB;
+        this.winW = size.width; this.winB = wb;
+        if (x !== this.compact || n !== this.narrow || grew) { this.compact = x; this.narrow = n; this.softNotify(c); }
       })
       .child(h_flex().h(38).px(this.compact ? 10 : 14).flex_none().items_center().justify_between()
         .child(h_flex().gap(6).items_center()

@@ -1170,8 +1170,8 @@ test("main.js: 모든 데스크 보내기는 deliver 한 곳에서 한 번만 �
   const row = methodOf(src, "  entryRow(t, e, v, cx) {", "  render(cx)");
   assert.match(row, /justify_end\(\)/);
   assert.match(row, /bg\(t\.working \+ "33"\)/);
-  assert.match(row, /\.child\(this\.sideTools\(t, id, e\.text, e\.ms\)\)\s*\n\s*\.child\(v_flex\(\)\.flex_none\(\)\.w\(width\)\.max_w\("80%"\)/); // 내 말풍선: 시간이 말풍선 앞(왼쪽), 폭은 글에서 정한다
-  assert.match(row, /items_end\(\)\s*\n\s*\.child\(div\(\)\.flex_1\(\)\.min_w\(0\)\.px\(12\)/); // PO: 말풍선 뒤(오른쪽)에 시간
+  assert.match(row, /\.child\(this\.sideTools\(t, id, e\.text, e\.ms\)\)\s*\n\s*\.child\(v_flex\(\)\.flex_none\(\)\.w\(width\)\.max_w\(cap \?\? "75%"\)/); // 내 말풍선: 시간이 말풍선 앞(왼쪽), 폭은 글에서 정한다
+  assert.match(row, /items_end\(\)\s*\n\s*\.child\(div\(\)\.flex_1\(\)\.min_w\(0\)\.max_w\(this\.capOf\(\) \?\? "75%"\)\.px\(12\)/); // PO: 말풍선 뒤(오른쪽)에 시간
   assert.match(row, /mineNote\(e\.status, blockedNow, age\)/);
   assert.ok(!/clock\(it\.ms\)/.test(methodOf(src, "  nameRow(t,", "  // What a waiting leader"))); // 머리줄에서 시간이 빠졌다
 });
@@ -1845,7 +1845,7 @@ const leadT = (n, o = {}) => tm({ address: `t-${n}`, name: n, parent: "tp", ...o
 
 test("typingNow: 방의 PO와 그 방 리더 중 working인 것만, 이름순으로 낸다", () => {
   const terms = [poT({ status: "working" }), leadT("lead-b", { status: "working", title: "베타 작업" }), leadT("lead-a", { status: "working", title: "알파 작업" }), leadT("lead-c", { status: "idle" }), leadT("lead-d", { status: "blocked" })];
-  assert.deepEqual(I.typingNow(terms, "pa", {}), [{ who: "po", name: "데스크" }, { who: "l:lead-d", name: "d" }, { who: "l:lead-b", name: "베타 작업" }, { who: "l:lead-a", name: "알파 작업" }]); // PO 먼저, 리더는 이름순; 권한 기다림(blocked)도 일하는 중으로 센다
+  assert.deepEqual(I.typingNow(terms, "pa", {}), [{ who: "po", name: "데스크", label: "작업중" }, { who: "l:lead-d", name: "d", label: "승인 대기" }, { who: "l:lead-b", name: "베타 작업", label: "작업중" }, { who: "l:lead-a", name: "알파 작업", label: "작업중" }]); // PO 먼저, 리더는 이름순; 권한 기다림(blocked)도 일하는 중으로 센다
   assert.deepEqual(I.typingNow([poT({ status: "blocked" })], "pa", {}), []); // PO 줄은 working만
   assert.deepEqual(I.typingNow([poT({ status: "idle" }), leadT("lead-c", { status: "done" })], "pa", {}), []); // 쓰는 중이 아니면 없다
   assert.deepEqual(I.typingNow([poT({ status: " Working " })], "pa", {}).map((x) => x.who), ["po"]); // 대소문자·공백 무시

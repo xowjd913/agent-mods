@@ -327,7 +327,7 @@ test("chat block of main.js is identical to inbox.cjs (the pure picture / pin / 
 
 test("main.js: the right bubble is sized by bubbleWidth in a full-width row; rows are not overlapped", () => {
   assert.match(MAIN, /h_flex\(\)\.w_full\(\)/);
-  assert.match(MAIN, /\.w\(width\)\.max_w\("80%"\)/);
+  assert.match(MAIN, /\.w\(width\)\.max_w\(cap \?\? "75%"\)/);
   assert.match(MAIN, /bubbleWidth\(/);
   assert.match(MAIN, /bubbleParts\(/);
 });
