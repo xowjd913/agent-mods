@@ -139,9 +139,9 @@ test("E: statusSig changes when a leader starts and stops working, so the 1.5 s 
 });
 
 test("E: the typing rows are drawn in every filter (no 'all' gate) and after the last message", () => {
-  assert.ok(!/v\.filter === "all"\)\s*for \(const x of typingNow/.test(MAIN), "no filter gate on the typing rows");
-  assert.match(MAIN, /for \(const x of typingNow\(v\.terms, v\.pick, namesMemo\(\)\)\) blocks\.push\(this\.typingRow\(t, x\)\)/);
-  const i = MAIN.indexOf("typingNow(v.terms, v.pick");
+  assert.ok(!/v\.filter === "all"\)\s*for \(const x of this\.typing/.test(MAIN), "no filter gate on the typing rows");
+  assert.match(MAIN, /for \(const x of this\.typing\(v\)\) blocks\.push\(this\.typingRow\(t, x\)\)/);
+  const i = MAIN.indexOf("this.typing(v)");
   assert.ok(i > MAIN.indexOf("v.entries.forEach((e) => {"), "typing rows come after the entries");
 });
 
@@ -528,4 +528,137 @@ test("R18: pruneReply clears only a leader's non-empty draft; copy() redraws thr
   const copy = MAIN.slice(MAIN.indexOf("  copy(key, text, cx)"), MAIN.indexOf("  // \"옆에 열기\":"));
   assert.doesNotMatch(copy, /cx\.notify\(\)|c\.notify\(\)/);
   assert.equal((copy.match(/softNotify/g) ?? []).length, 3);
+});
+
+// ---- Round 19: the "···" bubble stays while a leader is on a task (its own turns AND its team members' work), with a 30 s grace
+const worker = (o = {}) => tmT({ address: "t500", name: "dev-36", parent: "t137", ...o });
+const who = (terms, track = null, now = 0) => I.typingNow(terms, "pa", {}, track, now).map((x) => x.who);
+
+test("R19: a leader counts as working when a terminal below it (parent chain) works; unrelated terminals do not", () => {
+  const idleLead = lead137({ status: "done" });
+  assert.deepEqual(who([po28(), idleLead]), []);
+  assert.deepEqual(who([po28(), idleLead, worker({ status: "working" })]), ["l:lead-po-inbox"]); // a team member works for it
+  const deep = worker({ address: "t501", name: "rev", parent: "t500", status: "working" }); // a grandchild
+  assert.deepEqual(who([po28(), idleLead, worker({ status: "idle" }), deep]), ["l:lead-po-inbox"]);
+  assert.deepEqual(who([po28(), idleLead, worker({ parent: "t999", status: "working" })]), []); // another parent
+  assert.deepEqual(who([po28(), idleLead, worker({ parent: "", status: "working" })]), []); // no parent
+  // the PO is not "writing" because a leader below it works
+  assert.deepEqual(I.typingNow([po28(), idleLead, worker({ status: "working" })], "pa", {}).map((x) => x.who), ["l:lead-po-inbox"]);
+  // a parent loop does not hang and marks only what is on it
+  assert.deepEqual(who([po28(), idleLead, worker({ parent: "t501", status: "working" }), worker({ address: "t501", parent: "t500", status: "idle" })]), []);
+  assert.ok(I.busyAddrs([worker({ address: "a", parent: "b", status: "working" }), worker({ address: "b", parent: "a" })]).size === 2);
+});
+
+test("R19: blocked (waiting for a permission) counts like working, for the leader and for a team member", () => {
+  assert.deepEqual(who([po28(), lead137({ status: "blocked" })]), ["l:lead-po-inbox"]);
+  assert.deepEqual(who([po28(), lead137({ status: "done" }), worker({ status: " Blocked " })]), ["l:lead-po-inbox"]);
+  assert.deepEqual(who([po28(), lead137({ status: "idle" }), worker({ status: "idle" })]), []);
+});
+
+test("R19: after the last working moment the bubble stays for TYPING_GRACE_MS and then goes (the poll sees it through graceKey)", () => {
+  assert.equal(I.TYPING_GRACE_MS, 30000);
+  const track = new Map();
+  const busy = [po28(), lead137({ status: "done" }), worker({ status: "working" })];
+  const quiet = [po28(), lead137({ status: "done" }), worker({ status: "done" })];
+  I.typingSync(track, busy, new Map(), 1000);
+  assert.deepEqual(who(busy, track, 1000), ["l:lead-po-inbox"]);
+  assert.equal(I.graceKey(track, 1000), "", "working now: not in grace");
+  I.typingSync(track, quiet, new Map(), 6000); // it stopped
+  assert.deepEqual(who(quiet, track, 6000), ["l:lead-po-inbox"], "5 s of quiet: still shown");
+  assert.equal(I.graceKey(track, 6000), "lead-po-inbox");
+  I.typingSync(track, quiet, new Map(), 31000);
+  assert.deepEqual(who(quiet, track, 31000), ["l:lead-po-inbox"], "exactly 30 s after the last working moment: still shown");
+  assert.equal(I.graceKey(track, 31000), "lead-po-inbox");
+  I.typingSync(track, quiet, new Map(), 31001);
+  assert.deepEqual(who(quiet, track, 31001), [], "past the grace: gone");
+  assert.equal(I.graceKey(track, 31001), "");
+  assert.equal(track.size, 0, "and forgotten");
+  // work again before the grace ends keeps it going and starts a fresh grace
+  I.typingSync(track, busy, new Map(), 40000);
+  I.typingSync(track, quiet, new Map(), 50000);
+  I.typingSync(track, busy, new Map(), 60000);
+  I.typingSync(track, quiet, new Map(), 61000);
+  assert.deepEqual(who(quiet, track, 80000), ["l:lead-po-inbox"], "20 s after the last working moment (60 s)");
+  // a leader that never worked has no grace
+  assert.deepEqual(who(quiet, new Map(), 5), []);
+});
+
+test("R19: a report of the leader ends the grace at once; an older report does not; a report while busy keeps the dots only while busy", () => {
+  const busy = [po28(), lead137({ status: "working" })];
+  const quiet = [po28(), lead137({ status: "done" })];
+  // the report that was there before the work does not clear anything
+  let track = new Map();
+  I.typingSync(track, busy, new Map([["lead-po-inbox", 500]]), 1000);
+  I.typingSync(track, quiet, new Map([["lead-po-inbox", 500]]), 3000);
+  assert.deepEqual(who(quiet, track, 3000), ["l:lead-po-inbox"]);
+  // a report after the work: the bubble goes at once
+  I.typingSync(track, quiet, new Map([["lead-po-inbox", 3500]]), 4000);
+  assert.deepEqual(who(quiet, track, 4000), []);
+  assert.equal(track.size, 0);
+  // a report while it still works: the dots stay while it works, and there is no grace once it stops
+  track = new Map();
+  I.typingSync(track, busy, new Map([["lead-po-inbox", 500]]), 1000);
+  I.typingSync(track, busy, new Map([["lead-po-inbox", 1500]]), 2000);
+  assert.deepEqual(who(busy, track, 2000), ["l:lead-po-inbox"]);
+  I.typingSync(track, quiet, new Map([["lead-po-inbox", 1500]]), 3000);
+  assert.deepEqual(who(quiet, track, 3000), []);
+  // leaderSaid takes the newest shown report of each leader (an "answered"/"start" item is not a bubble)
+  const said = I.leaderSaid([{ leader: "lead-a", items: [{ ms: 10, kind: "done" }, { ms: 30, kind: "progress" }, { ms: 99, kind: "answered" }, { ms: 98, kind: "start" }] }, { leader: "lead-b", items: [] }]);
+  assert.deepEqual([...said], [["lead-a", 30]]);
+});
+
+test("R19: a terminal that is gone loses its bubble at once, even inside the grace", () => {
+  const track = new Map();
+  I.typingSync(track, [po28(), lead137({ status: "working" })], new Map(), 1000);
+  I.typingSync(track, [po28(), lead137({ status: "done" })], new Map(), 2000);
+  assert.equal(track.size, 1);
+  const gone = [po28(), worker({ status: "done" })]; // the leader's terminal closed
+  assert.deepEqual(who(gone, track, 2500), []);
+  I.typingSync(track, gone, new Map(), 2500);
+  assert.equal(track.size, 0);
+  assert.equal(I.graceKey(track, 2500), "");
+});
+
+test("R19: statusSig changes when a team member starts working (the poll redraws), and not for unrelated terminals", () => {
+  const base = I.statusSig([po28(), lead137({ status: "done" }), worker({ status: "done" })]);
+  assert.notEqual(I.statusSig([po28(), lead137({ status: "done" }), worker({ status: "working" })]), base);
+  assert.equal(I.statusSig([po28(), lead137({ status: "done" }), worker({ status: "done", title: "x" })]), base);
+  assert.equal(I.statusSig([po28(), lead137({ status: "done" }), worker({ parent: "t999", status: "working" })]), base);
+  assert.equal(I.statusSig([po28(), lead137({ status: "done" }), worker({ status: "working" })]), I.statusSig([worker({ status: "working" }), lead137({ status: "done" }), po28()]));
+});
+
+test("R19: main.js polls for real: a working team member and the end of the grace each redraw once; a quiet poll does not", () => {
+  let terms = [po28(), lead137({ status: "done" }), worker({ status: "done" })];
+  const Inbox = loadInbox({ herdr: { terminals: () => terms } });
+  const d = new Inbox();
+  d.startWatch = () => {};
+  d.sig = null; d.typingAt = new Map(); // (init() sets these)
+  let n = 0;
+  d.softNotify = () => { n++; };
+  d.badge = () => {};
+  const real = Date.now;
+  let now = 1_000_000;
+  Date.now = () => now;
+  try {
+    d.pollStatus({}); // first poll only stores
+    assert.equal(n, 0);
+    now += 1500; d.pollStatus({});
+    assert.equal(n, 0, "a quiet second");
+    terms = [po28(), lead137({ status: "done" }), worker({ status: "working" })];
+    now += 1500; d.pollStatus({});
+    assert.equal(n, 1, "the team member started");
+    now += 1500; d.pollStatus({});
+    assert.equal(n, 1);
+    terms = [po28(), lead137({ status: "done" }), worker({ status: "done" })];
+    now += 1500; d.pollStatus({});
+    assert.equal(n, 2, "it stopped: grace begins, statusSig changed");
+    now += 1500; d.pollStatus({});
+    assert.equal(n, 2, "inside the grace nothing changes");
+    assert.deepEqual(d.typing({ terms, pick: "pa" }).map((x) => x.who), ["l:lead-po-inbox"]);
+    now += 31000; d.pollStatus({});
+    assert.equal(n, 3, "the grace ran out: one more redraw takes the dots away");
+    assert.deepEqual(d.typing({ terms, pick: "pa" }).map((x) => x.who), []);
+    now += 1500; d.pollStatus({});
+    assert.equal(n, 3);
+  } finally { Date.now = real; }
 });

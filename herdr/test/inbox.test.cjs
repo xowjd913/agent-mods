@@ -1845,7 +1845,8 @@ const leadT = (n, o = {}) => tm({ address: `t-${n}`, name: n, parent: "tp", ...o
 
 test("typingNow: 방의 PO와 그 방 리더 중 working인 것만, 이름순으로 낸다", () => {
   const terms = [poT({ status: "working" }), leadT("lead-b", { status: "working", title: "베타 작업" }), leadT("lead-a", { status: "working", title: "알파 작업" }), leadT("lead-c", { status: "idle" }), leadT("lead-d", { status: "blocked" })];
-  assert.deepEqual(I.typingNow(terms, "pa", {}), [{ who: "po", name: "데스크" }, { who: "l:lead-b", name: "베타 작업" }, { who: "l:lead-a", name: "알파 작업" }]); // PO 먼저, 리더는 이름(가나다)순
+  assert.deepEqual(I.typingNow(terms, "pa", {}), [{ who: "po", name: "데스크" }, { who: "l:lead-d", name: "d" }, { who: "l:lead-b", name: "베타 작업" }, { who: "l:lead-a", name: "알파 작업" }]); // PO 먼저, 리더는 이름순; 권한 기다림(blocked)도 일하는 중으로 센다
+  assert.deepEqual(I.typingNow([poT({ status: "blocked" })], "pa", {}), []); // PO 줄은 working만
   assert.deepEqual(I.typingNow([poT({ status: "idle" }), leadT("lead-c", { status: "done" })], "pa", {}), []); // 쓰는 중이 아니면 없다
   assert.deepEqual(I.typingNow([poT({ status: " Working " })], "pa", {}).map((x) => x.who), ["po"]); // 대소문자·공백 무시
 });
@@ -1887,7 +1888,9 @@ test("main.js: 폴더 감시는 그려질 때만 걸고, 안 그려지면 풀며
   assert.match(src, /cx\.timer\.every\(this\.refreshMs\(\)/); // 타이머는 그대로
   const poll = methodOf(src, "  pollStatus(cx) {", "  refreshMs()");
   assert.match(poll, /if \(!this\.drawing\(\)\) \{ this\.stopWatch\(\); return; \}/);
-  assert.match(poll, /statusSig\(this\.liveTerms\(\)\)/);
+  assert.match(poll, /statusSig\(terms\)/);
+  assert.match(poll, /this\.liveTerms\(\)/);
+  assert.match(poll, /graceKey\(this\.typingAt, now\)/); // 말미 유예가 끝나면 서명이 달라져 점이 사라진다
   assert.match(poll, /if \(first\) return;/); // 처음 한 번은 다시 그리지 않는다
   const start = methodOf(src, "  startWatch(cx) {", "  pollStatus(cx)");
   assert.match(start, /watchFolder\(dir\)/);
@@ -1904,7 +1907,7 @@ test("startWatch·stopWatch·pollStatus: 가짜 런타임으로 감시 한 번, 
   const calls = { watch: 0, cancel: 0 };
   let resolve;
   const mkWatch = () => { calls.watch++; const p = new Promise((r) => { resolve = r; }); p.cancel = () => { calls.cancel++; resolve([]); }; return p; };
-  const g = mkGlobals({ watchFolder: mkWatch, statusSig: I.statusSig, STATUS_POLL_MS: 1500, WATCH_DEBOUNCE_MS: 5, Array });
+  const g = mkGlobals({ watchFolder: mkWatch, statusSig: I.statusSig, graceKey: I.graceKey, Date, STATUS_POLL_MS: 1500, WATCH_DEBOUNCE_MS: 5, Array });
   const m = {
     ...runMethod(src, "  stopWatch() {", "  // Starts watching", g),
     ...runMethod(src, "  startWatch(cx) {", "  // Every STATUS_POLL_MS", g),
@@ -1912,7 +1915,7 @@ test("startWatch·stopWatch·pollStatus: 가짜 런타임으로 감시 한 번, 
   };
   const loads = [];
   let drawing = true, terms = [poT()], notified = 0, badged = 0;
-  const self = { watch: null, watchGen: 0, debounced: false, sig: null, data: { dir: "/x/inbox" }, drawing: () => drawing, liveTerms: () => terms, badge: () => badged++, load: (c) => loads.push(c), ui: {} };
+  const self = { watch: null, watchGen: 0, debounced: false, sig: null, typingAt: new Map(), syncTyping: () => {}, data: { dir: "/x/inbox" }, drawing: () => drawing, liveTerms: () => terms, badge: () => badged++, load: (c) => loads.push(c), ui: {} };
   self.softNotify = (c) => c.notify(); // (the real one waits while a selection is held: see the quietNow test)
   for (const k of Object.keys(m)) self[k] = m[k].bind(self);
   const cx = { spawn: (f) => f({ timer: { after: (ms, fn) => setTimeout(() => fn({}), ms) } }), notify: () => notified++, timer: { after: (ms, fn) => setTimeout(() => fn({}), ms) } };
@@ -1947,7 +1950,7 @@ test("startWatch·stopWatch·pollStatus: 가짜 런타임으로 감시 한 번, 
 
 test("typingRow·full: ··· 말풍선은 모든 필터에서 그리고, 안 읽은 수·따라가기·위치 지도에는 넣지 않는다", () => {
   const src = mainSrc();
-  assert.match(src, /\n    for \(const x of typingNow\(v\.terms, v\.pick, namesMemo\(\)\)\) blocks\.push\(this\.typingRow\(t, x\)\);/);
+  assert.match(src, /\n    for \(const x of this\.typing\(v\)\) blocks\.push\(this\.typingRow\(t, x\)\);/);
   const row = methodOf(src, "  typingRow(t, x) {", "  render(cx)");
   assert.match(row, /"···"/);
   assert.ok(!/on_mouse_down|text_view|TextView|selectable/.test(row)); // 드래그를 가로채지 않는다

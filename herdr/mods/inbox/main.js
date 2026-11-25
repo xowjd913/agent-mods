@@ -478,11 +478,79 @@ function decisionOptions(body) {
   if (options.length < 2) return { options: [], recommended: 0 };
   return { options, recommended: options.includes(rec) ? rec : 0 };
 }
-// Who is writing right now: the room's PO and its leaders whose terminal status is "working" -> [{who, name}] (PO first, then the leaders by
-// shown name). `who` is the timeline owner key ("po" or "l:<hc name>"), the same the entries use. Pure; the dots bubbles read this, never
-// the unread counts. For the "PO 모름" room only leaders count (there is no PO terminal to watch).
+// Who is writing right now: the room's PO (its own terminal is working) and its leaders that have work going on -> [{who, name}] (PO first,
+// then the leaders by shown name). `who` is the timeline owner key ("po" or "l:<hc name>"), the same the entries use. Pure; the dots
+// bubbles read this, never the unread counts. For the "PO 모름" room only leaders count (there is no PO terminal to watch).
+// A leader's own hc status is "working" only during its own turns: while it waits for a team member it reads "done" or idle. So a leader has
+// work going on when its terminal OR any terminal below it (the `parent` chain) is working or blocked (waiting for a permission), and for
+// TYPING_GRACE_MS after the last such moment (`track`, kept by typingSync) so a short gap does not make the dots flicker. The grace ends
+// earlier when the leader posts a report (the report bubble replaces the dots) or its terminal is gone. Status only, never screen text.
 const isWorking = (t) => String(t?.status ?? "").trim().toLowerCase() === "working";
-function typingNow(terms, room, memo) {
+const isBusy = (t) => { const s = String(t?.status ?? "").trim().toLowerCase(); return s === "working" || s === "blocked"; };
+const TYPING_GRACE_MS = 30000;
+const TYPING_HOPS = 8; // how far up the parent chain a busy terminal marks its owners (and a loop guard)
+// The addresses with work at or below them: every busy terminal and each terminal on its parent chain.
+function busyAddrs(terms) {
+  const list = terms ?? [];
+  const byAddr = new Map();
+  for (const t of list) if (t?.address) byAddr.set(t.address, t);
+  const hot = new Set();
+  for (const t of list) {
+    if (!isBusy(t) || !t.address) continue;
+    let cur = t;
+    for (let i = 0; cur && i <= TYPING_HOPS; i++) {
+      if (hot.has(cur.address)) break; // its owners are marked already (also ends a loop)
+      hot.add(cur.address);
+      cur = cur.parent ? byAddr.get(cur.parent) : null;
+    }
+  }
+  return hot;
+}
+// The newest shown report of every leader as ms: Map<hc name, ms> from the loaded summaries [{leader, items}].
+function leaderSaid(leaders) {
+  const m = new Map();
+  for (const s of leaders ?? []) {
+    let x = 0;
+    for (const it of s?.items ?? []) if (tlShown(it)) x = Math.max(x, Number(it.ms) || 0);
+    if (x && s?.leader) m.set(s.leader, x);
+  }
+  return m;
+}
+// Keeps `track` (Map<hc name, {at, rep, stop, on}>) up to date: at = when work was last seen, on = it was seen at the last sync, rep = the newest
+// report seen, stop = a report came after the work began (no grace). Call it with the same terminals and `said` (leaderSaid) the dots are drawn from.
+function typingSync(track, terms, said, now) {
+  const list = terms ?? [];
+  const hot = busyAddrs(list);
+  const busy = new Set(), live = new Set();
+  for (const t of list) {
+    const n = String(t?.name ?? "");
+    if (!/^lead-/.test(n)) continue;
+    live.add(n);
+    if (hot.has(t.address)) busy.add(n);
+  }
+  for (const n of live) {
+    const r = Number(said?.get(n)) || 0;
+    let e = track.get(n);
+    if (!e) {
+      if (!busy.has(n)) continue;
+      e = { at: 0, rep: r, stop: false, on: false };
+      track.set(n, e);
+    }
+    if (busy.has(n) && !e.on) e.stop = false; // new work after a quiet moment starts a fresh grace
+    if (r > e.rep) { e.rep = r; e.stop = true; }
+    if (busy.has(n)) { e.on = true; e.at = now; }
+    else { e.on = false; if (e.stop || now - e.at > TYPING_GRACE_MS) track.delete(n); }
+  }
+  for (const n of [...track.keys()]) if (!live.has(n)) track.delete(n); // the terminal is gone
+}
+const typingGrace = (e, now) => Boolean(e) && !e.on && !e.stop && e.at > 0 && now - e.at <= TYPING_GRACE_MS;
+// The leaders that are only in their grace now, as one text: the poll adds it to statusSig so the dots go away at the end of the grace.
+function graceKey(track, now) {
+  const out = [];
+  for (const [n, e] of track ?? []) if (typingGrace(e, now)) out.push(n);
+  return out.sort().join(",");
+}
+function typingNow(terms, room, memo, track = null, now = 0) {
   const list = terms ?? [];
   const out = [];
   if (!room) return out;
@@ -491,11 +559,13 @@ function typingNow(terms, room, memo) {
     const term = po ? list.find((t) => t.address === po.address) : null;
     if (term && isWorking(term)) out.push({ who: "po", name: po.label });
   }
+  const hot = busyAddrs(list);
   const seen = new Set();
   const leaders = [];
   for (const t of list) {
     const n = String(t?.name ?? "");
-    if (!/^lead-/.test(n) || seen.has(n) || !isWorking(t) || leaderOwner(list, n, t.address) !== room) continue;
+    if (!/^lead-/.test(n) || seen.has(n) || leaderOwner(list, n, t.address) !== room) continue;
+    if (!hot.has(t.address) && !typingGrace(track?.get(n), now)) continue;
     seen.add(n);
     leaders.push({ who: `l:${n}`, name: leaderName(n, t, memo) });
   }
@@ -503,13 +573,15 @@ function typingNow(terms, room, memo) {
   return [...out, ...leaders];
 }
 // A short text that changes exactly when something the desk shows from the terminals changes: the status, the wait label and the shown
-// name of every PO and leader. The 1.5 s poll redraws a copy only when this differs from the last one (no redraw on a quiet second).
+// name of every PO and leader, and whether a leader has work below it (a team member working). The 1.5 s poll redraws a copy only when this
+// differs from the last one (no redraw on a quiet second).
 function statusSig(terms) {
   const rows = [];
+  const hot = busyAddrs(terms);
   for (const t of terms ?? []) {
     const lead = /^lead-/.test(String(t?.name ?? ""));
     if (!lead && !poId(t)) continue;
-    rows.push(`${t.address}|${String(t.status ?? "")}|${lead ? waitingKind(t) : ""}|${lead ? liveName(t) : ""}`);
+    rows.push(`${t.address}|${String(t.status ?? "")}|${lead ? waitingKind(t) : ""}|${lead ? liveName(t) : ""}|${lead && hot.has(t.address) ? 1 : 0}`);
   }
   return rows.sort().join("\n");
 }
@@ -817,6 +889,7 @@ export default class Inbox extends View {
     this.debounced = false;
     this.again = false; // a load was asked for while one ran: run it again when that one ends
     this.sig = null; // statusSig of the terminals at the last status poll
+    this.typingAt = new Map(); // leader hc name -> {at, rep, stop, on}: who worked lately (the grace of the "···" bubble), see typingSync
     this.load(cx);
     // The Dock owns the slow refresh and (with any pane) the badge; the window and a pane are read on screen, so they refresh faster,
     // a pane only while it is being drawn (a pane in a tab nobody looks at does not poll).
@@ -998,7 +1071,11 @@ export default class Inbox extends View {
     if (!this.drawing()) { this.stopWatch(); return; }
     this.startWatch(cx);
     let sig = "";
-    try { sig = statusSig(this.liveTerms()); } catch { return; }
+    try {
+      const terms = this.liveTerms(), now = Date.now();
+      this.syncTyping(terms, now);
+      sig = `${statusSig(terms)}\n~${graceKey(this.typingAt, now)}`; // the grace running out changes this, so the dots are redrawn away
+    } catch { return; }
     if (sig === this.sig) return;
     const first = this.sig === null;
     this.sig = sig;
@@ -1010,6 +1087,15 @@ export default class Inbox extends View {
   refreshMs() { return this.windowed || this.paned ? WINDOW_REFRESH_MS : PANE_REFRESH_MS; }
   // Was this copy drawn lately (within two refreshes)? A view that is not drawn is not being read. Never drawn yet counts as drawing.
   drawing() { return !this.drawnAt || Date.now() - this.drawnAt <= this.refreshMs() * 2 + 2000; }
+
+  // The "···" memory from the live terminals and the reports loaded so far (see typingSync).
+  syncTyping(terms, now) { try { typingSync(this.typingAt, terms, leaderSaid(this.data?.leaders), now); } catch {} }
+  // Who is writing now in the picked room: working (or blocked) leaders, those with a team member working, and those in their grace.
+  typing(v) {
+    const now = Date.now();
+    this.syncTyping(v.terms, now);
+    return typingNow(v.terms, v.pick, namesMemo(), this.typingAt, now);
+  }
 
   // The number of leaders that wait on a decision, on the app icon badge. ONE copy writes it at a time: the Dock or a pane, whichever holds
   // the lease in shared state (BADGE_KEY; renewed while it keeps loading, taken over when its holder went quiet); the window never writes.
@@ -2026,7 +2112,7 @@ export default class Inbox extends View {
     // The "···" bubbles of whoever is writing now (the room's PO and leaders whose hc status is working): in EVERY filter (a chip hides
     // messages, not what is happening), after the last message, and nothing else reads them (not the unread counts, not `seenNext`, not the
     // follow key, not the spot map).
-    for (const x of typingNow(v.terms, v.pick, namesMemo())) blocks.push(this.typingRow(t, x));
+    for (const x of this.typing(v)) blocks.push(this.typingRow(t, x));
     // Follow the newest: a new message scrolls to the bottom when the room just opened or the person already was at the bottom;
     // a person who scrolled up keeps their place. The handle's numbers are those of the last layout.
     const key = tlKey(`${v.pick}~${v.filter}`, v.shown); // a new filter scrolls to the newest like a new room
