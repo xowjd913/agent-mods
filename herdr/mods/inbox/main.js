@@ -24,7 +24,7 @@ import { theme, exec, appHome, checking, window, run, hc, terminals, panes, focu
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
 const ICON = (name) => `mods/workspace-chrome/${name}.svg`;
 const LOAD_TIMEOUT = 20000, LOAD_STALL_MS = 30000, WINDOW_REFRESH_MS = 5000, PANE_REFRESH_MS = 30000, STATUS_POLL_MS = 1500, WATCH_DEBOUNCE_MS = 250;
-const KIND = { done: ["완료", "working"], decision: ["결정", "blocked"], verify: ["확인", "blocked"], stop: ["중단", "idle"], resume: ["재개", "dim"], other: ["알림", "dim"], start: ["시작", "dim"] };
+const KIND = { done: ["완료", "working"], decision: ["결정", "blocked"], verify: ["확인", "blocked"], stop: ["중단", "idle"], resume: ["재개", "dim"], other: ["알림", "dim"], start: ["시작", "dim"], progress: ["진행", "dim"] };
 const WINDOW = { mod: "inbox", kind: "window", key: "inbox", keep: true, width: 720, height: 680, props: { mode: "window" } };
 const SENT_KEY = "inbox.sent";
 const PICK_KEY = "inbox.po"; // the PO id the person picked last (shared, so it also holds across window reopens)
@@ -222,9 +222,10 @@ function chatTarget(terms, to = [], pick = "") {
 // of this room that wait on a decision/verify (ts = the report time of the waited-on ask, "" when no report is known). Entries come
 // oldest first: {key, who ("l:<leader>" | "po" | "me"), ms, ts, s?, leader?, it?, text?, to?, waiting?, wait?}. `waiting` marks the report a
 // waiting leader is blocked on (it carries the answer buttons); `wait` is a made-up entry for a waiting leader with no report in the
-// list (its label alone), placed at `now` (the newest). Reports of kind answered/start are not messages.
+// list (its label alone), placed at `now` (the newest). Reports of kind answered are not messages; start/progress are the leader's own notices
+// (sent to the desk only, never to the PO) and show as its bubble.
 const TL_GAP_MS = 5 * 60 * 1000; // the same sender within this gap shares one header
-const tlShown = (it) => Boolean(it) && it.kind !== "answered" && it.kind !== "start";
+const tlShown = (it) => Boolean(it) && it.kind !== "answered";
 function timeline(room, leaders, says, mine, waits = [], now = 0) {
   const out = [];
   const seen = new Set();
@@ -383,7 +384,7 @@ function seenNext(seenMap, room, entries) {
 }
 // The chat filter chips, in order: [key, label]. 전체 = everything; 안 읽은 것 = messages newer than the room's seen marker as it was when the
 // room was opened (`seen`, a snapshot: opening a room moves the live marker to now, which would empty this filter at once); the rest are the
-// leader reports of one kind (결정 필요 = decision, 최종 확인 요청 = verify, 결과 = done, 멈춤 = stop). resume/start/other show only under
+// leader reports of one kind (결정 필요 = decision, 최종 확인 요청 = verify, 결과 = done, 멈춤 = stop). resume/start/progress/other show only under
 // 전체. The person's own lines are only under 전체; the made-up "waiting" entry (no report) counts by the kind the leader waits on.
 const CHAT_FILTERS = [["all", "전체"], ["unread", "안 읽은 것"], ["decision", "결정 필요"], ["verify", "최종 확인 요청"], ["done", "결과"], ["stop", "멈춤"]];
 const entryKind = (e) => (e?.who === "po" || e?.who === "me" ? "" : e?.waiting || e?.it?.kind || "");
@@ -1375,7 +1376,7 @@ export default class Inbox extends View {
     return out.sort((a, b) => (b.item?.ms ?? 0) - (a.item?.ms ?? 0));
   }
 
-  // Everything else, newest first: not start/answered lines, and not the report a lane-1 card already shows. Each carries its owner PO.
+  // Everything else, newest first: not answered lines, and not the report a lane-1 card already shows. Each carries its owner PO.
   reports(asks) {
     const shown = new Set(asks.map((a) => `${a.s.leader}|${a.item?.ts}`));
     const list = this.liveTerms();
@@ -1383,7 +1384,7 @@ export default class Inbox extends View {
     for (const s of this.data?.leaders ?? []) {
       const owner = leaderOwner(list, s.leader, s.terminal, s.po);
       for (const it of s.items) {
-        if (it.kind === "answered" || it.kind === "start" || shown.has(`${s.leader}|${it.ts}`)) continue;
+        if (it.kind === "answered" || shown.has(`${s.leader}|${it.ts}`)) continue;
         out.push({ s, it, owner });
       }
     }

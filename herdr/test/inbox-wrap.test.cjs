@@ -608,9 +608,9 @@ test("R19: a report of the leader ends the grace at once; an older report does n
   assert.deepEqual(who(busy, track, 2000), ["l:lead-po-inbox"]);
   I.typingSync(track, quiet, new Map([["lead-po-inbox", 1500]]), 3000);
   assert.deepEqual(who(quiet, track, 3000), []);
-  // leaderSaid takes the newest shown report of each leader (an "answered"/"start" item is not a bubble)
+  // leaderSaid takes the newest shown report of each leader (an "answered" item is not a bubble; start/progress are, #43)
   const said = I.leaderSaid([{ leader: "lead-a", items: [{ ms: 10, kind: "done" }, { ms: 30, kind: "progress" }, { ms: 99, kind: "answered" }, { ms: 98, kind: "start" }] }, { leader: "lead-b", items: [] }]);
-  assert.deepEqual([...said], [["lead-a", 30]]);
+  assert.deepEqual([...said], [["lead-a", 98]]);
 });
 
 test("R19: a terminal that is gone loses its bubble at once, even inside the grace", () => {
