@@ -687,12 +687,14 @@ function readPoSession(dir, id) {
 }
 // {<po id>: {usd, unknown:[model ids not in the table], sub:<sub-agent transcripts counted>, partial}} for every PO that has a session record
 // whose transcript can be read. A PO without a record (it started before the hook recorded sessions) is simply absent: nothing is shown.
-function poCosts(dir = inboxDir()) {
+// `cacheDir` is where the read-position cache lives: the desk watches the inbox folder (and reloads on any change in it), so collect() keeps the
+// cache outside it; it defaults to `dir` for callers that have no such folder.
+function poCosts(dir = inboxDir(), cacheDir = dir) {
   const out = {};
   let names = [];
   try { names = fs.readdirSync(path.join(dir, PO_SESSION_DIR)); } catch { return out; }
   let cache = { files: {} };
-  try { const c = JSON.parse(fs.readFileSync(path.join(dir, COST_CACHE), "utf8")); if (c && typeof c.files === "object" && c.files) cache = { files: c.files }; } catch {}
+  try { const c = JSON.parse(fs.readFileSync(path.join(cacheDir, COST_CACHE), "utf8")); if (c && typeof c.files === "object" && c.files) cache = { files: c.files }; } catch {}
   const next = { files: {} };
   let dirty = false;
   let budget = COST_BUDGET;
@@ -718,8 +720,8 @@ function poCosts(dir = inboxDir()) {
   if (Object.keys(next.files).length !== Object.keys(cache.files).length) dirty = true; // a transcript no PO is on any more is dropped
   if (dirty) {
     try {
-      const file = path.join(dir, COST_CACHE);
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const file = path.join(cacheDir, COST_CACHE);
+      fs.mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
       const tmp = `${file}.tmp-${process.pid}`;
       fs.writeFileSync(tmp, JSON.stringify(next), { mode: 0o600 });
       fs.renameSync(tmp, file);
@@ -740,7 +742,7 @@ function collect(dir = inboxDir()) {
   }
   leaders.sort((a, b) => (b.last?.ms ?? 0) - (a.last?.ms ?? 0));
   let cost = {};
-  try { cost = poCosts(dir); } catch {} // a failed cost read never takes the desk's data down
+  try { cost = poCosts(dir, path.join(appRoot(), "data", "inbox")); } catch {} // a failed cost read never takes the desk's data down
   return { at: new Date().toISOString(), dir, root: appRoot(), leaders, po: readPo(dir), imgd: imageDims(), cost };
 }
 
@@ -835,6 +837,7 @@ function costTip(c) {
     c.sub > 0 ? "서브에이전트 포함" : "메인 세션만",
     unk ? `가격표에 없는 모델이라 합계를 내지 않았습니다: ${c.unknown.slice(0, 3).join(", ")}` : "",
     c.partial ? "아직 다 읽지 못해 더 늘 수 있습니다" : "",
+    "빠른 모드·미국 데이터 거주 가격·웹 검색 같은 서버 도구 요금은 계산하지 않아 실제보다 적을 수 있습니다",
     "/clear 하면 0부터 다시 셉니다",
   ].filter(Boolean).join(" · ");
 }

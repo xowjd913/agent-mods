@@ -952,6 +952,7 @@ function costTip(c) {
     c.sub > 0 ? "서브에이전트 포함" : "메인 세션만",
     unk ? `가격표에 없는 모델이라 합계를 내지 않았습니다: ${c.unknown.slice(0, 3).join(", ")}` : "",
     c.partial ? "아직 다 읽지 못해 더 늘 수 있습니다" : "",
+    "빠른 모드·미국 데이터 거주 가격·웹 검색 같은 서버 도구 요금은 계산하지 않아 실제보다 적을 수 있습니다",
     "/clear 하면 0부터 다시 셉니다",
   ].filter(Boolean).join(" · ");
 }
@@ -1474,7 +1475,10 @@ export default class Inbox extends View {
         if (r.code !== 0) throw new Error(`수집기 종료 코드 ${r.code} ${(r.stderr || "").trim()}`);
         const d = JSON.parse(r.stdout);
         if (gen !== this.gen) return;
-        const sig = JSON.stringify({ ...d, at: 0 });
+        // The cost enters the signature as what is drawn (label + tooltip, whole cents), never the raw numbers, so a working PO's tokens do not redraw the desk.
+        const shown = {};
+        for (const [po, c] of Object.entries(d?.cost ?? {})) shown[po] = [costLabel(c), costTip(c)];
+        const sig = JSON.stringify({ ...d, cost: shown, at: 0 });
         this.changed = sig !== this.sigData || Boolean(this.error) || !this.data || Date.now() - this.drawnAt > LOAD_REDRAW_MS;
         this.sigData = sig;
         this.data = d;

@@ -247,10 +247,42 @@ test("poCosts: 깨진 캐시 파일은 처음부터 다시 읽는다", () => {
 });
 
 test("collect: cost 필드로 PO별 금액이 실리고, 비용 읽기가 실패해도 데스크 데이터는 그대로다", () => {
-  const dir = tmp();
+  const dir = tmp(), home = tmp();
+  const old = process.env.HERDR_APP_HOME;
+  process.env.HERDR_APP_HOME = home;
+  try {
+    session(dir, "po-a", "s1", msg("a", "claude-opus-5-5", { input_tokens: 1e6 }));
+    near(I.collect(dir).cost["po-a"].usd, 4);
+    assert.deepEqual(I.collect(path.join(dir, "nope")).cost, {});
+    // The read-position cache is NOT written into the watched inbox folder (its writes would reload the desk again and again while a PO works).
+    assert.equal(fs.existsSync(path.join(dir, I.COST_CACHE)), false);
+    assert.equal(fs.existsSync(path.join(home, "data", "inbox", I.COST_CACHE)), true);
+  } finally {
+    if (old === undefined) delete process.env.HERDR_APP_HOME; else process.env.HERDR_APP_HOME = old;
+  }
+});
+
+test("poCosts: cacheDir를 주면 캐시는 거기에만 쓰고 감시하는 inbox 폴더에는 아무것도 더하지 않는다", () => {
+  const dir = tmp(), cdir = path.join(tmp(), "c");
   session(dir, "po-a", "s1", msg("a", "claude-opus-5-5", { input_tokens: 1e6 }));
-  near(I.collect(dir).cost["po-a"].usd, 4);
-  assert.deepEqual(I.collect(path.join(dir, "nope")).cost, {});
+  const before = fs.readdirSync(dir).sort();
+  near(I.poCosts(dir, cdir)["po-a"].usd, 4);
+  assert.deepEqual(fs.readdirSync(dir).sort(), before);
+  assert.ok(fs.existsSync(path.join(cdir, I.COST_CACHE)));
+});
+
+test("main.js load: 다시 그리기 서명에는 금액의 원시 숫자가 아니라 화면에 나가는 글(라벨·툴팁)만 들어간다", () => {
+  const src = mainSrc();
+  const at = src.indexOf("const sig = JSON.stringify({ ...d, cost: shown, at: 0 });");
+  assert.ok(at > 0);
+  const head = src.slice(src.lastIndexOf("const shown = {};", at), at);
+  assert.match(head, /shown\[po\] = \[costLabel\(c\), costTip\(c\)\]/);
+  assert.doesNotMatch(src, /JSON\.stringify\(\{ \.\.\.d, at: 0 \}\)/);
+  // 같은 규칙을 직접 돌려 본다: 센트가 안 바뀌는 사용량 증가는 서명이 같고, 센트가 바뀌면 다르다.
+  const sigOf = (cost) => JSON.stringify({ cost: Object.fromEntries(Object.entries(cost).map(([po, c]) => [po, [I.costLabel(c), I.costTip(c)]])) });
+  const base = { usd: 3.2001, unknown: [], sub: 1, partial: false };
+  assert.equal(sigOf({ a: base }), sigOf({ a: { ...base, usd: 3.2049 } }));
+  assert.notEqual(sigOf({ a: base }), sigOf({ a: { ...base, usd: 3.21 } }));
 });
 
 test("라벨·툴팁: $ 두 자리, 큰 금액은 천 단위, 모르는 모델은 $?, 툴팁은 한국어로 추정치임과 범위를 밝힌다", () => {
@@ -265,6 +297,7 @@ test("라벨·툴팁: $ 두 자리, 큰 금액은 천 단위, 모르는 모델�
   assert.match(I.costTip({ usd: 3.2, unknown: [], sub: 2, partial: false }), /서브에이전트 포함/);
   assert.match(I.costTip({ usd: 3.2, unknown: ["claude-x"], sub: 0, partial: false }), /가격표에 없는 모델.*claude-x/);
   assert.match(I.costTip({ usd: 3.2, unknown: [], sub: 0, partial: true }), /더 늘 수 있습니다/);
+  assert.match(tip, /빠른 모드·미국 데이터 거주 가격·웹 검색.*계산하지 않아 실제보다 적을 수 있습니다/);
 });
 
 test("costLine: main.js와 inbox.cjs가 같은 블록을 쓴다", () => {
