@@ -802,3 +802,18 @@ test("main.js: Enter 전송은 imeHold를 거치고, PO 라벨이 없으면 안�
   assert.match(src, /id\("po-hint"\)/);
   assert.match(src, /\.child\(this\.picker\(t, v\)\)/); // 전체 보기는 PO가 0개여도 안내를 그린다
 });
+
+test("holdShown: 붙든 Enter가 둘째 Enter를 기다리는 동안만 안내를 보인다", () => {
+  assert.equal(I.holdShown(1000, 0), false);
+  assert.equal(I.holdShown(1000, 5000), true);
+  assert.equal(I.holdShown(5050, 5000), true); // 확정이 만든 편집
+  assert.equal(I.holdShown(5500, 5000), false); // 새로 쳤다
+});
+
+test("main.js: 붙든 Enter 안내를 그리고, PO를 고르거나 보내면 heldAt을 비운다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8");
+  assert.match(src, /한 번 더 Enter로 보냅니다/);
+  assert.match(src, /pickPo\(id, c\) \{\n\s+this\.heldAt = 0;/);
+  assert.match(src, /sendChat\(c\) \{\n\s+this\.sentAt = Date\.now\(\);\n\s+this\.heldAt = 0;/);
+  assert.match(src, /this\.heldAt = now; c\.notify\(\)/);
+});

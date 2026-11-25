@@ -128,6 +128,7 @@ const imeHold = (value, changedAt, heldAt, now) => {
   if (Number(now) - Number(changedAt) < IME_MS) return true;
   return IME_TAIL.test(String(value ?? "").trimEnd());
 };
+const holdShown = (changedAt, heldAt) => Number(heldAt) > 0 && Number(changedAt) <= Number(heldAt) + 100; // a held Enter is still waiting for its second one
 // The "@query" being typed right before `cursor` (offsets into the box text), or null. Not inside a chip, not in the middle of a word.
 function mentionQuery(text, cursor, tokens = []) {
   const before = String(text ?? "").slice(0, cursor);
@@ -277,6 +278,7 @@ export default class Inbox extends View {
     this.nlAt = 0; // the last Shift+Enter handled (ms)
     this.chat.on("change", (_e, c) => {
       this.changedAt = Date.now();
+      if (this.heldAt && !holdShown(this.changedAt, this.heldAt)) { this.heldAt = 0; try { c.notify(); } catch {} }
       try { if (strayBreak(this.chat.value(), this.sentAt, this.changedAt)) { this.chat.set_value(""); return; } } catch {} // the Enter that sent left a line break
       this.syncMenu(c);
     });
@@ -463,6 +465,7 @@ export default class Inbox extends View {
   }
 
   pickPo(id, c) {
+    this.heldAt = 0;
     try { setShared(PICK_KEY, id); } catch {}
     this.menu = null;
     this.chatSeen = null; // the other PO's lines: scroll to their bottom
@@ -561,7 +564,7 @@ export default class Inbox extends View {
       if (now - this.pickedAt <= 250 || now - this.sentAt <= 250 || now - this.heldAt < 150) return; // (the key and the submit event of one press are one Enter)
       let value = "";
       try { value = this.chat.value(); } catch {}
-      if (value.trim() && imeHold(value, this.changedAt, this.heldAt, now)) { this.heldAt = now; return; } // maybe the IME's confirming Enter: only this once
+      if (value.trim() && imeHold(value, this.changedAt, this.heldAt, now)) { this.heldAt = now; c.notify(); return; } // maybe the IME's confirming Enter: only this once
       this.sendChat(c);
     } else if (intent === "newline" && now - this.nlAt > 80) {
       this.nlAt = now;
@@ -614,6 +617,7 @@ export default class Inbox extends View {
 
   sendChat(c) {
     this.sentAt = Date.now();
+    this.heldAt = 0;
     const v = this.view();
     const terms = v.terms;
     const known = v.pick === PO_OTHER ? [] : terms.filter((t) => /^lead-/.test(String(t.name ?? "")) && leaderOwner(terms, t.name, t.address) === v.pick).map((t) => t.name);
@@ -685,6 +689,7 @@ export default class Inbox extends View {
         .on_scroll_wheel((e) => { this.chatUp = chatWheel(this.chatUp, e?.delta?.y); }) // wheel up = positive y
         .when(Boolean(this.chatScroll), (x) => x.track_scroll(this.chatScroll)).children(lines.map(bubble))))
       .when(Boolean(menu), (el) => el.child(menu))
+      .when(holdShown(this.changedAt, this.heldAt), (el) => el.child(div().text_size(11).text_color(t.working).child("한 번 더 Enter로 보냅니다")))
       .child(div().truncate().text_size(10.5).text_color(t.dim).child(target ? `받는 PO: ${target.label}` : "받는 PO가 없습니다 — PO를 고르세요"))
       .child(h_flex().gap(6).items_center()
         .child(div().flex_1().min_w(0).on_mouse_down("left", stop)
