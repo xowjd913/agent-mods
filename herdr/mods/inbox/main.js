@@ -30,6 +30,7 @@ const SENT_KEY = "inbox.sent";
 const PICK_KEY = "inbox.po"; // the PO id the person picked last (shared, so it also holds across window reopens)
 const CHAT_KEY = "inbox.chat"; // the lines the person sent through the chat box [{ts, ms, text, to, po}] (po: the PO id they went to)
 const MAX_CHAT = 100, MAX_ENTRIES = 80; // MAX_ENTRIES: the newest timeline entries drawn (a waiting one is always drawn)
+const SNAP_KEY = "inbox.snap"; // {<room id>: {seen, ts}}: the "안 읽은 것" base of a room as it was when opened, shared by every copy for a while
 const SEEN_KEY = "inbox.seen"; // {<room id>: ms of the newest message the person had on screen when last opening that room}
 const WIDE_MIN = 520; // two columns (rooms | room) from this width; narrower: the window shows the rooms as a strip on top, the dock and a pane as the slim column
 const ROOM_W = 168, SLIM_W = 58; // the window's room list / the dock's slim room column (initial circle + badges, the project as the tooltip)
@@ -320,7 +321,10 @@ const badgeTurn = (lease, id, now, ttl = 65000) => (!lease || lease.id === id ||
 // A PO that waits on a prompt: the last lines of its screen, and the numbered choices on it ("❯ 1. Yes" / "2. No ..."). The desk shows them and the
 // person presses one; nothing is ever pressed by itself. The choices are the last contiguous run of numbered rows (1, 2, ...) once the footer
 // (hint lines like "Esc to cancel · Tab to amend", box borders) at the bottom of the screen is skipped; else none.
-const promptTail = (text, n = 10) => cleanText(text).split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim()).slice(-n).map((l) => (l.length > 140 ? `${l.slice(0, 139)}…` : l));
+// A spinner / timer row of the PO ("✻ Waiting (12s)", "✻ Thinking… (3s · esc to interrupt)"): it changes every second without the question
+// changing, so it is neither shown nor part of the signature.
+const PROMPT_TIMER = /^[\s│┃|]*[^\p{L}\p{N}\s]?\s*\p{L}[\p{L}\s'-]{0,30}[….]*\s*\((?:\d+\s*[hms]\s*)+[^)]*\)[\s│┃|]*$/u;
+const promptTail = (text, n = 10) => cleanText(text).split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim() && !PROMPT_TIMER.test(l)).slice(-n).map((l) => (l.length > 140 ? `${l.slice(0, 139)}…` : l));
 const PROMPT_NUM = /^[\s│┃|]*([❯>›])?\s*(\d{1,2})[.)]\s+(\S.*?)[\s│┃|]*$/;
 const promptFooter = (l) => /^[^\p{L}\p{N}]*$/u.test(l) || (l.length <= 140 && /\b(esc|enter|tab|ctrl|shift|alt)\b|^\s*[↑↓←→]|\? for shortcuts/i.test(l));
 // {options: [{key, label, on}], head: the up to 2 lines right above the choices}. Options only when they are 1..N (2 or more).
@@ -344,6 +348,8 @@ function promptSig(text) {
   const lines = p.options.length ? [...p.head, ...p.options.map((o) => `${o.key}. ${o.label}`)] : promptTail(text, 6);
   return lines.map((l) => l.replace(/\s+/g, " ").trim()).join("\n");
 }
+// Whether two reads of a PO's screen show the same thing (the last 40 rows, whitespace squeezed, timer rows left out): then the panel is not redrawn.
+const promptSame = (a, b) => promptTail(a, 40).map((l) => l.replace(/\s+/g, " ").trim()).join("\n") === promptTail(b, 40).map((l) => l.replace(/\s+/g, " ").trim()).join("\n");
 // Whether the pasted `line` is still in the PO's input: the start or the end of its text is among the last 14 screen lines (box borders and
 // whitespace ignored), or, for a long / multi-line paste the PO folds into "[Pasted text …]", that marker is.
 function inputHas(screen, line) {
@@ -376,6 +382,38 @@ function filterEntries(entries, filter, seen) {
   if (!filter || filter === "all" || !CHAT_FILTERS.some((f) => f[0] === filter)) return list;
   if (filter === "unread") return list.filter((e) => e.who !== "me" && !e.wait && e.ms > (Number(seen) || 0));
   return list.filter((e) => entryKind(e) === filter);
+}
+// What the timeline draws under a filter: the filtered entries, and always the pending "waiting" ones (a leader still waiting on the person must not
+// vanish because a chip hides its kind). `raw` order is kept. The chip counts are not changed by this.
+function keepWaiting(raw, shown) {
+  const have = new Set(shown ?? []);
+  return (raw ?? []).filter((e) => have.has(e) || e.waiting);
+}
+// The "안 읽은 것" base, shared by every copy of the mod (Dock, window, pane): {<room>: {seen, ts}}. The first copy to draw a room takes the room's
+// last-opened marker before it moves, and the others use that same value for SNAP_TTL_MS after it was last drawn (each draw renews it).
+const SNAP_TTL_MS = 30000;
+const snapBase = (snaps, room, seen, now, ttl = SNAP_TTL_MS) => {
+  const s = snaps?.[room];
+  return s && now - (Number(s.ts) || 0) <= ttl ? Number(s.seen) || 0 : Number(seen?.[room]) || 0;
+};
+// -> {base, next}: `next` = the map to store (expired rooms dropped, this room renewed at most every ttl/3), null when nothing changes.
+function snapStep(snaps, room, seen, now, ttl = SNAP_TTL_MS) {
+  if (!room) return { base: 0, next: null };
+  const cur = snaps && typeof snaps === "object" ? snaps : {};
+  const fresh = Object.fromEntries(Object.entries(cur).filter(([, s]) => now - (Number(s?.ts) || 0) <= ttl));
+  const had = fresh[room];
+  const base = had ? Number(had.seen) || 0 : Number(seen?.[room]) || 0;
+  const touch = !had || now - (Number(had.ts) || 0) > ttl / 3;
+  if (!touch && Object.keys(fresh).length === Object.keys(cur).length) return { base, next: null };
+  return { base, next: { ...fresh, [room]: { seen: base, ts: touch ? now : had.ts } } };
+}
+// The element id of a timeline row: the entry key, which ends in the "#n" of a duplicate; a long key keeps its start and gets a hash of the whole.
+function tlId(key) {
+  const k = String(key ?? "");
+  if (k.length <= 80) return `tl-${k}`;
+  let h = 5381;
+  for (const ch of k) h = (Math.imul(h, 33) ^ ch.codePointAt(0)) >>> 0;
+  return `tl-${k.slice(0, 64)}~${h.toString(16).padStart(8, "0")}`;
 }
 // {all, unread, decision, verify, done, stop}: how many entries each chip shows.
 const filterCounts = (entries, seen) => Object.fromEntries(CHAT_FILTERS.map(([k]) => [k, filterEntries(entries, k, seen).length]));
@@ -522,8 +560,8 @@ export default class Inbox extends View {
     this.promptBusy = false;
     this.promptBusyAt = 0;
     this.promptGen = 0;
+    this.promptChain = 0; // the newest scheduled re-read of the screen; an older one does nothing
     this.filt = new Map(); // room -> the chat filter chip picked there (전체 when missing); not saved: a restart shows every message again
-    this.snap = null; // {room, seen}: the room's last-opened marker as it was when this copy opened that room (the 안 읽은 것 filter's base)
     this.heldAt = 0; // the last Enter held back as a possible IME confirm (ms)
     this.nlAt = 0; // the last Shift+Enter handled (ms)
     this.chat.on("change", (_e, c) => {
@@ -721,9 +759,12 @@ export default class Inbox extends View {
       return { ...r, n: all.filter((a) => a.owner === r.id).length, unread: r.id === pick ? 0 : unreadCount(entries, seen[r.id]) };
     });
     const filter = pick ? this.filt.get(pick) ?? "all" : "all";
-    const base = this.snap?.room === pick ? this.snap.seen : Number(seen[pick]) || 0; // opening a room moves `seen` to now: filter by the marker from before
+    let snaps = {};
+    try { snaps = shared(SNAP_KEY) ?? {}; } catch {}
+    const base = snapBase(snaps, pick, seen, now); // opening a room moves `seen` to now: filter by the marker from before (the same one in every copy)
     const shown = filterEntries(raw, filter, base);
-    const entries = groupTimeline(shown.filter((e, i) => i >= shown.length - MAX_ENTRIES || e.waiting));
+    const keep = keepWaiting(raw, shown); // a leader still waiting on the person stays visible under any chip
+    const entries = groupTimeline(keep.filter((e, i) => i >= keep.length - MAX_ENTRIES || e.waiting));
     return { terms, tabs, pick, raw, shown, filter, counts: filterCounts(raw, base), entries, asks: all.filter((a) => a.owner === pick), reports: reps.filter((r) => r.owner === pick) };
   }
 
@@ -734,7 +775,7 @@ export default class Inbox extends View {
     try {
       const v = this.view();
       const was = shared(SEEN_KEY) ?? {};
-      if (v.pick && this.snap?.room !== v.pick) this.snap = { room: v.pick, seen: Number(was[v.pick]) || 0 }; // taken before the marker moves
+      if (v.pick) { const st = snapStep(shared(SNAP_KEY), v.pick, was, Date.now()); if (st.next) setShared(SNAP_KEY, st.next); } // taken before the marker moves
       const next = seenNext(was, v.pick, v.raw);
       if (next) setShared(SEEN_KEY, next);
     } catch {}
@@ -943,8 +984,15 @@ export default class Inbox extends View {
       if (done || gen !== this.promptGen) return;
       done = true;
       this.promptBusy = false;
-      this.prompt = { po, at: Date.now(), text };
-      try { cx.notify(); cx.timer.after(PROMPT_REFRESH_MS + 100, (c2) => c2.notify()); } catch {}
+      // The same screen again (only a timer row moved): no new state and no redraw, so a drag-select in the panel is not cut. Either way the next read is
+      // scheduled here (one chain: a newer read replaces the older chain), and only while the PO still waits.
+      const same = this.prompt?.po === po && promptSame(this.prompt.text, text);
+      this.prompt = same ? { ...this.prompt, at: Date.now() } : { po, at: Date.now(), text };
+      const chain = ++this.promptChain;
+      try {
+        if (!same) cx.notify();
+        cx.timer.after(PROMPT_REFRESH_MS + 100, (c2) => { if (chain === this.promptChain && this.isBlocked(po)) this.readPrompt(po, c2); });
+      } catch {}
     };
     try { cx.timer.after(PROMPT_TIMEOUT_MS, (c2) => { if (!done && gen === this.promptGen) { this.promptBusy = false; try { c2.notify(); } catch {} } }); } catch {}
     let r;
@@ -983,8 +1031,8 @@ export default class Inbox extends View {
     const lines = shown ? promptTail(shown.text, 8) : [];
     const opts = shown ? promptOptions(shown.text) : [];
     const key = (k, label, tip, primary) => this.button(t, `pp-${k}`, label, (c) => this.pressPrompt(po, k === "esc" ? "esc" : k === "enter" ? "enter" : k, c), { primary, tip });
-    return v_flex().id("po-prompt").flex_none().min_w(0).mx(10).mb(6).p(8).gap(6).rounded(8).bg(t.blocked + "14").border(1).border_color(t.blocked + "55")
-      .child(div().min_w(0).truncate().text_size(11).font_semibold().text_color(t.blocked).child(shown ? `PO가 질문 중입니다 — 화면 끝 (${Math.max(0, Math.round((Date.now() - shown.at) / 1000))}초 전 화면)` : "PO가 질문 중입니다 — 화면 끝"))
+    return v_flex().id("po-prompt").flex_none().min_w(0).mx(10).mb(6).p(8).gap(6).rounded(8).bg(t.blocked + "14").border(1).border_color(t.blocked + "55").on_mouse_down("left", stop)
+      .child(div().min_w(0).truncate().text_size(11).font_semibold().text_color(t.blocked).child("PO가 질문 중입니다 — 화면 끝"))
       .child(v_flex().min_w(0).max_h(120).overflow_hidden().gap(1)
         .children(lines.length ? lines.map((l, i) => div().min_w(0).text_size(11).text_color(t.muted).child(this.text(`pp-l${i}`, chatHtml(l)))) : [div().text_size(11).text_color(t.dim).child(shown ? "화면을 읽지 못했습니다. 아래 버튼은 PO가 질문 중일 때만 눌립니다." : "화면을 읽는 중…")]))
       .child(h_flex().min_w(0).gap(6).items_center().flex_wrap()
@@ -1359,7 +1407,7 @@ export default class Inbox extends View {
   // circle, the person ("나") on the right. A leader's message that it waits on is red and carries its answer buttons.
   entryRow(t, e, v, cx) {
     const top = e.head ? 10 : 2;
-    const id = `tl-${String(e.key).slice(0, 80)}`;
+    const id = tlId(e.key);
     // The time sits at the bubble's bottom, on its outer side: left of mine, right of everyone else's.
     const when = (ms) => div().flex_none().pb(1).text_size(10).text_color(t.dim).child(ms ? clock(ms) : "");
     if (e.who === "me") {

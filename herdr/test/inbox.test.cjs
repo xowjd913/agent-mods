@@ -1469,8 +1469,8 @@ test("main.js: R8 배선 — 방 목록 질문 표시, deliver 정리, awaitPane
   // ask 카드: 보낸 표시는 resend·enterNow에서도 닫는다
   assert.match(src, /markAsk\(r, how\) \{/);
   assert.match(methodOf(src, "  enterNow(id, c) {", "  // ---- A blocked PO's screen"), /this\.markAsk\(r, "sent"\)/);
-  // 질문 패널은 화면이 몇 초 전 것인지 보여 준다
-  assert.match(methodOf(src, "  promptPanel(t, v, cx) {", "  // A panel answer:"), /초 전 화면/);
+  // 질문 패널은 다시 그리지 않아도 되도록 나이(몇 초 전 화면) 표시를 두지 않는다
+  assert.ok(!/초 전 화면/.test(methodOf(src, "  promptPanel(t, v, cx) {", "  // A panel answer:")));
 });
 
 // ---- 채팅 필터 (#36, #37)
@@ -1536,11 +1536,13 @@ test("main.js: 필터 배선 — 방별 상태, 열 때 기준 저장(표시 전
   assert.match(src, /this\.filt = new Map\(\)/);
   // 기준은 읽음 표시를 올리기 전에 잡는다
   const ms = methodOf(src, "  markSeen() {", "  setFilter(");
-  assert.ok(ms.indexOf("this.snap = ") > 0 && ms.indexOf("this.snap = ") < ms.indexOf("setShared(SEEN_KEY"));
+  assert.ok(ms.indexOf("snapStep(") > 0 && ms.indexOf("setShared(SNAP_KEY") > 0 && ms.indexOf("setShared(SNAP_KEY") < ms.indexOf("setShared(SEEN_KEY"));
+  assert.ok(!/this\.snap\b/.test(src));
   // view: 기준으로 거르고, raw(읽음 표시용)는 거르지 않은 전체
   const vw = methodOf(src, "  view() {", "  // Remembers that the person");
   assert.match(vw, /filterEntries\(raw, filter, base\)/);
-  assert.match(vw, /this\.snap\?\.room === pick \? this\.snap\.seen/);
+  assert.match(vw, /snapBase\(snaps, pick, seen, now\)/);
+  assert.match(vw, /keepWaiting\(raw, shown\)/);
   assert.match(vw, /filterCounts\(raw, base\)/);
   // 칩 줄: 6칩, 개수, 0이어도 누를 수 있다(on_click은 항상), 누름이 창을 끌지 않게 stop
   const fb = methodOf(src, "  filterBar(t, v) {", "  pickPo(id, c) {");
@@ -1734,4 +1736,83 @@ test("po-hook: 폴더를 쓸 수 없어도 run은 던지고 진입점은 0으로
   const good = spawnSync(process.execPath, [script], { input: JSON.stringify(STOP), encoding: "utf8", env: { ...env, HERDR_INBOX_DIR: path.join(dir, "inbox") } });
   assert.equal(good.status, 0); assert.equal(good.stdout, "");
   assert.equal(I.parsePoLines(fs.readFileSync(path.join(dir, "inbox", "po", "devnotes.jsonl"), "utf8"))[0].text, "다 했습니다");
+});
+
+// ---- R9 (PR #39 리뷰): 질문 패널·공유 기준·대기 줄·행 id
+test("promptTail/promptSig: 초 단위로 바뀌는 스피너·타이머 줄은 보이지도, 서명에도 들지 않는다", () => {
+  const a = "Do you want to proceed?\n❯ 1. Yes\n  2. No\n✻ Waiting (12s)";
+  const b = "Do you want to proceed?\n❯ 1. Yes\n  2. No\n✻ Waiting (13s)";
+  assert.deepEqual(I.promptTail(a, 8), ["Do you want to proceed?", "❯ 1. Yes", "  2. No"]);
+  assert.equal(I.promptSig(a), I.promptSig(b));
+  assert.ok(I.PROMPT_TIMER.test("✻ Thinking… (3s · ↓ 1.2k tokens · esc to interrupt)"));
+  assert.ok(I.PROMPT_TIMER.test("  ✶ Cogitating… (1m 5s)"));
+  // 선택지·일반 문장은 지우지 않는다
+  assert.ok(!I.PROMPT_TIMER.test("1. Yes (10s)"));
+  assert.ok(!I.PROMPT_TIMER.test("Run the command for 12s?"));
+  assert.ok(!I.PROMPT_TIMER.test("Waiting for the build"));
+});
+test("promptSame: 타이머·공백만 다르면 같은 화면, 질문이나 선택지가 다르면 다른 화면", () => {
+  const base = "Allow edit?\n❯ 1. Yes\n  2. No";
+  assert.equal(I.promptSame(`${base}\n✻ Waiting (1s)`, `${base}\n✻ Waiting (2s)  `), true);
+  assert.equal(I.promptSame(base, `${base}\n`), true);
+  assert.equal(I.promptSame(base, "Allow edit?\n  1. Yes\n❯ 2. No"), false);
+  assert.equal(I.promptSame(base, "Allow write?\n❯ 1. Yes\n  2. No"), false);
+  assert.equal(I.promptSame("", ""), true);
+  assert.equal(I.promptSame("", base), false);
+});
+test("keepWaiting: 필터가 숨겨도 아직 기다리는 줄은 남고, 순서는 그대로", () => {
+  const raw = [{ key: "a", who: "l:x", it: { kind: "done" } }, { key: "b", who: "l:y", waiting: "decision" }, { key: "c", who: "l:x", it: { kind: "stop" } }, { key: "d", who: "l:y", waiting: "verify", wait: true }];
+  const shown = I.filterEntries(raw, "stop", 0);
+  assert.deepEqual(shown.map((e) => e.key), ["c"]);
+  assert.deepEqual(I.keepWaiting(raw, shown).map((e) => e.key), ["b", "c", "d"]);
+  assert.deepEqual(I.keepWaiting(raw, raw).map((e) => e.key), ["a", "b", "c", "d"]);
+  assert.deepEqual(I.keepWaiting(null, null), []);
+  // 칩 개수는 그대로(필터 결과 기준)
+  assert.equal(I.filterCounts(raw, 0).stop, 1);
+});
+test("snapStep/snapBase: 첫 복사본이 잡은 기준을 다른 복사본이 30초 동안 같이 쓴다", () => {
+  const T = 1_000_000;
+  // 처음: 방의 마지막 읽음(50)을 기준으로 잡아 저장
+  let st = I.snapStep(undefined, "r1", { r1: 50 }, T);
+  assert.equal(st.base, 50);
+  assert.deepEqual(st.next, { r1: { seen: 50, ts: T } });
+  // 읽음 표시가 올라간 뒤(seen=999) 다른 복사본이 열어도 기준은 50
+  assert.equal(I.snapBase(st.next, "r1", { r1: 999 }, T + 5000), 50);
+  let st2 = I.snapStep(st.next, "r1", { r1: 999 }, T + 5000);
+  assert.equal(st2.base, 50);
+  assert.equal(st2.next, null); // ttl/3 안이라 다시 쓰지 않는다
+  // ttl/3 지나면 시각만 갱신
+  st2 = I.snapStep(st.next, "r1", { r1: 999 }, T + 12000);
+  assert.deepEqual(st2.next, { r1: { seen: 50, ts: T + 12000 } });
+  // 30초 동안 아무도 그리지 않으면 만료: 현재 읽음 표시가 새 기준
+  assert.equal(I.snapBase(st.next, "r1", { r1: 999 }, T + 31000), 999);
+  st2 = I.snapStep(st.next, "r1", { r1: 999 }, T + 31000);
+  assert.deepEqual(st2.next, { r1: { seen: 999, ts: T + 31000 } });
+  // 다른 방은 따로, 만료된 방은 지운다
+  st2 = I.snapStep({ r1: { seen: 50, ts: T }, r2: { seen: 7, ts: T + 40000 } }, "r2", { r2: 70 }, T + 45000);
+  assert.deepEqual(st2.next, { r2: { seen: 7, ts: T + 40000 } });
+  assert.equal(st2.base, 7);
+  assert.deepEqual(I.snapStep({}, "", {}, T), { base: 0, next: null });
+  assert.equal(I.snapBase(null, "r1", null, T), 0);
+});
+test("tlId: 80자까지는 그대로, 넘으면 앞 64자 + 전체 해시라 '#n'이 잘려도 id가 다르다", () => {
+  assert.equal(I.tlId("abc#2"), "tl-abc#2");
+  const long = "k".repeat(100);
+  const a = I.tlId(long), b = I.tlId(`${long}#2`);
+  assert.notEqual(a, b);
+  assert.match(a, /^tl-k{64}~[0-9a-f]{8}$/);
+  assert.equal(I.tlId(long), a);
+  assert.ok(a.length <= 3 + 64 + 9);
+  assert.equal(I.tlId(undefined), "tl-");
+});
+test("main.js: 질문 패널 — 왼쪽 눌림 stop, 같은 화면이면 상태·다시 그리기 생략, 한 줄 다시 읽기, 나이 표시 없음", () => {
+  const src = mainSrc();
+  const pp = methodOf(src, "  promptPanel(t, v, cx) {", "  // A panel answer");
+  assert.match(pp, /id\("po-prompt"\)[^\n]*on_mouse_down\("left", stop\)/);
+  assert.ok(!/초 전 화면/.test(pp));
+  const rp = methodOf(src, "  readPrompt(po, cx) {", "  // A key press from the question panel");
+  assert.match(rp, /promptSame\(this\.prompt\.text, text\)/);
+  assert.match(rp, /if \(!same\) cx\.notify\(\)/);
+  assert.match(rp, /chain === this\.promptChain && this\.isBlocked\(po\)\) this\.readPrompt\(po, c2\)/);
+  assert.match(src, /id = tlId\(e\.key\)/);
 });

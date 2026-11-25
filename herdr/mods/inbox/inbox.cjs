@@ -624,7 +624,10 @@ const badgeTurn = (lease, id, now, ttl = 65000) => (!lease || lease.id === id ||
 // A PO that waits on a prompt: the last lines of its screen, and the numbered choices on it ("❯ 1. Yes" / "2. No ..."). The desk shows them and the
 // person presses one; nothing is ever pressed by itself. The choices are the last contiguous run of numbered rows (1, 2, ...) once the footer
 // (hint lines like "Esc to cancel · Tab to amend", box borders) at the bottom of the screen is skipped; else none.
-const promptTail = (text, n = 10) => cleanText(text).split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim()).slice(-n).map((l) => (l.length > 140 ? `${l.slice(0, 139)}…` : l));
+// A spinner / timer row of the PO ("✻ Waiting (12s)", "✻ Thinking… (3s · esc to interrupt)"): it changes every second without the question
+// changing, so it is neither shown nor part of the signature.
+const PROMPT_TIMER = /^[\s│┃|]*[^\p{L}\p{N}\s]?\s*\p{L}[\p{L}\s'-]{0,30}[….]*\s*\((?:\d+\s*[hms]\s*)+[^)]*\)[\s│┃|]*$/u;
+const promptTail = (text, n = 10) => cleanText(text).split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim() && !PROMPT_TIMER.test(l)).slice(-n).map((l) => (l.length > 140 ? `${l.slice(0, 139)}…` : l));
 const PROMPT_NUM = /^[\s│┃|]*([❯>›])?\s*(\d{1,2})[.)]\s+(\S.*?)[\s│┃|]*$/;
 const promptFooter = (l) => /^[^\p{L}\p{N}]*$/u.test(l) || (l.length <= 140 && /\b(esc|enter|tab|ctrl|shift|alt)\b|^\s*[↑↓←→]|\? for shortcuts/i.test(l));
 // {options: [{key, label, on}], head: the up to 2 lines right above the choices}. Options only when they are 1..N (2 or more).
@@ -648,6 +651,8 @@ function promptSig(text) {
   const lines = p.options.length ? [...p.head, ...p.options.map((o) => `${o.key}. ${o.label}`)] : promptTail(text, 6);
   return lines.map((l) => l.replace(/\s+/g, " ").trim()).join("\n");
 }
+// Whether two reads of a PO's screen show the same thing (the last 40 rows, whitespace squeezed, timer rows left out): then the panel is not redrawn.
+const promptSame = (a, b) => promptTail(a, 40).map((l) => l.replace(/\s+/g, " ").trim()).join("\n") === promptTail(b, 40).map((l) => l.replace(/\s+/g, " ").trim()).join("\n");
 // Whether the pasted `line` is still in the PO's input: the start or the end of its text is among the last 14 screen lines (box borders and
 // whitespace ignored), or, for a long / multi-line paste the PO folds into "[Pasted text …]", that marker is.
 function inputHas(screen, line) {
@@ -680,6 +685,38 @@ function filterEntries(entries, filter, seen) {
   if (!filter || filter === "all" || !CHAT_FILTERS.some((f) => f[0] === filter)) return list;
   if (filter === "unread") return list.filter((e) => e.who !== "me" && !e.wait && e.ms > (Number(seen) || 0));
   return list.filter((e) => entryKind(e) === filter);
+}
+// What the timeline draws under a filter: the filtered entries, and always the pending "waiting" ones (a leader still waiting on the person must not
+// vanish because a chip hides its kind). `raw` order is kept. The chip counts are not changed by this.
+function keepWaiting(raw, shown) {
+  const have = new Set(shown ?? []);
+  return (raw ?? []).filter((e) => have.has(e) || e.waiting);
+}
+// The "안 읽은 것" base, shared by every copy of the mod (Dock, window, pane): {<room>: {seen, ts}}. The first copy to draw a room takes the room's
+// last-opened marker before it moves, and the others use that same value for SNAP_TTL_MS after it was last drawn (each draw renews it).
+const SNAP_TTL_MS = 30000;
+const snapBase = (snaps, room, seen, now, ttl = SNAP_TTL_MS) => {
+  const s = snaps?.[room];
+  return s && now - (Number(s.ts) || 0) <= ttl ? Number(s.seen) || 0 : Number(seen?.[room]) || 0;
+};
+// -> {base, next}: `next` = the map to store (expired rooms dropped, this room renewed at most every ttl/3), null when nothing changes.
+function snapStep(snaps, room, seen, now, ttl = SNAP_TTL_MS) {
+  if (!room) return { base: 0, next: null };
+  const cur = snaps && typeof snaps === "object" ? snaps : {};
+  const fresh = Object.fromEntries(Object.entries(cur).filter(([, s]) => now - (Number(s?.ts) || 0) <= ttl));
+  const had = fresh[room];
+  const base = had ? Number(had.seen) || 0 : Number(seen?.[room]) || 0;
+  const touch = !had || now - (Number(had.ts) || 0) > ttl / 3;
+  if (!touch && Object.keys(fresh).length === Object.keys(cur).length) return { base, next: null };
+  return { base, next: { ...fresh, [room]: { seen: base, ts: touch ? now : had.ts } } };
+}
+// The element id of a timeline row: the entry key, which ends in the "#n" of a duplicate; a long key keeps its start and gets a hash of the whole.
+function tlId(key) {
+  const k = String(key ?? "");
+  if (k.length <= 80) return `tl-${k}`;
+  let h = 5381;
+  for (const ch of k) h = (Math.imul(h, 33) ^ ch.codePointAt(0)) >>> 0;
+  return `tl-${k.slice(0, 64)}~${h.toString(16).padStart(8, "0")}`;
 }
 // {all, unread, decision, verify, done, stop}: how many entries each chip shows.
 const filterCounts = (entries, seen) => Object.fromEntries(CHAT_FILTERS.map(([k]) => [k, filterEntries(entries, k, seen).length]));
@@ -736,6 +773,6 @@ function decisionOptions(body) {
 }
 // chat:end
 
-module.exports = { PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptOptions, promptSig, inputHas, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) process.stdout.write(JSON.stringify(collect()));
