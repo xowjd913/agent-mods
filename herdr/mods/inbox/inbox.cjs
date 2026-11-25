@@ -561,6 +561,13 @@ function readPo(dir = inboxDir()) {
 // PRICE TABLE: the one place the prices live. USD per million tokens: [input, 5m cache write, 1h cache write, cache read, output].
 // Source: https://platform.claude.com/docs/en/about-claude/pricing  (checked 2026-11-25). A model id that is not listed is "$?", never a guess:
 // add a row when a model ships. Dated ids (-20250929), "[1m]" and "-latest" suffixes are dropped before the lookup (modelKey).
+//
+// USD->KRW RATE: also only here, a fixed value (the desk never fetches a rate). Source: Bank of Korea ECOS, statistic 731Y001 "원/미국달러(매매기준율)",
+// https://ecos.bok.or.kr/api/StatisticSearch/sample/json/kr/1/10/731Y001/D/20261115/20261125/0000001  -> TIME 20261125 = 1343.6 (the Seoul Money
+// Brokerage page smbs.biz could not be read that day). poCosts puts both on every cost it returns (rate, rateNote) so the copied costLine block
+// below has no number of its own. To update: change the rate, the date in the note and this comment together.
+const COST_KRW_RATE = 1343.6;
+const COST_KRW_NOTE = "한국은행 ECOS 매매기준율, 2026-11-25 기준 고정값";
 const COST_PRICES = {
   "claude-fable-5-2": [8, 10, 16, 0.2, 40], "claude-mythos-5-2": [8, 10, 16, 0.2, 40],
   "claude-fable-5-1": [10, 12.5, 20, 0.25, 50], "claude-mythos-5-1": [10, 12.5, 20, 0.25, 50],
@@ -715,7 +722,7 @@ function poCosts(dir = inboxDir(), cacheDir = dir) {
       partial = partial || r.partial;
       for (const k of r.ent.unk) if (!unknown.includes(k)) unknown.push(k);
     }
-    if (any) out[id] = { usd: Math.max(0, usd), unknown, sub, partial };
+    if (any) out[id] = { usd: Math.max(0, usd), unknown, sub, partial, rate: COST_KRW_RATE, rateNote: COST_KRW_NOTE };
   }
   if (Object.keys(next.files).length !== Object.keys(cache.files).length) dirty = true; // a transcript no PO is on any more is dropped
   if (dirty) {
@@ -820,20 +827,22 @@ function usageTip(rows, now) {
 // usageLine:end
 
 // costLine:begin
-// One PO's current-session cost, shown after the usage line: "이 세션 $3.20". The numbers come from inbox.cjs (poCosts: the usage fields of the
-// session transcript x the price table there) as {usd, unknown, sub, partial}; this block only words them. It is an API-equivalent estimate, not
-// the subscription bill. `unknown` lists the model ids that are not in the price table: the label is then "$?" (no guess). Copied between the
-// markers into inbox/main.js and inbox.cjs (a test keeps them identical).
+// One PO's current-session cost, shown after the usage line: "이 세션 약 4,300원". The numbers come from inbox.cjs (poCosts: the usage fields of the
+// session transcript x the price table there x the fixed KRW rate there) as {usd, unknown, sub, partial, rate, rateNote}; this block only words them.
+// It is an API-equivalent estimate, not the subscription bill. `unknown` lists the model ids that are not in the price table: the label is then
+// "?원" (no guess). Copied between the markers into inbox/main.js and inbox.cjs (a test keeps them identical).
 function costLabel(c) {
   if (!c || !Number.isFinite(c.usd)) return "";
-  if (Array.isArray(c.unknown) && c.unknown.length) return "$?";
-  return c.usd >= 1000 ? `$${Math.round(c.usd).toLocaleString("en-US")}` : `$${c.usd.toFixed(2)}`;
+  if ((Array.isArray(c.unknown) && c.unknown.length) || !(c.rate > 0)) return "?원";
+  return `약 ${Math.round(c.usd * c.rate).toLocaleString("en-US")}원`;
 }
 function costTip(c) {
   if (!c || !Number.isFinite(c.usd)) return "";
   const unk = Array.isArray(c.unknown) && c.unknown.length;
   return [
     "이 PO의 현재 세션에서 쓴 금액: API 기준 추정 금액, 구독 청구액 아님",
+    unk ? "" : `달러로는 $${c.usd >= 1000 ? Math.round(c.usd).toLocaleString("en-US") : c.usd.toFixed(2)}`,
+    c.rate > 0 ? `환율 ${Number(c.rate).toLocaleString("en-US")}원/$ (${c.rateNote || "고정값"})` : "",
     c.sub > 0 ? "서브에이전트 포함" : "메인 세션만",
     unk ? `가격표에 없는 모델이라 합계를 내지 않았습니다: ${c.unknown.slice(0, 3).join(", ")}` : "",
     c.partial ? "아직 다 읽지 못해 더 늘 수 있습니다" : "",
@@ -1651,7 +1660,7 @@ function diagAppend(lines, root = appRoot()) {
   try { try { fs.fchmodSync(fd, 0o600); } catch {} fs.writeSync(fd, text); } finally { fs.closeSync(fd); }
   return f;
 }
-module.exports = { COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, parseUsage, usageLeft, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { COST_PRICES, COST_KRW_RATE, COST_KRW_NOTE, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, parseUsage, usageLeft, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)

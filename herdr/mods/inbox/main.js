@@ -935,20 +935,22 @@ function usageTip(rows, now) {
 // usageLine:end
 
 // costLine:begin
-// One PO's current-session cost, shown after the usage line: "이 세션 $3.20". The numbers come from inbox.cjs (poCosts: the usage fields of the
-// session transcript x the price table there) as {usd, unknown, sub, partial}; this block only words them. It is an API-equivalent estimate, not
-// the subscription bill. `unknown` lists the model ids that are not in the price table: the label is then "$?" (no guess). Copied between the
-// markers into inbox/main.js and inbox.cjs (a test keeps them identical).
+// One PO's current-session cost, shown after the usage line: "이 세션 약 4,300원". The numbers come from inbox.cjs (poCosts: the usage fields of the
+// session transcript x the price table there x the fixed KRW rate there) as {usd, unknown, sub, partial, rate, rateNote}; this block only words them.
+// It is an API-equivalent estimate, not the subscription bill. `unknown` lists the model ids that are not in the price table: the label is then
+// "?원" (no guess). Copied between the markers into inbox/main.js and inbox.cjs (a test keeps them identical).
 function costLabel(c) {
   if (!c || !Number.isFinite(c.usd)) return "";
-  if (Array.isArray(c.unknown) && c.unknown.length) return "$?";
-  return c.usd >= 1000 ? `$${Math.round(c.usd).toLocaleString("en-US")}` : `$${c.usd.toFixed(2)}`;
+  if ((Array.isArray(c.unknown) && c.unknown.length) || !(c.rate > 0)) return "?원";
+  return `약 ${Math.round(c.usd * c.rate).toLocaleString("en-US")}원`;
 }
 function costTip(c) {
   if (!c || !Number.isFinite(c.usd)) return "";
   const unk = Array.isArray(c.unknown) && c.unknown.length;
   return [
     "이 PO의 현재 세션에서 쓴 금액: API 기준 추정 금액, 구독 청구액 아님",
+    unk ? "" : `달러로는 $${c.usd >= 1000 ? Math.round(c.usd).toLocaleString("en-US") : c.usd.toFixed(2)}`,
+    c.rate > 0 ? `환율 ${Number(c.rate).toLocaleString("en-US")}원/$ (${c.rateNote || "고정값"})` : "",
     c.sub > 0 ? "서브에이전트 포함" : "메인 세션만",
     unk ? `가격표에 없는 모델이라 합계를 내지 않았습니다: ${c.unknown.slice(0, 3).join(", ")}` : "",
     c.partial ? "아직 다 읽지 못해 더 늘 수 있습니다" : "",
@@ -1123,7 +1125,7 @@ export default class Inbox extends View {
   // time left until each reset. Nothing before the first read.
   usageLine(t, pick = "") {
     const rows = this.usage;
-    // The picked PO's session cost ("이 세션 $3.20"), from the helper's data; nothing when the PO has no recorded session (or is the "PO 모름" room).
+    // The picked PO's session cost ("이 세션 약 4,300원"), from the helper's data; nothing when the PO has no recorded session (or is the "PO 모름" room).
     const c = pick && pick !== PO_OTHER ? this.data?.cost?.[pick] : null;
     const cost = costLabel(c);
     const withCost = (el) => (cost ? el.child(div().flex_none().child("·")).child(div().id("inbox-cost").flex_none().tooltip(costTip(c)).child(`이 세션 ${cost}`)) : el);

@@ -194,7 +194,9 @@ test("poCosts: 서브에이전트가 없으면 메인만(sub 0), 모르는 모�
   const c = I.poCosts(dir)["po-a"];
   assert.equal(c.sub, 0);
   assert.deepEqual(c.unknown, ["claude-new-1"]);
-  assert.equal(I.costLabel(c), "$?");
+  assert.equal(I.costLabel(c), "?원");
+  assert.equal(c.rate, I.COST_KRW_RATE); // poCosts hands the fixed rate and its note to the drawn block
+  assert.equal(c.rateNote, I.COST_KRW_NOTE);
 });
 
 test("poCosts: 훅 기록이 없거나 transcript를 읽을 수 없는 PO는 결과에 없다 (화면엔 아무것도 안 나온다)", () => {
@@ -278,25 +280,33 @@ test("main.js load: 다시 그리기 서명에는 금액의 원시 숫자가 아
   const head = src.slice(src.lastIndexOf("const shown = {};", at), at);
   assert.match(head, /shown\[po\] = \[costLabel\(c\), costTip\(c\)\]/);
   assert.doesNotMatch(src, /JSON\.stringify\(\{ \.\.\.d, at: 0 \}\)/);
-  // 같은 규칙을 직접 돌려 본다: 센트가 안 바뀌는 사용량 증가는 서명이 같고, 센트가 바뀌면 다르다.
+  // 같은 규칙을 직접 돌려 본다: 표시되는 원 단위가 안 바뀌는 사용량 증가는 서명이 같고, 바뀌면 다르다.
   const sigOf = (cost) => JSON.stringify({ cost: Object.fromEntries(Object.entries(cost).map(([po, c]) => [po, [I.costLabel(c), I.costTip(c)]])) });
-  const base = { usd: 3.2001, unknown: [], sub: 1, partial: false };
-  assert.equal(sigOf({ a: base }), sigOf({ a: { ...base, usd: 3.2049 } }));
+  const base = { usd: 3.2001, unknown: [], sub: 1, partial: false, rate: I.COST_KRW_RATE, rateNote: I.COST_KRW_NOTE };
+  assert.equal(sigOf({ a: base }), sigOf({ a: { ...base, usd: 3.2004 } })); // both 약 4,300원
+  assert.notEqual(sigOf({ a: base }), sigOf({ a: { ...base, usd: 3.2049 } }));
   assert.notEqual(sigOf({ a: base }), sigOf({ a: { ...base, usd: 3.21 } }));
 });
 
-test("라벨·툴팁: $ 두 자리, 큰 금액은 천 단위, 모르는 모델은 $?, 툴팁은 한국어로 추정치임과 범위를 밝힌다", () => {
-  assert.equal(I.costLabel({ usd: 3.2, unknown: [] }), "$3.20");
-  assert.equal(I.costLabel({ usd: 0, unknown: [] }), "$0.00");
-  assert.equal(I.costLabel({ usd: 1234.5, unknown: [] }), "$1,235");
-  assert.equal(I.costLabel({ usd: 3.2, unknown: ["claude-x"] }), "$?");
-  assert.equal(I.costLabel({ usd: NaN, unknown: [] }), "");
-  const tip = I.costTip({ usd: 3.2, unknown: [], sub: 0, partial: false });
+test("라벨·툴팁: 약 N원(천 단위, 원 미만 반올림), 모르는 모델은 ?원, 툴팁은 한국어로 추정치임·달러·환율·범위를 밝힌다", () => {
+  const R = { rate: 1343.6, rateNote: "한국은행 ECOS 매매기준율, 2026-11-25 기준 고정값" };
+  assert.equal(I.costLabel({ usd: 3.2, unknown: [], ...R }), "약 4,300원");
+  assert.equal(I.costLabel({ usd: 0, unknown: [], ...R }), "약 0원");
+  assert.equal(I.costLabel({ usd: 1234.5, unknown: [], ...R }), "약 1,658,674원");
+  assert.equal(I.costLabel({ usd: 3.2, unknown: ["claude-x"], ...R }), "?원");
+  assert.equal(I.costLabel({ usd: 3.2, unknown: [] }), "?원"); // no rate -> no guess
+  assert.equal(I.costLabel({ usd: NaN, unknown: [], ...R }), "");
+  assert.equal(I.COST_KRW_RATE, 1343.6);
+  assert.match(I.COST_KRW_NOTE, /2026-11-25/);
+  const tip = I.costTip({ usd: 3.2, unknown: [], sub: 0, partial: false, ...R });
   assert.match(tip, /API 기준 추정 금액, 구독 청구액 아님/);
+  assert.match(tip, /달러로는 \$3\.20/);
+  assert.match(tip, /환율 1,343\.6원\/\$ \(한국은행 ECOS 매매기준율, 2026-11-25 기준 고정값\)/);
   assert.match(tip, /메인 세션만/);
-  assert.match(I.costTip({ usd: 3.2, unknown: [], sub: 2, partial: false }), /서브에이전트 포함/);
-  assert.match(I.costTip({ usd: 3.2, unknown: ["claude-x"], sub: 0, partial: false }), /가격표에 없는 모델.*claude-x/);
-  assert.match(I.costTip({ usd: 3.2, unknown: [], sub: 0, partial: true }), /더 늘 수 있습니다/);
+  assert.doesNotMatch(I.costTip({ usd: 3.2, unknown: ["claude-x"], sub: 0, partial: false, ...R }), /달러로는/);
+  assert.match(I.costTip({ usd: 3.2, unknown: [], sub: 2, partial: false, ...R }), /서브에이전트 포함/);
+  assert.match(I.costTip({ usd: 3.2, unknown: ["claude-x"], sub: 0, partial: false, ...R }), /가격표에 없는 모델.*claude-x/);
+  assert.match(I.costTip({ usd: 3.2, unknown: [], sub: 0, partial: true, ...R }), /더 늘 수 있습니다/);
   assert.match(tip, /빠른 모드·미국 데이터 거주 가격·웹 검색.*계산하지 않아 실제보다 적을 수 있습니다/);
 });
 
