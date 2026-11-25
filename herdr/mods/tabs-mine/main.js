@@ -269,7 +269,7 @@ export default class Tabs extends View {
     // Another mod may set workspace.panels without our ids: always offer the panels this layout actually has,
     // and drop the ones it doesn't (the stock list names Files, which this layout replaced).
     const have = (body?.children ?? []).map(c => c.id);
-    const listed = shared("workspace.panels") ?? ["files", "changes", "work-board", "pr-board", "schedules-board", "inbox-board"];
+    const listed = shared("workspace.panels") ?? ["files", "changes", "work-board", "pr-board", "schedules-board", "accounts-board", "inbox-board"];
     const enabled = [...new Set([...listed.filter(id => !have.length || have.includes(id)), ...have])];
     this.syncPanel(space, panel, body, enabled);
     const panelButton = (id, label, icon, badge) => {
@@ -296,6 +296,7 @@ export default class Tabs extends View {
       .when(enabled.includes("work-board"), el => el.child(panelButton("work-board", "Work", "mods/workspace-chrome/layers.svg")))
       .when(enabled.includes("pr-board"), el => el.child(panelButton("pr-board", "PRs", "mods/workspace-chrome/git-compare.svg", this.attention)))
       .when(enabled.includes("schedules-board"), el => el.child(panelButton("schedules-board", "예약", "mods/workspace-chrome/clock.svg")))
+      .when(enabled.includes("accounts-board"), el => el.child(panelButton("accounts-board", "계정", "mods/workspace-chrome/git-branch.svg")))
       .when(enabled.includes("inbox-board"), el => el.child(panelButton("inbox-board", "받은편지함", "mods/workspace-chrome/archive.svg", this.inboxWaiting())))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
