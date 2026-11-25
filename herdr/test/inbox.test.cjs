@@ -372,3 +372,253 @@ test("창 구역 접기와 답함 표시: 머리줄 누름·공유 상태·기�
   assert.match(src, /nameRow\(t, s, item \? \{ \.\.\.item, kind \} : null, null, true\)/); // 대기 카드만 붉은 종류 표시
   assert.match(src, /this\.kindTag\(t, it, kind \?\? it\?\.kind, ask\)/); // 창 보고 줄과 같은 규칙을 창 옆 목록 줄도 쓴다
 });
+
+// ---- 리더 이름(#33): 받은편지함과 에이전트 목록이 같은 규칙으로 세션 이름을 고른다.
+const NAMES = require("../mods/inbox/inbox.cjs");
+
+test("leaderName: 살아 있는 터미널 제목이 있으면 그것을 쓰고 '리더 · ' 머리말은 뗀다", () => {
+  const term = { name: "lead-po-inbox", address: "t137", title: "리더 · 받은편지함 패널" };
+  assert.equal(NAMES.leaderName("lead-po-inbox", term, {}), "받은편지함 패널");
+  assert.equal(NAMES.leaderName("lead-po-inbox", { ...term, title: "리더·받은편지함 패널" }, {}), "받은편지함 패널");
+  assert.equal(NAMES.leaderName("lead-po-inbox", { ...term, title: "✦ 리더 · 받은편지함 패널" }, {}), "받은편지함 패널"); // 상태 기호는 뗀다
+  assert.equal(NAMES.leaderName("lead-po-inbox", { ...term, title: "받은편지함 패널" }, {}), "받은편지함 패널"); // 머리말이 없어도 그대로
+});
+
+test("leaderName: 제목이 비었거나 쓸모없으면 session 라벨, 그다음 기억한 이름, 마지막으로 내부 이름", () => {
+  const base = { name: "lead-po-inbox", address: "t137" };
+  assert.equal(NAMES.leaderName("lead-po-inbox", { ...base, title: "  ", labels: { session: "리더 · 라벨 이름" } }, {}), "라벨 이름");
+  for (const title of ["", undefined, "lead-po-inbox", "t137", "claude", "리더 · "]) {
+    assert.equal(NAMES.leaderName("lead-po-inbox", { ...base, title }, {}), "po inbox", String(title)); // 기억도 없으면 내부 이름
+    assert.equal(NAMES.leaderName("lead-po-inbox", { ...base, title }, { "lead-po-inbox": "리더 · 기억한 이름" }), "기억한 이름", String(title));
+  }
+  assert.equal(NAMES.leaderName("lead-sched-acct", null, undefined), "sched acct");
+  assert.equal(NAMES.leaderName("lead-sched-acct", undefined, null), "sched acct");
+});
+
+test("leaderName: 이미 닫힌 리더(터미널 없음)는 마지막으로 본 이름을 쓴다", () => {
+  assert.equal(NAMES.leaderName("lead-gone", null, { "lead-gone": "닫힌 작업" }), "닫힌 작업");
+  assert.equal(NAMES.leaderName("lead-other", null, { "lead-gone": "닫힌 작업" }), "other"); // 다른 리더의 이름을 가져오지 않는다
+  assert.equal(NAMES.leaderName("", null, {}), "");
+});
+
+test("rememberNames: lead-* 터미널의 읽을 수 있는 제목만 기억하고, 바뀐 것이 없으면 null", () => {
+  const terms = [
+    { name: "lead-a", address: "t1", title: "리더 · 가 작업" },
+    { name: "lead-b", address: "t2", title: "" },
+    { name: "dev-1-x", address: "t3", title: "개발 · #1" }, // 리더가 아니다
+  ];
+  const m = NAMES.rememberNames({}, terms);
+  assert.deepEqual(m, { "lead-a": "가 작업" });
+  assert.equal(NAMES.rememberNames(m, terms), null);
+  assert.deepEqual(NAMES.rememberNames(m, [{ name: "lead-a", address: "t1", title: "리더 · 새 이름" }]), { "lead-a": "새 이름" });
+  assert.equal(NAMES.rememberNames({ "lead-a": "keep" }, [{ name: "lead-b", address: "t2", title: "" }]), null); // 제목이 비면 지우지 않는다
+  assert.equal(NAMES.rememberNames(undefined, undefined), null);
+});
+
+test("rememberNames: 오래된 것부터 버려 상한을 지킨다", () => {
+  const memo = { x1: "1", x2: "2", x3: "3" };
+  const next = NAMES.rememberNames(memo, [{ name: "lead-n", address: "t9", title: "새" }], 3);
+  assert.deepEqual(Object.keys(next), ["x2", "x3", "lead-n"]);
+});
+
+test("leaderName: 받은편지함·에이전트 목록·inbox.cjs가 같은 블록을 쓴다", () => {
+  const block = (f) => {
+    const src = fs.readFileSync(path.join(__dirname, f), "utf8");
+    const a = src.indexOf("// leaderName:begin"), b = src.indexOf("// leaderName:end");
+    assert.ok(a >= 0 && b > a, f);
+    return src.slice(a, b);
+  };
+  const ref = block("../mods/inbox/inbox.cjs");
+  assert.equal(block("../mods/inbox/main.js"), ref);
+  assert.equal(block("../mods/agent-groups/main.js"), ref);
+  assert.equal(block("../mods/leader-tabs/main.js"), ref);
+  assert.equal(block("../mods/work/main.js"), ref);
+});
+
+test("leader-tabs·work: 리더 이름을 hc 이름(lead-x) 그대로 그리지 않는다", () => {
+  const tabs = fs.readFileSync(path.join(__dirname, "../mods/leader-tabs/main.js"), "utf8");
+  assert.match(tabs, /return leaderName\(term\.name, term, namesMemo\(\)\)/);
+  assert.doesNotMatch(tabs, /term\.name \|\| term\.address/);
+  const work = fs.readFileSync(path.join(__dirname, "../mods/work/main.js"), "utf8");
+  assert.match(work, /const label = sessionLabel\(s\)/);
+  // The rule itself: a closed or untitled leader reads as its task, a titled one as its title.
+  assert.equal(NAMES.leaderName("lead-po-inbox", { name: "lead-po-inbox", address: "t1", title: "리더 · 받은편지함 정리" }, {}), "받은편지함 정리");
+  assert.equal(NAMES.leaderName("lead-po-inbox", { name: "lead-po-inbox", address: "t1", title: "lead-po-inbox" }, {}), "po inbox");
+});
+
+// The scroll lists keep their place across presses: handles the view owns, tracked on both lists, and an anchor after every press that
+// changes a card's or a section's height. (The kit gives no way to read a pixel offset, so this checks the wiring, not the pixels.)
+test("받은편지함: 자세히·접기·섹션·답 쓰기가 스크롤을 맨 위로 되돌리지 않게 위치를 붙든다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  assert.match(src, /ScrollHandle\.new\(\)/);
+  assert.match(src, /id\("inbox-list"\)[^\n]*track_scroll\(this\.scroll\)/);
+  assert.match(src, /id\("inbox-rows"\)[^\n]*track_scroll\(this\.rowsScroll\)/);
+  assert.match(src, /scroll_to_item\(i\)/);
+  assert.match(src, /this\.toggleOpen\(s, it\); this\.reveal\(this\.spot\(s, it\)\)/);
+  assert.match(src, /o\.toggle\?\.\(\); this\.reveal\(o\.id\)/);
+  assert.match(src, /this\.reveal\(this\.spot\(s, item\)\)/);
+  // Every child of the list is recorded with the spot key reveal looks up.
+  assert.match(src, /add\(this\.askCard\(t, a, cx\), this\.spot\(a\.s, a\.item\)\)/);
+  assert.match(src, /add\(this\.chatRow\(t, r\), this\.spot\(r\.s, r\.it\)\)/);
+  assert.match(src, /"sec-ask"\)/);
+  assert.match(src, /"sec-rep"\)/);
+});
+
+// ---- PO 채팅: @ 멘션, 리더 메뉴, po.jsonl
+const TERMS = [
+  { address: "t28", name: "", labels: { role: "po" } },
+  { address: "t12", name: "lead-b", title: "받은편지함 패널", parent: "t28" },
+  { address: "t13", name: "lead-a", title: "리더 · 가나다", parent: "t28" },
+  { address: "t99", name: "lead-orphan", parent: "t5" },
+  { address: "t40", name: "", labels: { role: "po" } },
+  { address: "t41", name: "lead-c", parent: "t40" },
+];
+
+test("parseMention: @리더는 살아 있는 리더만 대상이 되고, @here는 글에서 빠진다", () => {
+  const known = ["lead-a", "lead-b"];
+  const m = I.parseMention("@lead-a 상태 알려줘", known);
+  assert.deepEqual([m.text, m.to, m.here, m.empty], ["@lead-a 상태 알려줘", ["lead-a"], false, false]);
+  const h = I.parseMention("@here 오늘 뭐 했어?", known);
+  assert.deepEqual([h.text, h.to, h.here], ["오늘 뭐 했어?", [], true]);
+  const none = I.parseMention("그냥 PO에게", known);
+  assert.deepEqual([none.to, none.here], [[], false]);
+  assert.deepEqual(I.parseMention("@lead-zzz 안녕", known).to, []); // 모르는 리더는 일반 글자
+  assert.deepEqual(I.parseMention("둘 다 @lead-a, @lead-b! 그리고 @lead-a", known).to, ["lead-a", "lead-b"]);
+});
+
+test("parseMention: 줄바꿈은 한 줄로, 멘션만 있거나 빈 글은 empty, 단어 중간의 @는 멘션이 아니다", () => {
+  const known = ["lead-a"];
+  assert.equal(I.parseMention("위\n  아래", known).text, "위 아래");
+  assert.equal(I.parseMention("@lead-a", known).empty, true);
+  assert.equal(I.parseMention("@here  ", known).empty, true);
+  assert.equal(I.parseMention("   ", known).empty, true);
+  assert.equal(I.parseMention("mail@lead-a x", known).to.length, 0);
+  assert.equal(I.parseMention("@lead-ab 안녕", known).to.length, 0); // lead-a가 아니라 lead-ab
+});
+
+test("composeChat: 칩의 글자를 범위에 맞춰 풀어 쓴다(범위가 이미 그 글자이든, 한 글자 자리표시이든)", () => {
+  const tok = (start, end) => ({ range: { start, end }, token: { id: "lead-a", text: "@lead-a" } });
+  assert.equal(I.composeChat({ text: "@lead-a 안녕", tokens: [tok(0, 7)] }), "@lead-a 안녕");
+  assert.equal(I.composeChat({ text: "￼ 안녕", tokens: [tok(0, 1)] }), "@lead-a 안녕");
+  assert.equal(I.composeChat({ text: "a ￼ b ￼", tokens: [tok(2, 3), tok(6, 7)] }), "a @lead-a b @lead-a");
+  assert.equal(I.composeChat({ text: "그냥", tokens: [] }), "그냥");
+  assert.equal(I.composeChat(null), "");
+});
+
+test("mentionQuery: 커서 바로 앞의 @글자만 질의이고, 칩 안이나 단어 중간은 아니다", () => {
+  assert.deepEqual(I.mentionQuery("@", 1), { start: 0, end: 1, query: "" });
+  assert.deepEqual(I.mentionQuery("안녕 @re", 6), { start: 3, end: 6, query: "re" });
+  assert.equal(I.mentionQuery("안녕 @re 뒤", 3), null);
+  assert.equal(I.mentionQuery("a@b", 3), null);
+  assert.equal(I.mentionQuery("@lead-a ", 8), null); // 공백이 지나면 끝
+  assert.equal(I.mentionQuery("@lead-a", 7, [{ range: { start: 0, end: 7 } }]), null);
+  assert.deepEqual(I.mentionQuery("@lead-a @", 9, [{ range: { start: 0, end: 7 } }]), { start: 8, end: 9, query: "" });
+});
+
+test("leaderMenu: @here가 맨 위, 그다음 PO가 있는 살아 있는 리더를 세션 이름으로, 질의로 거른다", () => {
+  const all = I.leaderMenu(TERMS, {});
+  assert.deepEqual(all.map((x) => x.id), ["here", "lead-c", "lead-a", "lead-b"]); // 이름 순(글자 코드 순)
+  assert.equal(all.some((x) => x.id === "lead-orphan"), false); // 부모가 PO가 아닌 리더는 뺀다
+  assert.equal(all.find((x) => x.id === "lead-b").label, "받은편지함 패널");
+  assert.equal(all.find((x) => x.id === "lead-a").label, "가나다"); // '리더 · ' 머리말은 뗀다
+  assert.equal(all.find((x) => x.id === "lead-c").label, "c"); // 제목이 없으면 hc 이름에서
+  assert.deepEqual(I.leaderMenu(TERMS, {}, "받은").map((x) => x.id), ["lead-b"]);
+  assert.deepEqual(I.leaderMenu(TERMS, {}, "LEAD-A").map((x) => x.id), ["lead-a"]);
+  assert.deepEqual(I.leaderMenu(TERMS, {}, "he").map((x) => x.id), ["here"]);
+  assert.deepEqual(I.leaderMenu(TERMS, {}, "없는이름"), []);
+  assert.equal(I.leaderMenu(TERMS, {}, "", 2).length, 2);
+  assert.deepEqual(I.leaderMenu([], {}).map((x) => x.id), ["here"]);
+});
+
+test("leaderMenu: 닫힌 리더는 없고, 기억한 이름은 터미널 제목이 없을 때만 쓴다", () => {
+  const terms = [{ address: "t1", name: "", labels: { role: "po" } }, { address: "t2", name: "lead-x", parent: "t1" }];
+  assert.equal(I.leaderMenu(terms, { "lead-x": "기억한 이름" }).find((x) => x.id === "lead-x").label, "기억한 이름");
+  assert.deepEqual(I.leaderMenu([terms[0]], { "lead-x": "기억한 이름" }).map((x) => x.id), ["here"]);
+});
+
+test("chatTarget: 부른 리더들의 PO, 서로 다른 PO나 PO 없는 리더는 거절, 멘션이 없으면 리더가 가장 많은 PO", () => {
+  assert.deepEqual(I.chatTarget(TERMS, ["lead-a"]), { po: "t28" });
+  assert.deepEqual(I.chatTarget(TERMS, ["lead-a", "lead-b"]), { po: "t28" });
+  assert.deepEqual(I.chatTarget(TERMS, ["lead-c"]), { po: "t40" });
+  assert.deepEqual(I.chatTarget(TERMS, ["lead-a", "lead-c"]), { po: null, why: "many" });
+  assert.deepEqual(I.chatTarget(TERMS, ["lead-orphan"]), { po: null, why: "orphan" });
+  assert.deepEqual(I.chatTarget(TERMS, []), { po: "t28" }); // 리더 둘인 t28 > 하나인 t40
+  assert.deepEqual(I.chatTarget(TERMS.slice(0, 1), []), { po: "t28" }); // 리더가 없어도 role=po면 보낼 수 있다
+  assert.deepEqual(I.chatTarget([{ address: "t1", name: "", labels: { role: "dev" } }], []), { po: null, why: "none" });
+});
+
+test("parsePoLines: say 줄만, 오래된 것부터, 깨진 줄·모르는 종류·빈 글·잘못된 시각은 건너뛴다", () => {
+  const l = (o) => JSON.stringify(o);
+  const t = [
+    l({ ts: "2026-01-01T00:00:02Z", kind: "say", text: " 두번째 ", to: "lead-a", extra: 1 }),
+    "not json",
+    l({ ts: "2026-01-01T00:00:01Z", kind: "say", text: "첫번째" }),
+    l({ ts: "2026-01-01T00:00:03Z", kind: "other", text: "x" }),
+    l({ ts: "2026-01-01T00:00:04Z", kind: "say", text: "   " }),
+    l({ ts: "어제", kind: "say", text: "시각 없음" }),
+    l({ ts: "2026-01-01T00:00:05Z", kind: "say", text: 5 }),
+    '{"ts":"2026-01-01T00:00:06Z","kind":"say","te',
+  ].join("\n");
+  const out = I.parsePoLines(t);
+  assert.deepEqual(out.map((x) => [x.text, x.to]), [["첫번째", ""], ["두번째", "lead-a"]]);
+  assert.equal(out[0].extra, undefined);
+  assert.equal(typeof out[0].ms, "number");
+});
+
+test("parsePoLines: 최근 100줄만 남긴다. 빈 글은 빈 목록", () => {
+  const many = Array.from({ length: 130 }, (_, i) => JSON.stringify({ ts: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(), kind: "say", text: String(i) })).join("\n");
+  const out = I.parsePoLines(many);
+  assert.equal(out.length, 100);
+  assert.equal(out[99].text, "129");
+  assert.deepEqual(I.parsePoLines(""), []);
+  assert.deepEqual(I.parsePoLines(undefined), []);
+});
+
+test("collect: po.jsonl은 리더가 아니라 po 줄로 읽고, 없거나 비어 있어도 오류 없이 빈 목록이다", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "inbox-po-"));
+  fs.writeFileSync(path.join(dir, "lead-a.jsonl"), text({ ts: "2026-01-01T00:00:00Z", kind: "done" }));
+  assert.deepEqual(I.collect(dir).po, []); // 파일 없음
+  fs.writeFileSync(path.join(dir, "po.jsonl"), "");
+  assert.deepEqual(I.collect(dir).po, []); // 빈 파일
+  fs.writeFileSync(path.join(dir, "po.jsonl"), JSON.stringify({ ts: "2026-01-02T00:00:00Z", kind: "say", text: "안녕하세요", to: "here" }) + "\n");
+  const d = I.collect(dir);
+  assert.deepEqual(d.leaders.map((x) => x.leader), ["lead-a"]); // po가 리더로 보이지 않는다
+  assert.deepEqual(d.po.map((x) => [x.text, x.to]), [["안녕하세요", "here"]]);
+  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, leaders: [], po: [] });
+});
+
+test("chat 블록: main.js가 inbox.cjs와 한 글자도 다르지 않은 같은 블록을 쓴다", () => {
+  const block = (f) => {
+    const src = fs.readFileSync(path.join(__dirname, f), "utf8");
+    const a = src.indexOf("// chat:begin"), b = src.indexOf("// chat:end");
+    assert.ok(a >= 0 && b > a, f);
+    return src.slice(a, b);
+  };
+  assert.equal(block("../mods/inbox/main.js"), block("../mods/inbox/inbox.cjs"));
+});
+
+test("parseMention: 글 가운데 @here는 빠지고 남는 공백·문장부호를 정리한다, 모르는 @lead는 글에 그대로 남는다", () => {
+  const known = ["lead-a"];
+  assert.equal(I.parseMention("확인해 줘 @here 부탁해", known).text, "확인해 줘 부탁해");
+  assert.equal(I.parseMention("확인해 줘 @here, 부탁해", known).text, "확인해 줘, 부탁해");
+  assert.equal(I.parseMention("@here, 부탁해", known).text, "부탁해");
+  const u = I.parseMention("@lead-zzz 이거 해줘", known);
+  assert.deepEqual([u.text, u.to, u.empty], ["@lead-zzz 이거 해줘", [], false]);
+});
+
+test("채팅 줄 따라가기: 열 때와 새 줄이 올 때만 맨 아래로, 위로 올려 읽는 중이면 건드리지 않는다", () => {
+  const a = [{ ms: 1, me: true, text: "안녕" }];
+  const b = [...a, { ms: 2, me: false, text: "네" }];
+  assert.equal(I.chatKey([]), "");
+  assert.notEqual(I.chatKey(a), I.chatKey(b));
+  assert.equal(I.chatFollow(null, I.chatKey(a), 0), true); // 창을 막 열었다
+  assert.equal(I.chatFollow(I.chatKey(a), I.chatKey(a), 0), false); // 같은 줄: 그대로
+  assert.equal(I.chatFollow(I.chatKey(a), I.chatKey(b), 0), true); // 새 줄
+  assert.equal(I.chatFollow(I.chatKey(a), I.chatKey(b), 120), false); // 위로 올려 읽는 중
+  assert.equal(I.chatFollow(null, "", 0), false); // 줄이 없다
+  let up = 0;
+  up = I.chatWheel(up, 80); assert.equal(up, 80);
+  up = I.chatWheel(up, -200); assert.equal(up, 0); // 맨 아래로 돌아오면 다시 따라간다
+  assert.equal(I.chatWheel(0, 99999), 4000);
+  assert.equal(I.chatWheel(5, undefined), 5);
+});

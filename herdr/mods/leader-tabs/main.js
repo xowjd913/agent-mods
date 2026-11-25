@@ -19,11 +19,10 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, terminals, focused, props, run, theme, home, layout, exec, checking } from "herdr";
+import { panes, terminals, focused, props, run, theme, home, layout, exec, checking, shared } from "herdr";
 
 const PANE_ICON = (name) => `mods/pane/${name}.svg`;
 const roleOf = (t) => String(t?.labels?.role ?? "").trim().toLowerCase();
-const LEADER_PREFIX = /^리더\s*·\s*/;
 const ARRANGE = 'f="$HOME/.claude/skills/leader/herdr-team.sh"; [ -f "$f" ] || exit 127; HC_TERMINAL_ID="$1" exec sh "$f" arrange';
 const HEAL_COOLDOWN = 30000;
 const SETTLE = 10000;
@@ -63,10 +62,39 @@ function statusMark(t, st) {
   return null;
 }
 
-// "리더 · 워크트리 제목 표시" -> "워크트리 제목 표시"; falls back to the hc name.
+// leaderName:begin
+// The name a person knows a leader by: its Herdr session name. ONE rule for the inbox (cards, rows), agent-groups (leader headers), leader-tabs (tab text) and work (session rows).
+// The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js and agent-groups/main.js
+// (a test keeps them identical). Order: the live terminal title -> the `session` label -> the last name remembered for that leader
+// (`memo`, {<hc name>: name}) -> the hc name ("lead-po-inbox" -> "po inbox"). The "리더 · " prefix is dropped: the place already says
+// it is a leader, and the name then reads as its task.
+const LEADER_PREFIX = /^\s*리더\s*·\s*/;
+const sessionName = (s) => String(s ?? "").replace(/^[^\p{L}\p{N}\p{Ps}\p{Pi}]+/u, "").replace(LEADER_PREFIX, "").trim();
+const liveName = (term) => [term?.title, term?.labels?.session].map(sessionName).find((n) => n && n !== term?.name && n !== term?.address && n.toLowerCase() !== "claude") ?? "";
+const leaderName = (leader, term, memo) => liveName(term) || sessionName(memo?.[leader]) || String(leader ?? "").replace(/^lead-/, "").replace(/-/g, " ").trim() || String(term?.address ?? "");
+// The memo with the live names of `terms` merged in; null when nothing changed. At most `max` leaders are kept (oldest dropped).
+function rememberNames(memo, terms, max = 60) {
+  const next = { ...(memo ?? {}) };
+  let changed = false;
+  for (const t of terms ?? []) {
+    const n = /^lead-/.test(String(t?.name ?? "")) ? liveName(t) : "";
+    if (!n || next[t.name] === n) continue;
+    delete next[t.name]; // re-added last: the newest stay when the cap drops the oldest
+    next[t.name] = n;
+    changed = true;
+  }
+  if (!changed) return null;
+  for (const k of Object.keys(next).slice(0, Math.max(0, Object.keys(next).length - max))) delete next[k];
+  return next;
+}
+// leaderName:end
+const NAMES_KEY = "leader.names"; // written by the inbox / agent-groups; read-only here
+const namesMemo = () => { try { return shared(NAMES_KEY) ?? {}; } catch { return {}; } };
+
+// The tab's text is the leader's session name (the shared rule: live title without "리더 · ", the `session` label, the remembered name,
+// then the hc name made readable) -- never the raw "lead-x".
 function leaderLabel(term) {
-  const title = String(term.title ?? "").trim();
-  return title ? title.replace(LEADER_PREFIX, "") || title : term.name || term.address;
+  return leaderName(term.name, term, namesMemo());
 }
 
 export default class LeaderTabs extends View {

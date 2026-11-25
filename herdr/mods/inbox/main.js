@@ -11,7 +11,7 @@
 // by inbox.cjs; this mod only reads them.
 
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, TextView, ScrollHandle } from "gpui-base";
 import { theme, exec, appHome, checking, window, run, terminals, panes, setBadge, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
@@ -20,6 +20,8 @@ const LOAD_TIMEOUT = 20000, LOAD_STALL_MS = 30000, WINDOW_REFRESH_MS = 5000, PAN
 const KIND = { done: ["완료", "working"], decision: ["결정", "blocked"], verify: ["확인", "blocked"], stop: ["중단", "idle"], resume: ["재개", "dim"], other: ["알림", "dim"], start: ["시작", "dim"] };
 const WINDOW = { mod: "inbox", kind: "window", key: "inbox", keep: true, width: 480, height: 680, props: { mode: "window" } };
 const SENT_KEY = "inbox.sent";
+const CHAT_KEY = "inbox.chat"; // the lines the person sent through the chat box [{ts, ms, text, to}]
+const MAX_CHAT = 30, SHOW_CHAT = 6;
 const OPEN_KEY = "inbox.expanded"; // cards the person opened ("자세히"), shared so they stay open across re-renders and window reopens
 const MAX_OPEN = 60;
 const FOCUS_KEY = "inbox.focus"; // "<leader>|<report time>" the window should show first and open (set by a pane row), "" for none
@@ -30,6 +32,33 @@ const CLIP = "답을 클립보드에 담아 PO 터미널에 붙여 넣습니다(
 
 // Which terminal is a waiting leader. Copied verbatim from inbox.cjs (a test keeps them identical); tabs-mine uses the same line.
 const waitingKind = (t) => (/^lead-/.test(String(t?.name ?? "")) ? (["decision", "verify"].find((k) => k === String(t.labels?.wait ?? "").trim().toLowerCase()) ?? "") : "");
+
+// leaderName:begin
+// The name a person knows a leader by: its Herdr session name. ONE rule for the inbox (cards, rows), agent-groups (leader headers), leader-tabs (tab text) and work (session rows).
+// The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js and agent-groups/main.js
+// (a test keeps them identical). Order: the live terminal title -> the `session` label -> the last name remembered for that leader
+// (`memo`, {<hc name>: name}) -> the hc name ("lead-po-inbox" -> "po inbox"). The "리더 · " prefix is dropped: the place already says
+// it is a leader, and the name then reads as its task.
+const LEADER_PREFIX = /^\s*리더\s*·\s*/;
+const sessionName = (s) => String(s ?? "").replace(/^[^\p{L}\p{N}\p{Ps}\p{Pi}]+/u, "").replace(LEADER_PREFIX, "").trim();
+const liveName = (term) => [term?.title, term?.labels?.session].map(sessionName).find((n) => n && n !== term?.name && n !== term?.address && n.toLowerCase() !== "claude") ?? "";
+const leaderName = (leader, term, memo) => liveName(term) || sessionName(memo?.[leader]) || String(leader ?? "").replace(/^lead-/, "").replace(/-/g, " ").trim() || String(term?.address ?? "");
+// The memo with the live names of `terms` merged in; null when nothing changed. At most `max` leaders are kept (oldest dropped).
+function rememberNames(memo, terms, max = 60) {
+  const next = { ...(memo ?? {}) };
+  let changed = false;
+  for (const t of terms ?? []) {
+    const n = /^lead-/.test(String(t?.name ?? "")) ? liveName(t) : "";
+    if (!n || next[t.name] === n) continue;
+    delete next[t.name]; // re-added last: the newest stay when the cap drops the oldest
+    next[t.name] = n;
+    changed = true;
+  }
+  if (!changed) return null;
+  for (const k of Object.keys(next).slice(0, Math.max(0, Object.keys(next).length - max))) delete next[k];
+  return next;
+}
+// leaderName:end
 
 // The PO of a leader: its terminal's parent, only when that parent has the label role=po (no guessing). Same rule as inbox.cjs
 // findPo; kept here because the mod cannot require a .cjs file.
@@ -44,6 +73,74 @@ function answerLine(kind, leader, text, link) {
   const body = String(text ?? "").replace(/\s*\n\s*/g, " ").trim();
   return `Panel answer (${kind}) for ${leader}: "${body}".${link ? ` Target: ${link}` : ""}`;
 }
+
+// chat:begin
+// The chat box of the window: "@" mentions, the menu of live leaders and which PO a line goes to. Pure. The mods cannot require a
+// .cjs file, so this block is copied verbatim between the markers into inbox/main.js (a test keeps them identical).
+const MENTION_END = "(?=$|[\\s.,!?:;)])";
+const MENTION = new RegExp(`(^|\\s)@(here|lead-[A-Za-z0-9_-]+)${MENTION_END}`, "g");
+const HERE = new RegExp(`(^|\\s)@here${MENTION_END}`, "g");
+const HERE_PUNCT = /(^|\s)@here(?=[.,!?:;)])/g; // "@here" before punctuation takes its leading space with it: "hi @here, ok" -> "hi, ok"
+// The box text with each mention chip written out as its text ("@lead-x"), whether or not the chip's range already holds that text.
+function composeChat(content) {
+  let text = String(content?.text ?? "");
+  for (const s of [...(content?.tokens ?? [])].sort((a, b) => b.range.start - a.range.start)) text = text.slice(0, s.range.start) + String(s.token?.text ?? "") + text.slice(s.range.end);
+  return text;
+}
+// What goes to the PO: one line, "@here" dropped (it only means "to the PO"), and the live leaders (`known`, hc names) it names.
+// `empty` is true when nothing is left once the mentions are taken out, so a lone "@lead-x" is not sent.
+function parseMention(raw, known = []) {
+  const flat = String(raw ?? "").replace(/\s*\n\s*/g, " ").trim();
+  const to = [];
+  let here = false;
+  const empty = flat.replace(MENTION, (m, pre, name) => {
+    if (name === "here") here = true;
+    else if (known.includes(name)) { if (!to.includes(name)) to.push(name); } else return m;
+    return pre;
+  }).trim() === "";
+  const text = flat.replace(HERE_PUNCT, "").replace(HERE, "$1").replace(/\s+/g, " ").replace(/^[\s,.:;!?)]+/, "").trim();
+  return { text, to, here, empty };
+}
+// The "@query" being typed right before `cursor` (offsets into the box text), or null. Not inside a chip, not in the middle of a word.
+function mentionQuery(text, cursor, tokens = []) {
+  const before = String(text ?? "").slice(0, cursor);
+  const m = /(^|\s)@([^\s@]*)$/.exec(before);
+  if (!m) return null;
+  const start = before.length - m[2].length - 1;
+  if (tokens.some((t) => start >= t.range.start && start < t.range.end)) return null;
+  return { start, end: cursor, query: m[2] };
+}
+// The "@" menu: "@here" first, then the live leaders that have a PO (the same rule as findPo), by shown name. `query` filters by hc name
+// or shown name.
+function leaderMenu(terms, memo, query = "", limit = 8) {
+  const list = terms ?? [];
+  const q = String(query ?? "").trim().toLowerCase();
+  const leaders = list.filter((t) => /^lead-/.test(String(t?.name ?? "")) && findPo(list, t.name, t.address))
+    .map((t) => ({ id: t.name, label: leaderName(t.name, t, memo), sub: t.name }))
+    .filter((x, i, a) => a.findIndex((y) => y.id === x.id) === i)
+    .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0)); // code-unit order: the same on every platform
+  return [{ id: "here", label: "here", sub: "" }, ...leaders].filter((x) => !q || x.id.toLowerCase().includes(q) || x.label.toLowerCase().includes(q)).slice(0, limit);
+}
+// The PO a line is pasted into: the PO of the leaders it names (they must share one), else the PO with the most live leaders.
+// {po} or {po:null, why:"orphan"|"many"|"none"}.
+function chatTarget(terms, to = []) {
+  const list = terms ?? [];
+  if (to.length) {
+    const pos = [...new Set(to.map((n) => findPo(list, n)))];
+    if (pos.includes(null)) return { po: null, why: "orphan" };
+    return pos.length > 1 ? { po: null, why: "many" } : { po: pos[0] };
+  }
+  const isPo = (t) => String(t?.labels?.role ?? "").trim().toLowerCase() === "po";
+  const count = (po) => list.filter((t) => /^lead-/.test(String(t?.name ?? "")) && t.parent === po.address).length;
+  const best = list.filter(isPo).map((p, i) => ({ p, n: count(p), i })).sort((a, b) => b.n - a.n || a.i - b.i)[0];
+  return best ? { po: best.p.address } : { po: null, why: "none" };
+}
+// Follow-the-newest rule of the chat lines: scroll to the bottom when the window opens (no key seen yet) or a new line arrived, but
+// not while the person has scrolled up to read. `up` is how far (px) the wheel has moved up from the bottom.
+const chatKey = (lines) => { const l = (lines ?? [])[(lines ?? []).length - 1]; return l ? `${lines.length}|${l.ms}|${l.me ? 1 : 0}|${l.text}` : ""; };
+const chatWheel = (up, dy) => Math.max(0, Math.min(4000, (Number(up) || 0) + (Number(dy) || 0)));
+const chatFollow = (seen, key, up) => key !== "" && key !== seen && (Number(up) || 0) <= 4;
+// chat:end
 
 // Opens an http(s) link with the app's own open_url when a context is at hand, else through the system opener.
 function openUrl(url, cx) {
@@ -77,7 +174,21 @@ const safeProps = () => { try { return props() ?? {}; } catch { return {}; } };
 // A press the mod handles must not start a drag of the floating window.
 const stop = (_e, cx) => cx.stop_propagation();
 
-const shortName = (leader) => String(leader).replace(/^lead-/, "");
+const NAMES_KEY = "leader.names"; // {<hc name>: session name}, shared with agent-groups: a closed leader keeps a readable name
+const namesMemo = () => { try { return shared(NAMES_KEY) ?? {}; } catch { return {}; } };
+// The shown name of a leader (by hc name): live terminal, else remembered, else the hc name.
+function shortName(leader) {
+  let list = [];
+  try { list = terminals() ?? []; } catch {}
+  return leaderName(leader, list.find((t) => t.name === leader), namesMemo());
+}
+// Remember the live names (only changes are written).
+function rememberLeaders() {
+  try {
+    const next = rememberNames(namesMemo(), terminals() ?? []);
+    if (next) setShared(NAMES_KEY, next);
+  } catch {}
+}
 
 // Two shapes of one mod: the small summary pane (lane counts, opens the window) and the full chat view, which runs in a floating
 // window (props().mode === "window") and works the same as a pane.
@@ -95,6 +206,21 @@ export default class Inbox extends View {
     this.inputs = new Map(); // leader -> InputState
     this.msg = null; // {text, bad}
     this.copied = null; // key of the command whose 복사 button just ran
+    this.chat = InputState.new({ value: "", placeholder: "PO에게 말하기 — @로 리더를 부르고 Enter로 PO 입력칸에 넣기" });
+    this.menu = null; // the open "@" menu: {start, end, query, items, sel}
+    this.chat.on("change", (_e, c) => this.syncMenu(c));
+    this.chat.on("submit", (_e, c) => { if (this.menu) this.pickMenu(this.menu.sel, c); else if (Date.now() - this.pickedAt > 250) this.sendChat(c); });
+    this.pickedAt = 0; // a menu pick just now: the Enter that made it must not also send
+    this.chatScroll = null; // the chat lines' scroll handle
+    try { this.chatScroll = ScrollHandle.new(); } catch {}
+    this.chatSeen = null; // chatKey of the last drawn lines
+    this.chatUp = 0; // px the person has wheeled up from the bottom of the chat lines
+    // The scroll position of both lists is held by handles the view owns (not only by the element id), and every press that changes the
+    // height of a card or a section asks for that spot to stay in view (see reveal).
+    this.scroll = null; // the window's list
+    this.rowsScroll = null; // the pane's list
+    try { this.scroll = ScrollHandle.new(); this.rowsScroll = ScrollHandle.new(); } catch {}
+    this.at = new Map(); // spot key -> index of that child in the window's list, rebuilt on every frame
     if (checking()) return;
     this.load(cx);
     // The always-on summary pane owns the slow refresh and the badge; the window refreshes faster while it is open.
@@ -137,6 +263,14 @@ export default class Inbox extends View {
       setShared(OPEN_KEY, cur);
     } catch {}
   }
+
+  // Keeps the spot a press changed (a card that opened or closed, a section that folded, an answer box) in view: scroll_to_item moves
+  // nothing while the child is already visible, so a list that kept its place stays still, and one that lost it comes back to that spot
+  // instead of the top. No pixel offset is readable from the handle, so "in view" is the most this can promise.
+  reveal(key) {
+    try { const i = this.at.get(key); if (i !== undefined) this.scroll?.scroll_to_item(i); } catch {}
+  }
+  spot(s, it) { return `c|${this.cardKey(s, it)}`; }
 
   // A command's copy button: exactly that text goes on the clipboard (no paste, no send); the button says "복사됨" for a moment.
   copy(key, text, cx) {
@@ -194,6 +328,7 @@ export default class Inbox extends View {
         if (gen !== this.gen) return;
         this.data = d;
         this.error = null;
+        rememberLeaders();
       } catch (e) { if (gen === this.gen) this.error = `불러오기 실패: ${String(e?.message ?? e).slice(0, 180)}`; }
       finally { if (gen === this.gen) { this.busy = false; this.badge(); cx.notify(); } }
     });
@@ -283,6 +418,131 @@ export default class Inbox extends View {
     return s;
   }
 
+  // ---- PO chat: the line goes to the PO's prompt the same way a panel answer does; the person presses Enter there.
+  liveTerms() { try { return terminals() ?? []; } catch { return []; } }
+
+  // Opens, updates or closes the "@" menu from the text before the cursor.
+  syncMenu(c) {
+    let next = null;
+    try {
+      const content = this.chat.content();
+      const q = mentionQuery(content.text, this.chat.selected_range().end, content.tokens);
+      const items = q ? leaderMenu(this.liveTerms(), namesMemo(), q.query) : [];
+      if (q && items.length) next = { ...q, items, sel: Math.min(this.menu?.sel ?? 0, items.length - 1) };
+    } catch {}
+    this.menu = next;
+    c.notify();
+  }
+
+  // Puts the picked mention into the box as a chip ("@lead-x "); a plain "@lead-x " when the chip cannot be made.
+  pickMenu(i, c) {
+    const m = this.menu, item = m?.items[i];
+    if (!item) return;
+    const range = { start: m.start, end: m.end };
+    const token = { id: item.id, text: `@${item.id} `, label: `@${item.label}` };
+    this.menu = null;
+    this.pickedAt = Date.now();
+    try { this.chat.replace_range_with_token(range, token); }
+    catch {
+      try {
+        const text = composeChat(this.chat.content());
+        this.chat.set_value(text.slice(0, range.start) + token.text + text.slice(range.end));
+        this.chat.set_selected_range({ start: range.start + token.text.length, end: range.start + token.text.length });
+      } catch {}
+    }
+    try { this.chat.focus(); } catch {}
+    c.notify();
+  }
+
+  // Keys the open menu handles stop here, so they do not also move the cursor, the focus or close the window.
+  menuKey(e, c) {
+    const m = this.menu;
+    if (!m) return;
+    const key = String(e?.key ?? "").toLowerCase().replace(/^arrow/, "");
+    if (key === "down" || key === "up") m.sel = (m.sel + (key === "down" ? 1 : m.items.length - 1)) % m.items.length;
+    else if (key === "escape") this.menu = null;
+    else if (/^(tab|enter)$/.test(key)) this.pickMenu(m.sel, c);
+    else return;
+    try { c.stop_propagation(); } catch {}
+    c.notify();
+  }
+
+  chatLines() {
+    let mine = [];
+    try { mine = shared(CHAT_KEY) ?? []; } catch {}
+    return [...mine.map((x) => ({ ...x, me: true })), ...(this.data?.po ?? [])].sort((a, b) => a.ms - b.ms).slice(-SHOW_CHAT);
+  }
+
+  sendChat(c) {
+    const terms = this.liveTerms();
+    const known = terms.map((t) => t.name).filter((n) => /^lead-/.test(String(n ?? "")));
+    let p;
+    try { p = parseMention(composeChat(this.chat.content()), known); } catch { p = { empty: true }; }
+    if (p.empty) { this.say("PO에게 보낼 글을 먼저 적어 주세요.", true); c.notify(); return; }
+    const tgt = chatTarget(terms, p.to);
+    if (!tgt.po) {
+      this.say(tgt.why === "many" ? "부른 리더들의 PO가 서로 다릅니다. 한 PO의 리더만 함께 부르세요." : tgt.why === "orphan" ? NO_PO : "role=po 라벨이 붙은 PO 터미널이 없습니다.", true);
+      c.notify();
+      return;
+    }
+    const po = tgt.po;
+    try {
+      c.write_to_clipboard(p.text);
+      if (!(panes() ?? []).some((x) => x.terminal === po)) {
+        run("terminal.keep", { terminal: po });
+        this.say(`PO(${po})에 창이 없어 열었습니다. 다른 것을 복사하기 전에 PO 터미널에서 붙여넣고 Enter를 누르세요(글은 클립보드에 있습니다).`);
+      } else {
+        run("pane.focus", { terminal: po });
+        try { run("terminal.paste", {}); this.say(`PO(${po})에 붙여 넣었습니다. PO 터미널에서 Enter를 눌러 보내세요.`); }
+        catch { this.say(`PO(${po})를 열었습니다. 글은 클립보드에 있으니 붙여넣고 Enter를 누르세요.`); }
+      }
+      try {
+        const now = Date.now();
+        setShared(CHAT_KEY, [...(shared(CHAT_KEY) ?? []), { ts: new Date(now).toISOString(), ms: now, text: p.text, to: p.to[0] ?? "" }].slice(-MAX_CHAT));
+      } catch {}
+      this.chat.set_value("");
+      this.menu = null;
+      if (this.windowed) { try { closeOverlay(safeProps().overlay); } catch {} } // the PO pane takes the keyboard
+    } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
+    c.notify();
+  }
+
+  // The chat footer: the last few lines (the person's and the PO's), the "@" menu, the input with mention chips.
+  chatBox(t) {
+    const lines = this.chatLines();
+    const key = chatKey(lines);
+    if (chatFollow(this.chatSeen, key, this.chatUp)) { try { this.chatScroll?.scroll_to_item(lines.length - 1); } catch {} }
+    this.chatSeen = key;
+    const bubble = (x, i) => {
+      const who = x.me ? null : h_flex().gap(5).items_center()
+        .child(div().text_size(10.5).font_semibold().text_color(t.working).child("PO"))
+        .when(Boolean(x.to), (el) => el.child(div().text_size(10.5).text_color(t.dim).child(`→ ${shortName(x.to)}`)));
+      return h_flex().flex_none().px(4).justify_start().when(x.me, (el) => el.justify_end())
+        .child(v_flex().id(`chat-${i}`).max_w("85%").min_w(0).gap(2).px(10).py(5).rounded(10).bg(x.me ? t.selected : t.raised).border(1).border_color(t.border)
+          .when(Boolean(who), (el) => el.child(who))
+          .child(div().min_w(0).text_size(12.5).text_color(t.foreground).child(x.text))
+          .child(div().text_size(10).text_color(t.dim).child(ago(x.ts))));
+    };
+    const menu = this.menu && v_flex().id("chat-menu").flex_none().p(4).gap(2).rounded(8).bg(t.raised).border(1).border_color(t.border)
+      .children(this.menu.items.map((it, i) => h_flex().id(`mn-${it.id}`).h(26).px(8).gap(8).items_center().rounded(6).cursor_pointer()
+        .bg(i === this.menu.sel ? t.selected : t.raised).hover((x) => x.bg(t.hover))
+        .on_mouse_down("left", stop).on_click((_e, c) => this.pickMenu(i, c))
+        .child(div().text_size(12.5).font_semibold().text_color(it.id === "here" ? t.muted : tint(t, it.id)).child(`@${it.label}`))
+        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(it.id === "here" ? "PO에게 그냥 보내기" : it.sub))));
+    const chip = (ctx) => div().h(ctx.line_height).px(5).rounded(5).flex().items_center().bg(t.working + "26").text_color(t.working).text_size(12.5).font_semibold()
+      .child(ctx.token.label ?? ctx.token.text.trim());
+    return v_flex().flex_none().px(10).pb(10).pt(6).gap(6).border_t(1).border_color(t.border)
+      .on_key_down((e, c) => this.menuKey(e, c))
+      .when(lines.length > 0, (el) => el.child(v_flex().id("chat-lines").max_h(190).gap(5).overflow_y_scrollbar()
+        .on_scroll_wheel((e) => { this.chatUp = chatWheel(this.chatUp, e?.delta?.y); }) // wheel up = positive y
+        .when(Boolean(this.chatScroll), (x) => x.track_scroll(this.chatScroll)).children(lines.map(bubble))))
+      .when(Boolean(menu), (el) => el.child(menu))
+      .child(h_flex().gap(6).items_center()
+        .child(div().flex_1().min_w(0).on_mouse_down("left", stop)
+          .child(Input.new(this.chat).token((ctx) => chip(ctx)).h(30).px(10).items_center().rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
+        .child(this.button(t, "chat-send", "PO에 넣기", (c) => this.sendChat(c), { primary: true, tip: "글을 클립보드에 담아 PO 터미널에 붙여 넣습니다. Enter는 PO 터미널에서 누릅니다" })));
+  }
+
   // ---- parts
   button(t, id, label, onClick, o = {}) {
     if (o.disabled) {
@@ -312,7 +572,7 @@ export default class Inbox extends View {
   heading(t, text, count, first, o = {}) {
     const el = h_flex().id(o.id ?? `sec-${text}`).h(first ? 30 : 38).px(8).pt(first ? 4 : 14).items_center().gap(7).flex_none().cursor_pointer()
       .when(!first, (x) => x.border_t(1).border_color(t.border).mt(6))
-      .on_mouse_down("left", stop).on_click((_e, c) => { o.toggle?.(); c.notify(); }).tooltip(o.folded ? "눌러서 펼칩니다" : "눌러서 접습니다")
+      .on_mouse_down("left", stop).on_click((_e, c) => { o.toggle?.(); this.reveal(o.id); c.notify(); }).tooltip(o.folded ? "눌러서 펼칩니다" : "눌러서 접습니다")
       .child(div().flex_none().w(12).text_size(11).text_color(t.dim).child(o.folded ? "▸" : "▾"))
       .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(text))
       .child(div().flex_none().px(6).h(16).rounded(8).bg(o.hot && count > 0 ? t.blocked + "26" : t.raised).flex().items_center().text_size(10.5)
@@ -366,7 +626,7 @@ export default class Inbox extends View {
     const id = `b-${s.leader}-${it.ts}`;
     const toggle = it.long ? div().id(`tg-${s.leader}-${it.ts}`).flex_none().px(8).h(20).rounded(10).flex().items_center().text_size(10.5).cursor_pointer().bg(t.raised)
       .border(1).border_color(t.border).text_color(t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
-      .on_click((_e, c) => { this.toggleOpen(s, it); c.notify(); }).child(open ? "접기" : "자세히") : null;
+      .on_click((_e, c) => { this.toggleOpen(s, it); this.reveal(this.spot(s, it)); c.notify(); }).child(open ? "접기" : "자세히") : null;
     const box = v_flex().min_w(0).px(10).py(7).gap(5).rounded(10).bg(accent ? accent + "1f" : t.raised).border(1).border_color(accent ? accent + "55" : t.border)
       .text_size(12.5).text_color(t.foreground);
     const headline = it.head || it.lead || it.title;
@@ -406,7 +666,7 @@ export default class Inbox extends View {
     const actions = h_flex().gap(6).pl(this.compact ? 0 : 36).items_center().flex_wrap()
       .when(Boolean(link) && link !== item?.link, (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", (c) => openUrl(link, c))))
       .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c), { primary: true, disabled: a.po ? "" : NO_PO, tip: CLIP })))
-      .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); c.notify(); }, { disabled: a.po ? "" : NO_PO }))
+      .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); this.reveal(this.spot(s, item)); c.notify(); }, { disabled: a.po ? "" : NO_PO }))
       .child(div().text_size(11).text_color(done ? t.working : t.dim).child(done ? "PO에 넣음 — PO에서 Enter로 보내면 사라집니다" : "PO에서 Enter로 보내면 리더가 받고 사라집니다"));
     card.child(head).child(actions);
     if (!a.po) card.child(div().pl(this.compact ? 0 : 36).text_size(11).text_color(t.dim).child(NO_PO));
@@ -471,7 +731,7 @@ export default class Inbox extends View {
         .child(this.button(t, "inbox-open", "창 열기", (c) => { this.clearFocus(); this.openWindow(); c.notify(); }, { tip: "받은편지함 창을 엽니다" })))
       .when(Boolean(this.error), (el) => el.child(div().text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
       .when(Boolean(this.msg), (el) => el.child(div().text_size(11.5).text_color(this.msg.bad ? t.blocked : t.working).child(this.msg.text)))
-      .child(v_flex().id("inbox-rows").flex_1().min_h(0).gap(4).overflow_y_scrollbar().mode("always").children(list));
+      .child(v_flex().id("inbox-rows").flex_1().min_h(0).gap(4).overflow_y_scrollbar().mode("always").when(Boolean(this.rowsScroll), (el) => el.track_scroll(this.rowsScroll)).children(list));
   }
 
   // The full chat view (pane or window): both lanes.
@@ -480,7 +740,10 @@ export default class Inbox extends View {
     const asks = this.asks();
     let reports = this.reports(asks);
     const blocks = [];
-    // The item a pane row opened goes first (the view has no scroll-to): an ask is moved to the top of its lane, a report gets its own
+    const at = new Map(); // spot key -> index in blocks (the direct children of the scroll list)
+    this.at = at;
+    const add = (el, key) => { if (key) at.set(key, blocks.length); blocks.push(el); };
+    // The item a pane row opened goes first (the first pass has no scroll-to; once drawn, reveal() keeps a pressed spot in view): an ask is moved to the top of its lane, a report gets its own
     // spot above the lanes. Its card was opened by the row; "모두 보기" drops the choice.
     const f = this.focusKey();
     const fa = f ? asks.findIndex((a) => this.cardKey(a.s, a.item) === f) : -1;
@@ -492,18 +755,18 @@ export default class Inbox extends View {
         .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child("선택한 보고"))
         .child(div().flex_1())
         .child(this.button(t, "focus-clear", "모두 보기", (c) => { this.clearFocus(); c.notify(); })));
-      blocks.push(this.chatRow(t, pick));
+      add(this.chatRow(t, pick), this.spot(pick.s, pick.it));
     }
     const askFold = this.collapsed("ask", asks.length, fa >= 0);
-    blocks.push(this.heading(t, "결정 필요", asks.length, fr < 0, { id: "sec-ask", hot: true, folded: askFold, toggle: () => this.toggleSection("ask", asks.length, askFold) }));
+    add(this.heading(t, "결정 필요", asks.length, fr < 0, { id: "sec-ask", hot: true, folded: askFold, toggle: () => this.toggleSection("ask", asks.length, askFold) }), "sec-ask");
     if (!askFold) {
-      if (asks.length) asks.forEach((a) => blocks.push(this.askCard(t, a, cx)));
+      if (asks.length) asks.forEach((a) => add(this.askCard(t, a, cx), this.spot(a.s, a.item)));
       else blocks.push(div().flex_none().px(10).pb(8).text_size(12).text_color(t.dim).child(this.data ? "기다리는 결정·확인이 없습니다." : "불러오는 중…"));
     }
     const repFold = this.collapsed("rep", reports.length, false);
-    blocks.push(this.heading(t, "결과 보고", reports.length + (fr >= 0 ? 1 : 0), false, { id: "sec-rep", folded: repFold, toggle: () => this.toggleSection("rep", reports.length, repFold) }));
+    add(this.heading(t, "결과 보고", reports.length + (fr >= 0 ? 1 : 0), false, { id: "sec-rep", folded: repFold, toggle: () => this.toggleSection("rep", reports.length, repFold) }), "sec-rep");
     if (!repFold) {
-      if (reports.length) reports.forEach((r) => blocks.push(this.chatRow(t, r)));
+      if (reports.length) reports.forEach((r) => add(this.chatRow(t, r), this.spot(r.s, r.it)));
       else blocks.push(div().flex_none().px(10).text_size(12).text_color(t.dim).child(this.data ? "받은 보고가 없습니다." : ""));
     }
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
@@ -522,6 +785,7 @@ export default class Inbox extends View {
       .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
       .when(Boolean(this.msg), (el) => el.child(div().id("inbox-msg").px(14).pb(6).text_size(11.5).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
         .on_mouse_down("left", stop).on_click((_e, c) => { this.msg = null; c.notify(); }).child(this.msg.text)))
-      .child(v_flex().id("inbox-list").on_mouse_down("left", stop).flex_1().min_h(0).px(4).overflow_y_scrollbar().mode("always").children(blocks));
+      .child(v_flex().id("inbox-list").on_mouse_down("left", stop).flex_1().min_h(0).px(4).overflow_y_scrollbar().mode("always").when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks))
+      .child(this.chatBox(t));
   }
 }

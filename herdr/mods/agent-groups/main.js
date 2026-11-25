@@ -97,6 +97,8 @@ const PO_TAB = /^PO(?:\s|·|$)/;
 // Role label: the PO start flow sets `role=po` on its own terminal and `spawn --leader` sets
 // `role=leader`. It is read first; the tab-name rules below apply only to a terminal without it.
 const ROLE = "role";
+const NAMES_KEY = "leader.names"; // {<hc name>: session name}, shared with the inbox
+const namesMemo = () => { try { return shared(NAMES_KEY) ?? {}; } catch { return {}; } };
 const roleOf = (t) => String(t?.labels?.[ROLE] ?? "").trim().toLowerCase();
 const SECTION = { 4: "Needs you", 3: "Done", 2: "Working", 1: "Idle" };
 const SECTION_STATUS = { 4: "blocked", 3: "done", 2: "working" };
@@ -115,6 +117,33 @@ function icon(p, size, color) {
   return p.tint ? svg(p.icon).size(size).flex_none().text_color(color) : image(p.icon).w(size).h(size).flex_none();
 }
 
+// leaderName:begin
+// The name a person knows a leader by: its Herdr session name. ONE rule for the inbox (cards, rows), agent-groups (leader headers), leader-tabs (tab text) and work (session rows).
+// The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js and agent-groups/main.js
+// (a test keeps them identical). Order: the live terminal title -> the `session` label -> the last name remembered for that leader
+// (`memo`, {<hc name>: name}) -> the hc name ("lead-po-inbox" -> "po inbox"). The "리더 · " prefix is dropped: the place already says
+// it is a leader, and the name then reads as its task.
+const LEADER_PREFIX = /^\s*리더\s*·\s*/;
+const sessionName = (s) => String(s ?? "").replace(/^[^\p{L}\p{N}\p{Ps}\p{Pi}]+/u, "").replace(LEADER_PREFIX, "").trim();
+const liveName = (term) => [term?.title, term?.labels?.session].map(sessionName).find((n) => n && n !== term?.name && n !== term?.address && n.toLowerCase() !== "claude") ?? "";
+const leaderName = (leader, term, memo) => liveName(term) || sessionName(memo?.[leader]) || String(leader ?? "").replace(/^lead-/, "").replace(/-/g, " ").trim() || String(term?.address ?? "");
+// The memo with the live names of `terms` merged in; null when nothing changed. At most `max` leaders are kept (oldest dropped).
+function rememberNames(memo, terms, max = 60) {
+  const next = { ...(memo ?? {}) };
+  let changed = false;
+  for (const t of terms ?? []) {
+    const n = /^lead-/.test(String(t?.name ?? "")) ? liveName(t) : "";
+    if (!n || next[t.name] === n) continue;
+    delete next[t.name]; // re-added last: the newest stay when the cap drops the oldest
+    next[t.name] = n;
+    changed = true;
+  }
+  if (!changed) return null;
+  for (const k of Object.keys(next).slice(0, Math.max(0, Object.keys(next).length - max))) delete next[k];
+  return next;
+}
+// leaderName:end
+
 // A leader terminal by its role label, else (no label) its lead- name.
 const isLeader = (t) => {
   const role = roleOf(t);
@@ -124,7 +153,7 @@ const isLeader = (t) => {
 // live one an agent-like entry (no pane) in the space of the nearest ancestor that is listed (the PO
 // or leader above it), so taskPlan can place it. The name comes from the `session` label, else the hc name.
 // `listed` maps each listed address to its status.
-export function paneless(real, all, listed = new Map()) {
+export function paneless(real, all, listed = new Map(), memo = {}) {
   const byAddr = new Map(real.map((a) => [a.address, a]));
   const term = new Map(all.map((x) => [x.address, x]));
   const seat = (t) => {
@@ -146,7 +175,7 @@ export function paneless(real, all, listed = new Map()) {
     if (!home) return;
     // A leader's row reads like a real leader's: the full `session` label ("리더 · ..."), else "리더 · " + the
     // hc name without "lead-". Its tab name stays empty so taskPlan builds the section header itself.
-    const title = leader ? session || `리더 · ${String(t.name ?? "").replace(LEAD, "").replace(/-/g, " ").trim()}` : session;
+    const title = leader ? `리더 · ${leaderName(t.name, t, memo)}` : session;
     out.push({
       address: t.address,
       pane: null,
@@ -170,7 +199,7 @@ export function paneless(real, all, listed = new Map()) {
 // team members whose parent chain reaches it), under its PO when the leader's parent chain reaches
 // one. Members with no leader in their chain stay in issue-number groups (`loose`), then `others`.
 // `order` is the on-screen order. Pure: reads only the snapshot (agents, terminals, tab names).
-export function taskPlan(agentList, all, tabNames = new Map()) {
+export function taskPlan(agentList, all, tabNames = new Map(), memo = {}) {
   const term = new Map(all.map((x) => [x.address, x]));
   const parents = new Set(all.filter((x) => x.state === "live" && x.parent).map((x) => x.parent));
   // Nearest ancestor (up to 8 steps) that is in `set`.
@@ -216,16 +245,14 @@ export function taskPlan(agentList, all, tabNames = new Map()) {
       (owner ? byLeader.get(owner) : orphans).push(x);
     }
     const byRole = (x, y) => ROLE_ORDER[x.role] - ROLE_ORDER[y.role] || x.a.seq - y.a.seq;
-    // Header title: the leader's tab name (not just a number, not the PO's own tab), else the
-    // `session` label without "리더 ·", else the hc name without "lead-".
+    // Header title: the leader's tab name (not just a number, not the PO's own tab), else its session name
+    // (leaderName: live title, `session` label, remembered name, hc name).
     const titleOf = (leader) => {
       const t = term.get(leader.address);
       const po = pos.find((p) => p.tab === leader.tab);
       const tab = String(leader.tab_name ?? "").trim();
       if (tab && !/^\d+$/.test(tab) && !po) return tab;
-      const session = String(t?.labels?.[SESSION] ?? "").replace(/^\s*리더\s*·\s*/, "").trim();
-      if (session) return session;
-      return String(t?.name ?? "").replace(LEAD, "").replace(/-/g, " ").trim() || leader.address;
+      return leaderName(t?.name, t, memo);
     };
     const sectionOf = (leader) => ({ leader, title: titleOf(leader), members: byLeader.get(leader.address).sort(byRole).map((x) => x.a) });
     const sections = leaders.map(sectionOf);
@@ -298,6 +325,14 @@ export default class Agents extends View {
     const listed = new Set(list.map((a) => a.address));
     for (const [k, c] of Object.entries(this.changed)) if (!listed.has(k) && now - c.at > 30 * 86400000) delete this.changed[k];
     localStorage.setItem("changed", JSON.stringify(this.changed));
+  }
+
+  // Remember the live leaders' session names so a closed leader keeps a readable name (shared with the inbox).
+  rememberLeaders(all) {
+    try {
+      const next = rememberNames(namesMemo(), all);
+      if (next) setShared(NAMES_KEY, next);
+    } catch {}
   }
 
   // Keep offline pins until their terminal returns, and keep each pending until
@@ -400,11 +435,11 @@ export default class Agents extends View {
   }
 
   paneless(real, all) {
-    return paneless(real, all, this.listed);
+    return paneless(real, all, this.listed, namesMemo());
   }
 
   taskPlan(agentList, all) {
-    return taskPlan(agentList, all, this.tabNames);
+    return taskPlan(agentList, all, this.tabNames, namesMemo());
   }
 
   // compact: a ! for blocked where a header already says "Needs you".
@@ -437,6 +472,7 @@ export default class Agents extends View {
     this.ghosts = new Map(ghosts.map((g) => [g.address, g]));
     for (const g of ghosts) this.tabNames.set(g.address, g.tab_name);
     this.migratePins(all);
+    this.rememberLeaders(all);
     const shown = focused()?.agent;
     const now = Date.now();
     this.track([...list, ...ghosts], now);
