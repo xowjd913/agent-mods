@@ -35,7 +35,7 @@ function fakeRun({ logged = ["acct-a", "acct-b"], remotes = {}, gitVersion = "gi
     }
     if (cmd === "git" && args[0] === "version") return { status: 0, stdout: gitVersion + "\n", stderr: "" };
     if (cmd === "git" && args[0] === "remote") {
-      const url = remotes[opts.cwd];
+      const url = remotes[opts.cwd] || Object.entries(remotes).find(([k]) => path.resolve(k) === path.resolve(opts.cwd || ""))?.[1];
       return url ? { status: 0, stdout: url + "\n", stderr: "" } : { status: 2, stdout: "", stderr: "" };
     }
     if (cmd === "git" && args[0] === "config") return { status: 1, stdout: "", stderr: "" };
