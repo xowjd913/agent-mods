@@ -798,8 +798,9 @@ function pinStep(st, o) {
 }
 // ScrollHandle.scroll_to_item(i) reveals that row with the smallest scroll, so on a row TALLER than the viewport (an expanded long bubble, #54)
 // it lands on the row's top, then on its bottom, then on its top again: every call flips the view. A re-pin call is therefore made only while the
-// view is not at its end yet; a view already at the end is left alone (nothing to catch up on, and nothing to flip).
-const pinCall = (o) => !atBottom(o?.y, o?.vh, o?.ch);
+// view is not at its end AND the content grew since the last call (`seen` = the content height at that call): within PIN_SLACK of the end, with
+// nothing new to catch up on, a view stays where it is (a call there would flip it just the same).
+const pinCall = (o, seen) => !atBottom(o?.y, o?.vh, o?.ch) && (Number(o?.ch) || 0) > (Number(seen) || 0) + 1;
 // ---- selection: a drag-selected text must not be rebuilt under the pointer
 const SEL_HOLD_MS = 120000, PRESS_HOLD_MS = 8000;
 // st = {sel: a selection is settled, selAt, press: the pointer is down in the list, pressAt}. While true, background redraws wait.
@@ -1033,6 +1034,8 @@ export default class Inbox extends View {
     this.ui = { sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0 }; // a drag-select in the list: redraws wait while it is held
     this.dirty = false; // a redraw was held back
     this.pin = { pinned: true, ct: 0 }; // the timeline's pin to the newest (see pinStep)
+    this.pinCh = 0; // the content height at the last re-pin look/call (see pinCall)
+    this.reading = false; // a 더 보기 / 접기 click is waiting for its draw: the 250ms poll must not restore the pin from the old layout
     this.lastIdx = 0; // index of the last child of the list
     this.sigData = ""; // what the last load drew (without its clock)
     this.errSig = "";
@@ -1125,22 +1128,26 @@ export default class Inbox extends View {
     if (!this.scroll || !this.drawnAt) return;
     try {
       const o = this.scroll.offset(), vp = this.scroll.viewport_size(), ct = this.scroll.content_size();
+      // Just after a 더 보기 / 접기 click the draw has not happened yet: the numbers are the old layout's, so the pin is not restored from them (#54).
+      if (this.reading) return;
       const r = pinStep(this.pin, { y: o.y, vh: vp.height, ch: ct.height });
       // A scroll that is held back (drag / selection) leaves the pin as it was: pinned and the old content height stay, so the next tick after the
       // release still sees the growth and goes to the bottom (storing r.ct now would turn it into "pinned: false").
       if (r.go && quietNow(this.ui, Date.now())) return;
       this.pin = { pinned: r.pinned, ct: r.ct };
-      if (r.go) { this.diag(`pin: tick go y=${Math.round(o.y)} vh=${Math.round(vp.height)} ch=${Math.round(ct.height)}`); this.scroll.scroll_to_item(this.lastIdx); }
+      if (r.go) { this.pinCh = ct.height; this.diag(`pin: tick go y=${Math.round(o.y)} vh=${Math.round(vp.height)} ch=${Math.round(ct.height)}`); this.scroll.scroll_to_item(this.lastIdx); }
     } catch {}
   }
 
-  // One catch-up call after a draw: scroll to the row `last` only while the view is not at its end yet (see pinCall; the numbers are those of the
-  // layout that exists by then). `why` names the caller in diag.log (rate-limited by diag's own queue).
+  // One catch-up call after a draw: scroll to the row `last` only while the content grew since the last call and the view is not at its end (see
+  // pinCall; the numbers are those of the layout that exists by then). `why` names the caller in diag.log (rate-limited by diag's own queue).
   pinGo(last, why) {
     try {
       const o = this.scroll.offset(), vp = this.scroll.viewport_size(), ct = this.scroll.content_size();
       const m = { y: o.y, vh: vp.height, ch: ct.height };
-      if (!pinCall(m)) return;
+      const go = pinCall(m, this.pinCh);
+      this.pinCh = m.ch; // the height this look saw: a later look with the same height has nothing new to catch up on
+      if (!go) return;
       this.diag(`pin: ${why} go y=${Math.round(m.y)} vh=${Math.round(m.vh)} ch=${Math.round(m.ch)}`);
       this.scroll.scroll_to_item(last);
     } catch {}
@@ -2191,6 +2198,7 @@ export default class Inbox extends View {
         if (this.more.has(id)) this.more.delete(id); else this.more.add(id);
         // The person is reading this bubble now: let go of the bottom pin so the draw does not drag the view to the end of what just grew (#54).
         this.pin = { pinned: false, ct: Number(this.pin?.ct) || 0 };
+        this.reading = true; // cleared by the next draw
         try { cx.notify(); } catch {}
       })
       .tooltip(open ? "다시 접습니다" : "이 메시지 전체를 펼칩니다").child(open ? "접기" : moreLabel(lc.more));
@@ -2448,6 +2456,7 @@ export default class Inbox extends View {
       } catch {}
       if (tlFollow(this.tlSeen, key, atEnd)) {
         const last = blocks.length - 1;
+        this.pinCh = 0; // a new room: the retry below is a fresh catch-up
         try { this.scroll?.scroll_to_item(last); } catch {}
         try { cx.timer.after(80, () => { if (!quietNow(this.ui, Date.now())) this.pinGo(last, "follow"); }); } catch {}
       }
@@ -2455,6 +2464,7 @@ export default class Inbox extends View {
     this.tlSeen = key;
     // Re-pin after this draw: the person was at the bottom (within PIN_SLACK) and the content may have changed height (a row, the dots, a
     // picture); the handle still holds the last layout, so go to the end now and again once the new layout exists.
+    this.reading = false; // the draw the 더 보기 click asked for has come
     if (this.scroll && this.pin.pinned && !quietNow(this.ui, Date.now())) {
       const last = blocks.length - 1;
       const go = () => { if (!quietNow(this.ui, Date.now())) this.pinGo(last, "draw"); };

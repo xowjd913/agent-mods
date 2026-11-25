@@ -1364,8 +1364,9 @@ function pinStep(st, o) {
 }
 // ScrollHandle.scroll_to_item(i) reveals that row with the smallest scroll, so on a row TALLER than the viewport (an expanded long bubble, #54)
 // it lands on the row's top, then on its bottom, then on its top again: every call flips the view. A re-pin call is therefore made only while the
-// view is not at its end yet; a view already at the end is left alone (nothing to catch up on, and nothing to flip).
-const pinCall = (o) => !atBottom(o?.y, o?.vh, o?.ch);
+// view is not at its end AND the content grew since the last call (`seen` = the content height at that call): within PIN_SLACK of the end, with
+// nothing new to catch up on, a view stays where it is (a call there would flip it just the same).
+const pinCall = (o, seen) => !atBottom(o?.y, o?.vh, o?.ch) && (Number(o?.ch) || 0) > (Number(seen) || 0) + 1;
 // ---- selection: a drag-selected text must not be rebuilt under the pointer
 const SEL_HOLD_MS = 120000, PRESS_HOLD_MS = 8000;
 // st = {sel: a selection is settled, selAt, press: the pointer is down in the list, pressAt}. While true, background redraws wait.

@@ -117,36 +117,53 @@ test("bubbleWidth: hugs a short Korean line, grows with a long one, has a minimu
   assert.ok(I.bubbleWidth("a".repeat(20)) < I.bubbleWidth("가".repeat(20)));
 });
 
-test("pinCall: a view already at its end gets no re-pin call, so a row taller than the viewport cannot flip it (#54)", () => {
-  assert.equal(I.pinCall({ y: 8600, vh: 400, ch: 9000 }), false); // at the end
-  assert.equal(I.pinCall({ y: 8599.5, vh: 400, ch: 9000 }), false); // within the 1px of atBottom
-  assert.equal(I.pinCall({ y: 8000, vh: 400, ch: 9000 }), true); // not at the end yet
-  assert.equal(I.pinCall(null), false); // no numbers (before the first frame): nothing to do
+test("pinCall: no re-pin call unless the content grew and the view is not at its end, so a row taller than the viewport cannot flip it (#54)", () => {
+  assert.equal(I.pinCall({ y: 8600, vh: 400, ch: 9000 }, 0), false); // at the end
+  assert.equal(I.pinCall({ y: 8599.5, vh: 400, ch: 9000 }, 0), false); // within the 1px of atBottom
+  assert.equal(I.pinCall({ y: 8000, vh: 400, ch: 9000 }, 9000), false); // not at the end, but nothing grew since the last call
+  assert.equal(I.pinCall({ y: 8000, vh: 400, ch: 9000 }, 8000), true); // grew, not at the end yet
+  assert.equal(I.pinCall({ y: 8000, vh: 400, ch: 9000 }, 8999.5), false); // within the 1px of "same height"
+  assert.equal(I.pinCall(null, 0), false); // no numbers (before the first frame): nothing to do
   // A fake handle with scroll_to_item's "smallest scroll" rule on ONE row that is taller than the viewport (top above the view -> its top,
   // else bottom below the view -> its bottom): each unguarded call flips the view between the row's top and its bottom.
   const VH = 400, ROW_TOP = 500, ROW_H = 9000, CH = ROW_TOP + ROW_H;
-  const mk = () => ({ y: CH - VH, calls: 0, toItem() { this.calls++; if (ROW_TOP < this.y) this.y = ROW_TOP; else if (ROW_TOP + ROW_H > this.y + VH) this.y = CH - VH; } });
+  const mk = (y) => ({ y, calls: 0, seen: 0, toItem() { this.calls++; if (ROW_TOP < this.y) this.y = ROW_TOP; else if (ROW_TOP + ROW_H > this.y + VH) this.y = CH - VH; } });
+  // pinGo's logic: look, remember the height, call only when pinCall says so
+  const look = (h, ch) => { const go = I.pinCall({ y: h.y, vh: VH, ch }, h.seen); h.seen = ch; if (go) h.toItem(); };
   const draws = (h, guarded) => { // each draw makes the two catch-up calls (60ms, 220ms)
     const tops = [];
-    for (let d = 0; d < 6; d++) for (let c = 0; c < 2; c++) { if (!guarded || I.pinCall({ y: h.y, vh: VH, ch: CH })) h.toItem(); tops.push(h.y); }
+    for (let d = 0; d < 6; d++) for (let c = 0; c < 2; c++) { if (guarded) look(h, CH); else h.toItem(); tops.push(h.y); }
     return tops;
   };
-  const a = mk(); const unguarded = draws(a, false);
+  const a = mk(CH - VH); const unguarded = draws(a, false);
   assert.ok(new Set(unguarded).size > 1 && a.calls === 12, "unguarded calls flip the view"); // the old behaviour
-  const b = mk(); const guarded = draws(b, true);
+  const b = mk(CH - VH); b.seen = CH; const guarded = draws(b, true);
   assert.equal(new Set(guarded).size, 1); // stays where it was
   assert.equal(b.calls, 0);
-  // not at the end (the bubble just grew): the calls still catch up, and stop once the end is reached
-  const c = mk(); c.y = 300;
-  const tops = draws(c, true);
+  // 1-40px above the end (inside PIN_SLACK, not atBottom), nothing grew: no call at all (review R1 P2)
+  const n = mk(CH - VH - 20); n.seen = CH; const near = draws(n, true);
+  assert.equal(n.calls, 0);
+  assert.equal(new Set(near).size, 1);
+  // the same spot but the content grew (a new row): still follows, once, and stops at the end
+  const g = mk(CH - VH - 20); g.seen = CH - 300; // the new last row is 300px high, below the old end: its bottom is the end
+  g.toItem = function () { this.calls++; if (CH - 300 + 300 > this.y + VH) this.y = CH - VH; };
+  const tops = draws(g, true);
   assert.equal(tops[tops.length - 1], CH - VH);
-  assert.ok(c.calls <= 2, `calls ${c.calls}`);
+  assert.equal(g.calls, 1);
+  // not at the end (the bubble just grew a lot): the calls still catch up, and stop once the end is reached
+  const c = mk(300);
+  const tops2 = draws(c, true);
+  assert.equal(tops2[tops2.length - 1], CH - VH);
+  assert.ok(c.calls <= 1, `calls ${c.calls}`);
 });
 
 test("main.js (#54): the draw-time re-pin goes through pinGo/pinCall, and 더 보기 lets go of the bottom pin", () => {
   assert.match(MAIN, /pinGo\(last, "draw"\)/);
   assert.match(MAIN, /pinGo\(last, "follow"\)/);
-  assert.match(MAIN, /if \(!pinCall\(m\)\) return;/);
+  assert.match(MAIN, /pinCall\(m, this\.pinCh\)/);
+  assert.match(MAIN, /if \(this\.reading\) return;/); // the poll right after a 더 보기 click does not restore the pin from the old layout
+  assert.match(MAIN, /this\.reading = true;/);
+  assert.match(MAIN, /this\.reading = false; \/\/ the draw/);
   // no bare scroll_to_item(last) left in a timer
   assert.equal(/cx\.timer\.after\([^\n]*scroll_to_item/.test(MAIN), false);
   const more = MAIN.slice(MAIN.indexOf("moreToggle(t, id, lc, open) {"));
