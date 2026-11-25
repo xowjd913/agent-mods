@@ -1174,7 +1174,7 @@ test("scheduleEnv: 예약 계정 신원 뒤에 로그인된 다른 계정의 own
   for (const a of ["acct-a", "acct-b"]) fs.writeFileSync(path.join(idDir, `${a}.gitconfig`), `[user]\n\tname = ${a}\n\temail = ${a}@example.com\n`);
   // 전역 설정: sync 처럼 example-org/* → acct-b 신원 (명령줄 설정이 이것을 이긴다)
   const glob = path.join(home, "gitconfig");
-  fs.writeFileSync(glob, ga.urlPatterns("example-org/*").map((p) => `[includeIf "hasconfig:remote.*.url:${p}"]\n\tpath = ${path.join(idDir, "acct-b.gitconfig")}\n`).join(""));
+  fs.writeFileSync(glob, ga.urlPatterns("example-org/*").map((p) => `[includeIf "hasconfig:remote.*.url:${p}"]\n\tpath = ${path.join(idDir, "acct-b.gitconfig").replace(/\\/g, "/")}\n`).join(""));
   const r = ga.scheduleEnv(ctx, { account: "acct-a", dir: "/w/repo" });
   assert.equal(r.ok, true);
   const keys = Object.keys(r.env).filter((k) => /^GIT_CONFIG_KEY_/.test(k)).map((k) => r.env[k]);
