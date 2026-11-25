@@ -2051,6 +2051,10 @@ test("usageLine: 툴팁은 초기화까지 남은 일·시간·분을 보여 주
   assert.equal(I.usageLeft(now + 30000, now), "1분 미만");
   assert.equal(I.usageLeft(now - MIN, now), "");
   assert.equal(I.usageLeft(0, now), "");
+  assert.equal(I.usageLeft(now + DAY, now), "1일");
+  assert.equal(I.usageLeft(now + DAY - 1, now), "23시간 59분");
+  assert.equal(I.usageLeft(now + MIN, now), "1분");
+  assert.equal(I.usageLeft(now, now), "1분 미만");
   const rows = [{ label: "5h", percent: 54, resetsAt: now + 2 * HOUR + 15 * MIN }, { label: "7d", percent: 34, resetsAt: now + 5 * DAY + 4 * HOUR + 41 * MIN }];
   assert.equal(I.usageTip(rows, now), "5h 초기화까지 2시간 15분 · 7d 초기화까지 5일 4시간 41분");
   assert.equal(I.usageTip([{ label: "5h", percent: 1, resetsAt: now - HOUR }, rows[1]], now), "5h 초기화 시각이 지났습니다 · 7d 초기화까지 5일 4시간 41분");
@@ -2073,6 +2077,7 @@ test("usageLine: main.js 배선 — 파일만 읽고(exec·네트워크 없음),
   const fn = src.slice(src.indexOf("  loadUsage(cx) {"), src.indexOf("  usageLine(t) {"));
   assert.match(fn, /readTextFile\(`\$\{home\(\)\}\/\$\{USAGE_FILE\}`\)/);
   assert.doesNotMatch(fn, /exec\(|fetch\(/);
+  assert.match(fn, /JSON\.stringify\(\[rows, usageTip\(rows, Date\.now\(\)\)\]\)/);
   assert.match(src, /cx\.timer\.every\(USAGE_REFRESH_MS, \(cx\) => this\.loadUsage\(cx\)\)/);
   assert.match(fn, /if \(sig === this\.usageSig\) return;/);
   const line = src.slice(src.indexOf("  usageLine(t) {"), src.indexOf("  // ---- redraw gating"));

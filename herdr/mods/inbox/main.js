@@ -1076,13 +1076,13 @@ export default class Inbox extends View {
     this.diag(`init: ${this.windowed ? "window" : this.paned ? "pane" : "dock"}`);
   }
 
-  // Reads the usage file (a file read only) and redraws only when what the line shows changed: a redraw drops a drag-select.
+  // Reads the usage file (a file read only) and redraws only when what the line shows (the rows or the tooltip text) changed: a redraw drops a drag-select.
   loadUsage(cx) {
     cx.spawn(async (cx) => {
       let raw = null;
       try { raw = await readTextFile(`${home()}/${USAGE_FILE}`); } catch {}
       const rows = parseUsage(raw, Date.now());
-      const sig = JSON.stringify(rows);
+      const sig = JSON.stringify([rows, usageTip(rows, Date.now())]);
       this.usage = rows;
       if (sig === this.usageSig) return;
       this.usageSig = sig;
