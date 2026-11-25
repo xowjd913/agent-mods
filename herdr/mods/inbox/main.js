@@ -796,6 +796,10 @@ function pinStep(st, o) {
   if (was && grew) return { pinned: true, ct: ch, go: true };
   return { pinned: false, ct: ch, go: false };
 }
+// ScrollHandle.scroll_to_item(i) reveals that row with the smallest scroll, so on a row TALLER than the viewport (an expanded long bubble, #54)
+// it lands on the row's top, then on its bottom, then on its top again: every call flips the view. A re-pin call is therefore made only while the
+// view is not at its end yet; a view already at the end is left alone (nothing to catch up on, and nothing to flip).
+const pinCall = (o) => !atBottom(o?.y, o?.vh, o?.ch);
 // ---- selection: a drag-selected text must not be rebuilt under the pointer
 const SEL_HOLD_MS = 120000, PRESS_HOLD_MS = 8000;
 // st = {sel: a selection is settled, selAt, press: the pointer is down in the list, pressAt}. While true, background redraws wait.
@@ -1126,7 +1130,19 @@ export default class Inbox extends View {
       // release still sees the growth and goes to the bottom (storing r.ct now would turn it into "pinned: false").
       if (r.go && quietNow(this.ui, Date.now())) return;
       this.pin = { pinned: r.pinned, ct: r.ct };
-      if (r.go) this.scroll.scroll_to_item(this.lastIdx);
+      if (r.go) { this.diag(`pin: tick go y=${Math.round(o.y)} vh=${Math.round(vp.height)} ch=${Math.round(ct.height)}`); this.scroll.scroll_to_item(this.lastIdx); }
+    } catch {}
+  }
+
+  // One catch-up call after a draw: scroll to the row `last` only while the view is not at its end yet (see pinCall; the numbers are those of the
+  // layout that exists by then). `why` names the caller in diag.log (rate-limited by diag's own queue).
+  pinGo(last, why) {
+    try {
+      const o = this.scroll.offset(), vp = this.scroll.viewport_size(), ct = this.scroll.content_size();
+      const m = { y: o.y, vh: vp.height, ch: ct.height };
+      if (!pinCall(m)) return;
+      this.diag(`pin: ${why} go y=${Math.round(m.y)} vh=${Math.round(m.vh)} ch=${Math.round(m.ch)}`);
+      this.scroll.scroll_to_item(last);
     } catch {}
   }
 
@@ -2171,7 +2187,12 @@ export default class Inbox extends View {
   moreToggle(t, id, lc, open) {
     return div().id(`${id}-more`).flex_none().text_size(11).cursor_pointer().text_color(t.working).hover((s) => s.text_color(t.foreground))
       .on_mouse_down("left", stop)
-      .on_click((_e, cx) => { if (this.more.has(id)) this.more.delete(id); else this.more.add(id); try { cx.notify(); } catch {} })
+      .on_click((_e, cx) => {
+        if (this.more.has(id)) this.more.delete(id); else this.more.add(id);
+        // The person is reading this bubble now: let go of the bottom pin so the draw does not drag the view to the end of what just grew (#54).
+        this.pin = { pinned: false, ct: Number(this.pin?.ct) || 0 };
+        try { cx.notify(); } catch {}
+      })
       .tooltip(open ? "다시 접습니다" : "이 메시지 전체를 펼칩니다").child(open ? "접기" : moreLabel(lc.more));
   }
 
@@ -2427,9 +2448,8 @@ export default class Inbox extends View {
       } catch {}
       if (tlFollow(this.tlSeen, key, atEnd)) {
         const last = blocks.length - 1;
-        const go = () => { try { this.scroll?.scroll_to_item(last); } catch {} };
-        go();
-        try { cx.timer.after(80, () => go()); } catch {}
+        try { this.scroll?.scroll_to_item(last); } catch {}
+        try { cx.timer.after(80, () => { if (!quietNow(this.ui, Date.now())) this.pinGo(last, "follow"); }); } catch {}
       }
     }
     this.tlSeen = key;
@@ -2437,7 +2457,7 @@ export default class Inbox extends View {
     // picture); the handle still holds the last layout, so go to the end now and again once the new layout exists.
     if (this.scroll && this.pin.pinned && !quietNow(this.ui, Date.now())) {
       const last = blocks.length - 1;
-      const go = () => { try { if (!quietNow(this.ui, Date.now())) this.scroll?.scroll_to_item(last); } catch {} };
+      const go = () => { if (!quietNow(this.ui, Date.now())) this.pinGo(last, "draw"); };
       try { cx.timer.after(60, () => go()); cx.timer.after(220, () => go()); } catch {}
     }
     const waiting = v.tabs.reduce((n, x) => n + x.n, 0); // leaders waiting on a decision, over every room
