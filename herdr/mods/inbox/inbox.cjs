@@ -432,10 +432,16 @@ function mentionQuery(text, cursor, tokens = []) {
 // ---- The PO picker. A PO terminal carries the labels role=po and po=<id>; the id is lowercase [a-z0-9-], 1-40 long (never the terminal
 // address, which changes on a restart). Everything in the window is for the one picked PO.
 const PO_ID = /^[a-z0-9-]{1,40}$/;
-const PO_OTHER = "~"; // the pick that holds leaders and reports no live PO owns ("기타"); not a valid id, so it never clashes
+const PO_OTHER = "~"; // the pick that holds leaders and reports no live PO owns ("PO 모름"); not a valid id, so it never clashes
 const cleanPoId = (v) => { const s = String(v ?? "").trim(); return PO_ID.test(s) ? s : ""; };
 const isPoTerm = (t) => String(t?.labels?.role ?? "").trim().toLowerCase() === "po";
 const poId = (t) => (isPoTerm(t) ? cleanPoId(t?.labels?.po) : "");
+// The project a PO terminal is for: its tab's name "PO · <project>" (`where` is "<space> / <tab>"), else "" (the caller falls back to the id).
+const poProject = (t) => {
+  const tab = String(t?.where ?? "").split(" / ").slice(1).join(" / ").trim();
+  const m = /^PO\s*[·:\-]?\s*(\S.*)$/.exec(tab);
+  return m ? m[1].trim() : "";
+};
 // The live PO terminals that have a po id, in terminal order: [{id, address, label, n}]. `label` is the terminal title ("PO · DevNotes"),
 // else the id; `n` the live lead-* terminals under it. Two terminals with the same id: the first one is the PO.
 function poList(terms) {
@@ -445,7 +451,7 @@ function poList(terms) {
     const id = poId(t);
     if (!id || out.some((p) => p.id === id)) continue;
     const title = String(t.title ?? "").trim();
-    out.push({ id, address: t.address, label: title && title !== t.name && title !== t.address ? title : id, n: list.filter((x) => /^lead-/.test(String(x?.name ?? "")) && x.parent === t.address).length });
+    out.push({ id, address: t.address, label: poProject(t) || id, title: title && title !== t.name && title !== t.address ? title : "", n: list.filter((x) => /^lead-/.test(String(x?.name ?? "")) && x.parent === t.address).length });
   }
   return out;
 }
@@ -496,6 +502,6 @@ const chatWheel = (up, dy) => Math.max(0, Math.min(4000, (Number(up) || 0) + (Nu
 const chatFollow = (seen, key, up) => key !== "" && key !== seen && (Number(up) || 0) <= 4;
 // chat:end
 
-module.exports = { PO_OTHER, cleanPoId, poId, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, chatKey, chatWheel, chatFollow, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, chatKey, chatWheel, chatFollow, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) process.stdout.write(JSON.stringify(collect()));

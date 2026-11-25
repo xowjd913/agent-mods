@@ -2,7 +2,7 @@
 // (~/.herdr-inbox/po/<po id>.jsonl).
 //  - One PO at a time: a PO terminal carries the labels role=po and po=<id>; the picker lists the live ones and the pick (kept in
 //    shared state) decides which leaders' cards, wait counts, "@" menu, chat target and PO lines are shown. A leader belongs to the PO
-//    that is its live terminal's parent (else the PO its reports name); the rest sits under "기타", which cannot chat.
+//    that is its live terminal's parent (else the PO its reports name); the rest sits under "PO 모름", which cannot chat.
 //  - The right pane is ONE list: open decision/verify asks pinned on top, then the latest reports (newest first), one short row each
 //    (leader, kind badge, first line). A row opens the floating window at that item; the counts are small badges in the pane header.
 //  - The window is the chat view, in two lanes:
@@ -37,7 +37,8 @@ const FOCUS_KEY = "inbox.focus"; // "<leader>|<report time>" the window should s
 const SECT_KEY = "inbox.sections"; // {ask:{c,n}, rep:{c}}: which window sections the person collapsed (c) and, for "결정 필요", at which count (n)
 const MAX_ROWS = 20; // pane rows below the pinned asks; the rest is in the window
 const NO_PO = "이 리더의 PO 터미널을 찾지 못했습니다(리더 터미널의 부모가 role=po 라벨이어야 합니다).";
-const OTHER_LABEL = "기타";
+const OTHER_LABEL = "PO 모름";
+const OTHER_TIP = "PO를 알 수 없는 리더와 보고: 이미 닫힌 리더인데 보고 줄에 po가 없고 그 PO도 지금 없는 것(이 변경 전에 쓴 보고 줄 등). 여기서는 채팅을 보낼 수 없습니다";
 const CLIP = "답을 클립보드에 담아 PO 터미널에 붙여 넣습니다(Enter는 직접 누르세요). 클립보드 내용이 바뀝니다.";
 
 // Which terminal is a waiting leader. Copied verbatim from inbox.cjs (a test keeps them identical); tabs-mine uses the same line.
@@ -141,10 +142,16 @@ function mentionQuery(text, cursor, tokens = []) {
 // ---- The PO picker. A PO terminal carries the labels role=po and po=<id>; the id is lowercase [a-z0-9-], 1-40 long (never the terminal
 // address, which changes on a restart). Everything in the window is for the one picked PO.
 const PO_ID = /^[a-z0-9-]{1,40}$/;
-const PO_OTHER = "~"; // the pick that holds leaders and reports no live PO owns ("기타"); not a valid id, so it never clashes
+const PO_OTHER = "~"; // the pick that holds leaders and reports no live PO owns ("PO 모름"); not a valid id, so it never clashes
 const cleanPoId = (v) => { const s = String(v ?? "").trim(); return PO_ID.test(s) ? s : ""; };
 const isPoTerm = (t) => String(t?.labels?.role ?? "").trim().toLowerCase() === "po";
 const poId = (t) => (isPoTerm(t) ? cleanPoId(t?.labels?.po) : "");
+// The project a PO terminal is for: its tab's name "PO · <project>" (`where` is "<space> / <tab>"), else "" (the caller falls back to the id).
+const poProject = (t) => {
+  const tab = String(t?.where ?? "").split(" / ").slice(1).join(" / ").trim();
+  const m = /^PO\s*[·:\-]?\s*(\S.*)$/.exec(tab);
+  return m ? m[1].trim() : "";
+};
 // The live PO terminals that have a po id, in terminal order: [{id, address, label, n}]. `label` is the terminal title ("PO · DevNotes"),
 // else the id; `n` the live lead-* terminals under it. Two terminals with the same id: the first one is the PO.
 function poList(terms) {
@@ -154,7 +161,7 @@ function poList(terms) {
     const id = poId(t);
     if (!id || out.some((p) => p.id === id)) continue;
     const title = String(t.title ?? "").trim();
-    out.push({ id, address: t.address, label: title && title !== t.name && title !== t.address ? title : id, n: list.filter((x) => /^lead-/.test(String(x?.name ?? "")) && x.parent === t.address).length });
+    out.push({ id, address: t.address, label: poProject(t) || id, title: title && title !== t.name && title !== t.address ? title : "", n: list.filter((x) => /^lead-/.test(String(x?.name ?? "")) && x.parent === t.address).length });
   }
   return out;
 }
@@ -447,7 +454,7 @@ export default class Inbox extends View {
     return out.sort((a, b) => b.it.ms - a.it.ms);
   }
 
-  // What the window shows: the live POs (plus "기타" while a leader or report belongs to none), the picked one, and its asks and reports.
+  // What the window shows: the live POs (plus "PO 모름" while a leader or report belongs to none), the picked one, and its asks and reports.
   // `tabs` [{id, label, n}]: n = the waiting leaders of that PO.
   view() {
     const terms = this.liveTerms();
@@ -459,7 +466,7 @@ export default class Inbox extends View {
     try { last = shared(PICK_KEY) ?? ""; } catch {}
     const pick = choosePick(pos, last, hasOther);
     const waiting = (id) => all.filter((a) => a.owner === id).length;
-    const tabs = pos.map((p) => ({ id: p.id, label: p.label, n: waiting(p.id) }));
+    const tabs = pos.map((p) => ({ id: p.id, label: p.label, title: p.title, n: waiting(p.id) }));
     if (hasOther) tabs.push({ id: PO_OTHER, label: OTHER_LABEL, n: waiting(PO_OTHER) });
     return { terms, tabs, pick, asks: all.filter((a) => a.owner === pick), reports: reps.filter((r) => r.owner === pick) };
   }
@@ -697,19 +704,20 @@ export default class Inbox extends View {
         .child(this.button(t, "chat-send", "PO에 보내기", (c) => this.sendChat(c), { primary: true, tip: "고른 PO 터미널에 글을 붙여 넣고 Enter까지 눌러 보냅니다(글은 클립보드를 거칩니다). Shift+Enter는 줄바꿈" })));
   }
 
-  // The PO picker: one chip per live PO (title or id, the waiting count in red) and "기타" while something belongs to no live PO.
+  // The PO picker: one chip per live PO (title or id, the waiting count in red) and "PO 모름" while something belongs to no live PO.
   picker(t, v) {
     if (!v.tabs.some((x) => x.id !== PO_OTHER)) {
       return div().id("po-hint").flex_none().px(this.compact ? 10 : 14).pb(6).text_size(11).text_color(t.muted)
         .child("PO 터미널에 role=po, po=<id> 라벨을 달면 PO별로 나뉩니다. 지금은 PO가 없어 채팅을 보낼 수 없습니다.");
     }
-    return h_flex().id("po-picker").flex_none().px(this.compact ? 10 : 14).pb(6).gap(5).flex_wrap()
+    return h_flex().id("po-picker").flex_none().px(this.compact ? 10 : 14).pb(6).gap(5).flex_wrap().items_center()
+      .child(div().flex_none().text_size(10.5).font_semibold().text_color(t.dim).child("PO"))
       .children(v.tabs.map((x) => {
         const on = x.id === v.pick;
         return h_flex().id(`po-${x.id}`).h(24).px(9).gap(5).items_center().rounded(12).cursor_pointer().on_mouse_down("left", stop)
           .bg(on ? t.selected : t.raised).border(1).border_color(on ? t.foreground + "40" : t.border)
           .hover((s) => s.bg(on ? t.selected : t.hover)).on_click((_e, c) => this.pickPo(x.id, c))
-          .tooltip(x.id === PO_OTHER ? "PO를 알 수 없는 리더와 보고(채팅은 보낼 수 없습니다)" : `po=${x.id}`)
+          .tooltip(x.id === PO_OTHER ? OTHER_TIP : `po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
           .child(div().max_w(150).truncate().text_size(11.5).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
           .when(x.n > 0, (el) => el.child(div().flex_none().px(5).h(15).rounded(8).bg(t.blocked + "26").flex().items_center().text_size(10).text_color(t.blocked).child(String(x.n))));
       }));

@@ -573,14 +573,37 @@ test("cleanPoId·poId: 소문자·숫자·하이픈 1~40자만 id이고, po 라�
 
 test("poList: po id가 있는 살아 있는 PO만, 터미널 제목(없으면 id)과 살아 있는 리더 수와 함께, 같은 id는 첫 터미널", () => {
   assert.deepEqual(I.poList(TERMS), [
-    { id: "devnotes", address: "t28", label: "PO · DevNotes", n: 2 },
-    { id: "mascoz", address: "t40", label: "mascoz", n: 1 },
+    { id: "devnotes", address: "t28", label: "devnotes", title: "PO · DevNotes", n: 2 },
+    { id: "mascoz", address: "t40", label: "mascoz", title: "", n: 1 },
   ]);
   assert.deepEqual(I.poList([{ address: "t1", labels: { role: "po" } }, { address: "t2", labels: { role: "dev", po: "x" } }]), []); // po 라벨 없음·PO 아님
   assert.deepEqual(I.poList(null), []);
   const dup = [{ address: "t1", title: "첫째", labels: { role: "po", po: "a" } }, { address: "t2", title: "둘째", labels: { role: "po", po: "a" } }];
   assert.deepEqual(I.poList(dup).map((p) => [p.id, p.address]), [["a", "t1"]]);
   assert.equal(I.poList([{ address: "t1", name: "po-main", title: "po-main", labels: { role: "po", po: "a" } }])[0].label, "a"); // 제목이 이름·주소 그대로면 id
+});
+
+test("poProject·poList: 칩 이름은 탭 이름 'PO · <프로젝트>'의 프로젝트이고, 없으면 po id, 세션 제목은 title로만 간다", () => {
+  assert.equal(I.poProject({ where: "DevNotes / PO · DevNotes" }), "DevNotes");
+  assert.equal(I.poProject({ where: "Mascoz / PO · Mascoz" }), "Mascoz");
+  assert.equal(I.poProject({ where: "a / PO: 한글 프로젝트" }), "한글 프로젝트");
+  assert.equal(I.poProject({ where: "DevNotes / PO" }), ""); // 프로젝트 이름이 없다
+  assert.equal(I.poProject({ where: "DevNotes / 리더 · DevNotes" }), ""); // PO 탭이 아니다
+  assert.equal(I.poProject({ where: "POSTMAN / 1" }), ""); // 공간 이름은 보지 않는다
+  assert.equal(I.poProject({}), "");
+  const t = { address: "t28", title: "/po 세션 중단과 하위 작업 상태", where: "DevNotes / PO · DevNotes", labels: { role: "po", po: "devnotes" } };
+  const [p] = I.poList([t]);
+  assert.equal(p.label, "DevNotes");
+  assert.equal(p.title, "/po 세션 중단과 하위 작업 상태");
+  assert.equal(I.poList([{ ...t, where: "DevNotes / 3" }])[0].label, "devnotes"); // 탭 이름에서 못 읽으면 id
+});
+
+test("main.js: 칩 줄에 PO 머리말, 이름 'PO 모름', 세션 제목은 툴팁", () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8");
+  assert.match(src, /const OTHER_LABEL = "PO 모름"/);
+  assert.match(src, /child\("PO"\)\)\n\s+\.children\(v\.tabs/);
+  assert.match(src, /세션: \$\{x\.title\}/);
+  assert.doesNotMatch(src, /label: "기타"|OTHER_LABEL = "기타"/);
 });
 
 test("poFile: po/<id>.jsonl 경로만 만들고, 잘못된 id는 null이라 폴더를 벗어나지 못한다", () => {
