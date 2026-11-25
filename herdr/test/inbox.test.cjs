@@ -289,7 +289,7 @@ test("main.js: 카드 글자는 모두 선택 가능한 TextView이고, 눌러�
 
 test("main.js: 오른쪽 칸은 분류 단계 없이 한 목록이고, 줄을 누르면 그 카드를 펼쳐 창을 연다", () => {
   const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
-  const sum = src.slice(src.indexOf("  summary(cx) {"), src.indexOf("  // The full chat view"));
+  const sum = src.slice(src.indexOf("  summary(cx) {"), src.indexOf("  // The messenger view"));
   assert.ok(sum.length > 200);
   assert.ok(!/결정 필요|결과 보고|눌러서 채팅 창 열기/.test(sum)); // 분류 버튼·안내 줄이 없다
   assert.ok(!/id\("inbox-summary"\)[^\n]*on_click/.test(sum) && !/\.on_click\(\(\) => this\.openWindow/.test(sum)); // 칸 전체 클릭 없음
@@ -305,7 +305,7 @@ test("main.js: 오른쪽 칸은 분류 단계 없이 한 목록이고, 줄을 �
   // 창은 공유 상태의 선택을 읽어 그 카드를 맨 앞에 둔다(스크롤 이동 API가 없다)
   assert.match(src, /const FOCUS_KEY = "inbox\.focus"/);
   assert.match(src, /openCard\(s, it\) \{[\s\S]*cur\[k\] = 1[\s\S]*setShared\(FOCUS_KEY, it \? this\.cardKey\(s, it\) : ""\)[\s\S]*this\.openWindow\(\)/);
-  assert.match(src, /선택한 보고/);
+  assert.match(src, /this\.cardKey\(e\.s, e\.it\) === f/); // 창은 선택한 카드를 타임라인에서 찾아 한 번 보여 준다
   assert.match(src, /clearFocus\(\); try \{ closeOverlay/); // 창을 닫으면 선택도 지운다
   // 창 카드에는 여전히 카드 전체 클릭이 없다
   assert.equal((src.match(/toggleOpen\(/g) ?? []).length, 2);
@@ -361,18 +361,23 @@ test("답함 표시: answered의 본문 종류가 맞는 가장 가까운 앞선
   assert.deepEqual(d.map((i) => i.answered), [true, true, undefined, undefined]);
 });
 
-test("창 구역 접기와 답함 표시: 머리줄 누름·공유 상태·기본값·붉은색 규칙이 main.js에 있다", () => {
+test("메신저 창: 방 목록·타임라인·인라인 버튼·답함 표시 규칙이 main.js에 있다", () => {
   const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
-  assert.match(src, /const SECT_KEY = "inbox\.sections"/);
-  assert.match(src, /collapsed\(name, count, force\)/);
-  assert.match(src, /return name === "ask" && count === 0/); // 결정 필요는 비면 스스로 접힘
-  assert.match(src, /st\.n === count/); // 직접 누른 것은 개수가 바뀔 때까지 이김
-  assert.match(src, /setShared\(SECT_KEY/);
-  assert.match(src, /id: "sec-ask"[^\n]*this\.collapsed|collapsed\("ask", asks\.length, fa >= 0\)/);
-  assert.match(src, /"▸" : "▾"/);
-  assert.match(src, /\$\{k\[0\]\} · 답함/);
-  assert.match(src, /nameRow\(t, s, item \? \{ \.\.\.item, kind \} : null, null, true\)/); // 대기 카드만 붉은 종류 표시
-  assert.match(src, /this\.kindTag\(t, it, kind \?\? it\?\.kind, ask\)/); // 창 보고 줄과 같은 규칙을 창 옆 목록 줄도 쓴다
+  assert.ok(!/SECT_KEY|collapsed\(|toggleSection|sec-ask|sec-rep|chatRow|askCard|heading\(/.test(src)); // 두 줄기·접기 구역은 없다
+  assert.match(src, /\$\{k\[0\]\} · 답함/); // 답함 태그
+  assert.match(src, /this\.nameRow\(t, e\.s, e\.it, null, Boolean\(e\.waiting\), !e\.head\)/); // 같은 보낸이가 이어지면 이름 줄을 줄인다
+  assert.match(src, /this\.askActions\(t, a, cx\)/); // 기다리는 메시지에만 인라인 버튼
+  const act = src.slice(src.indexOf("  askActions("), src.indexOf("  entryRow("));
+  for (const id of ["link-", "ok-", "write-", "send-"]) assert.ok(act.includes(id));
+  assert.match(act, /kind === "verify"/); // 확인 완료는 verify에만
+  assert.match(src, /roomList\(t, v\) \{[\s\S]*border_r\(1\)/); // 왼쪽 방 목록
+  assert.match(src, /\.child\(wide \? h_flex\(\)\.flex_1\(\)\.min_h\(0\)\.child\(this\.roomList\(t, v\)\)\.child\(room\) : room\)/);
+  assert.match(src, /\.when\(!wide, \(el\) => el\.child\(this\.picker\(t, v\)\)\)/); // 좁으면 위쪽 띠
+  assert.match(src, /const WIDE_MIN = 520/);
+  assert.match(src, /e\.who === "me"[\s\S]*items_end\(\)/); // 내 글은 오른쪽
+  assert.match(src, /this\.circle\(t, color, letter\)|circle\(t, color, letter\) \{/);
+  assert.match(src, /채팅 없음/); // PO 모름 방에는 채팅 상자가 없다
+  assert.match(src, /v\.pick === PO_OTHER[\s\S]*chat-none/);
 });
 
 // ---- 리더 이름(#33): 받은편지함과 에이전트 목록이 같은 규칙으로 세션 이름을 고른다.
@@ -450,20 +455,18 @@ test("leader-tabs·work: 리더 이름을 hc 이름(lead-x) 그대로 그리지 
 
 // The scroll lists keep their place across presses: handles the view owns, tracked on both lists, and an anchor after every press that
 // changes a card's or a section's height. (The kit gives no way to read a pixel offset, so this checks the wiring, not the pixels.)
-test("받은편지함: 자세히·접기·섹션·답 쓰기가 스크롤을 맨 위로 되돌리지 않게 위치를 붙든다", () => {
+test("받은편지함: 타임라인은 새 글을 따라 맨 아래로 가고, 올려 읽는 중이면 붙든다", () => {
   const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
   assert.match(src, /ScrollHandle\.new\(\)/);
-  assert.match(src, /id\("inbox-list"\)[^\n]*track_scroll\(this\.scroll\)/);
+  assert.match(src, /id\("inbox-list"\)[^\n]*/);
+  assert.match(src, /track_scroll\(this\.scroll\)/);
   assert.match(src, /id\("inbox-rows"\)[^\n]*track_scroll\(this\.rowsScroll\)/);
-  assert.match(src, /scroll_to_item\(i\)/);
+  assert.match(src, /atBottom\(o\.y, vp\.height, ct\.height\)/); // 마지막 레이아웃의 값으로 바닥 여부를 읽는다
+  assert.match(src, /tlFollow\(this\.tlSeen, key, atEnd\)/);
+  assert.match(src, /scroll_to_item\(last\)/); // ScrollHandle에는 scroll_to_bottom이 없다
+  assert.match(src, /this\.tlSeen = key/);
+  assert.match(src, /this\.reveal\(this\.spot\(s, item\)\)/); // 답 상자가 열려도 그 자리를 붙든다
   assert.match(src, /this\.toggleOpen\(s, it\); this\.reveal\(this\.spot\(s, it\)\)/);
-  assert.match(src, /o\.toggle\?\.\(\); this\.reveal\(o\.id\)/);
-  assert.match(src, /this\.reveal\(this\.spot\(s, item\)\)/);
-  // Every child of the list is recorded with the spot key reveal looks up.
-  assert.match(src, /add\(this\.askCard\(t, a, cx\), this\.spot\(a\.s, a\.item\)\)/);
-  assert.match(src, /add\(this\.chatRow\(t, r\), this\.spot\(r\.s, r\.it\)\)/);
-  assert.match(src, /"sec-ask"\)/);
-  assert.match(src, /"sec-rep"\)/);
 });
 
 // ---- PO 채팅: @ 멘션, 리더 메뉴, po/<id>.jsonl
@@ -716,21 +719,104 @@ test("parseMention: 글 가운데 @here는 빠지고 남는 공백·문장부호
   assert.deepEqual([u.text, u.to, u.empty], ["@lead-zzz 이거 해줘", [], false]);
 });
 
-test("채팅 줄 따라가기: 열 때와 새 줄이 올 때만 맨 아래로, 위로 올려 읽는 중이면 건드리지 않는다", () => {
-  const a = [{ ms: 1, me: true, text: "안녕" }];
-  const b = [...a, { ms: 2, me: false, text: "네" }];
-  assert.equal(I.chatKey([]), "");
-  assert.notEqual(I.chatKey(a), I.chatKey(b));
-  assert.equal(I.chatFollow(null, I.chatKey(a), 0), true); // 창을 막 열었다
-  assert.equal(I.chatFollow(I.chatKey(a), I.chatKey(a), 0), false); // 같은 줄: 그대로
-  assert.equal(I.chatFollow(I.chatKey(a), I.chatKey(b), 0), true); // 새 줄
-  assert.equal(I.chatFollow(I.chatKey(a), I.chatKey(b), 120), false); // 위로 올려 읽는 중
-  assert.equal(I.chatFollow(null, "", 0), false); // 줄이 없다
-  let up = 0;
-  up = I.chatWheel(up, 80); assert.equal(up, 80);
-  up = I.chatWheel(up, -200); assert.equal(up, 0); // 맨 아래로 돌아오면 다시 따라간다
-  assert.equal(I.chatWheel(0, 99999), 4000);
-  assert.equal(I.chatWheel(5, undefined), 5);
+// ---- 메신저 타임라인 (PO별 방)
+const sumOf = (leader, ...items) => ({ leader, items: items.map((i) => ({ ...i, ms: Date.parse(i.ts) })) });
+const T = (m) => new Date(Date.UTC(2026, 0, 1, 0, m)).toISOString();
+
+test("timeline: 방에 속한 리더 보고와 PO 말, 내가 보낸 글이 시간순(오래된 것이 위)으로 한 줄에 섞이고 answered·start는 빠진다", () => {
+  const a = sumOf("lead-a", { ts: T(5), kind: "done" }, { ts: T(1), kind: "decision" }, { ts: T(2), kind: "answered" }, { ts: T(0), kind: "start" });
+  const b = sumOf("lead-b", { ts: T(3), kind: "verify" });
+  const says = [{ ts: T(4), ms: Date.parse(T(4)), text: "PO 말", to: "lead-a" }];
+  const mine = [{ ts: T(6), ms: Date.parse(T(6)), text: "내 글", to: "lead-a", po: "p1" }];
+  const t = I.timeline("p1", [{ s: a, owner: "p1" }, { s: b, owner: "p1" }], says, mine);
+  assert.deepEqual(t.map((e) => e.who), ["l:lead-a", "l:lead-b", "po", "l:lead-a", "me"]);
+  assert.deepEqual(t.map((e) => e.ms), t.map((e) => e.ms).slice().sort((x, y) => x - y));
+  assert.equal(t.filter((e) => e.it && (e.it.kind === "answered" || e.it.kind === "start")).length, 0);
+});
+
+test("timeline: 다른 PO의 리더·내 글은 들어오지 않고, PO 모름 방에는 PO 말이 없다", () => {
+  const a = sumOf("lead-a", { ts: T(1), kind: "done" });
+  const b = sumOf("lead-b", { ts: T(2), kind: "done" });
+  const says = [{ ts: T(3), ms: Date.parse(T(3)), text: "x", to: "" }];
+  const mine = [{ ts: T(4), ms: Date.parse(T(4)), text: "y", to: "", po: "p2" }];
+  const t1 = I.timeline("p1", [{ s: a, owner: "p1" }, { s: b, owner: "p2" }], says, mine);
+  assert.deepEqual(t1.map((e) => e.who), ["l:lead-a", "po"]);
+  const t0 = I.timeline(I.PO_OTHER, [{ s: a, owner: "p1" }, { s: b, owner: I.PO_OTHER }], says, []);
+  assert.deepEqual(t0.map((e) => e.who), ["l:lead-b"]);
+});
+
+test("timeline: 같은 시각은 입력 순서를 지키고, 같은 보고가 두 번 와도 한 번만 나온다", () => {
+  const a = sumOf("lead-a", { ts: T(1), kind: "done" }, { ts: T(1), kind: "done" });
+  const says = [{ ts: T(1), ms: Date.parse(T(1)), text: "x" }];
+  const t = I.timeline("p1", [{ s: a, owner: "p1" }], says, []);
+  assert.deepEqual(t.map((e) => e.who), ["l:lead-a", "po"]);
+});
+
+test("timeline: 대기 중인 보고에는 waiting 표시가 붙고, 보고가 목록에 없으면 맨 아래에 대기 항목을 하나 만든다", () => {
+  const a = sumOf("lead-a", { ts: T(1), kind: "decision" }, { ts: T(2), kind: "done" });
+  const t = I.timeline("p1", [{ s: a, owner: "p1" }], [], [], [{ leader: "lead-a", ts: T(1), kind: "decision" }], Date.parse(T(9)));
+  assert.equal(t.find((e) => e.it?.kind === "decision").waiting, "decision");
+  assert.equal(t.some((e) => e.wait), false);
+  const t2 = I.timeline("p1", [{ s: a, owner: "p1" }], [], [], [{ leader: "lead-z", ts: "", kind: "verify" }], Date.parse(T(9)));
+  const last = t2[t2.length - 1];
+  assert.deepEqual([last.wait, last.leader, last.waiting, last.ms], [true, "lead-z", "verify", Date.parse(T(9))]);
+});
+
+test("groupTimeline: 같은 사람이 5분 안에 이어 쓰면 머리말을 접고, 사람이 바뀌거나 5분이 지나면 다시 단다", () => {
+  const m = (who, min) => ({ who, ms: min * 60000 });
+  const g = I.groupTimeline([m("l:a", 0), m("l:a", 4), m("l:a", 10), m("po", 11), m("l:a", 12), m("l:b", 12), m("l:b", 17)]);
+  assert.deepEqual(g.map((e) => e.head), [true, false, true, true, true, true, false]);
+  assert.equal(I.TL_GAP_MS, 300000);
+  assert.deepEqual(I.groupTimeline([]), []);
+  assert.equal(I.groupTimeline([m("me", 0), m("me", 5)])[1].head, false); // 정확히 5분은 접힌다
+});
+
+test("unreadCount: 마지막으로 연 시각 뒤의 남의 메시지만 세고, 내 글과 대기 항목은 세지 않는다", () => {
+  const e = [{ who: "l:a", ms: 10 }, { who: "po", ms: 20 }, { who: "me", ms: 30 }, { who: "l:a", ms: 40, wait: true }, { who: "l:b", ms: 50 }];
+  assert.equal(I.unreadCount(e, 0), 3); // 한 번도 안 연 방은 전부
+  assert.equal(I.unreadCount(e, 10), 2);
+  assert.equal(I.unreadCount(e, 50), 0);
+  assert.equal(I.unreadCount([], 0), 0);
+  assert.equal(I.unreadCount(e, undefined), 3);
+});
+
+test("seenNext: 방을 열면 가장 새 메시지 시각을 기억하고, 달라질 게 없으면 null", () => {
+  const e = [{ who: "l:a", ms: 10 }, { who: "po", ms: 20 }, { who: "l:a", ms: 99, wait: true }];
+  assert.deepEqual(I.seenNext({ x: 5 }, "p1", e), { x: 5, p1: 20 });
+  assert.equal(I.seenNext({ p1: 20 }, "p1", e), null);
+  assert.equal(I.seenNext({}, "p1", []), null);
+  assert.equal(I.seenNext({}, "", e), null);
+  assert.deepEqual(I.seenNext(null, "p1", e), { p1: 20 });
+});
+
+test("tlFollow: 방을 바꿨거나 창을 막 열 때, 그리고 맨 아래에 있는 중 새 글이 올 때만 맨 아래로 간다", () => {
+  const a = [{ ms: 1, key: "k1" }];
+  const b = [...a, { ms: 2, key: "k2" }];
+  const ka = I.tlKey("p1", a), kb = I.tlKey("p1", b);
+  assert.notEqual(ka, kb);
+  assert.equal(I.tlFollow("", ka, false), true); // 창을 막 열었다
+  assert.equal(I.tlFollow(ka, ka, true), false); // 같은 상태
+  assert.equal(I.tlFollow(ka, kb, true), true); // 맨 아래에서 새 글
+  assert.equal(I.tlFollow(ka, kb, false), false); // 위로 올려 읽는 중
+  assert.equal(I.tlFollow(ka, I.tlKey("p2", a), false), true); // 방을 바꿨다
+  assert.equal(I.tlFollow(null, ka, false), true);
+});
+
+test("atBottom: 스크롤 위치+보이는 높이가 내용 높이 가까이면 맨 아래", () => {
+  assert.equal(I.atBottom(500, 300, 800), true);
+  assert.equal(I.atBottom(499.5, 300, 800), true);
+  assert.equal(I.atBottom(100, 300, 800), false);
+  assert.equal(I.atBottom(0, 300, 200), true); // 내용이 짧다
+  assert.equal(I.atBottom(undefined, undefined, undefined), true);
+});
+
+test("chatHtml: HTML을 이스케이프하고 줄마다 문단으로 나누며 http(s) 링크만 누를 수 있게 하고 끝 문장부호는 뺀다", () => {
+  assert.equal(I.chatHtml("a<b>&\"c\""), "<p>a&lt;b&gt;&amp;&quot;c&quot;</p>");
+  assert.equal(I.chatHtml("위\n\n아래"), "<p>위</p><p>&nbsp;</p><p>아래</p>");
+  assert.equal(I.chatHtml("보세요 https://x.io/a?b=1&c=2). 끝"), "<p>보세요 <a href=\"https://x.io/a?b=1&amp;c=2\">https://x.io/a?b=1&amp;c=2</a>). 끝</p>");
+  assert.equal(I.chatHtml("javascript:alert(1) ftp://x"), "<p>javascript:alert(1) ftp://x</p>");
+  assert.equal(I.chatHtml(""), "<p>&nbsp;</p>");
+  assert.equal(I.chatHtml("a\r\nb"), "<p>a</p><p>b</p>");
 });
 
 test("parseMention: 줄바꿈과 빈 줄은 지키고, 줄 끝 공백·연속 빈 줄·CRLF만 정리한다", () => {
@@ -785,8 +871,8 @@ test("main.js: 창은 고른 PO 하나만 보이고(카드·보고·@ 목록·�
   assert.match(src, /choosePick\(pos, last, hasOther\)/);
   assert.match(src, /leaderMenu\(this\.liveTerms\(\), namesMemo\(\), q\.query, 8, this\.view\(\)\.pick\)/);
   assert.match(src, /chatTarget\(terms, p\.to, v\.pick\)/);
-  assert.match(src, /mine\.filter\(\(x\) => x\.po === pick\)/);
-  assert.match(src, /this\.data\?\.po\?\.\[pick\]/);
+  assert.match(src, /for \(const x of mine \?\? \[\]\) if \(x\.po === room\)/); // 내 글은 그 방의 것만
+  assert.match(src, /this\.data\?\.po\?\.\[id\]/); // PO 답글도 그 방의 것만
   assert.match(src, /po: v\.pick \}/); // 보낸 글에 PO를 적어 둔다
   assert.match(src, /setShared\(PICK_KEY, id\)/);
   assert.match(src, /child\("PO 데스크"\)/);

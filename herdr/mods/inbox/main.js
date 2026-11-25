@@ -23,18 +23,20 @@ import { theme, exec, appHome, checking, window, run, hc, terminals, panes, setB
 
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
 const ICON = (name) => `mods/workspace-chrome/${name}.svg`;
-const LOAD_TIMEOUT = 20000, LOAD_STALL_MS = 30000, WINDOW_REFRESH_MS = 5000, PANE_REFRESH_MS = 30000, MAX_BUBBLES = 40;
+const LOAD_TIMEOUT = 20000, LOAD_STALL_MS = 30000, WINDOW_REFRESH_MS = 5000, PANE_REFRESH_MS = 30000;
 const KIND = { done: ["완료", "working"], decision: ["결정", "blocked"], verify: ["확인", "blocked"], stop: ["중단", "idle"], resume: ["재개", "dim"], other: ["알림", "dim"], start: ["시작", "dim"] };
-const WINDOW = { mod: "inbox", kind: "window", key: "inbox", keep: true, width: 480, height: 680, props: { mode: "window" } };
+const WINDOW = { mod: "inbox", kind: "window", key: "inbox", keep: true, width: 720, height: 680, props: { mode: "window" } };
 const SENT_KEY = "inbox.sent";
 const PICK_KEY = "inbox.po"; // the PO id the person picked last (shared, so it also holds across window reopens)
 const CHAT_KEY = "inbox.chat"; // the lines the person sent through the chat box [{ts, ms, text, to, po}] (po: the PO id they went to)
-const MAX_CHAT = 30, SHOW_CHAT = 6;
+const MAX_CHAT = 100, MAX_ENTRIES = 80; // MAX_ENTRIES: the newest timeline entries drawn (a waiting one is always drawn)
+const SEEN_KEY = "inbox.seen"; // {<room id>: ms of the newest message the person had on screen when last opening that room}
+const WIDE_MIN = 520; // the window is two columns (rooms | room) from this width, else the rooms are a strip on top
+const ROOM_W = 168;
 const PASTE_SETTLE_MS = 350; // the PO terminal takes the paste before Enter is pressed
 const OPEN_KEY = "inbox.expanded"; // cards the person opened ("자세히"), shared so they stay open across re-renders and window reopens
 const MAX_OPEN = 60;
 const FOCUS_KEY = "inbox.focus"; // "<leader>|<report time>" the window should show first and open (set by a pane row), "" for none
-const SECT_KEY = "inbox.sections"; // {ask:{c,n}, rep:{c}}: which window sections the person collapsed (c) and, for "결정 필요", at which count (n)
 const MAX_ROWS = 20; // pane rows below the pinned asks; the rest is in the window
 const NO_PO = "이 리더의 PO 터미널을 찾지 못했습니다(리더 터미널의 부모가 role=po 라벨이어야 합니다).";
 const OTHER_LABEL = "PO 모름";
@@ -205,11 +207,68 @@ function chatTarget(terms, to = [], pick = "") {
   const p = pick && pick !== PO_OTHER ? poList(list).find((x) => x.id === pick) : null;
   return p ? { po: p.address } : { po: null, why: "none" };
 }
-// Follow-the-newest rule of the chat lines: scroll to the bottom when the window opens (no key seen yet) or a new line arrived, but
-// not while the person has scrolled up to read. `up` is how far (px) the wheel has moved up from the bottom.
-const chatKey = (lines) => { const l = (lines ?? [])[(lines ?? []).length - 1]; return l ? `${lines.length}|${l.ms}|${l.me ? 1 : 0}|${l.text}` : ""; };
-const chatWheel = (up, dy) => Math.max(0, Math.min(4000, (Number(up) || 0) + (Number(dy) || 0)));
-const chatFollow = (seen, key, up) => key !== "" && key !== seen && (Number(up) || 0) <= 4;
+// ---- The messenger timeline of one room (= one PO). Everything below is pure.
+// `leaders` [{s, owner}]: s = a leader's summary (s.leader, s.items), owner = its room (a PO id or PO_OTHER). `says`: the PO's own lines
+// (po/<id>.jsonl). `mine`: what the person sent through the chat box [{ts, ms, text, to, po}]. `waits` [{leader, ts, kind}]: the leaders
+// of this room that wait on a decision/verify (ts = the report time of the waited-on ask, "" when no report is known). Entries come
+// oldest first: {key, who ("l:<leader>" | "po" | "me"), ms, ts, s?, leader?, it?, text?, to?, waiting?, wait?}. `waiting` marks the report a
+// waiting leader is blocked on (it carries the answer buttons); `wait` is a made-up entry for a waiting leader with no report in the
+// list (its label alone), placed at `now` (the newest). Reports of kind answered/start are not messages.
+const TL_GAP_MS = 5 * 60 * 1000; // the same sender within this gap shares one header
+const tlShown = (it) => Boolean(it) && it.kind !== "answered" && it.kind !== "start";
+function timeline(room, leaders, says, mine, waits = [], now = 0) {
+  const out = [];
+  const seen = new Set();
+  for (const { s, owner } of leaders ?? []) {
+    if (owner !== room) continue;
+    for (const it of s?.items ?? []) {
+      const key = `l|${s.leader}|${it.ts}`;
+      if (!tlShown(it) || seen.has(key)) continue;
+      seen.add(key);
+      const w = (waits ?? []).find((x) => x.leader === s.leader && x.ts === it.ts);
+      out.push({ key, who: `l:${s.leader}`, ms: Number(it.ms) || 0, ts: it.ts, s, leader: s.leader, it, ...(w ? { waiting: w.kind } : {}) });
+    }
+  }
+  for (const w of waits ?? []) {
+    if (out.some((e) => e.leader === w.leader && e.it?.ts === w.ts)) continue;
+    const s = (leaders ?? []).find((l) => l.owner === room && l.s?.leader === w.leader)?.s ?? { leader: w.leader, items: [] };
+    out.push({ key: `w|${w.leader}`, who: `l:${w.leader}`, ms: Number(now) || 0, ts: "", s, leader: w.leader, waiting: w.kind, wait: true });
+  }
+  if (room && room !== PO_OTHER) for (const x of says ?? []) out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "" });
+  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "" });
+  return out.map((e, i) => ({ e, i })).sort((a, b) => a.e.ms - b.e.ms || a.i - b.i).map((x) => x.e);
+}
+// Slack-style headers: `head` is true for the first entry and whenever the sender changes or the gap to the entry before is over `gap`.
+const groupTimeline = (entries, gap = TL_GAP_MS) => (entries ?? []).map((e, i, a) => ({ ...e, head: i === 0 || a[i - 1].who !== e.who || e.ms - a[i - 1].ms > gap }));
+// Messages of a room that came after the person last opened it (`seen`, ms; 0/missing = never opened). The person's own lines and
+// the made-up "waiting" entry do not count (a waiting leader has its own count).
+const unreadCount = (entries, seen) => (entries ?? []).filter((e) => e.who !== "me" && !e.wait && e.ms > (Number(seen) || 0)).length;
+// The new {room: last opened ms} after opening `room` with these entries; null when nothing changes.
+function seenNext(seenMap, room, entries) {
+  const latest = Math.max(0, ...(entries ?? []).filter((e) => !e.wait).map((e) => e.ms));
+  if (!room || !(latest > 0) || (Number(seenMap?.[room]) || 0) >= latest) return null;
+  return { ...(seenMap ?? {}), [room]: latest };
+}
+// Follow-the-newest rule: scroll to the bottom when the room changes or the window opens (`seen` is the last key drawn, "" at first),
+// and when a new message arrived while the list was at its bottom; never while the person has scrolled up to read.
+const tlKey = (room, entries) => { const l = (entries ?? [])[(entries ?? []).length - 1]; return `${room}|${(entries ?? []).length}|${l ? `${l.ms}|${l.key}` : ""}`; };
+const tlFollow = (seen, key, atEnd) => key !== (seen ?? "") && (String(seen ?? "").split("|")[0] !== key.split("|")[0] || Boolean(atEnd));
+// Whether a scroll area is at its end (ScrollPosition: offset().y + viewport height >= content height - 1).
+const atBottom = (y, viewport, content) => (Number(y) || 0) + (Number(viewport) || 0) >= (Number(content) || 0) - 1;
+// A message text as HTML for a TextView: escaped, one paragraph per line, http(s) links clickable (trailing punctuation stays outside).
+const escHtml = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+function chatHtml(text) {
+  return String(text ?? "").replace(/\r\n?/g, "\n").split("\n").map((line) => {
+    let out = "", at = 0;
+    for (const m of line.matchAll(/https?:\/\/[^\s<>"]+/g)) {
+      const url = m[0].replace(/[.,!?:;)\]]+$/, "");
+      if (!url) continue;
+      out += `${escHtml(line.slice(at, m.index))}<a href="${escHtml(url)}">${escHtml(url)}</a>`;
+      at = m.index + url.length;
+    }
+    return `<p>${out + escHtml(line.slice(at)) || "&nbsp;"}</p>`;
+  }).join("");
+}
 // chat:end
 
 // Opens an http(s) link with the app's own open_url when a context is at hand, else through the system opener.
@@ -229,6 +288,15 @@ function ago(iso) {
   if (m < 60) return `${m}분 전`;
   const h = Math.floor(m / 60);
   return h < 24 ? `${h}시간 전` : `${Math.floor(h / 24)}일 전`;
+}
+
+// The time a message was written: HH:MM today, else month/day HH:MM (local time).
+function clock(ms) {
+  const d = new Date(Number(ms));
+  if (Number.isNaN(d.getTime())) return "";
+  const p = (n) => String(n).padStart(2, "0");
+  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  return Date.now() - d.getTime() < 20 * 3600 * 1000 ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
 }
 
 // A stable color per leader name, from the theme's ANSI colors.
@@ -272,6 +340,7 @@ export default class Inbox extends View {
     this.busyAt = 0;
     this.gen = 0;
     this.compact = false;
+    this.narrow = false; // narrower than WIDE_MIN: the rooms are a strip on top
     this.writing = null; // leader whose answer box is open
     this.inputs = new Map(); // leader -> InputState
     this.msg = null; // {text, bad}
@@ -293,10 +362,8 @@ export default class Inbox extends View {
     // handler dedupes, so whichever the widget raises, one send / one line break happens.
     this.chat.on("submit", (e, c) => { if (this.menu) this.pickMenu(this.menu.sel, c); else this.enterBox(e?.shift ? "newline" : "send", c); });
     this.pickedAt = 0; // a menu pick just now: the Enter that made it must not also send
-    this.chatScroll = null; // the chat lines' scroll handle
-    try { this.chatScroll = ScrollHandle.new(); } catch {}
-    this.chatSeen = null; // chatKey of the last drawn lines
-    this.chatUp = 0; // px the person has wheeled up from the bottom of the chat lines
+    this.tlSeen = ""; // tlKey of the timeline last drawn (follow-the-newest)
+    this.focusDone = ""; // the focus key already scrolled to
     // The scroll position of both lists is held by handles the view owns (not only by the element id), and every press that changes the
     // height of a card or a section asks for that spot to stay in view (see reveal).
     this.scroll = null; // the window's list
@@ -372,25 +439,12 @@ export default class Inbox extends View {
         if (it.long && !cur[k]) { cur[k] = 1; const keys = Object.keys(cur); for (const old of keys.slice(0, Math.max(0, keys.length - MAX_OPEN))) delete cur[old]; setShared(OPEN_KEY, cur); }
       }
       setShared(FOCUS_KEY, it ? this.cardKey(s, it) : "");
+      if (it) setShared(PICK_KEY, leaderOwner(this.liveTerms(), s.leader, s.terminal, s.po)); // the card is in its leader's room
     } catch {}
     this.openWindow();
   }
   focusKey() { try { return String(shared(FOCUS_KEY) ?? ""); } catch { return ""; } }
   clearFocus() { try { setShared(FOCUS_KEY, ""); } catch {} }
-
-  // Section collapse for the window. "결정 필요" starts open and folds itself while it is empty; a click on its header wins until the
-  // number of waiting asks changes, then the default applies again. "결과 보고" starts open and keeps the person's click for good.
-  // The section holding the item a pane row opened is never folded.
-  collapsed(name, count, force) {
-    if (force) return false;
-    let st = null;
-    try { st = shared(SECT_KEY)?.[name] ?? null; } catch {}
-    if (st && (name !== "ask" || st.n === count)) return Boolean(st.c);
-    return name === "ask" && count === 0;
-  }
-  toggleSection(name, count, now) {
-    try { setShared(SECT_KEY, { ...(shared(SECT_KEY) ?? {}), [name]: { c: !now, n: count } }); } catch {}
-  }
 
   openWindow() {
     this.msg = null;
@@ -411,6 +465,7 @@ export default class Inbox extends View {
         this.data = d;
         this.error = null;
         rememberLeaders();
+        this.markSeen();
       } catch (e) { if (gen === this.gen) this.error = `불러오기 실패: ${String(e?.message ?? e).slice(0, 180)}`; }
       finally { if (gen === this.gen) { this.busy = false; this.badge(); cx.notify(); } }
     });
@@ -454,8 +509,10 @@ export default class Inbox extends View {
     return out.sort((a, b) => b.it.ms - a.it.ms);
   }
 
-  // What the window shows: the live POs (plus "PO 모름" while a leader or report belongs to none), the picked one, and its asks and reports.
-  // `tabs` [{id, label, n}]: n = the waiting leaders of that PO.
+  // What the window shows: the rooms (the live POs, plus "PO 모름" while a leader or report belongs to none), the picked one with its
+  // timeline, and the dock's lists. `tabs` [{id, label, title, n, unread}]: n = the waiting leaders of that room, unread = its messages newer
+  // than the last time the window had it open (0 for the room on screen). `entries` = the picked room's grouped timeline (newest last);
+  // `raw` = all of it, before the cut to MAX_ENTRIES.
   view() {
     const terms = this.liveTerms();
     const pos = poList(terms);
@@ -465,18 +522,40 @@ export default class Inbox extends View {
     let last = "";
     try { last = shared(PICK_KEY) ?? ""; } catch {}
     const pick = choosePick(pos, last, hasOther);
-    const waiting = (id) => all.filter((a) => a.owner === id).length;
-    const tabs = pos.map((p) => ({ id: p.id, label: p.label, title: p.title, n: waiting(p.id) }));
-    if (hasOther) tabs.push({ id: PO_OTHER, label: OTHER_LABEL, n: waiting(PO_OTHER) });
-    return { terms, tabs, pick, asks: all.filter((a) => a.owner === pick), reports: reps.filter((r) => r.owner === pick) };
+    let mine = [], seen = {};
+    try { mine = shared(CHAT_KEY) ?? []; } catch {}
+    try { seen = shared(SEEN_KEY) ?? {}; } catch {}
+    const leaders = (this.data?.leaders ?? []).map((s) => ({ s, owner: leaderOwner(terms, s.leader, s.terminal, s.po) }));
+    const now = Date.now();
+    const waits = (id) => all.filter((a) => a.owner === id).map((a) => ({ leader: a.s.leader, ts: a.item?.ts ?? "", kind: a.kind }));
+    const room = (id) => timeline(id, leaders, id === PO_OTHER ? [] : this.data?.po?.[id] ?? [], mine, waits(id), now);
+    const rooms = pos.map((p) => ({ id: p.id, label: p.label, title: p.title }));
+    if (hasOther) rooms.push({ id: PO_OTHER, label: OTHER_LABEL, title: "" });
+    let raw = [];
+    const tabs = rooms.map((r) => {
+      const entries = room(r.id);
+      if (r.id === pick) raw = entries;
+      return { ...r, n: all.filter((a) => a.owner === r.id).length, unread: this.windowed && r.id === pick ? 0 : unreadCount(entries, seen[r.id]) };
+    });
+    const entries = groupTimeline(raw.filter((e, i) => i >= raw.length - MAX_ENTRIES || e.waiting));
+    return { terms, tabs, pick, raw, entries, asks: all.filter((a) => a.owner === pick), reports: reps.filter((r) => r.owner === pick) };
+  }
+
+  // Remembers that the person has the picked room's newest message on screen (the window only: the dock does not read a room).
+  markSeen() {
+    if (!this.windowed) return;
+    try {
+      const v = this.view();
+      const next = seenNext(shared(SEEN_KEY) ?? {}, v.pick, v.raw);
+      if (next) setShared(SEEN_KEY, next);
+    } catch {}
   }
 
   pickPo(id, c) {
     this.heldAt = 0;
     try { setShared(PICK_KEY, id); } catch {}
     this.menu = null;
-    this.chatSeen = null; // the other PO's lines: scroll to their bottom
-    this.chatUp = 0;
+    this.markSeen();
     c.notify();
   }
 
@@ -601,14 +680,6 @@ export default class Inbox extends View {
     c.notify();
   }
 
-  // The chat lines of the picked PO: what the person sent to it and what it said (its own file).
-  chatLines(pick) {
-    let mine = [];
-    try { mine = shared(CHAT_KEY) ?? []; } catch {}
-    const said = pick && pick !== PO_OTHER ? this.data?.po?.[pick] ?? [] : [];
-    return [...mine.filter((x) => x.po === pick).map((x) => ({ ...x, me: true })), ...said].sort((a, b) => a.ms - b.ms).slice(-SHOW_CHAT);
-  }
-
   // Presses Enter in the PO terminal once the paste has landed (`hc keys`, no <hc ...> tag), and reports a failure in the box's message.
   // The window stays open until then (closing it could drop the timer) and is closed afterwards.
   submitPo(po, c) {
@@ -665,22 +736,12 @@ export default class Inbox extends View {
     c.notify();
   }
 
-  // The chat footer: the last few lines (the person's and the PO's), the "@" menu, the input with mention chips.
+  // The chat footer: the "@" menu, the input with mention chips, the send button. The room has no box while it is "PO 모름" (no PO to send to).
   chatBox(t, v) {
-    const lines = this.chatLines(v.pick);
-    const key = chatKey(lines);
-    if (chatFollow(this.chatSeen, key, this.chatUp)) { try { this.chatScroll?.scroll_to_item(lines.length - 1); } catch {} }
-    this.chatSeen = key;
-    const bubble = (x, i) => {
-      const who = x.me ? null : h_flex().gap(5).items_center()
-        .child(div().text_size(10.5).font_semibold().text_color(t.working).child("PO"))
-        .when(Boolean(x.to), (el) => el.child(div().text_size(10.5).text_color(t.dim).child(`→ ${shortName(x.to)}`)));
-      return h_flex().flex_none().px(4).justify_start().when(x.me, (el) => el.justify_end())
-        .child(v_flex().id(`chat-${i}`).max_w("85%").min_w(0).gap(2).px(10).py(5).rounded(10).bg(x.me ? t.selected : t.raised).border(1).border_color(t.border)
-          .when(Boolean(who), (el) => el.child(who))
-          .child(div().min_w(0).text_size(12.5).text_color(t.foreground).child(x.text))
-          .child(div().text_size(10).text_color(t.dim).child(ago(x.ts))));
-    };
+    if (v.pick === PO_OTHER) {
+      return div().id("chat-none").flex_none().px(12).py(8).border_t(1).border_color(t.border).text_size(11.5).text_color(t.dim)
+        .child("PO를 알 수 없는 방이라 여기서는 보낼 곳이 없습니다. 왼쪽에서 PO 방을 고르세요.");
+    }
     const menu = this.menu && v_flex().id("chat-menu").flex_none().p(4).gap(2).rounded(8).bg(t.raised).border(1).border_color(t.border)
       .children(this.menu.items.map((it, i) => h_flex().id(`mn-${it.id}`).h(26).px(8).gap(8).items_center().rounded(6).cursor_pointer()
         .bg(i === this.menu.sel ? t.selected : t.raised).hover((x) => x.bg(t.hover))
@@ -692,9 +753,6 @@ export default class Inbox extends View {
       .child(ctx.token.label ?? ctx.token.text.trim());
     return v_flex().flex_none().px(10).pb(10).pt(6).gap(6).border_t(1).border_color(t.border)
       .on_key_down((e, c) => this.inputKey(e, c))
-      .when(lines.length > 0, (el) => el.child(v_flex().id("chat-lines").max_h(190).gap(5).overflow_y_scrollbar()
-        .on_scroll_wheel((e) => { this.chatUp = chatWheel(this.chatUp, e?.delta?.y); }) // wheel up = positive y
-        .when(Boolean(this.chatScroll), (x) => x.track_scroll(this.chatScroll)).children(lines.map(bubble))))
       .when(Boolean(menu), (el) => el.child(menu))
       .when(holdShown(this.changedAt, this.heldAt), (el) => el.child(div().text_size(11).text_color(t.working).child("한 번 더 Enter로 보냅니다")))
       .child(div().truncate().text_size(10.5).text_color(t.dim).child(target ? `받는 PO: ${target.label}` : "받는 PO가 없습니다 — PO를 고르세요"))
@@ -704,12 +762,22 @@ export default class Inbox extends View {
         .child(this.button(t, "chat-send", "PO에 보내기", (c) => this.sendChat(c), { primary: true, tip: "고른 PO 터미널에 글을 붙여 넣고 Enter까지 눌러 보냅니다(글은 클립보드를 거칩니다). Shift+Enter는 줄바꿈" })));
   }
 
-  // The PO picker: one chip per live PO (title or id, the waiting count in red) and "PO 모름" while something belongs to no live PO.
+  poHint(t) {
+    return div().id("po-hint").flex_none().px(this.compact ? 10 : 14).pb(6).text_size(11).text_color(t.muted)
+      .child("PO 터미널에 role=po, po=<id> 라벨을 달면 PO별로 나뉩니다. 지금은 PO가 없어 채팅을 보낼 수 없습니다.");
+  }
+
+  // The count badges of a room: unread (green, the window only) and waiting leaders (red).
+  roomBadges(t, x) {
+    return [
+      x.unread > 0 && this.windowed ? div().flex_none().px(5).h(15).rounded(8).bg(t.working).flex().items_center().text_size(10).font_semibold().text_color(t.chrome).child(String(x.unread)) : null,
+      x.n > 0 ? div().flex_none().px(5).h(15).rounded(8).bg(t.blocked + "26").flex().items_center().text_size(10).text_color(t.blocked).child(String(x.n)) : null,
+    ].filter(Boolean);
+  }
+
+  // The room strip (the dock, and the window when narrow): one chip per room — the live POs by project, and "PO 모름" while something belongs to none.
   picker(t, v) {
-    if (!v.tabs.some((x) => x.id !== PO_OTHER)) {
-      return div().id("po-hint").flex_none().px(this.compact ? 10 : 14).pb(6).text_size(11).text_color(t.muted)
-        .child("PO 터미널에 role=po, po=<id> 라벨을 달면 PO별로 나뉩니다. 지금은 PO가 없어 채팅을 보낼 수 없습니다.");
-    }
+    if (!v.tabs.some((x) => x.id !== PO_OTHER)) return this.poHint(t);
     return h_flex().id("po-picker").flex_none().px(this.compact ? 10 : 14).pb(6).gap(5).flex_wrap().items_center()
       .child(div().flex_none().text_size(10.5).font_semibold().text_color(t.dim).child("PO"))
       .children(v.tabs.map((x) => {
@@ -719,7 +787,24 @@ export default class Inbox extends View {
           .hover((s) => s.bg(on ? t.selected : t.hover)).on_click((_e, c) => this.pickPo(x.id, c))
           .tooltip(x.id === PO_OTHER ? OTHER_TIP : `po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
           .child(div().max_w(150).truncate().text_size(11.5).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
-          .when(x.n > 0, (el) => el.child(div().flex_none().px(5).h(15).rounded(8).bg(t.blocked + "26").flex().items_center().text_size(10).text_color(t.blocked).child(String(x.n))));
+          .children(this.roomBadges(t, x));
+      }));
+  }
+
+  // The room list (the wide window): one row per room — a colored initial circle, the project, its badges.
+  roomList(t, v) {
+    return v_flex().id("po-rooms").flex_none().w(ROOM_W).min_h(0).p(6).gap(3).border_r(1).border_color(t.border).overflow_y_scrollbar()
+      .children(v.tabs.map((x) => {
+        const on = x.id === v.pick;
+        const color = x.id === PO_OTHER ? t.dim : tint(t, x.id);
+        return h_flex().id(`po-${x.id}`).flex_none().h(44).px(8).gap(8).items_center().rounded(8).cursor_pointer().on_mouse_down("left", stop)
+          .bg(on ? t.selected : t.chrome).hover((s) => s.bg(on ? t.selected : t.hover)).on_click((_e, c) => this.pickPo(x.id, c))
+          .tooltip(x.id === PO_OTHER ? OTHER_TIP : `po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
+          .child(this.circle(t, color, x.id === PO_OTHER ? "?" : String(x.label).slice(0, 1).toUpperCase()))
+          .child(v_flex().flex_1().min_w(0)
+            .child(div().min_w(0).truncate().text_size(12.5).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
+            .child(div().min_w(0).truncate().text_size(10).text_color(t.dim).child(x.id === PO_OTHER ? "채팅 없음" : "PO")))
+          .children(this.roomBadges(t, x));
       }));
   }
 
@@ -748,23 +833,12 @@ export default class Inbox extends View {
     return this.tag(t, it?.answered ? `${k[0]} · 답함` : k[0], "dim");
   }
 
-  // A window section header: press it to fold or unfold the section (chevron + title + count that stays visible when folded).
-  heading(t, text, count, first, o = {}) {
-    const el = h_flex().id(o.id ?? `sec-${text}`).h(first ? 30 : 38).px(8).pt(first ? 4 : 14).items_center().gap(7).flex_none().cursor_pointer()
-      .when(!first, (x) => x.border_t(1).border_color(t.border).mt(6))
-      .on_mouse_down("left", stop).on_click((_e, c) => { o.toggle?.(); this.reveal(o.id); c.notify(); }).tooltip(o.folded ? "눌러서 펼칩니다" : "눌러서 접습니다")
-      .child(div().flex_none().w(12).text_size(11).text_color(t.dim).child(o.folded ? "▸" : "▾"))
-      .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(text))
-      .child(div().flex_none().px(6).h(16).rounded(8).bg(o.hot && count > 0 ? t.blocked + "26" : t.raised).flex().items_center().text_size(10.5)
-        .text_color(o.hot && count > 0 ? t.blocked : t.muted).child(String(count)));
-    return el;
+  // A round initial badge (a leader, the PO or a room): a tint of its color behind the letter.
+  circle(t, color, letter) {
+    return div().flex_none().size(28).rounded(14).bg(color + "33").flex().items_center().justify_center().text_size(12).font_semibold().text_color(color).child(letter);
   }
 
-  avatar(t, leader) {
-    const c = tint(t, leader);
-    return div().flex_none().size(28).rounded(14).bg(c + "33").flex().items_center().justify_center().text_size(12).font_semibold().text_color(c)
-      .child(shortName(leader).slice(0, 1).toUpperCase());
-  }
+  avatar(t, leader) { return this.circle(t, tint(t, leader), shortName(leader).slice(0, 1).toUpperCase()); }
 
   // ---- report text. Collapsed (default): the headline, the first meaningful line and the short link. Open: the structured body
   // (blocks come parsed from inbox.cjs): headings, indented list rows, command blocks with a copy button, short link labels.
@@ -823,47 +897,75 @@ export default class Inbox extends View {
     return box;
   }
 
-  nameRow(t, s, it, extra, waiting) {
+  // A message header: the leader's name (left out when `bare`, a follow-up line), the kind tag and the time.
+  nameRow(t, s, it, extra, waiting, bare) {
     return h_flex().gap(6).items_center().min_w(0)
-      .child(div().id(`peek-${s.leader}-${it?.ts ?? ""}`).min_w(0).truncate().text_size(12).font_semibold().text_color(tint(t, s.leader)).cursor_pointer()
-        .hover((x) => x.text_color(t.foreground)).on_mouse_down("left", stop).on_click(() => this.peek(s)).tooltip("그 리더 터미널 들여다보기").child(shortName(s.leader)))
+      .when(!bare, (el) => el.child(div().id(`peek-${s.leader}-${it?.ts ?? ""}`).min_w(0).truncate().text_size(12).font_semibold().text_color(tint(t, s.leader)).cursor_pointer()
+        .hover((x) => x.text_color(t.foreground)).on_mouse_down("left", stop).on_click(() => this.peek(s)).tooltip("그 리더 터미널 들여다보기").child(shortName(s.leader))))
       .when(Boolean(it), (el) => el.child(this.kindTag(t, it, it.kind, waiting)))
-      .child(div().flex_1())
-      .when(Boolean(it?.ts), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(ago(it.ts))))
+      .when(!bare, (el) => el.child(div().flex_1()))
+      .when(Boolean(it?.ms), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(clock(it.ms))))
       .when(Boolean(extra), (el) => el.child(extra));
   }
 
-  askCard(t, a, cx) {
+  // What a waiting leader's message offers: 링크 열기, 확인 완료 (verify), 답 쓰기 with its answer box, and what an answer does.
+  askActions(t, a, cx) {
     const { s, kind, item, link } = a;
     const writing = this.writing === s.leader;
     const done = this.sentOf(a);
-    const card = v_flex().id(`ask-${s.leader}`).flex_none().mx(4).mb(8).p(8).gap(6).rounded(10).bg(t.raised).border(1).border_color(t.blocked + "66");
-    const head = h_flex().gap(8).items_start()
-      .child(this.avatar(t, s.leader))
-      .child(v_flex().flex_1().min_w(0).gap(4)
-        .child(this.nameRow(t, s, item ? { ...item, kind } : null, null, true))
-        .child(item ? this.bubble(t, s, item, t.blocked) : div().text_size(12).text_color(t.dim).child("보고 기록 없이 대기 표시만 있습니다. 링크를 열거나 터미널을 들여다보세요.")));
-    const actions = h_flex().gap(6).pl(this.compact ? 0 : 36).items_center().flex_wrap()
-      .when(Boolean(link) && link !== item?.link, (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", (c) => openUrl(link, c))))
-      .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c), { primary: true, disabled: a.po ? "" : NO_PO, tip: CLIP })))
-      .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); this.reveal(this.spot(s, item)); c.notify(); }, { disabled: a.po ? "" : NO_PO }))
-      .child(div().text_size(11).text_color(done ? t.working : t.dim).child(done ? "PO에 넣음 — PO에서 Enter로 보내면 사라집니다" : "PO에서 Enter로 보내면 리더가 받고 사라집니다"));
-    card.child(head).child(actions);
-    if (!a.po) card.child(div().pl(this.compact ? 0 : 36).text_size(11).text_color(t.dim).child(NO_PO));
+    const box = v_flex().min_w(0).gap(6)
+      .child(h_flex().gap(6).items_center().flex_wrap()
+        .when(Boolean(link) && link !== item?.link, (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", (c) => openUrl(link, c))))
+        .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c), { primary: true, disabled: a.po ? "" : NO_PO, tip: CLIP })))
+        .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); this.reveal(this.spot(s, item)); c.notify(); }, { disabled: a.po ? "" : NO_PO }))
+        .child(div().text_size(11).text_color(done ? t.working : t.dim).child(done ? "PO에 넣음 — PO에서 Enter로 보내면 사라집니다" : "PO에서 Enter로 보내면 리더가 받고 사라집니다")));
+    if (!a.po) box.child(div().text_size(11).text_color(t.dim).child(NO_PO));
     if (writing) {
       const input = this.box(s.leader, cx);
-      card.child(h_flex().gap(6).pl(this.compact ? 0 : 36).items_center()
+      box.child(h_flex().gap(6).items_center()
         .child(div().flex_1().min_w(0).on_mouse_down("left", stop).child(Input.new(input).h(30).px(10).items_center().rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
         .child(this.button(t, `send-${s.leader}`, "보내기", (c) => this.send(a, input.value(), c), { primary: true, disabled: a.po ? "" : NO_PO, tip: CLIP })));
     }
-    return card;
+    return box;
   }
 
-  chatRow(t, r) {
-    const { s, it } = r;
-    return h_flex().flex_none().px(8).py(4).gap(8).items_start()
-      .child(this.avatar(t, s.leader))
-      .child(v_flex().flex_1().min_w(0).gap(4).child(this.nameRow(t, s, it)).child(this.bubble(t, s, it)))
+  // One timeline entry (a grouped entry: `head` says whether the sender's name line is drawn). Leaders and the PO are on the left with a
+  // circle, the person ("나") on the right. A leader's message that it waits on is red and carries its answer buttons.
+  entryRow(t, e, v, cx) {
+    const top = e.head ? 10 : 2;
+    const id = `tl-${String(e.key).slice(0, 80)}`;
+    if (e.who === "me") {
+      return v_flex().flex_none().px(10).pt(top).gap(3).items_end()
+        .when(e.head, (el) => el.child(h_flex().gap(6).items_center()
+          .child(div().text_size(10.5).text_color(t.dim).child(clock(e.ms)))
+          .child(div().text_size(12).font_semibold().text_color(t.foreground).child("나"))))
+        .child(div().max_w("85%").min_w(0).px(10).py(6).rounded(10).bg(t.selected).border(1).border_color(t.foreground + "30").text_size(12.5).text_color(t.foreground)
+          .child(this.text(id, chatHtml(e.text))));
+    }
+    if (e.who === "po") {
+      return h_flex().flex_none().px(10).pt(top).gap(8).items_start()
+        .child(e.head ? this.circle(t, t.working, "P") : div().flex_none().w(28))
+        .child(v_flex().flex_1().min_w(0).gap(3)
+          .when(e.head, (el) => el.child(h_flex().gap(6).items_center()
+            .child(div().text_size(12).font_semibold().text_color(t.working).child("PO"))
+            .when(Boolean(e.to), (x) => x.child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(`→ ${shortName(e.to)}`)))
+            .child(div().flex_1())
+            .child(div().flex_none().text_size(10.5).text_color(t.dim).child(clock(e.ms)))))
+          .child(div().min_w(0).px(10).py(6).rounded(10).bg(t.raised).border(1).border_color(t.border).text_size(12.5).text_color(t.foreground)
+            .child(this.text(id, chatHtml(e.text)))));
+    }
+    const a = e.waiting ? v.asks.find((x) => x.s.leader === e.leader) : null;
+    const wait = e.it ? { ...e.it, kind: e.waiting || e.it.kind } : null;
+    const hdr = e.it
+      ? this.nameRow(t, e.s, e.it, null, Boolean(e.waiting), !e.head)
+      : this.nameRow(t, e.s, e.waiting ? { kind: e.waiting, ms: 0 } : null, null, true, !e.head);
+    return h_flex().id(this.spot(e.s, e.it)).flex_none().px(10).pt(top).gap(8).items_start()
+      .child(e.head ? this.avatar(t, e.leader) : div().flex_none().w(28))
+      .child(v_flex().flex_1().min_w(0).gap(4)
+        .child(hdr)
+        .child(e.it ? this.bubble(t, e.s, wait, e.waiting ? t.blocked : null)
+          : div().text_size(12).text_color(t.dim).child("보고 기록 없이 대기 표시만 있습니다. 링크를 열거나 터미널을 들여다보세요."))
+        .when(Boolean(a), (el) => el.child(this.askActions(t, a, cx))));
   }
 
   render(cx) { return this.windowed ? this.full(cx) : this.summary(cx); }
@@ -916,44 +1018,64 @@ export default class Inbox extends View {
       .child(v_flex().id("inbox-rows").flex_1().min_h(0).gap(4).overflow_y_scrollbar().mode("always").when(Boolean(this.rowsScroll), (el) => el.track_scroll(this.rowsScroll)).children(list));
   }
 
-  // The full chat view (pane or window): both lanes.
+  // The messenger view: rooms (one per PO) beside one room's timeline, and the chat box under it. Narrow: the rooms are a strip on top.
   full(cx) {
     const t = theme();
     const v = this.view();
-    const asks = v.asks;
-    let reports = v.reports.slice(0, MAX_BUBBLES);
+    const wide = !this.narrow;
     const blocks = [];
     const at = new Map(); // spot key -> index in blocks (the direct children of the scroll list)
     this.at = at;
-    const add = (el, key) => { if (key) at.set(key, blocks.length); blocks.push(el); };
-    // The item a pane row opened goes first (the first pass has no scroll-to; once drawn, reveal() keeps a pressed spot in view): an ask is moved to the top of its lane, a report gets its own
-    // spot above the lanes. Its card was opened by the row; "모두 보기" drops the choice.
     const f = this.focusKey();
-    const fa = f ? asks.findIndex((a) => this.cardKey(a.s, a.item) === f) : -1;
-    if (fa > 0) asks.unshift(...asks.splice(fa, 1));
-    const fr = f && fa < 0 ? reports.findIndex((r) => this.cardKey(r.s, r.it) === f) : -1;
-    if (fr >= 0) {
-      const [pick] = reports.splice(fr, 1);
-      blocks.push(h_flex().h(30).px(8).pt(4).items_center().gap(7).flex_none()
-        .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child("선택한 보고"))
-        .child(div().flex_1())
-        .child(this.button(t, "focus-clear", "모두 보기", (c) => { this.clearFocus(); c.notify(); })));
-      add(this.chatRow(t, pick), this.spot(pick.s, pick.it));
+    let focusAt = -1;
+    v.entries.forEach((e) => {
+      if (e.who !== "po" && e.who !== "me" && e.it) {
+        const k = this.spot(e.s, e.it);
+        at.set(k, blocks.length);
+        if (f && this.cardKey(e.s, e.it) === f) focusAt = blocks.length;
+      }
+      blocks.push(this.entryRow(t, e, v, cx));
+    });
+    if (!blocks.length) {
+      blocks.push(div().flex_none().p(14).text_size(12).text_color(t.dim)
+        .child(!this.data ? "불러오는 중…" : v.pick ? "이 방에는 아직 대화가 없습니다." : "PO가 없습니다."));
     }
-    const askFold = this.collapsed("ask", asks.length, fa >= 0);
-    add(this.heading(t, "결정 필요", asks.length, fr < 0, { id: "sec-ask", hot: true, folded: askFold, toggle: () => this.toggleSection("ask", asks.length, askFold) }), "sec-ask");
-    if (!askFold) {
-      if (asks.length) asks.forEach((a) => add(this.askCard(t, a, cx), this.spot(a.s, a.item)));
-      else blocks.push(div().flex_none().px(10).pb(8).text_size(12).text_color(t.dim).child(this.data ? "기다리는 결정·확인이 없습니다." : "불러오는 중…"));
+    // Follow the newest: a new message scrolls to the bottom when the room just opened or the person already was at the bottom;
+    // a person who scrolled up keeps their place. The handle's numbers are those of the last layout.
+    const key = tlKey(v.pick, v.raw);
+    if (this.scroll) {
+      let atEnd = true;
+      try {
+        const o = this.scroll.offset(), vp = this.scroll.viewport_size(), ct = this.scroll.content_size();
+        atEnd = atBottom(o.y, vp.height, ct.height);
+      } catch {}
+      if (!f) this.focusDone = "";
+      if (f && focusAt >= 0 && this.focusDone !== f) {
+        this.focusDone = f;
+        const i = focusAt;
+        try { cx.timer.after(60, (c) => { try { this.scroll?.scroll_to_item(i); } catch {} }); } catch {}
+      } else if (!(f && focusAt >= 0) && tlFollow(this.tlSeen, key, atEnd)) {
+        const last = blocks.length - 1;
+        const go = () => { try { this.scroll?.scroll_to_item(last); } catch {} };
+        go();
+        try { cx.timer.after(80, () => go()); } catch {}
+      }
     }
-    const repFold = this.collapsed("rep", reports.length, false);
-    add(this.heading(t, "결과 보고", reports.length + (fr >= 0 ? 1 : 0), false, { id: "sec-rep", folded: repFold, toggle: () => this.toggleSection("rep", reports.length, repFold) }), "sec-rep");
-    if (!repFold) {
-      if (reports.length) reports.forEach((r) => add(this.chatRow(t, r), this.spot(r.s, r.it)));
-      else blocks.push(div().flex_none().px(10).text_size(12).text_color(t.dim).child(this.data ? "받은 보고가 없습니다." : ""));
-    }
+    this.tlSeen = key;
+    const head = v.pick === PO_OTHER ? OTHER_LABEL : v.tabs.find((x) => x.id === v.pick)?.label ?? "";
+    const lines = v_flex().id("inbox-list").on_mouse_down("left", stop).flex_1().min_h(0).pb(8).overflow_y_scrollbar().mode("always")
+      .when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks);
+    const room = v_flex().flex_1().min_w(0).min_h(0)
+      .when(wide && Boolean(head), (el) => el.child(h_flex().flex_none().h(30).px(14).gap(6).items_center().border_b(1).border_color(t.border)
+        .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(head))
+        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : `리더 ${new Set(v.raw.filter((e) => e.leader).map((e) => e.leader)).size}명`))))
+      .child(lines)
+      .child(this.chatBox(t, v));
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
-      .on_size_change((size, c) => { const x = size.width < 360; if (x !== this.compact) { this.compact = x; c.notify(); } })
+      .on_size_change((size, c) => {
+        const x = size.width < 360, n = size.width < WIDE_MIN;
+        if (x !== this.compact || n !== this.narrow) { this.compact = x; this.narrow = n; c.notify(); }
+      })
       .child(h_flex().h(38).px(this.compact ? 10 : 14).flex_none().items_center().justify_between()
         .child(h_flex().gap(6).items_center()
           .child(div().text_size(15).font_semibold().text_color(t.foreground).child("PO 데스크"))
@@ -965,11 +1087,11 @@ export default class Inbox extends View {
           .when(this.windowed, (el) => el.child(div().id("inbox-close").p(4).rounded(5).text_color(t.dim).cursor_pointer().hover((x) => x.bg(t.hover).text_color(t.foreground))
             .on_mouse_down("left", stop).on_click((_e, c) => { this.clearFocus(); try { closeOverlay(safeProps().overlay); } catch {} c.notify(); }).tooltip("닫기")
             .child(svg("mods/pane/close.svg").size(13))))))
-      .child(this.picker(t, v))
+      .when(!wide, (el) => el.child(this.picker(t, v)))
+      .when(wide && !v.tabs.some((x) => x.id !== PO_OTHER), (el) => el.child(this.poHint(t)))
       .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
       .when(Boolean(this.msg), (el) => el.child(div().id("inbox-msg").px(14).pb(6).text_size(11.5).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
         .on_mouse_down("left", stop).on_click((_e, c) => { this.msg = null; c.notify(); }).child(this.msg.text)))
-      .child(v_flex().id("inbox-list").on_mouse_down("left", stop).flex_1().min_h(0).px(4).overflow_y_scrollbar().mode("always").when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks))
-      .child(this.chatBox(t, v));
+      .child(wide ? h_flex().flex_1().min_h(0).child(this.roomList(t, v)).child(room) : room);
   }
 }

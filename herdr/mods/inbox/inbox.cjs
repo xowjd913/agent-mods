@@ -495,13 +495,70 @@ function chatTarget(terms, to = [], pick = "") {
   const p = pick && pick !== PO_OTHER ? poList(list).find((x) => x.id === pick) : null;
   return p ? { po: p.address } : { po: null, why: "none" };
 }
-// Follow-the-newest rule of the chat lines: scroll to the bottom when the window opens (no key seen yet) or a new line arrived, but
-// not while the person has scrolled up to read. `up` is how far (px) the wheel has moved up from the bottom.
-const chatKey = (lines) => { const l = (lines ?? [])[(lines ?? []).length - 1]; return l ? `${lines.length}|${l.ms}|${l.me ? 1 : 0}|${l.text}` : ""; };
-const chatWheel = (up, dy) => Math.max(0, Math.min(4000, (Number(up) || 0) + (Number(dy) || 0)));
-const chatFollow = (seen, key, up) => key !== "" && key !== seen && (Number(up) || 0) <= 4;
+// ---- The messenger timeline of one room (= one PO). Everything below is pure.
+// `leaders` [{s, owner}]: s = a leader's summary (s.leader, s.items), owner = its room (a PO id or PO_OTHER). `says`: the PO's own lines
+// (po/<id>.jsonl). `mine`: what the person sent through the chat box [{ts, ms, text, to, po}]. `waits` [{leader, ts, kind}]: the leaders
+// of this room that wait on a decision/verify (ts = the report time of the waited-on ask, "" when no report is known). Entries come
+// oldest first: {key, who ("l:<leader>" | "po" | "me"), ms, ts, s?, leader?, it?, text?, to?, waiting?, wait?}. `waiting` marks the report a
+// waiting leader is blocked on (it carries the answer buttons); `wait` is a made-up entry for a waiting leader with no report in the
+// list (its label alone), placed at `now` (the newest). Reports of kind answered/start are not messages.
+const TL_GAP_MS = 5 * 60 * 1000; // the same sender within this gap shares one header
+const tlShown = (it) => Boolean(it) && it.kind !== "answered" && it.kind !== "start";
+function timeline(room, leaders, says, mine, waits = [], now = 0) {
+  const out = [];
+  const seen = new Set();
+  for (const { s, owner } of leaders ?? []) {
+    if (owner !== room) continue;
+    for (const it of s?.items ?? []) {
+      const key = `l|${s.leader}|${it.ts}`;
+      if (!tlShown(it) || seen.has(key)) continue;
+      seen.add(key);
+      const w = (waits ?? []).find((x) => x.leader === s.leader && x.ts === it.ts);
+      out.push({ key, who: `l:${s.leader}`, ms: Number(it.ms) || 0, ts: it.ts, s, leader: s.leader, it, ...(w ? { waiting: w.kind } : {}) });
+    }
+  }
+  for (const w of waits ?? []) {
+    if (out.some((e) => e.leader === w.leader && e.it?.ts === w.ts)) continue;
+    const s = (leaders ?? []).find((l) => l.owner === room && l.s?.leader === w.leader)?.s ?? { leader: w.leader, items: [] };
+    out.push({ key: `w|${w.leader}`, who: `l:${w.leader}`, ms: Number(now) || 0, ts: "", s, leader: w.leader, waiting: w.kind, wait: true });
+  }
+  if (room && room !== PO_OTHER) for (const x of says ?? []) out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "" });
+  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "" });
+  return out.map((e, i) => ({ e, i })).sort((a, b) => a.e.ms - b.e.ms || a.i - b.i).map((x) => x.e);
+}
+// Slack-style headers: `head` is true for the first entry and whenever the sender changes or the gap to the entry before is over `gap`.
+const groupTimeline = (entries, gap = TL_GAP_MS) => (entries ?? []).map((e, i, a) => ({ ...e, head: i === 0 || a[i - 1].who !== e.who || e.ms - a[i - 1].ms > gap }));
+// Messages of a room that came after the person last opened it (`seen`, ms; 0/missing = never opened). The person's own lines and
+// the made-up "waiting" entry do not count (a waiting leader has its own count).
+const unreadCount = (entries, seen) => (entries ?? []).filter((e) => e.who !== "me" && !e.wait && e.ms > (Number(seen) || 0)).length;
+// The new {room: last opened ms} after opening `room` with these entries; null when nothing changes.
+function seenNext(seenMap, room, entries) {
+  const latest = Math.max(0, ...(entries ?? []).filter((e) => !e.wait).map((e) => e.ms));
+  if (!room || !(latest > 0) || (Number(seenMap?.[room]) || 0) >= latest) return null;
+  return { ...(seenMap ?? {}), [room]: latest };
+}
+// Follow-the-newest rule: scroll to the bottom when the room changes or the window opens (`seen` is the last key drawn, "" at first),
+// and when a new message arrived while the list was at its bottom; never while the person has scrolled up to read.
+const tlKey = (room, entries) => { const l = (entries ?? [])[(entries ?? []).length - 1]; return `${room}|${(entries ?? []).length}|${l ? `${l.ms}|${l.key}` : ""}`; };
+const tlFollow = (seen, key, atEnd) => key !== (seen ?? "") && (String(seen ?? "").split("|")[0] !== key.split("|")[0] || Boolean(atEnd));
+// Whether a scroll area is at its end (ScrollPosition: offset().y + viewport height >= content height - 1).
+const atBottom = (y, viewport, content) => (Number(y) || 0) + (Number(viewport) || 0) >= (Number(content) || 0) - 1;
+// A message text as HTML for a TextView: escaped, one paragraph per line, http(s) links clickable (trailing punctuation stays outside).
+const escHtml = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+function chatHtml(text) {
+  return String(text ?? "").replace(/\r\n?/g, "\n").split("\n").map((line) => {
+    let out = "", at = 0;
+    for (const m of line.matchAll(/https?:\/\/[^\s<>"]+/g)) {
+      const url = m[0].replace(/[.,!?:;)\]]+$/, "");
+      if (!url) continue;
+      out += `${escHtml(line.slice(at, m.index))}<a href="${escHtml(url)}">${escHtml(url)}</a>`;
+      at = m.index + url.length;
+    }
+    return `<p>${out + escHtml(line.slice(at)) || "&nbsp;"}</p>`;
+  }).join("");
+}
 // chat:end
 
-module.exports = { PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, chatKey, chatWheel, chatFollow, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, tlKey, tlFollow, atBottom, chatHtml, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) process.stdout.write(JSON.stringify(collect()));
