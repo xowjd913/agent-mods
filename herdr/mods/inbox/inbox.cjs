@@ -285,16 +285,193 @@ const MAX_PO_TEXT = 2000;
 // typed into the PO terminal itself (written by the PO hook): it comes back with `me: true` and is shown as the person's own bubble.
 function parsePoLines(text) {
   const out = [];
+  const pics = []; // {kind:"img"} lines: the images of a prompt, written by the hook after it read them from the transcript
   for (const raw of String(text ?? "").split("\n")) {
     let o;
     try { o = JSON.parse(raw); } catch { continue; }
+    if (o && o.kind === "img" && Array.isArray(o.imgs)) {
+      const ms = Date.parse(o.ts);
+      const imgs = o.imgs.filter((x) => typeof x === "string" && x).slice(0, 4);
+      if (ms > 0 && imgs.length) pics.push({ ms, pid: typeof o.pid === "string" ? o.pid : "", imgs });
+      continue;
+    }
     if (!o || (o.kind !== "say" && o.kind !== "me") || typeof o.text !== "string" || !o.text.trim()) continue;
     const ms = Date.parse(o.ts);
     if (!(ms > 0)) continue;
-    out.push({ ts: new Date(ms).toISOString(), ms, text: o.text.trim().slice(0, MAX_PO_TEXT), to: typeof o.to === "string" ? o.to.trim() : "", ...(o.kind === "me" ? { me: true } : {}) });
+    out.push({ ts: new Date(ms).toISOString(), ms, text: o.text.trim().slice(0, MAX_PO_TEXT), to: typeof o.to === "string" ? o.to.trim() : "", ...(o.kind === "me" ? { me: true } : {}), pid: typeof o.pid === "string" ? o.pid : "" });
+  }
+  // An image line belongs to the prompt with its prompt id, else to the latest prompt within 2 minutes before it.
+  for (const g of pics) {
+    const me = out.filter((x) => x.me);
+    const hit = (g.pid && me.find((x) => x.pid === g.pid)) || [...me].reverse().find((x) => x.ms <= g.ms && g.ms - x.ms <= 120000);
+    if (hit) hit.imgs = g.imgs;
   }
   out.sort((a, b) => a.ms - b.ms);
-  return out.slice(-MAX_PO);
+  return out.slice(-MAX_PO).map(({ pid, ...x }) => x);
+}
+
+// ---- picture files (Node side; the pure rules - which path may be drawn - are imgOk/splitImgs in the chat block)
+// Every picture lives in <inbox dir>/po/img/, written 0600 in a 0700 folder, named by its content hash (the same picture is the same file, so
+// writing it twice is harmless), at most 5 MB each and 4 per message; files older than 14 days are removed on the next save.
+const MAX_IMG_BYTES = 5 * 1024 * 1024;
+const IMG_KEEP_MS = 14 * 24 * 3600 * 1000;
+const MIME_EXT = { "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp" };
+const imgDir = (dir = inboxDir()) => path.join(dir, PO_DIR, "img");
+// The extension a picture's own first bytes say, or "" when they are not a PNG / JPEG / GIF / WebP.
+function sniffExt(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 12) return "";
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return ".png";
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return ".jpg";
+  if (buf.toString("latin1", 0, 3) === "GIF") return ".gif";
+  if (buf.toString("latin1", 0, 4) === "RIFF" && buf.toString("latin1", 8, 12) === "WEBP") return ".webp";
+  return "";
+}
+// [width, height] of a PNG / GIF / JPEG / WebP from its first bytes (`buf` = the start of the file; a JPEG's size can sit up to ~64 KB in), or null.
+function imgSize(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 24) return null;
+  const ok = (w, h) => (w > 0 && h > 0 && w < 100000 && h < 100000 ? [w, h] : null);
+  const ext = sniffExt(buf);
+  if (ext === ".png") return ok(buf.readUInt32BE(16), buf.readUInt32BE(20));
+  if (ext === ".gif") return ok(buf.readUInt16LE(6), buf.readUInt16LE(8));
+  if (ext === ".webp") {
+    const k = buf.toString("latin1", 12, 16);
+    if (k === "VP8X" && buf.length >= 30) return ok(1 + buf.readUIntLE(24, 3), 1 + buf.readUIntLE(27, 3));
+    if (k === "VP8L" && buf.length >= 25) { const b = buf.readUInt32LE(21); return ok(1 + (b & 0x3fff), 1 + ((b >> 14) & 0x3fff)); }
+    if (k === "VP8 " && buf.length >= 30) return ok(buf.readUInt16LE(26) & 0x3fff, buf.readUInt16LE(28) & 0x3fff);
+    return null;
+  }
+  if (ext === ".jpg") {
+    let i = 2;
+    while (i + 9 < buf.length) {
+      if (buf[i] !== 0xff) { i++; continue; }
+      const m = buf[i + 1];
+      if (m === 0xff) { i++; continue; }
+      if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) return ok(buf.readUInt16BE(i + 7), buf.readUInt16BE(i + 5));
+      i += 2 + buf.readUInt16BE(i + 2);
+    }
+  }
+  return null;
+}
+// {<file path>: [w, h]} for the newest 30 pictures of the folder (what the bubbles may draw), so a bubble can be given the picture's shape.
+function imageDims(dir = inboxDir()) {
+  const folder = imgDir(dir);
+  const out = {};
+  try {
+    const names = fs.readdirSync(folder).filter((n) => IMG_EXT.test(n)).map((n) => { try { return { n, m: fs.statSync(path.join(folder, n)).mtimeMs }; } catch { return null; } }).filter(Boolean).sort((a, b) => b.m - a.m).slice(0, 30);
+    for (const { n } of names) {
+      try {
+        const fd = fs.openSync(path.join(folder, n), "r");
+        try { const buf = Buffer.alloc(65536); const k = fs.readSync(fd, buf, 0, buf.length, 0); const d = imgSize(buf.subarray(0, k)); if (d) out[path.join(folder, n)] = d; } finally { fs.closeSync(fd); }
+      } catch {}
+    }
+  } catch {}
+  return out;
+}
+function pruneImages(folder, now = Date.now()) {
+  try {
+    for (const n of fs.readdirSync(folder)) {
+      if (!/^[0-9a-f]{16}\.(png|jpg|gif|webp)$/.test(n)) continue;
+      const f = path.join(folder, n);
+      try { if (now - fs.statSync(f).mtimeMs > IMG_KEEP_MS) fs.unlinkSync(f); } catch {}
+    }
+  } catch {}
+}
+// Saves picture bytes as <inbox dir>/po/img/<hash>.<ext> (0600) and returns the path, or null when it is not a picture or is over 5 MB.
+function saveImage(buf, dir = inboxDir(), now = Date.now()) {
+  const ext = sniffExt(buf);
+  if (!ext || buf.length > MAX_IMG_BYTES) return null;
+  const folder = imgDir(dir);
+  fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
+  const file = path.join(folder, `${require("crypto").createHash("sha256").update(buf).digest("hex").slice(0, 16)}${ext}`);
+  if (fs.existsSync(file)) { try { fs.chmodSync(file, 0o600); fs.utimesSync(file, new Date(now), new Date(now)); } catch {} return file; }
+  pruneImages(folder, now);
+  const fd = fs.openSync(file, "w", 0o600);
+  try { try { fs.fchmodSync(fd, 0o600); } catch {} fs.writeSync(fd, buf); } finally { fs.closeSync(fd); }
+  return file;
+}
+// A picture file the person picked or dropped -> a copy in the picture folder (path), or null.
+function importImage(src, dir = inboxDir()) {
+  try {
+    if (!IMG_EXT.test(String(src))) return null;
+    const st = fs.statSync(src);
+    if (!st.isFile() || st.size > MAX_IMG_BYTES) return null;
+    return saveImage(fs.readFileSync(src), dir);
+  } catch { return null; }
+}
+// The picture on the system clipboard -> its saved path, or null when there is none (or no tool to read it). macOS: AppleScript writes the
+// clipboard's PNG; Windows: PowerShell saves the clipboard bitmap; Linux: wl-paste or xclip.
+function clipImage(dir = inboxDir()) {
+  const { execFileSync } = require("child_process");
+  const run = (cmd, args, env) => execFileSync(cmd, args, { timeout: 8000, stdio: ["ignore", "pipe", "ignore"], windowsHide: true, maxBuffer: MAX_IMG_BYTES + 1024, env: { ...process.env, ...(env ?? {}) } });
+  try {
+    if (process.platform === "darwin" || process.platform === "win32") {
+      const tmpd = fs.mkdtempSync(path.join(os.tmpdir(), "po-clip-"));
+      const tmp = path.join(tmpd, "clip.png");
+      try {
+        if (process.platform === "darwin") {
+          run("osascript", ["-e", "on run argv", "-e", "set f to open for access (POSIX file (item 1 of argv)) with write permission", "-e", "try", "-e", "set eof f to 0", "-e", "write (the clipboard as «class PNGf») to f", "-e", "close access f", "-e", "on error", "-e", "try", "-e", "close access f", "-e", "end try", "-e", "error number -128", "-e", "end try", "-e", "end run", tmp]);
+        } else {
+          run("powershell", ["-NoProfile", "-NonInteractive", "-Command", "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $i=[System.Windows.Forms.Clipboard]::GetImage(); if($i){$i.Save($env:PO_CLIP,[System.Drawing.Imaging.ImageFormat]::Png)}"], { PO_CLIP: tmp });
+        }
+        return saveImage(fs.readFileSync(tmp), dir);
+      } finally {
+        try { fs.unlinkSync(tmp); } catch {}
+        try { fs.rmdirSync(tmpd); } catch {}
+      }
+    }
+    for (const [cmd, args] of [["wl-paste", ["--type", "image/png"]], ["xclip", ["-selection", "clipboard", "-t", "image/png", "-o"]]]) {
+      try { const p = saveImage(run(cmd, args), dir); if (p) return p; } catch {}
+    }
+  } catch {}
+  return null;
+}
+// The pictures of one prompt in a Claude Code transcript (jsonl): the user entry whose promptId is `promptId` (else the newest user entry that
+// carries a picture and whose text starts like `promptText`) holds {type:"image", source:{type:"base64", media_type, data}} blocks next to its
+// "[Image #N]" text. Each is saved (capped) and the paths come back. Only the last 32 MiB of the transcript are read.
+function transcriptImages(file, promptId, promptText, dir = inboxDir(), now = Date.now()) {
+  let text = "";
+  try {
+    const st = fs.statSync(file);
+    const n = Math.min(st.size, 32 << 20);
+    const fd = fs.openSync(file, "r");
+    try { const buf = Buffer.alloc(n); fs.readSync(fd, buf, 0, n, st.size - n); text = buf.toString("utf8"); } finally { fs.closeSync(fd); }
+  } catch { return []; }
+  const head = String(promptText ?? "").replace(/\s+/g, " ").trim().slice(0, 30);
+  const lines = text.split("\n");
+  let pick = null;
+  for (let i = lines.length - 1; i >= 0 && !pick; i--) {
+    const ln = lines[i];
+    if (!ln.includes('"image"') || !ln.includes('"user"')) continue;
+    let o;
+    try { o = JSON.parse(ln); } catch { continue; }
+    if (o?.type !== "user" || !Array.isArray(o.message?.content)) continue;
+    const blocks = o.message.content.filter((b) => b?.type === "image" && b.source?.type === "base64" && typeof b.source.data === "string");
+    if (!blocks.length) continue;
+    const t = o.message.content.filter((b) => b?.type === "text").map((b) => b.text ?? "").join(" ").replace(/\s+/g, " ").trim();
+    if ((promptId && o.promptId === promptId) || (!promptId && head && t.startsWith(head))) pick = blocks;
+  }
+  const out = [];
+  for (const b of (pick ?? []).slice(0, MAX_IMGS)) {
+    if (b.source.data.length > MAX_IMG_BYTES * 1.4) continue;
+    const p = saveImage(Buffer.from(b.source.data, "base64"), dir, now);
+    if (p && !out.includes(p)) out.push(p);
+  }
+  return out;
+}
+// Prompt ids in a PO's file whose "me" line holds an "[Image #N]" placeholder that has no {kind:"img"} line yet (newest 3), with the prompt text.
+function pendingImagePids(file) {
+  let text = "";
+  try { text = readTail(file); } catch { return []; }
+  const asked = new Map();
+  const got = new Set();
+  for (const ln of text.split("\n")) {
+    let o;
+    try { o = JSON.parse(ln); } catch { continue; }
+    if (!o || typeof o.pid !== "string" || !o.pid) continue;
+    if (o.kind === "img") got.add(o.pid);
+    else if (o.kind === "me" && typeof o.text === "string" && /\[Image #\d+\]/.test(o.text)) asked.set(o.pid, o.text);
+  }
+  return [...asked].filter(([pid]) => !got.has(pid)).slice(-3).map(([pid, text]) => ({ pid, text }));
 }
 
 // What the PO hook appends for one hook event (`payload` = the hook's stdin JSON), or null when there is nothing to write:
@@ -333,7 +510,7 @@ function readPo(dir = inboxDir()) {
 
 function collect(dir = inboxDir()) {
   let names = [];
-  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== OLD_PO_FILE); } catch { return { at: new Date().toISOString(), dir, leaders: [], po: {} }; }
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== OLD_PO_FILE); } catch { return { at: new Date().toISOString(), dir, leaders: [], po: {}, imgd: {} }; }
   const leaders = [];
   for (const n of names) {
     try {
@@ -342,7 +519,7 @@ function collect(dir = inboxDir()) {
     } catch {}
   }
   leaders.sort((a, b) => (b.last?.ms ?? 0) - (a.last?.ms ?? 0));
-  return { at: new Date().toISOString(), dir, leaders, po: readPo(dir) };
+  return { at: new Date().toISOString(), dir, leaders, po: readPo(dir), imgd: imageDims(dir) };
 }
 
 // Which terminal is a waiting leader: a terminal named lead-* with the wait label decision|verify; returns that kind or "".
@@ -558,12 +735,12 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
       const t = tnorm(x.text);
       const i = sentBy.findIndex((m, j) => !taken.has(j) && (x.ms - (Number(m.ms) || 0)) >= -60000 && (x.ms - (Number(m.ms) || 0)) <= 11 * 60000 && (tnorm(m.line) === t || tnorm(m.text) === t));
       if (i >= 0) { taken.add(i); continue; }
-      out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: "", kind: "chat", status: "sent", typed: true });
+      out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
       continue;
     }
     out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "" });
   }
-  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now) });
+  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
   // Two entries with the same key (the same text at the same ms) would share one element id: the later ones get a #n suffix.
   const used = new Map();
   for (const e of out) {
@@ -588,9 +765,10 @@ const cleanText = (s) => String(s ?? "").replace(/\r\n?/g, "\n").replace(CTRL_CH
 // ak: the key of the leader's ask card this send answers ("" for none): a resend that goes through marks that card sent again.
 function chatRecord(rec, status, now = 0, seq = "") {
   const text = cleanText(rec?.text).trim();
-  if (!text || !rec?.po) return null;
+  const imgs = (Array.isArray(rec?.imgs) ? rec.imgs : []).filter((x) => typeof x === "string" && x).slice(0, 4);
+  if ((!text && !imgs.length) || !rec?.po) return null;
   const ms = Number(now) || 0;
-  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, line: cleanText(rec.line ?? text).slice(0, 4000), to: String(rec.to ?? ""), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", ak: String(rec.ak ?? ""), status: CHAT_STATUS.includes(status) ? status : "failed" };
+  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, ...(imgs.length ? { imgs } : {}), line: cleanText(rec.line ?? text).slice(0, 4000), to: String(rec.to ?? ""), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", ak: String(rec.ak ?? ""), status: CHAT_STATUS.includes(status) ? status : "failed" };
 }
 // The list with record `id` set to `status` at `now` (null when there is no such record or it already has it).
 function setChatStatus(list, id, status, now = 0) {
@@ -812,8 +990,90 @@ function statusSig(terms) {
   }
   return rows.sort().join("\n");
 }
+// ---- images (pasted, picked or dropped in the box; or pasted in the PO terminal and read back by the hook)
+// A picture lives in <inbox dir>/po/img/ (0600, written by this helper); a line of the desk's message names it as "[image: <path> — ...]" so the
+// PO (Claude) can open it with Read, and the bubble shows the picture. Only a path inside that folder is ever drawn.
+const IMG_EXT = /\.(png|jpe?g|gif|webp)$/i;
+const MAX_IMGS = 4;
+const imgLine = (p) => `[image: ${p} — open it with the Read tool]`;
+const IMG_LINE = /^\[image: (.+?)(?: — [^\]]*)?\]$/;
+const slashed = (x) => String(x ?? "").replace(/\\/g, "/");
+function imgOk(dir, p) {
+  const d = slashed(dir).replace(/\/+$/, "");
+  const s = slashed(p);
+  if (!d || !s || s.includes("..") || /[\u0000-\u001F]/.test(s)) return false;
+  const pre = `${d}/po/img/`;
+  return s.startsWith(pre) && IMG_EXT.test(s) && s.length > pre.length && !s.slice(pre.length).includes("/");
+}
+// A message text -> {text without its "[image: ...]" lines, imgs: the paths those lines named}.
+function splitImgs(text) {
+  const imgs = [];
+  const keep = [];
+  for (const ln of String(text ?? "").split("\n")) {
+    const m = IMG_LINE.exec(ln.trim());
+    if (m && imgs.length < MAX_IMGS) imgs.push(m[1]); else keep.push(ln);
+  }
+  return { text: keep.join("\n").trim(), imgs };
+}
+// What a bubble draws for `text` (+ `extra`, the paths the hook read back): the words, the pictures that may be drawn, and the numbers of
+// "[Image #N]" placeholders (a picture pasted in the PO terminal) that have no picture to show - drawn as a small chip, never as raw text.
+function bubbleParts(text, extra, dir) {
+  const sp = splitImgs(text);
+  const nums = [...sp.text.matchAll(/\[Image #(\d+)\]/g)].map((m) => Number(m[1]));
+  const words = sp.text.replace(/\[Image #\d+\][ \t]*/g, "").replace(/\n{3,}/g, "\n\n").trim();
+  const imgs = [...sp.imgs, ...(Array.isArray(extra) ? extra : [])].filter((x, i, a) => imgOk(dir, x) && a.indexOf(x) === i).slice(0, MAX_IMGS);
+  return { text: words, imgs, chips: nums.slice(imgs.length) };
+}
+// The shape a picture is drawn in: fits [w,h] into maxW x maxH keeping its proportions (never enlarged); unknown size -> 4:3.
+function fitImg(w, h, maxW = 240, maxH = 200) {
+  if (!(Number(w) > 0 && Number(h) > 0)) return { w: Math.min(200, maxW), h: Math.min(150, maxH) };
+  const ow = Number(w), oh = Number(h);
+  const k = Math.min(1, maxW / ow, maxH / oh);
+  return { w: Math.max(24, Math.round(ow * k)), h: Math.max(18, Math.round(oh * k)) };
+}
+// The width (px) a message bubble asks for: the text's longest line at 12.5px (Korean and other wide glyphs ~13.5px, Latin ~7.4px) plus the
+// bubble's padding and border, never under `min`. The bubble is then `w(this).max_w(80%)`: it hugs a short line and stops at the same
+// share of the row as the left bubbles on a long one, and does not depend on how a text view reports its own intrinsic width.
+function bubbleWidth(text, min = 64) {
+  let widest = 0;
+  for (const ln of String(text ?? "").split("\n")) {
+    let w = 0;
+    for (const ch of ln) w += ch.charCodeAt(0) < 0x250 ? 7.4 : 13.5;
+    widest = Math.max(widest, w);
+  }
+  return Math.max(min, Math.ceil(widest * 1.05) + 24);
+}
+// ---- scroll: stay pinned to the newest while it is at the bottom
+const PIN_SLACK = 40; // "at the bottom" means within this many px of it
+// One look at the timeline's scroll handle: `st` = {pinned, ct} from the last look, `o` = {y, vh, ch} (offset, viewport and content height now).
+// Content that grew while the view was pinned (a row came, the dots appeared, a picture loaded) -> go: scroll to the end again. A view the
+// person scrolled up (nothing grew, yet it is not near the end) is not pinned any more and keeps its place.
+function pinStep(st, o) {
+  const y = Number(o?.y) || 0, vh = Number(o?.vh) || 0, ch = Number(o?.ch) || 0;
+  const was = st ? st.pinned !== false : true;
+  const prev = Number(st?.ct) || 0;
+  const grew = ch > prev + 1;
+  const near = y + vh >= ch - PIN_SLACK;
+  if (near) return { pinned: true, ct: ch, go: was && grew && y + vh < ch - 1 };
+  if (was && grew) return { pinned: true, ct: ch, go: true };
+  return { pinned: false, ct: ch, go: false };
+}
+// ---- selection: a drag-selected text must not be rebuilt under the pointer
+const SEL_HOLD_MS = 120000, PRESS_HOLD_MS = 8000;
+// st = {sel: a selection is settled, selAt, press: the pointer is down in the list, pressAt}. While true, background redraws wait.
+const quietNow = (st, now) => Boolean((st?.sel && now - (st.selAt || 0) < SEL_HOLD_MS) || (st?.press && now - (st.pressAt || 0) < PRESS_HOLD_MS));
+
 // chat:end
 
-module.exports = { PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
-if (require.main === module) process.stdout.write(JSON.stringify(collect()));
+if (require.main === module) {
+  // `node inbox.cjs`            -> the panel's data (JSON)
+  // `node inbox.cjs clipimg`    -> {"path": <saved picture of the clipboard>|null}
+  // `node inbox.cjs addimg <f>` -> {"path": <saved copy of the picture file f>|null}
+  const [cmd, arg] = process.argv.slice(2);
+  const shown = (p) => { let d = null; try { const buf = fs.readFileSync(p).subarray(0, 65536); d = imgSize(buf); } catch {} return { path: p || null, ...(d ? { w: d[0], h: d[1] } : {}) }; };
+  if (cmd === "clipimg") process.stdout.write(JSON.stringify(shown(clipImage())));
+  else if (cmd === "addimg") process.stdout.write(JSON.stringify(shown(importImage(arg))));
+  else process.stdout.write(JSON.stringify(collect()));
+}

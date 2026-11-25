@@ -17,9 +17,9 @@
 // it as the person's own typing), then Enter is pressed with `hc keys <PO> enter` (herdr.d.ts hc(); `hc keys --help`: "Press named
 // keys", no <hc from=...> tag, which the tagged send command adds). Shift+Enter is a line break; the line breaks stay in the paste.
 
-import { View, div, svg } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, ScrollHandle } from "gpui-base";
-import { theme, exec, appHome, checking, window, run, hc, terminals, panes, focused, setBadge, shared, setShared, props, openOverlay, closeOverlay, watchFolder } from "herdr";
+import { theme, exec, appHome, checking, window, run, hc, terminals, panes, focused, setBadge, shared, setShared, props, openOverlay, closeOverlay, watchFolder, pickFiles } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
 const ICON = (name) => `mods/workspace-chrome/${name}.svg`;
@@ -255,12 +255,12 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
       const t = tnorm(x.text);
       const i = sentBy.findIndex((m, j) => !taken.has(j) && (x.ms - (Number(m.ms) || 0)) >= -60000 && (x.ms - (Number(m.ms) || 0)) <= 11 * 60000 && (tnorm(m.line) === t || tnorm(m.text) === t));
       if (i >= 0) { taken.add(i); continue; }
-      out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: "", kind: "chat", status: "sent", typed: true });
+      out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
       continue;
     }
     out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "" });
   }
-  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now) });
+  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
   // Two entries with the same key (the same text at the same ms) would share one element id: the later ones get a #n suffix.
   const used = new Map();
   for (const e of out) {
@@ -285,9 +285,10 @@ const cleanText = (s) => String(s ?? "").replace(/\r\n?/g, "\n").replace(CTRL_CH
 // ak: the key of the leader's ask card this send answers ("" for none): a resend that goes through marks that card sent again.
 function chatRecord(rec, status, now = 0, seq = "") {
   const text = cleanText(rec?.text).trim();
-  if (!text || !rec?.po) return null;
+  const imgs = (Array.isArray(rec?.imgs) ? rec.imgs : []).filter((x) => typeof x === "string" && x).slice(0, 4);
+  if ((!text && !imgs.length) || !rec?.po) return null;
   const ms = Number(now) || 0;
-  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, line: cleanText(rec.line ?? text).slice(0, 4000), to: String(rec.to ?? ""), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", ak: String(rec.ak ?? ""), status: CHAT_STATUS.includes(status) ? status : "failed" };
+  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, ...(imgs.length ? { imgs } : {}), line: cleanText(rec.line ?? text).slice(0, 4000), to: String(rec.to ?? ""), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", ak: String(rec.ak ?? ""), status: CHAT_STATUS.includes(status) ? status : "failed" };
 }
 // The list with record `id` set to `status` at `now` (null when there is no such record or it already has it).
 function setChatStatus(list, id, status, now = 0) {
@@ -509,7 +510,83 @@ function statusSig(terms) {
   }
   return rows.sort().join("\n");
 }
+// ---- images (pasted, picked or dropped in the box; or pasted in the PO terminal and read back by the hook)
+// A picture lives in <inbox dir>/po/img/ (0600, written by this helper); a line of the desk's message names it as "[image: <path> — ...]" so the
+// PO (Claude) can open it with Read, and the bubble shows the picture. Only a path inside that folder is ever drawn.
+const IMG_EXT = /\.(png|jpe?g|gif|webp)$/i;
+const MAX_IMGS = 4;
+const imgLine = (p) => `[image: ${p} — open it with the Read tool]`;
+const IMG_LINE = /^\[image: (.+?)(?: — [^\]]*)?\]$/;
+const slashed = (x) => String(x ?? "").replace(/\\/g, "/");
+function imgOk(dir, p) {
+  const d = slashed(dir).replace(/\/+$/, "");
+  const s = slashed(p);
+  if (!d || !s || s.includes("..") || /[\u0000-\u001F]/.test(s)) return false;
+  const pre = `${d}/po/img/`;
+  return s.startsWith(pre) && IMG_EXT.test(s) && s.length > pre.length && !s.slice(pre.length).includes("/");
+}
+// A message text -> {text without its "[image: ...]" lines, imgs: the paths those lines named}.
+function splitImgs(text) {
+  const imgs = [];
+  const keep = [];
+  for (const ln of String(text ?? "").split("\n")) {
+    const m = IMG_LINE.exec(ln.trim());
+    if (m && imgs.length < MAX_IMGS) imgs.push(m[1]); else keep.push(ln);
+  }
+  return { text: keep.join("\n").trim(), imgs };
+}
+// What a bubble draws for `text` (+ `extra`, the paths the hook read back): the words, the pictures that may be drawn, and the numbers of
+// "[Image #N]" placeholders (a picture pasted in the PO terminal) that have no picture to show - drawn as a small chip, never as raw text.
+function bubbleParts(text, extra, dir) {
+  const sp = splitImgs(text);
+  const nums = [...sp.text.matchAll(/\[Image #(\d+)\]/g)].map((m) => Number(m[1]));
+  const words = sp.text.replace(/\[Image #\d+\][ \t]*/g, "").replace(/\n{3,}/g, "\n\n").trim();
+  const imgs = [...sp.imgs, ...(Array.isArray(extra) ? extra : [])].filter((x, i, a) => imgOk(dir, x) && a.indexOf(x) === i).slice(0, MAX_IMGS);
+  return { text: words, imgs, chips: nums.slice(imgs.length) };
+}
+// The shape a picture is drawn in: fits [w,h] into maxW x maxH keeping its proportions (never enlarged); unknown size -> 4:3.
+function fitImg(w, h, maxW = 240, maxH = 200) {
+  if (!(Number(w) > 0 && Number(h) > 0)) return { w: Math.min(200, maxW), h: Math.min(150, maxH) };
+  const ow = Number(w), oh = Number(h);
+  const k = Math.min(1, maxW / ow, maxH / oh);
+  return { w: Math.max(24, Math.round(ow * k)), h: Math.max(18, Math.round(oh * k)) };
+}
+// The width (px) a message bubble asks for: the text's longest line at 12.5px (Korean and other wide glyphs ~13.5px, Latin ~7.4px) plus the
+// bubble's padding and border, never under `min`. The bubble is then `w(this).max_w(80%)`: it hugs a short line and stops at the same
+// share of the row as the left bubbles on a long one, and does not depend on how a text view reports its own intrinsic width.
+function bubbleWidth(text, min = 64) {
+  let widest = 0;
+  for (const ln of String(text ?? "").split("\n")) {
+    let w = 0;
+    for (const ch of ln) w += ch.charCodeAt(0) < 0x250 ? 7.4 : 13.5;
+    widest = Math.max(widest, w);
+  }
+  return Math.max(min, Math.ceil(widest * 1.05) + 24);
+}
+// ---- scroll: stay pinned to the newest while it is at the bottom
+const PIN_SLACK = 40; // "at the bottom" means within this many px of it
+// One look at the timeline's scroll handle: `st` = {pinned, ct} from the last look, `o` = {y, vh, ch} (offset, viewport and content height now).
+// Content that grew while the view was pinned (a row came, the dots appeared, a picture loaded) -> go: scroll to the end again. A view the
+// person scrolled up (nothing grew, yet it is not near the end) is not pinned any more and keeps its place.
+function pinStep(st, o) {
+  const y = Number(o?.y) || 0, vh = Number(o?.vh) || 0, ch = Number(o?.ch) || 0;
+  const was = st ? st.pinned !== false : true;
+  const prev = Number(st?.ct) || 0;
+  const grew = ch > prev + 1;
+  const near = y + vh >= ch - PIN_SLACK;
+  if (near) return { pinned: true, ct: ch, go: was && grew && y + vh < ch - 1 };
+  if (was && grew) return { pinned: true, ct: ch, go: true };
+  return { pinned: false, ct: ch, go: false };
+}
+// ---- selection: a drag-selected text must not be rebuilt under the pointer
+const SEL_HOLD_MS = 120000, PRESS_HOLD_MS = 8000;
+// st = {sel: a selection is settled, selAt, press: the pointer is down in the list, pressAt}. While true, background redraws wait.
+const quietNow = (st, now) => Boolean((st?.sel && now - (st.selAt || 0) < SEL_HOLD_MS) || (st?.press && now - (st.pressAt || 0) < PRESS_HOLD_MS));
+
 // chat:end
+
+const PIN_TICK_MS = 250; // how often the timeline checks that it still sits at the newest
+const LOAD_REDRAW_MS = 25000; // an unchanged load still redraws this often (the "5분 전" clocks)
 
 // Opens an http(s) link with the app's own open_url when a context is at hand, else through the system opener.
 function openUrl(url, cx) {
@@ -519,6 +596,16 @@ function openUrl(url, cx) {
   if (p === "macos") exec("open", [url]);
   else if (p === "windows") exec("powershell.exe", ["-NoProfile", "-Command", `Start-Process '${url.replace(/'/g, "''")}'`]);
   else exec("xdg-open", [url]);
+}
+
+// Opens a local file (a picture of a bubble) with the system's viewer.
+function openFile(path) {
+  const f = String(path ?? "");
+  if (!f || /[\0\n]/.test(f)) return;
+  const p = window()?.platform;
+  if (p === "macos") exec("open", [f]);
+  else if (p === "windows") exec("powershell.exe", ["-NoProfile", "-Command", `Start-Process -LiteralPath '${f.replace(/'/g, "''")}'`]);
+  else exec("xdg-open", [f]);
 }
 
 function ago(iso) {
@@ -588,7 +675,7 @@ export default class Inbox extends View {
     this.inputs = new Map(); // leader -> InputState
     this.msg = null; // {text, bad}
     this.copied = null; // key of the command whose 복사 button just ran
-    this.chat = TextareaState.new({ value: "", rows: 1, placeholder: "PO에게 말하기 — Enter로 보내기, Shift+Enter로 줄바꿈, @로 리더 부르기" });
+    this.chat = TextareaState.new({ value: "", rows: 1, placeholder: "PO에게 말하기 — Enter로 보내기, Shift+Enter로 줄바꿈, @로 리더 부르기, 그림은 붙여넣기" });
     try { this.chat.set_auto_grow(1, 6); } catch {}
     this.menu = null; // the open "@" menu: {start, end, query, items, sel}
     this.changedAt = 0; // the last edit of the box (ms)
@@ -607,6 +694,16 @@ export default class Inbox extends View {
     this.nlAt = 0; // the last Shift+Enter handled (ms)
     this.core = ""; // the box text without trailing line breaks, as of the last change
     this.editAt = 0; // the last time that text changed (ms); the IME hold reads this, not changedAt
+    this.pics = []; // pictures waiting in the box: [{path, w, h}] (saved under the inbox's po/img by the helper)
+    this.picBusy = 0; // pictures being read from the clipboard / a file right now
+    this.imgd = new Map(); // path -> [w, h] of pictures added here (the helper's list covers the others)
+    this.ui = { sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0 }; // a drag-select in the list: redraws wait while it is held
+    this.dirty = false; // a redraw was held back
+    this.pin = { pinned: true, ct: 0 }; // the timeline's pin to the newest (see pinStep)
+    this.lastIdx = 0; // index of the last child of the list
+    this.sigData = ""; // what the last load drew (without its clock)
+    this.errSig = "";
+    this.chat.on("paste_other", (_e, c) => this.pastePic(c)); // Cmd+V found no text: take a picture from the clipboard
     this.chat.on("change", (_e, c) => {
       this.changedAt = Date.now();
       let value = "";
@@ -642,7 +739,64 @@ export default class Inbox extends View {
     // The folder watch makes a new report or PO line appear at once; the timer above stays as the fallback (a watch that cannot start or
     // dies). The status poll makes the "···" bubbles, the blocked dots and the names follow the terminals within seconds.
     cx.timer.every(STATUS_POLL_MS, (cx) => this.pollStatus(cx));
+    // The timeline keeps its place at the newest: the handle's numbers are those of the last layout, so content that grew after a draw (a
+    // row, the dots, a picture that finished loading) is seen here and the view goes back to the bottom. A held-back redraw is let go
+    // once the selection / press is over.
+    cx.timer.every(PIN_TICK_MS, (cx) => this.pinTick(cx));
   }
+
+  // ---- redraw gating (a drag-select must not be rebuilt under the pointer) and the pin to the newest
+  pinTick(cx) {
+    if (this.dirty && !quietNow(this.ui, Date.now())) { this.dirty = false; try { cx.notify(); } catch {} }
+    if (!this.scroll || !this.drawnAt) return;
+    try {
+      const o = this.scroll.offset(), vp = this.scroll.viewport_size(), ct = this.scroll.content_size();
+      const r = pinStep(this.pin, { y: o.y, vh: vp.height, ch: ct.height });
+      this.pin = { pinned: r.pinned, ct: r.ct };
+      if (r.go && !this.ui.press) this.scroll.scroll_to_item(this.lastIdx);
+    } catch {}
+  }
+
+  // A background redraw: held back while a selection or a press is held (pinTick lets it go afterwards).
+  softNotify(cx) {
+    if (quietNow(this.ui, Date.now())) { this.dirty = true; return; }
+    this.dirty = false;
+    try { cx.notify(); } catch {}
+  }
+
+  // A TextView's selection settled (sel) or cleared (null).
+  onSel(id, sel, cx) {
+    if (sel) this.ui.sels.set(id, true); else this.ui.sels.delete(id);
+    this.ui.sel = this.ui.sels.size > 0;
+    if (sel) this.ui.selAt = Date.now();
+    this.ui.press = false;
+    if (!this.ui.sel && this.dirty) this.softNotify(cx);
+  }
+
+  // ---- pictures in the box
+  async addPic(args, c) {
+    this.picBusy++;
+    try { c.notify(); } catch {}
+    try {
+      const r = await exec("node", [HELPER(), ...args], { timeout: 20000 });
+      if (r.code !== 0) throw new Error((r.stderr || "").trim().split("\n").pop() || `종료 코드 ${r.code}`);
+      const o = JSON.parse(r.stdout);
+      if (!o?.path) throw new Error("그림이 없습니다");
+      if (o.w > 0 && o.h > 0) this.imgd.set(o.path, [o.w, o.h]);
+      if (this.pics.length >= MAX_IMGS) this.say(`그림은 한 번에 ${MAX_IMGS}장까지 붙일 수 있습니다.`, true);
+      else if (!this.pics.some((x) => x.path === o.path)) this.pics = [...this.pics, { path: o.path, w: o.w ?? 0, h: o.h ?? 0 }];
+      this.msg = null;
+    } catch (e) { this.say(`그림을 붙이지 못했습니다: ${String(e?.message ?? e).slice(0, 140)}`, true); }
+    finally { this.picBusy = Math.max(0, this.picBusy - 1); try { c.notify(); } catch {} }
+  }
+  pastePic(c) { return this.addPic(["clipimg"], c); }
+  async pickPics(c) {
+    let files = null;
+    try { files = await pickFiles({ prompt: "그림 붙이기", multiple: true }); } catch (e) { this.say(`파일을 고르지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); try { c.notify(); } catch {} return; }
+    for (const f of (files ?? []).slice(0, MAX_IMGS)) await this.addPic(["addimg", f], c);
+  }
+  dropPics(paths, c) { for (const f of (paths ?? []).slice(0, MAX_IMGS)) this.addPic(["addimg", f], c); }
+  removePic(i, c) { this.pics = this.pics.filter((_x, k) => k !== i); try { c.notify(); } catch {} }
 
   // The watch runs only while this copy is drawn; a copy nobody looks at releases it (a closed copy is released by the runtime).
   stopWatch() {
@@ -688,7 +842,7 @@ export default class Inbox extends View {
     this.sig = sig;
     if (first) return;
     this.badge();
-    cx.notify();
+    this.softNotify(cx);
   }
 
   refreshMs() { return this.windowed || this.paned ? WINDOW_REFRESH_MS : PANE_REFRESH_MS; }
@@ -787,13 +941,24 @@ export default class Inbox extends View {
         if (r.code !== 0) throw new Error(`수집기 종료 코드 ${r.code} ${(r.stderr || "").trim()}`);
         const d = JSON.parse(r.stdout);
         if (gen !== this.gen) return;
+        const sig = JSON.stringify({ ...d, at: 0 });
+        this.changed = sig !== this.sigData || Boolean(this.error) || !this.data || Date.now() - this.drawnAt > LOAD_REDRAW_MS;
+        this.sigData = sig;
         this.data = d;
         this.error = null;
         rememberLeaders();
         this.markSeen();
         if (this.drawing()) this.startWatch(cx);
-      } catch (e) { if (gen === this.gen) this.error = `불러오기 실패: ${String(e?.message ?? e).slice(0, 180)}`; }
-      finally { if (gen === this.gen) { this.busy = false; this.badge(); cx.notify(); if (this.again) this.load(cx); } }
+      } catch (e) { if (gen === this.gen) { this.error = `불러오기 실패: ${String(e?.message ?? e).slice(0, 180)}`; this.changed = true; } }
+      finally {
+        if (gen === this.gen) {
+          this.busy = false;
+          this.badge();
+          // An unchanged answer is not redrawn (a redraw rebuilds every row and drops a drag-select); the clock still moves now and then.
+          if (this.changed || !this.drawnAt) this.softNotify(cx);
+          if (this.again) this.load(cx);
+        }
+      }
     });
   }
 
@@ -1292,7 +1457,11 @@ export default class Inbox extends View {
     const known = v.pick === PO_OTHER ? [] : terms.filter((t) => /^lead-/.test(String(t.name ?? "")) && leaderOwner(terms, t.name, t.address) === v.pick).map((t) => t.name);
     let p;
     try { p = parseMention(composeChat(this.chat.content()), known); } catch { p = { empty: true }; }
-    if (p.empty) { this.say("PO에게 보낼 글을 먼저 적어 주세요.", true); c.notify(); return; }
+    const pics = this.pics.slice(0, MAX_IMGS);
+    if (p.empty && !pics.length) { this.say("PO에게 보낼 글을 먼저 적어 주세요.", true); c.notify(); return; }
+    if (this.picBusy) { this.say("그림을 읽는 중입니다. 잠시 뒤에 다시 보내세요.", true); c.notify(); return; }
+    if (p.empty) p = { text: "", to: [], empty: false };
+    p.to = p.to ?? [];
     const tgt = chatTarget(terms, p.to, v.pick);
     if (!tgt.po) {
       this.say(tgt.why === "many" ? "부른 리더들의 PO가 서로 다릅니다. 한 PO의 리더만 함께 부르세요." : tgt.why === "orphan" ? NO_PO
@@ -1302,9 +1471,12 @@ export default class Inbox extends View {
     }
     const po = tgt.po;
     try {
-      const r = this.deliver(po, p.text, c, { text: p.text, to: p.to[0] ?? "", po: v.pick, kind: "chat" });
+      // The PO reads a picture from its file: each path goes in the message as a line it can open with the Read tool.
+      const line = [p.text, ...pics.map((x) => imgLine(x.path))].filter(Boolean).join("\n");
+      const r = this.deliver(po, line, c, { text: p.text, imgs: pics.map((x) => x.path), to: p.to[0] ?? "", po: v.pick, kind: "chat" });
       if (r === "sent" || r === "held" || r === "opening") { // opening: the bubble holds the text and sends it by itself once the pane opens
         this.chat.set_value("");
+        this.pics = [];
         this.menu = null;
       }
     } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
@@ -1331,7 +1503,16 @@ export default class Inbox extends View {
       .when(Boolean(menu), (el) => el.child(menu))
       .when(holdShown(this.changedAt, this.heldAt), (el) => el.child(div().text_size(11).text_color(t.working).child("한 번 더 Enter로 보냅니다")))
       .child(div().truncate().text_size(10.5).text_color(t.dim).child(target ? `받는 PO: ${target.label}` : "받는 PO가 없습니다 — PO를 고르세요"))
+      .when(this.pics.length > 0 || this.picBusy > 0, (el) => el.child(h_flex().gap(6).items_center().flex_wrap()
+        .children(this.pics.map((x, i) => h_flex().id(`pic-${i}`).flex_none().h(44).pl(4).pr(6).gap(6).items_center().rounded(8).bg(t.raised).border(1).border_color(t.border)
+          .child(image(x.path).w(fitImg(x.w, x.h, 52, 36).w).h(fitImg(x.w, x.h, 52, 36).h).rounded(4))
+          .child(div().max_w(110).truncate().text_size(10.5).text_color(t.muted).child(String(x.path).split(/[\\/]/).pop()))
+          .child(div().id(`pic-x-${i}`).px(4).rounded(5).text_size(12).text_color(t.dim).cursor_pointer().on_mouse_down("left", stop)
+            .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, c) => this.removePic(i, c)).tooltip("이 그림 빼기").child("✕"))))
+        .when(this.picBusy > 0, (x) => x.child(div().text_size(10.5).text_color(t.dim).child("그림을 읽는 중…")))))
       .child(h_flex().gap(6).items_center()
+        .on_drop((ev, c) => this.dropPics(ev?.paths, c))
+        .child(this.button(t, "chat-attach", "그림", (c) => { this.pickPics(c); }, { tip: "그림 파일을 골라 붙입니다(Cmd+V로 붙여넣거나 파일을 끌어다 놓아도 됩니다). 보내면 PO가 파일을 열어 봅니다" }))
         .child(div().flex_1().min_w(0).on_mouse_down("left", stop)
           .child(Textarea.new(this.chat).token((ctx) => chip(ctx)).min_h(30).px(10).py(5).rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
         .child(this.button(t, "chat-send", "PO에 보내기", (c) => this.sendChat(c), { primary: true, tip: "고른 PO 터미널에 글을 붙여 넣고 Enter까지 눌러 보냅니다(글은 클립보드를 거칩니다). Shift+Enter는 줄바꿈" })));
@@ -1438,7 +1619,7 @@ export default class Inbox extends View {
 
   // Card text you can drag-select and copy with Cmd+C. Links inside open through openUrl. A press here must not drag the window or toggle anything.
   text(id, html) {
-    return TextView.html(id, html).selectable(true).on_link_click((url, c) => openUrl(url, c));
+    return TextView.html(id, html).selectable(true).on_link_click((url, c) => openUrl(url, c)).on_selection_change((sel, c) => this.onSel(id, sel, c));
   }
 
   codeBlock(t, text, html, id) {
@@ -1536,12 +1717,21 @@ export default class Inbox extends View {
       const bad = e.status === "nopane" || e.status === "failed" || e.status === "noenter" || e.status === "gone" || (e.status === "held" && !blockedNow);
       const acts = mineActs(e.status, blockedNow, age);
       const ACT = { resend: ["다시 보내기", "같은 글을 같은 PO에게 다시 보냅니다(말풍선은 늘지 않습니다)", (c) => this.resend(e.id, c)], enter: ["Enter 누르기", "PO의 입력창에 보낸 글이 아직 있는지 확인한 뒤 Enter만 누릅니다(PO가 질문 중이면 누르지 않습니다)", (c) => this.enterNow(e.id, c)] };
+      const bp = bubbleParts(e.text, e.imgs, this.data?.dir ?? "");
+      const sizes = bp.imgs.map((p) => { const d = this.data?.imgd?.[p] ?? this.imgd.get(p); return fitImg(d?.[0], d?.[1]); });
+      // The bubble asks for its text's width (up to 80% of the row, like the left bubbles) and never less than its widest picture: a
+      // percentage max inside a content-sized box collapsed to ~3 characters, so the row is full width and the bubble has a width of its own.
+      const width = Math.max(bubbleWidth(bp.text), ...sizes.map((f) => f.w + 22), 64);
       return v_flex().id(id).flex_none().px(10).pt(top).gap(2).items_end()
         .when(Boolean(e.to), (el) => el.child(div().max_w("85%").min_w(0).truncate().text_size(10).text_color(t.dim).child(`→ ${shortName(e.to)}`)))
-        .child(h_flex().max_w("100%").min_w(0).gap(6).items_end().justify_end()
+        .child(h_flex().w_full().min_w(0).gap(6).items_end().justify_end()
           .child(when(e.ms))
-          .child(div().max_w("80%").min_w(0).px(10).py(6).rounded(10).bg(t.working + "33").border(1).border_color((bad ? t.blocked : t.working) + "66").text_size(12.5).text_color(t.foreground)
-            .child(this.text(`${id}-t`, chatHtml(e.text)))))
+          .child(v_flex().flex_none().w(width).max_w("80%").min_w(0).px(10).py(6).gap(4).rounded(10).bg(t.working + "33").border(1).border_color((bad ? t.blocked : t.working) + "66").text_size(12.5).text_color(t.foreground)
+            .children(bp.imgs.map((p, i) => div().id(`${id}-img${i}`).flex_none().w(sizes[i].w).h(sizes[i].h).rounded(6).overflow_hidden().cursor_pointer().on_mouse_down("left", stop)
+              .on_click(() => openFile(p)).tooltip("눌러서 그림 열기")
+              .child(image(p).w(sizes[i].w).h(sizes[i].h))))
+            .when(bp.chips.length > 0, (el) => el.child(h_flex().gap(4).flex_wrap().children(bp.chips.map((n) => div().flex_none().px(6).h(17).rounded(5).flex().items_center().bg(t.raised).text_size(10.5).text_color(t.muted).child(`사진 #${n}`)))))
+            .when(Boolean(bp.text), (el) => el.child(this.text(`${id}-t`, chatHtml(bp.text))))))
         .when(Boolean(note), (el) => el.child(h_flex().max_w("100%").min_w(0).gap(6).items_center().flex_wrap().justify_end()
           .child(div().min_w(0).text_size(10.5).text_color(bad ? t.blocked : t.dim).child(note))
           .children(Boolean(e.id) ? acts.map((k, i) => this.button(t, `ma-${k}-${e.id}`, ACT[k][0], ACT[k][2], { primary: i === 0, tip: ACT[k][1] })) : [])));
@@ -1618,6 +1808,7 @@ export default class Inbox extends View {
     // Follow the newest: a new message scrolls to the bottom when the room just opened or the person already was at the bottom;
     // a person who scrolled up keeps their place. The handle's numbers are those of the last layout.
     const key = tlKey(`${v.pick}~${v.filter}`, v.shown); // a new filter scrolls to the newest like a new room
+    this.lastIdx = Math.max(0, blocks.length - 1);
     if (this.scroll) {
       let atEnd = true;
       try {
@@ -1632,9 +1823,19 @@ export default class Inbox extends View {
       }
     }
     this.tlSeen = key;
+    // Re-pin after this draw: the person was at the bottom (within PIN_SLACK) and the content may have changed height (a row, the dots, a
+    // picture); the handle still holds the last layout, so go to the end now and again once the new layout exists.
+    if (this.scroll && this.pin.pinned && !this.ui.press) {
+      const last = blocks.length - 1;
+      const go = () => { try { if (!this.ui.press) this.scroll?.scroll_to_item(last); } catch {} };
+      try { cx.timer.after(60, () => go()); cx.timer.after(220, () => go()); } catch {}
+    }
     const waiting = v.tabs.reduce((n, x) => n + x.n, 0); // leaders waiting on a decision, over every room
     const head = v.pick === PO_OTHER ? OTHER_LABEL : v.tabs.find((x) => x.id === v.pick)?.label ?? "";
-    const lines = v_flex().id("inbox-list").on_mouse_down("left", stop).flex_1().min_h(0).pb(8).overflow_y_scrollbar().mode("always")
+    const lines = v_flex().id("inbox-list").flex_1().min_h(0).pb(8).overflow_y_scrollbar().mode("always")
+      .on_mouse_down("left", (_e, c) => { this.ui.press = true; this.ui.pressAt = Date.now(); this.ui.sels.clear(); this.ui.sel = false; c.stop_propagation(); })
+      .on_mouse_up("left", () => { this.ui.press = false; })
+      .on_mouse_down_out((_e, c) => { this.ui.press = false; if (this.ui.sel) { this.ui.sels.clear(); this.ui.sel = false; } if (this.dirty) this.softNotify(c); })
       .when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks);
     const bar = this.filterBar(t, v);
     const panel = this.promptPanel(t, v, cx); // a blocked PO's screen + its keys (null while the room's PO is not waiting on a prompt)

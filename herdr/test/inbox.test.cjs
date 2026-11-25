@@ -99,7 +99,7 @@ test("main.js: 답 버튼·답 상자·N안 칩·채팅은 모두 deliver() 한 
   const chat = methodOf(src, "  sendChat(c) {", "  // The chat footer");
   const del = deliverOf(src);
   assert.match(send, /this\.deliver\(po, answerLine\(/);
-  assert.match(chat, /this\.deliver\(po, p\.text, c, \{/);
+  assert.match(chat, /this\.deliver\(po, line, c, \{/);
   assert.ok(!/run\("terminal\.paste"|submitPo|hc\(/.test(send + chat)); // 붙여넣기·Enter는 deliver 안에서만
   // 순서: 클립보드 → 포커스 → 붙여넣기 → Enter
   const at = (re) => del.search(re);
@@ -842,7 +842,7 @@ test("collect: po/<id>.jsonl을 PO별로 읽고, 옛 po.jsonl과 잘못된 파�
   assert.deepEqual(d.po.devnotes.map((x) => [x.text, x.to]), [["안녕하세요", "here"]]);
   assert.deepEqual(d.po.mascoz.map((x) => x.text), ["마스코즈"]);
   assert.deepEqual(I.readPo(dir), d.po);
-  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, dir: path.join(dir, "none"), leaders: [], po: {} });
+  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, dir: path.join(dir, "none"), leaders: [], po: {}, imgd: {} });
 });
 
 test("chat 블록: main.js가 inbox.cjs와 한 글자도 다르지 않은 같은 블록을 쓴다", () => {
@@ -1170,7 +1170,7 @@ test("main.js: 모든 데스크 보내기는 deliver 한 곳에서 한 번만 �
   const row = methodOf(src, "  entryRow(t, e, v, cx) {", "  render(cx)");
   assert.match(row, /justify_end\(\)/);
   assert.match(row, /bg\(t\.working \+ "33"\)/);
-  assert.match(row, /\.child\(when\(e\.ms\)\)\s*\n\s*\.child\(div\(\)\.max_w\("80%"\)/); // 내 말풍선: 시간이 말풍선 앞(왼쪽)
+  assert.match(row, /\.child\(when\(e\.ms\)\)\s*\n\s*\.child\(v_flex\(\)\.flex_none\(\)\.w\(width\)\.max_w\("80%"\)/); // 내 말풍선: 시간이 말풍선 앞(왼쪽), 폭은 글에서 정한다
   assert.match(row, /items_end\(\)\s*\n\s*\.child\(div\(\)\.flex_1\(\)\.min_w\(0\)\.px\(10\)/); // PO: 말풍선 뒤(오른쪽)에 시간
   assert.match(row, /mineNote\(e\.status, blockedNow, age\)/);
   assert.ok(!/clock\(it\.ms\)/.test(methodOf(src, "  nameRow(t,", "  // What a waiting leader"))); // 머리줄에서 시간이 빠졌다
@@ -1912,7 +1912,8 @@ test("startWatch·stopWatch·pollStatus: 가짜 런타임으로 감시 한 번, 
   };
   const loads = [];
   let drawing = true, terms = [poT()], notified = 0, badged = 0;
-  const self = { watch: null, watchGen: 0, debounced: false, sig: null, data: { dir: "/x/inbox" }, drawing: () => drawing, liveTerms: () => terms, badge: () => badged++, load: (c) => loads.push(c) };
+  const self = { watch: null, watchGen: 0, debounced: false, sig: null, data: { dir: "/x/inbox" }, drawing: () => drawing, liveTerms: () => terms, badge: () => badged++, load: (c) => loads.push(c), ui: {} };
+  self.softNotify = (c) => c.notify(); // (the real one waits while a selection is held: see the quietNow test)
   for (const k of Object.keys(m)) self[k] = m[k].bind(self);
   const cx = { spawn: (f) => f({ timer: { after: (ms, fn) => setTimeout(() => fn({}), ms) } }), notify: () => notified++, timer: { after: (ms, fn) => setTimeout(() => fn({}), ms) } };
   self.pollStatus(cx); await tick();
