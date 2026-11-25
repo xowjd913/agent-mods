@@ -455,7 +455,7 @@ test("main.js: 방 목록과 방 칸이 행의 전체 높이를 채운다(타임
   assert.match(src, /id\("po-rooms"\)\.flex_none\(\)\.w\(SLIM_W\)\.h_full\(\)/);
   // the timeline itself keeps taking the rest of the column above the pinned chat box
   assert.match(src, /id\("inbox-list"\)[^\n]*\.flex_1\(\)\.min_h\(0\)/);
-  assert.match(src, /\.child\(lines\)\s*\n\s*\.when\(Boolean\(panel\), \(el\) => el\.child\(panel\)\)\s*\n\s*\.child\(this\.chatBox\(t, v\)\)/);
+  assert.match(src, /\.child\(lines\)\s*\n\s*\.when\(Boolean\(panel\), \(el\) => el\.child\(panel\)\)\s*\n\s*\.when\(Boolean\(rrow\), \(el\) => el\.child\(rrow\)\)\s*\n\s*\.child\(this\.chatBox\(t, v\)\)/);
 });
 
 test("답함 표시: 실제 lead-sched-acct 순서(결정·답, 확인·답, 결정·답)는 모두 답함이고 열린 것이 없다", () => {
@@ -2006,4 +2006,93 @@ test("Enter 흐름: 위젯이 넣은 줄바꿈은 IME 붙들기를 매번 켜지
   assert.match(src, /dropBreak\(value\) \{/);
   assert.match(src, /if \(strayHeld\(value, now, now\) && now - this\.changedAt <= 25\) this\.dropBreak\(value\)/);
   assert.match(src, /needsNewline\(this\.changedAt, now\)/); // Shift+Enter의 줄바꿈 보충은 원래 시각(changedAt) 그대로
+});
+
+// ---- PO 새로 시작 (#41) ----
+test("restartBlock: PO 없음/작업 중/질문 중/진행 중이면 이유를, 쉬는 PO면 빈 글을 준다", () => {
+  assert.match(I.restartBlock({}), /찾지 못/);
+  assert.match(I.restartBlock({ po: "p", status: "working" }), /작업 중/);
+  assert.match(I.restartBlock({ po: "p", status: "blocked" }), /질문 중/);
+  assert.match(I.restartBlock({ po: "p", status: "idle", running: true }), /새로 시작하는 중/);
+  assert.equal(I.restartBlock({ po: "p", status: "idle" }), "");
+  assert.equal(I.restartBlock({ po: "p", status: "" }), "");
+});
+test("handoffAsk: 표식으로 시작하고 노트 경로를 담는다(영어 한 덩어리)", () => {
+  const a = I.handoffAsk("~/.herdr-inbox/po/x.handoff.md");
+  assert.ok(a.startsWith(I.RESTART_MARK));
+  assert.ok(a.includes("~/.herdr-inbox/po/x.handoff.md"));
+  assert.ok(!a.includes("\n"));
+});
+test("restartConfirm: 무엇이 일어나는지와 결정·확인 대기 수를 함께 보여 준다", () => {
+  const c = I.restartConfirm(2, 1);
+  assert.match(c, /\/clear/);
+  assert.match(c, /\/PO/);
+  assert.match(c, /결정 대기 2건/);
+  assert.match(c, /확인 대기 1건/);
+  assert.doesNotMatch(I.restartConfirm(0, 0), /대기 0건/);
+});
+test("restartSteps: 네 단계의 done/active/fail/todo", () => {
+  assert.deepEqual(I.restartSteps(0).map((s) => s.state), ["active", "todo", "todo", "todo"]);
+  assert.deepEqual(I.restartSteps(2).map((s) => s.state), ["done", "done", "active", "todo"]);
+  assert.deepEqual(I.restartSteps(4).map((s) => s.state), ["done", "done", "done", "done"]);
+  assert.deepEqual(I.restartSteps(1, true).map((s) => s.state), ["done", "fail", "todo", "todo"]);
+  assert.deepEqual(I.restartSteps(2).map((s) => s.label), I.RESTART_STEPS);
+});
+test("restartCleared: 비어 있지 않고 요청 표식이 없을 때만 비워진 화면", () => {
+  assert.equal(I.restartCleared(""), false);
+  assert.equal(I.restartCleared("  \n "), false);
+  assert.equal(I.restartCleared(`${I.RESTART_MARK} write a note\n> `), false);
+  assert.equal(I.restartCleared("> \n? for shortcuts"), true);
+});
+test("restartNoteFresh/restartPoll: 요청 전에 있던 노트는 새 것이 아니다, 새 노트 + 쉬는 PO만 go, 5분이면 timeout", () => {
+  const since = 1_000_000;
+  const old = { exists: true, size: 9, ms: since - 60_000 };
+  const fresh = { exists: true, size: 9, ms: since + 5_000 };
+  assert.equal(I.restartNoteFresh(old, since), false);
+  assert.equal(I.restartNoteFresh(fresh, since), true);
+  assert.equal(I.restartNoteFresh({ exists: true, size: 0, ms: since + 5 }, since), false);
+  assert.equal(I.restartNoteFresh({ exists: false, size: 0, ms: 0 }, since), false);
+  const now = since + 10_000;
+  assert.equal(I.restartPoll({ note: old, since, now, status: "idle", quiet: 5 }), "wait");
+  assert.equal(I.restartPoll({ note: fresh, since, now, status: "working", quiet: 5 }), "idle-wait");
+  assert.equal(I.restartPoll({ note: fresh, since, now, status: "idle", quiet: 0 }), "idle-wait");
+  assert.equal(I.restartPoll({ note: fresh, since, now, status: "idle", quiet: 1 }), "go");
+  assert.equal(I.restartPoll({ note: old, since, now: since + I.RESTART_WAIT_MS + 1, status: "idle" }), "timeout");
+});
+test("readHandoff: 노트 파일을 읽고(없으면 exists=false), 이상한 id는 받지 않는다", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "handoff-"));
+  try {
+    assert.equal(I.readHandoff(dir, "p1").exists, false);
+    fs.mkdirSync(path.join(dir, "po"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "po", "p1.handoff.md"), "# note\nhello");
+    const h = I.readHandoff(dir, "p1");
+    assert.equal(h.exists, true);
+    assert.equal(h.text, "# note\nhello");
+    assert.ok(h.ms > 0 && h.size > 0);
+    assert.equal(I.readHandoff(dir, "../x").exists, false);
+    assert.equal(I.handoffFile(dir, "../x"), null);
+    assert.ok(I.handoffFile(dir, "p1").endsWith("p1.handoff.md"));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+test("main.js: PO 새로 시작 배선 — 방별 상태, 버튼은 막힌 이유와 함께, 확인 줄, 단계 줄, 노트 말풍선, 지우기 전 확인", () => {
+  const src = mainSrc();
+  assert.match(src, /this\.rs = new Map\(\)/);
+  assert.match(src, /restartRow\(t, v, cx\) \{/);
+  assert.match(src, /"PO 새로 시작", \(c\) => this\.restartOpen\(room, c\), \{ disabled: why/);
+  assert.match(src, /restartConfirm\(waiting\("decision"\), waiting\("verify"\)\)/);
+  assert.match(src, /"새로 시작", \(c\) => this\.restartRun\(room, po, room, c\)/);
+  assert.match(src, /"다시", \(c\) => this\.restartRun\(/);
+  assert.match(src, /restartSteps\(r\.n, failed\)/);
+  assert.match(src, /who: "po", head: true, ms: hn\.ms/);
+  // typeLine never records a chat bubble and never types into a PO on a prompt
+  const tl = src.slice(src.indexOf("  typeLine("), src.indexOf("  // 새로 시작 / 다시"));
+  assert.match(tl, /if \(this\.isBlocked\(po\)\)/);
+  assert.doesNotMatch(tl, /setShared|CHAT_KEY|record/);
+  // /PO only after the screen was verified cleared; a timeout/failure clears nothing
+  const cl = src.slice(src.indexOf("  restartClear("), src.indexOf("  // The strip above the chat box"));
+  assert.ok(cl.indexOf("restartCleared(") < cl.indexOf('"/PO"'));
+  assert.match(cl, /\/PO를 보내지 않았습니다/);
+  const w = src.slice(src.indexOf("  restartWait("), src.indexOf("  // Step 3: /clear"));
+  assert.match(w, /act === "timeout"/);
+  assert.ok(!w.includes('"/clear"'));
 });

@@ -1354,6 +1354,51 @@ function bubbleCap(colW, minInner = 0) {
   return pic > cap && pic <= room ? pic : cap;
 }
 
+// ---- "PO 새로 시작": the desk asks the PO for a handoff note, then clears it (/clear) and starts it again (/PO). Everything here is pure.
+// The note is ~/.herdr-inbox/po/<po id>.handoff.md. Steps (RESTART_STEPS): 노트 요청 -> 노트 작성됨 -> 대화 비움 -> PO 다시 시작. `n` = how many are done.
+const RESTART_STEPS = ["노트 요청", "노트 작성됨", "대화 비움", "PO 다시 시작"];
+const RESTART_WAIT_MS = 5 * 60 * 1000; // a note that has not appeared by then: 다시 / 취소, nothing is cleared
+const RESTART_POLL_MS = 2000; // how often the note file and the PO's state are looked at
+const RESTART_CLEAR_MS = 10 * 1000; // how long the screen gets to show the cleared conversation after /clear
+const RESTART_MARK = "[desk:handoff]"; // first words of the request: the screen shows it until the conversation is cleared
+// Why the button cannot be pressed ("" when it can): the PO must be idle (not working, not on a prompt), a restart of it must not already run.
+function restartBlock({ po = "", status = "", running = false } = {}) {
+  const s = String(status ?? "").trim().toLowerCase();
+  if (!po) return "PO 터미널을 찾지 못했습니다";
+  if (running) return "이 PO를 새로 시작하는 중입니다";
+  if (s === "blocked") return "PO가 질문 중입니다 — 먼저 질문에 답하세요";
+  if (s === "working") return "PO가 작업 중입니다 — 끝난 뒤에 누르세요";
+  return "";
+}
+// The line pasted into the PO (English: it is read by an agent). `file` is where the note goes (shown with ~).
+function handoffAsk(file) {
+  return `${RESTART_MARK} The user will restart you with /clear. Before that, write a handoff note to ${file} (overwrite it; create the folder if needed) so that the next session can continue seamlessly: (1) decisions and final checks the user still has to answer, (2) each running leader with its task, issue/PR and state, (3) what you were doing and the next steps, (4) anything that is only in this conversation. Keep it short and in the user's language. Do nothing else; reply "handoff written" when the file is saved.`;
+}
+// What the confirm line says: what will happen and how many decisions / final checks still wait on the person.
+function restartConfirm(decisions = 0, verifies = 0) {
+  const d = Math.max(0, Number(decisions) || 0), v = Math.max(0, Number(verifies) || 0);
+  const wait = d + v ? `결정 대기 ${d}건 · 확인 대기 ${v}건이 있습니다(새로 시작해도 리더 쪽 대기는 그대로입니다).` : "결정·확인 대기는 없습니다.";
+  return `PO에게 인수인계 노트를 쓰게 한 뒤 대화를 비우고(/clear) /PO로 다시 시작합니다. ${wait}`;
+}
+// The four steps for the room: `n` done, `fail` = the step at index n failed (so it shows as stopped).
+function restartSteps(n = 0, fail = false) {
+  const k = Math.max(0, Math.min(RESTART_STEPS.length, Number(n) || 0));
+  return RESTART_STEPS.map((label, i) => ({ label, state: i < k ? "done" : i === k ? (fail ? "fail" : "active") : "todo" }));
+}
+// The conversation is cleared once the screen is read (not empty) and the request is no longer on it.
+const restartCleared = (screen) => { const s = cleanText(screen); return s.trim().length > 0 && !s.includes(RESTART_MARK); };
+// The note may be fetched (text, not an empty file) and was written after the request (mtime in ms, 1 s slack for coarse file clocks).
+const restartNoteFresh = (note, since) => Boolean(note && note.exists && Number(note.size) > 0 && Number(note.ms) >= Number(since) - 1000);
+// One poll while the note is awaited: "wait" (no fresh note yet), "timeout" (the time is out), "idle-wait" (the note is there, the PO still works:
+// let it finish), "go" (the note is there and the PO is idle for two looks in a row: clear it).
+function restartPoll({ note, since, now, status, quiet = 0 } = {}) {
+  const fresh = restartNoteFresh(note, since);
+  const s = String(status ?? "").trim().toLowerCase();
+  if (!fresh) return Number(now) - Number(since) >= RESTART_WAIT_MS ? "timeout" : "wait";
+  if (s === "working" || s === "blocked") return "idle-wait";
+  return Number(quiet) >= 1 ? "go" : "idle-wait";
+}
+
 // chat:end
 
 // Diagnostics for the desk (what the pointer and the selection do), kept in a small capped file the leader can read: <app root>/data/inbox/diag.log,
@@ -1371,16 +1416,35 @@ function diagAppend(lines, root = appRoot()) {
   try { try { fs.fchmodSync(fd, 0o600); } catch {} fs.writeSync(fd, text); } finally { fs.closeSync(fd); }
   return f;
 }
-module.exports = { unwrapTags, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+// The handoff note of a PO (the PO writes it when the desk restarts it): <inbox>/po/<po id>.handoff.md, or null for an invalid id.
+const handoffFile = (dir, id) => (cleanPoId(id) ? path.join(dir, PO_DIR, `${cleanPoId(id)}.handoff.md`) : null);
+const HANDOFF_MAX = 20000;
+// {path (as the PO is told: ~ for the home folder), exists, ms (mtime), size, text (the first HANDOFF_MAX characters, control characters out)}.
+// A missing, unreadable or invalid one is {exists: false}. The caller decides whether it is new enough (restartNoteFresh).
+function readHandoff(dir = inboxDir(), id = "") {
+  const file = handoffFile(dir, id);
+  if (!file) return { path: "", exists: false, ms: 0, size: 0, text: "" };
+  const home = os.homedir();
+  const shown = file.startsWith(home + path.sep) ? `~${file.slice(home.length).split(path.sep).join("/")}` : file;
+  try {
+    const st = fs.statSync(file);
+    if (!st.isFile()) return { path: shown, exists: false, ms: 0, size: 0, text: "" };
+    return { path: shown, exists: true, ms: Math.floor(st.mtimeMs), size: st.size, text: cleanText(fs.readFileSync(file, "utf8").slice(0, HANDOFF_MAX)) };
+  } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
+}
+
+module.exports = { handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartCleared, restartNoteFresh, restartPoll, unwrapTags, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)
   // `node inbox.cjs clipimg`    -> {"path": <saved picture of the clipboard>|null}
+  // `node inbox.cjs handoff <po id>` -> {path, exists, ms, size, text} of that PO's handoff note
   // `node inbox.cjs addimg <f>` -> {"path": <saved copy of the picture file f>|null}
   const [cmd, arg] = process.argv.slice(2);
   const shown = (p) => { let d = null; try { const buf = fs.readFileSync(p).subarray(0, 65536); d = imgSize(buf); } catch {} return { path: p || null, ...(d ? { w: d[0], h: d[1] } : {}) }; };
   if (cmd === "clipimg") process.stdout.write(JSON.stringify(shown(clipImage())));
   else if (cmd === "diag") { try { diagAppend(JSON.parse(arg)); } catch {} process.stdout.write("{}"); }
+  else if (cmd === "handoff") process.stdout.write(JSON.stringify(readHandoff(inboxDir(), arg)));
   else if (cmd === "addimg") process.stdout.write(JSON.stringify(shown(importImage(arg))));
   else process.stdout.write(JSON.stringify(collect()));
 }
