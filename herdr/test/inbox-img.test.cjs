@@ -381,3 +381,34 @@ test("main.js: spacing between chat rows (same sender 8, new sender 18) and bubb
   assert.match(MAIN, /const top = e\.head \? 18 : 8/);
   assert.ok((MAIN.match(/px\(12\)\.py\(9\)\.gap\(6\)\.rounded\(12\)/g) || []).length >= 2);
 });
+
+// diag.log: a small capped 0600 file of selection/pointer events for the leader (ids and lengths only).
+test("diagAppend: 0600 file, one line each, cut long lines, rotates past the cap", () => {
+  const root = tmp();
+  const f = I.diagAppend(["a one", "b\ntwo", "x".repeat(1000)], root);
+  assert.equal(f, path.join(root, "data", "inbox", "diag.log"));
+  assert.equal(fs.statSync(f).mode & 0o777, 0o600);
+  const lines = fs.readFileSync(f, "utf8").trimEnd().split("\n");
+  assert.equal(lines.length, 3);
+  assert.equal(lines[1], "b two");
+  assert.ok(lines[2].length <= 300);
+  fs.writeFileSync(f, "y".repeat(I.DIAG_MAX + 10), { mode: 0o600 });
+  I.diagAppend(["fresh"], root);
+  assert.equal(fs.readFileSync(f, "utf8"), "fresh\n");
+  assert.equal(fs.statSync(f + ".1").size, I.DIAG_MAX + 10);
+});
+
+test("diag CLI appends to <HERDR_APP_HOME>/data/inbox/diag.log", () => {
+  const root = tmp();
+  const { execFileSync } = require("node:child_process");
+  execFileSync("node", [path.join(__dirname, "../mods/inbox/inbox.cjs"), "diag", JSON.stringify(["hello"])], { env: { ...process.env, HERDR_APP_HOME: root } });
+  assert.equal(fs.readFileSync(path.join(root, "data", "inbox", "diag.log"), "utf8"), "hello\n");
+});
+
+test("main.js logs selection, press/release and the per-draw TextView count to diag, never text content", () => {
+  assert.match(MAIN, /this\.diag\(`selection /);
+  assert.match(MAIN, /this\.diag\("press /);
+  assert.match(MAIN, /this\.diag\("release /);
+  assert.match(MAIN, /selectable TextView\(s\)/);
+  assert.match(MAIN, /settled in \$\{id\}: \$\{String\(sel\.text \?\? ""\)\.length\} chars/); // the length only
+});

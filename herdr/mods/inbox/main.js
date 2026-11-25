@@ -771,10 +771,27 @@ export default class Inbox extends View {
   // desk is a press, so redraws and the bottom pin wait until it is released. The press gate used to live on the list's own mouse-down,
   // which a TextView that handles the press itself never lets through - the pin and redraws then ran under a drag and dropped the selection.
   pointer(e, cx) {
-    if (e?.pressed_button === "left") { this.ui.press = true; this.ui.pressAt = Date.now(); return; }
-    if (this.ui.press) { this.ui.press = false; if (this.dirty) this.softNotify(cx); }
+    if (e?.pressed_button === "left") { if (!this.ui.press) this.diag("press (left held, window move)", cx); this.ui.press = true; this.ui.pressAt = Date.now(); return; }
+    if (this.ui.press) { this.diag("release (move without button)", cx); this.ui.press = false; if (this.dirty) this.softNotify(cx); }
+  }
+  // Diagnostics for the leader (the person does not read consoles): lines are buffered and written by inbox.cjs in one call at most every 2s
+  // to <app root>/data/inbox/diag.log (capped, 0600). Ids and lengths only, never message text.
+  diag(msg, cx) {
+    try {
+      const q = (this.diagQ ??= []);
+      if (q.length < 40) q.push(`${new Date().toISOString()} ${msg}`);
+      if (this.diagBusy) return;
+      this.diagBusy = true;
+      if (!cx?.timer) { this.diagBusy = false; return; }
+      cx.timer.after(2000, async () => {
+        const out = this.diagQ.splice(0);
+        try { if (out.length) await exec("node", [HELPER(), "diag", JSON.stringify(out)], { timeout: 5000 }); } catch {}
+        this.diagBusy = false;
+      });
+    } catch {}
   }
   pointerUp(cx) {
+    this.diag("release (window mouse up)", cx);
     this.ui.press = false;
     if (this.dirty && !this.ui.sel) this.softNotify(cx);
   }
@@ -789,6 +806,7 @@ export default class Inbox extends View {
   // A TextView's selection settled (sel) or cleared (null).
   onSel(id, sel, cx) {
     this.ui.selEvents = (this.ui.selEvents ?? 0) + 1; // how often a TextView reported a selection at all (see the console line)
+    this.diag(`selection ${sel ? `settled in ${id}: ${String(sel.text ?? "").length} chars` : `cleared in ${id}`} (#${this.ui.selEvents})`, cx);
     try { console.log(`[inbox] selection ${sel ? `settled in ${id}: ${String(sel.text ?? "").length} chars` : `cleared in ${id}`} (#${this.ui.selEvents})`); } catch {}
     if (sel) this.ui.sels.set(id, true); else this.ui.sels.delete(id);
     this.ui.sel = this.ui.sels.size > 0;
@@ -1643,6 +1661,7 @@ export default class Inbox extends View {
 
   // Card text you can drag-select and copy with Cmd+C. Links inside open through openUrl. A press here must not drag the window or toggle anything.
   text(id, html) {
+    this.tvN = (this.tvN ?? 0) + 1;
     return TextView.html(id, html).selectable(true).on_link_click((url, c) => openUrl(url, c)).on_selection_change((sel, c) => this.onSel(id, sel, c));
   }
 
@@ -1804,6 +1823,11 @@ export default class Inbox extends View {
 
   // The messenger view: rooms (one per PO) beside one room's timeline, and the chat box under it. Narrow: the rooms are a strip on top.
   full(cx) {
+    this.tvN = 0;
+    Promise.resolve().then(() => { // once per draw (only when the count changed or 10s passed, so a busy desk does not flood the file)
+      const now = Date.now();
+      if (this.tvLast !== this.tvN || now - (this.tvLogAt ?? 0) > 10000) { this.tvLast = this.tvN; this.tvLogAt = now; this.diag(`draw: ${this.tvN} selectable TextView(s)`, cx); }
+    });
     const t = theme();
     const v = this.view();
     this.drawnAt = Date.now();

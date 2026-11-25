@@ -1083,7 +1083,22 @@ const quietNow = (st, now) => Boolean((st?.sel && now - (st.selAt || 0) < SEL_HO
 
 // chat:end
 
-module.exports = { appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+// Diagnostics for the desk (what the pointer and the selection do), kept in a small capped file the leader can read: <app root>/data/inbox/diag.log,
+// 0600; past DIAG_MAX it is moved to diag.log.1 (the older half is dropped) and a new one starts. Lines carry ids and lengths only, never message text.
+const DIAG_MAX = 64 * 1024;
+function diagAppend(lines, root = appRoot()) {
+  const dir = path.join(root, "data", "inbox");
+  const f = path.join(dir, "diag.log");
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  let size = 0;
+  try { size = fs.statSync(f).size; } catch {}
+  if (size > DIAG_MAX) fs.renameSync(f, f + ".1");
+  const text = (Array.isArray(lines) ? lines : []).slice(0, 60).map((x) => String(x).replace(/[\r\n]+/g, " ").slice(0, 300)).join("\n") + "\n";
+  const fd = fs.openSync(f, "a", 0o600);
+  try { try { fs.fchmodSync(fd, 0o600); } catch {} fs.writeSync(fd, text); } finally { fs.closeSync(fd); }
+  return f;
+}
+module.exports = { diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)
@@ -1092,6 +1107,7 @@ if (require.main === module) {
   const [cmd, arg] = process.argv.slice(2);
   const shown = (p) => { let d = null; try { const buf = fs.readFileSync(p).subarray(0, 65536); d = imgSize(buf); } catch {} return { path: p || null, ...(d ? { w: d[0], h: d[1] } : {}) }; };
   if (cmd === "clipimg") process.stdout.write(JSON.stringify(shown(clipImage())));
+  else if (cmd === "diag") { try { diagAppend(JSON.parse(arg)); } catch {} process.stdout.write("{}"); }
   else if (cmd === "addimg") process.stdout.write(JSON.stringify(shown(importImage(arg))));
   else process.stdout.write(JSON.stringify(collect()));
 }
