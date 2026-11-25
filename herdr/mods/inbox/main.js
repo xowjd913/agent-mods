@@ -735,6 +735,8 @@ export default class Inbox extends View {
     this.editAt = 0; // the last time that text changed (ms); the IME hold reads this, not changedAt
     this.pics = []; // pictures waiting in the box: [{path, w, h}] (saved under the inbox's po/img by the helper)
     this.picBusy = 0; // pictures being read from the clipboard / a file right now
+    this.replyPics = new Map(); // leader -> pictures waiting in that leader's answer box (same shape as this.pics)
+    this.replyBusy = new Map(); // leader -> pictures being read for that answer box
     this.imgd = new Map(); // path -> [w, h] of pictures added here (the helper's list covers the others)
     this.ui = { sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0 }; // a drag-select in the list: redraws wait while it is held
     this.dirty = false; // a redraw was held back
@@ -852,8 +854,21 @@ export default class Inbox extends View {
   }
 
   // ---- pictures in the box
-  async addPic(args, c) {
-    this.picBusy++;
+  // `key` is null for the PO box, or a leader name for that leader's answer box: every picture path below takes it, so the two boxes share one code.
+  picsOf(key = null) { return key == null ? this.pics : (this.replyPics.get(key) ?? []); }
+  busyOf(key = null) { return key == null ? this.picBusy : (this.replyBusy.get(key) ?? 0); }
+  setPics(key, list) {
+    if (key == null) this.pics = list;
+    else if (list.length) this.replyPics.set(key, list);
+    else this.replyPics.delete(key);
+  }
+  bumpBusy(key, n) {
+    if (key == null) { this.picBusy = Math.max(0, this.picBusy + n); return; }
+    const v = Math.max(0, (this.replyBusy.get(key) ?? 0) + n);
+    if (v) this.replyBusy.set(key, v); else this.replyBusy.delete(key);
+  }
+  async addPic(args, c, key = null) {
+    this.bumpBusy(key, 1);
     try { c.notify(); } catch {}
     try {
       const r = await exec("node", [HELPER(), ...args], { timeout: 20000 });
@@ -861,20 +876,36 @@ export default class Inbox extends View {
       const o = JSON.parse(r.stdout);
       if (!o?.path) throw new Error("그림이 없습니다");
       if (o.w > 0 && o.h > 0) this.imgd.set(o.path, [o.w, o.h]);
-      if (this.pics.length >= MAX_IMGS) this.say(`그림은 한 번에 ${MAX_IMGS}장까지 붙일 수 있습니다.`, true);
-      else if (!this.pics.some((x) => x.path === o.path)) this.pics = [...this.pics, { path: o.path, w: o.w ?? 0, h: o.h ?? 0 }];
+      const cur = this.picsOf(key);
+      if (cur.length >= MAX_IMGS) this.say(`그림은 한 번에 ${MAX_IMGS}장까지 붙일 수 있습니다.`, true);
+      else if (!cur.some((x) => x.path === o.path)) this.setPics(key, [...cur, { path: o.path, w: o.w ?? 0, h: o.h ?? 0 }]);
       this.msg = null;
     } catch (e) { this.say(`그림을 붙이지 못했습니다: ${String(e?.message ?? e).slice(0, 140)}`, true); }
-    finally { this.picBusy = Math.max(0, this.picBusy - 1); try { c.notify(); } catch {} }
+    finally { this.bumpBusy(key, -1); try { c.notify(); } catch {} }
   }
-  pastePic(c) { return this.addPic(["clipimg"], c); }
-  async pickPics(c) {
+  pastePic(c, key = null) { return this.addPic(["clipimg"], c, key); }
+  async pickPics(c, key = null) {
     let files = null;
     try { files = await pickFiles({ prompt: "그림 붙이기", multiple: true }); } catch (e) { this.say(`파일을 고르지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); try { c.notify(); } catch {} return; }
-    for (const f of (files ?? []).slice(0, MAX_IMGS)) await this.addPic(["addimg", f], c);
+    for (const f of (files ?? []).slice(0, MAX_IMGS)) await this.addPic(["addimg", f], c, key);
   }
-  dropPics(paths, c) { for (const f of (paths ?? []).slice(0, MAX_IMGS)) this.addPic(["addimg", f], c); }
-  removePic(i, c) { this.pics = this.pics.filter((_x, k) => k !== i); try { c.notify(); } catch {} }
+  dropPics(paths, c, key = null) { for (const f of (paths ?? []).slice(0, MAX_IMGS)) this.addPic(["addimg", f], c, key); }
+  removePic(i, c, key = null) { this.setPics(key, this.picsOf(key).filter((_x, k) => k !== i)); try { c.notify(); } catch {} }
+
+  // The thumbnail chips of a box (with ✕) and the "reading…" note, or null when it holds nothing. One drawing for both boxes; `pre` keeps the ids apart.
+  picRow(t, key = null) {
+    const pics = this.picsOf(key);
+    const busy = this.busyOf(key);
+    if (!pics.length && !busy) return null;
+    const pre = key == null ? "pic" : `rpic-${key}`;
+    return h_flex().gap(6).items_center().flex_wrap()
+      .children(pics.map((x, i) => h_flex().id(`${pre}-${i}`).flex_none().h(44).pl(4).pr(6).gap(6).items_center().rounded(8).bg(t.raised).border(1).border_color(t.border)
+        .child(this.thumb(t, x))
+        .child(div().max_w(110).truncate().text_size(10.5).text_color(t.muted).child(String(x.path).split(/[\\/]/).pop()))
+        .child(div().id(`${pre}-x-${i}`).px(4).rounded(5).text_size(12).text_color(t.dim).cursor_pointer().on_mouse_down("left", stop)
+          .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, c) => this.removePic(i, c, key)).tooltip("이 그림 빼기").child("✕"))))
+      .when(busy > 0, (x) => x.child(div().text_size(10.5).text_color(t.dim).child("그림을 읽는 중…")));
+  }
 
   // The watch runs only while this copy is drawn; a copy nobody looks at releases it (a closed copy is released by the runtime).
   stopWatch() {
@@ -1392,12 +1423,17 @@ export default class Inbox extends View {
   // A panel answer: the answer line goes through deliver(). The box is cleared and the ask marked once it reached the PO (or, when the PO had
   // no pane, once the pane opened and it was delivered).
   send(a, text, cx, kind = "answer") {
+    // Only a written answer takes the pictures of its box along; the option / 확인 완료 buttons send their fixed word and leave them there.
+    const pics = kind === "answer" ? this.picsOf(a.s.leader).slice(0, MAX_IMGS) : [];
     const body = String(text ?? "").trim();
-    if (!body) { this.say("답을 먼저 적어 주세요.", true); cx.notify(); return; }
+    if (!body && !pics.length) { this.say("답을 먼저 적어 주세요.", true); cx.notify(); return; }
+    if (pics.length && this.busyOf(a.s.leader)) { this.say("그림을 읽는 중입니다. 잠시 뒤에 다시 보내세요.", true); cx.notify(); return; }
     const po = a.po;
     if (!po) { this.say(NO_PO, true); cx.notify(); return; }
     try {
-      const r = this.deliver(po, answerLine(a.kind, a.s.leader, body, a.link), cx, { text: body, to: a.s.leader, po: a.owner, kind, ak: this.askKey(a) }, (r2) => { this.clearBox(a, r2); });
+      // The PO reads a picture from its file: each path goes in the answer as a line it can open with the Read tool (as the PO box does).
+      const line = [answerLine(a.kind, a.s.leader, body || "(picture only)", a.link), ...pics.map((x) => imgLine(x.path))].join("\n");
+      const r = this.deliver(po, line, cx, { text: body, imgs: pics.map((x) => x.path), to: a.s.leader, po: a.owner, kind, ak: this.askKey(a) }, (r2) => { this.clearBox(a, r2); });
       if (r === "sent" || r === "held") this.clearBox(a, r);
     } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
     cx.notify();
@@ -1406,6 +1442,7 @@ export default class Inbox extends View {
   clearBox(a, how = "sent") {
     try { setShared(SENT_KEY, { ...(shared(SENT_KEY) ?? {}), [a.s.leader]: this.askKey(a) + (how === "held" ? "|held" : "") }); } catch {}
     this.inputs.get(a.s.leader)?.set_value("");
+    this.replyPics.delete(a.s.leader);
     if (this.writing === a.s.leader) this.writing = null;
   }
 
@@ -1414,6 +1451,7 @@ export default class Inbox extends View {
     if (!s) {
       s = InputState.new({ value: "", placeholder: "답을 적고 Enter" });
       s.on("submit", (_e, c) => { const a = this.asks().find((x) => x.s.leader === leader); if (a) this.send(a, s.value(), c); });
+      s.on("paste_other", (_e, c) => this.pastePic(c, leader)); // Cmd+V found no text: take a picture from the clipboard, as the PO box does
       this.inputs.set(leader, s);
     }
     return s;
@@ -1581,13 +1619,7 @@ export default class Inbox extends View {
       .when(Boolean(menu), (el) => el.child(menu))
       .when(holdShown(this.changedAt, this.heldAt), (el) => el.child(div().text_size(11).text_color(t.working).child("한 번 더 Enter로 보냅니다")))
       .child(div().truncate().text_size(10.5).text_color(t.dim).child(target ? `받는 PO: ${target.label}` : "받는 PO가 없습니다 — PO를 고르세요"))
-      .when(this.pics.length > 0 || this.picBusy > 0, (el) => el.child(h_flex().gap(6).items_center().flex_wrap()
-        .children(this.pics.map((x, i) => h_flex().id(`pic-${i}`).flex_none().h(44).pl(4).pr(6).gap(6).items_center().rounded(8).bg(t.raised).border(1).border_color(t.border)
-          .child(this.thumb(t, x))
-          .child(div().max_w(110).truncate().text_size(10.5).text_color(t.muted).child(String(x.path).split(/[\\/]/).pop()))
-          .child(div().id(`pic-x-${i}`).px(4).rounded(5).text_size(12).text_color(t.dim).cursor_pointer().on_mouse_down("left", stop)
-            .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, c) => this.removePic(i, c)).tooltip("이 그림 빼기").child("✕"))))
-        .when(this.picBusy > 0, (x) => x.child(div().text_size(10.5).text_color(t.dim).child("그림을 읽는 중…")))))
+      .when(this.pics.length > 0 || this.picBusy > 0, (el) => el.child(this.picRow(t, null)))
       .child(h_flex().gap(6).items_center()
         .on_drop((ev, c) => this.dropPics(ev?.paths, c))
         .child(this.button(t, "chat-attach", "그림", (c) => { this.pickPics(c); }, { tip: "그림 파일을 골라 붙입니다(Cmd+V로 붙여넣거나 파일을 끌어다 놓아도 됩니다). 보내면 PO가 파일을 열어 봅니다" }))
@@ -1792,7 +1824,11 @@ export default class Inbox extends View {
     if (!a.po) box.child(div().text_size(11).text_color(t.dim).child(NO_PO));
     if (writing) {
       const input = this.box(s.leader, cx);
+      const row = this.picRow(t, s.leader);
+      if (row) box.child(row);
       box.child(h_flex().gap(6).items_center()
+        .on_drop((ev, c) => this.dropPics(ev?.paths, c, s.leader))
+        .child(this.button(t, `attach-${s.leader}`, "그림", (c) => { this.pickPics(c, s.leader); }, { tip: "그림 파일을 골라 붙입니다(Cmd+V로 붙여넣거나 파일을 끌어다 놓아도 됩니다). 보내면 PO가 파일을 열어 봅니다" }))
         .child(div().flex_1().min_w(0).on_mouse_down("left", stop).child(Input.new(input).h(30).px(10).items_center().rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
         .child(this.button(t, `send-${s.leader}`, "보내기", (c) => this.send(a, input.value(), c), { primary: true, disabled: a.po ? "" : NO_PO, tip: CLIP })));
     }

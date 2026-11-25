@@ -98,7 +98,7 @@ test("main.js: 답 버튼·답 상자·N안 칩·채팅은 모두 deliver() 한 
   const send = methodOf(src, "  send(a, text, cx, kind = \"answer\") {", "  clearBox(a");
   const chat = methodOf(src, "  sendChat(c) {", "  // The chat footer");
   const del = deliverOf(src);
-  assert.match(send, /this\.deliver\(po, answerLine\(/);
+  assert.match(send, /answerLine\(a\.kind, a\.s\.leader, /); assert.match(send, /this\.deliver\(po, line, cx, \{/);
   assert.match(chat, /this\.deliver\(po, line, c, \{/);
   assert.ok(!/run\("terminal\.paste"|submitPo|hc\(/.test(send + chat)); // 붙여넣기·Enter는 deliver 안에서만
   // 순서: 클립보드 → 포커스 → 붙여넣기 → Enter
@@ -1162,7 +1162,7 @@ test("main.js: 모든 데스크 보내기는 deliver 한 곳에서 한 번만 �
   assert.equal((del.match(/this\.record\(/g) ?? []).length, 1); // 새 기록은 deliver 한 곳에서 한 번(다시 보내기는 같은 id로 상태만 바꾼다)
   assert.match(del, /if \(!id\) id = this\.record\(\{ \.\.\.rec, line: text \}, "sending"\)/);
   for (const st of ["failed", "held", "nopane"]) assert.match(del, new RegExp(`this\\.mark\\(id, "${st}"\\)`));
-  assert.match(src, /\{ text: body, to: a\.s\.leader, po: a\.owner, kind, ak: this\.askKey\(a\) \}/); // 버튼·칩·답 상자는 사람이 쓴 글(body)을 기록한다
+  assert.match(src, /\{ text: body, imgs: pics\.map\(\(x\) => x\.path\), to: a\.s\.leader, po: a\.owner, kind, ak: this\.askKey\(a\) \}/); // 버튼·칩·답 상자는 사람이 쓴 글(body)을 기록한다
   assert.match(src, /send\(a, "확인 완료", c, "verify"\)/);
   assert.match(src, /send\(a, `\$\{n\}안 선택`, c, "choice"\)/);
   assert.ok(!/answerLine\([^)]*\)[^;]*kind: "chat"/.test(src));

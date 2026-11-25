@@ -144,3 +144,101 @@ test("E: the typing rows are drawn in every filter (no 'all' gate) and after the
   const i = MAIN.indexOf("typingNow(v.terms, v.pick");
   assert.ok(i > MAIN.indexOf("v.entries.forEach((e) => {"), "typing rows come after the entries");
 });
+
+// ---- Round 15 F: the answer box of a 결정 필요 card takes pictures like the PO box (same code, per-leader list).
+// The picture methods are cut out of main.js and run against a fake exec, so the shared code is what is tested.
+function pictureDesk(execImpl) {
+  const a = MAIN.indexOf("  picsOf(key = null)");
+  const b = MAIN.indexOf("  // The thumbnail chips of a box");
+  assert.ok(a > 0 && b > a, "the picture methods are found");
+  const body = MAIN.slice(a, b);
+  const make = new Function("exec", "HELPER", "MAX_IMGS", "pickFiles", `return class Desk {
+    constructor() { this.pics = []; this.picBusy = 0; this.replyPics = new Map(); this.replyBusy = new Map(); this.imgd = new Map(); this.msg = "x"; this.said = []; }
+    say(m, bad) { this.said.push([m, Boolean(bad)]); }
+    ${body}
+  }`);
+  return new (make(execImpl, () => "helper.cjs", 4, async () => ["/f/a.png"]))();
+}
+const fakeCx = () => ({ notify() {} });
+const okExec = async (_cmd, args) => ({ code: 0, stdout: JSON.stringify({ path: `data/inbox/img/${args[args.length - 1].replace(/\W/g, "")}.png`, w: 10, h: 20 }), stderr: "" });
+
+test("F: a picture added for a leader lands in that leader's list only, and the PO box list is untouched", async () => {
+  const d = pictureDesk(okExec);
+  await d.addPic(["clipimg"], fakeCx(), "lead-a");
+  assert.equal(d.picsOf("lead-a").length, 1);
+  assert.equal(d.picsOf("lead-b").length, 0);
+  assert.equal(d.pics.length, 0);
+  assert.equal(d.busyOf("lead-a"), 0, "busy is released");
+  assert.equal(d.replyBusy.size, 0);
+});
+
+test("F: the PO box still uses this.pics (key null)", async () => {
+  const d = pictureDesk(okExec);
+  await d.pastePic(fakeCx());
+  assert.equal(d.pics.length, 1);
+  assert.equal(d.replyPics.size, 0);
+});
+
+test("F: the leader list is capped at MAX_IMGS, skips a duplicate path, and can drop one picture", async () => {
+  let n = 0;
+  const d = pictureDesk(async () => ({ code: 0, stdout: JSON.stringify({ path: `data/inbox/img/p${n++}.png`, w: 1, h: 1 }), stderr: "" }));
+  for (let i = 0; i < 6; i++) await d.addPic(["clipimg"], fakeCx(), "lead-a");
+  assert.equal(d.picsOf("lead-a").length, 4);
+  assert.ok(d.said.some(([m, bad]) => /4장/.test(m) && bad));
+  d.removePic(1, fakeCx(), "lead-a");
+  assert.deepEqual(d.picsOf("lead-a").map((x) => x.path), ["data/inbox/img/p0.png", "data/inbox/img/p2.png", "data/inbox/img/p3.png"]);
+  const same = pictureDesk(async () => ({ code: 0, stdout: JSON.stringify({ path: "data/inbox/img/same.png" }), stderr: "" }));
+  await same.addPic(["clipimg"], fakeCx(), "lead-a");
+  await same.addPic(["clipimg"], fakeCx(), "lead-a");
+  assert.equal(same.picsOf("lead-a").length, 1);
+});
+
+test("F: a failed read says so and leaves the leader's list as it was", async () => {
+  const d = pictureDesk(async () => ({ code: 1, stdout: "", stderr: "no picture on the clipboard" }));
+  await d.pastePic(fakeCx(), "lead-a");
+  assert.equal(d.picsOf("lead-a").length, 0);
+  assert.ok(d.said.some(([m, bad]) => /그림을 붙이지 못했습니다/.test(m) && bad));
+  assert.equal(d.busyOf("lead-a"), 0);
+});
+
+test("F: the file button and a drop add to the leader's list", async () => {
+  const d = pictureDesk(okExec);
+  await d.pickPics(fakeCx(), "lead-a");
+  assert.equal(d.picsOf("lead-a").length, 1);
+  d.dropPics(["/x/b.png"], fakeCx(), "lead-b");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(d.picsOf("lead-b").length, 1);
+  assert.equal(d.pics.length, 0);
+});
+
+test("F: the answer box wires paste_other, the 그림 button, drop and the chip row for its leader", () => {
+  const box = MAIN.slice(MAIN.indexOf("  box(leader, cx) {"), MAIN.indexOf("// ---- PO chat"));
+  assert.match(box, /s\.on\("paste_other", \(_e, c\) => this\.pastePic\(c, leader\)\)/);
+  const ask = MAIN.slice(MAIN.indexOf("  askActions(t, a, cx) {"), MAIN.indexOf("  // One timeline entry"));
+  assert.match(ask, /this\.picRow\(t, s\.leader\)/);
+  assert.match(ask, /attach-\$\{s\.leader\}/);
+  assert.match(ask, /this\.pickPics\(c, s\.leader\)/);
+  assert.match(ask, /this\.dropPics\(ev\?\.paths, c, s\.leader\)/);
+  assert.match(MAIN, /this\.picRow\(t, null\)/, "the PO box draws the same chip row");
+  // the decision option buttons and 확인 완료 are unchanged
+  assert.match(ask, /this\.send\(a, `\$\{n\}안 선택`, c, "choice"\)/);
+  assert.match(ask, /this\.send\(a, "확인 완료", c, "verify"\)/);
+});
+
+test("F: the answer carries the pictures as Read-tool lines and in the bubble record; the option buttons carry none", () => {
+  const send = MAIN.slice(MAIN.indexOf("  send(a, text, cx"), MAIN.indexOf("  clearBox("));
+  assert.match(send, /kind === "answer" \? this\.picsOf\(a\.s\.leader\)/);
+  assert.match(send, /pics\.map\(\(x\) => imgLine\(x\.path\)\)/);
+  assert.match(send, /imgs: pics\.map\(\(x\) => x\.path\)/);
+  assert.match(send, /!body && !pics\.length/, "a picture alone is an answer");
+  const clear = MAIN.slice(MAIN.indexOf("  clearBox("), MAIN.indexOf("  box(leader, cx)"));
+  assert.match(clear, /this\.replyPics\.delete\(a\.s\.leader\)/);
+});
+
+test("F: the answer line plus image lines is the same shape the PO box sends", () => {
+  const line = [I.answerLine("decision", "lead-a", "1안으로", ""), I.imgLine(PIC)].join("\n");
+  const [first, second, ...rest] = line.split("\n");
+  assert.match(first, /^Panel answer \(decision\) for lead-a: "1안으로"\.$/);
+  assert.match(second, /^\[image: .*ab12\.png/);
+  assert.equal(rest.length, 0);
+});
