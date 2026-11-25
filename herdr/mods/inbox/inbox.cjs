@@ -1441,21 +1441,47 @@ function restartPoll({ note, since, now, status, quiet = 0 } = {}) {
 
 // The request marker is in the PO's whole history (`hc read` with many lines): proof that the history the desk is about to clear is the one it asked.
 const restartHasMark = (screen) => cleanText(screen).includes(RESTART_MARK);
-// Whether the PO's input holds the pasted `line` and nothing else: some screen row (box borders and the prompt mark dropped) is the line itself
-// (a long line: starts with it; a paste the PO folded into "[Pasted text ...]" counts too). Text the person had typed there first would come
-// before the line on that row, so Enter is not pressed over it.
-function restartInputOnly(screen, line) {
-  const squeeze = (s) => String(s).replace(/[│┃|]/g, " ").replace(/\s+/g, " ").trim();
-  const want = squeeze(cleanText(line));
-  if (!want) return false;
-  const rows = cleanText(screen).split("\n").filter((l) => l.trim()).slice(-14).map((l) => squeeze(l).replace(/^[❯>›]\s*/, ""));
-  return rows.some((r) => (want.length > 40 ? r.startsWith(want.slice(0, 40)) : r === want) || /^\[Pasted text/i.test(r));
+// The PO's input box as the screen shows it: from the bottom-most prompt row (❯ / >) that has a border row right above it, down to the next border
+// row (a long line wraps into several rows; borders, the sidebar bars and whitespace squeezed). Looking for the prompt row, not for "the last N
+// rows", keeps a tall footer or a narrow pane (many wrapped rows) from pushing the first row out of sight. null = no input box found.
+const RESTART_RULE = /^[╭╰┌└├]?[─━╌╍┄┅]{4,}/;
+const squeezeRow = (s) => String(s).replace(/[│┃|]/g, " ").replace(/\s+/g, " ").trim();
+function restartInputText(screen) {
+  const rows = cleanText(screen).split("\n");
+  const rule = (l) => RESTART_RULE.test(l.trim());
+  const prompt = (l) => /^[❯>›](\s|$)/.test(squeezeRow(l));
+  let at = -1;
+  for (let i = rows.length - 1; i > 0; i--) {
+    if (!prompt(rows[i])) continue;
+    let j = i - 1;
+    while (j >= 0 && !rows[j].trim()) j--;
+    if (j >= 0 && rule(rows[j])) { at = i; break; }
+  }
+  if (at < 0) return null;
+  const out = [];
+  for (let i = at; i < rows.length && i < at + 40 && (i === at || !rule(rows[i])); i++) out.push(squeezeRow(rows[i]).replace(/^[❯>›]\s*/, ""));
+  return out.filter(Boolean).join(" ");
 }
+// The input box is empty (nothing typed; Claude Code's greyed hint `Try "..."` is not text): true / false, null when the box was not found.
+function restartInputEmpty(screen) {
+  const t = restartInputText(screen);
+  return t === null ? null : t === "" || /^Try "/.test(t);
+}
+// Whether the PO's input holds the pasted `line` and nothing else before it: the input text is the line itself (a long line: starts with it;
+// a paste the PO folded into "[Pasted text ...]" counts too). Text the person had typed there first would come before the line, so Enter is not pressed over it.
+function restartInputOnly(screen, line) {
+  const want = squeezeRow(cleanText(line));
+  const t = restartInputText(screen);
+  if (!want || t === null) return false;
+  return /^\[Pasted text/i.test(t) || (want.length > 40 ? t.startsWith(want.slice(0, 40)) : t === want);
+}
+// The screen tail for diag.log when an input check fails: the last 14 non-empty rows, each trimmed (the next miss can then be read from the log).
+const restartShot = (screen) => cleanText(screen ?? "").split("\n").filter((l) => l.trim()).slice(-14).map((l) => l.replace(/\s+/g, " ").trim().slice(0, 200));
 const RESTART_READ_LINES = 400; // the whole history is read (scrollback included) before and after /clear
 // chat:end
 
 // Diagnostics for the desk (what the pointer and the selection do), kept in a small capped file the leader can read: <app root>/data/inbox/diag.log,
-// 0600; past DIAG_MAX it is moved to diag.log.1 (the older half is dropped) and a new one starts. Lines carry ids and lengths only, never message text.
+// 0600; past DIAG_MAX it is moved to diag.log.1 (the older half is dropped) and a new one starts. Lines carry ids and lengths only, never message text (one exception: a failed restart input check logs the screen tail, see restartShot).
 const DIAG_MAX = 64 * 1024;
 function diagAppend(lines, root = appRoot()) {
   const dir = path.join(root, "data", "inbox");
@@ -1486,7 +1512,7 @@ function readHandoff(dir = inboxDir(), id = "") {
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartCleared, restartHasMark, restartInputOnly, RESTART_READ_LINES, restartNoteFresh, restartPoll, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, parseUsage, usageReset, usageTip, unwrapTags, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartCleared, restartHasMark, restartInputOnly, restartInputText, restartInputEmpty, restartShot, RESTART_READ_LINES, restartNoteFresh, restartPoll, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, parseUsage, usageReset, usageTip, unwrapTags, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)

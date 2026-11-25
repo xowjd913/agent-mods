@@ -876,16 +876,42 @@ function restartPoll({ note, since, now, status, quiet = 0 } = {}) {
 
 // The request marker is in the PO's whole history (`hc read` with many lines): proof that the history the desk is about to clear is the one it asked.
 const restartHasMark = (screen) => cleanText(screen).includes(RESTART_MARK);
-// Whether the PO's input holds the pasted `line` and nothing else: some screen row (box borders and the prompt mark dropped) is the line itself
-// (a long line: starts with it; a paste the PO folded into "[Pasted text ...]" counts too). Text the person had typed there first would come
-// before the line on that row, so Enter is not pressed over it.
-function restartInputOnly(screen, line) {
-  const squeeze = (s) => String(s).replace(/[│┃|]/g, " ").replace(/\s+/g, " ").trim();
-  const want = squeeze(cleanText(line));
-  if (!want) return false;
-  const rows = cleanText(screen).split("\n").filter((l) => l.trim()).slice(-14).map((l) => squeeze(l).replace(/^[❯>›]\s*/, ""));
-  return rows.some((r) => (want.length > 40 ? r.startsWith(want.slice(0, 40)) : r === want) || /^\[Pasted text/i.test(r));
+// The PO's input box as the screen shows it: from the bottom-most prompt row (❯ / >) that has a border row right above it, down to the next border
+// row (a long line wraps into several rows; borders, the sidebar bars and whitespace squeezed). Looking for the prompt row, not for "the last N
+// rows", keeps a tall footer or a narrow pane (many wrapped rows) from pushing the first row out of sight. null = no input box found.
+const RESTART_RULE = /^[╭╰┌└├]?[─━╌╍┄┅]{4,}/;
+const squeezeRow = (s) => String(s).replace(/[│┃|]/g, " ").replace(/\s+/g, " ").trim();
+function restartInputText(screen) {
+  const rows = cleanText(screen).split("\n");
+  const rule = (l) => RESTART_RULE.test(l.trim());
+  const prompt = (l) => /^[❯>›](\s|$)/.test(squeezeRow(l));
+  let at = -1;
+  for (let i = rows.length - 1; i > 0; i--) {
+    if (!prompt(rows[i])) continue;
+    let j = i - 1;
+    while (j >= 0 && !rows[j].trim()) j--;
+    if (j >= 0 && rule(rows[j])) { at = i; break; }
+  }
+  if (at < 0) return null;
+  const out = [];
+  for (let i = at; i < rows.length && i < at + 40 && (i === at || !rule(rows[i])); i++) out.push(squeezeRow(rows[i]).replace(/^[❯>›]\s*/, ""));
+  return out.filter(Boolean).join(" ");
 }
+// The input box is empty (nothing typed; Claude Code's greyed hint `Try "..."` is not text): true / false, null when the box was not found.
+function restartInputEmpty(screen) {
+  const t = restartInputText(screen);
+  return t === null ? null : t === "" || /^Try "/.test(t);
+}
+// Whether the PO's input holds the pasted `line` and nothing else before it: the input text is the line itself (a long line: starts with it;
+// a paste the PO folded into "[Pasted text ...]" counts too). Text the person had typed there first would come before the line, so Enter is not pressed over it.
+function restartInputOnly(screen, line) {
+  const want = squeezeRow(cleanText(line));
+  const t = restartInputText(screen);
+  if (!want || t === null) return false;
+  return /^\[Pasted text/i.test(t) || (want.length > 40 ? t.startsWith(want.slice(0, 40)) : t === want);
+}
+// The screen tail for diag.log when an input check fails: the last 14 non-empty rows, each trimmed (the next miss can then be read from the log).
+const restartShot = (screen) => cleanText(screen ?? "").split("\n").filter((l) => l.trim()).slice(-14).map((l) => l.replace(/\s+/g, " ").trim().slice(0, 200));
 const RESTART_READ_LINES = 400; // the whole history is read (scrollback included) before and after /clear
 // chat:end
 
@@ -1865,6 +1891,11 @@ export default class Inbox extends View {
   // The whole run is ONE async function inside cx.spawn: a click's or a timer's cx is only good during its own call, so after an await
   // only the spawn's cx is used (never the click's c). Waiting is sleepOn (a timer that resolves a promise), never a callback chain.
   sleepOn(cx, ms) { return new Promise((res, rej) => { try { cx.timer.after(ms, () => res()); } catch (e) { rej(e); } }); } // a cx the host closed throws: the run ends (restartRun's catch)
+  // An input check failed: the screen tail goes to diag.log (one line per row; the rows are the PO's own screen, kept in the local 0600 file only).
+  diagShot(why, screen) {
+    this.diag(`restart input check: ${why} (${String(screen ?? "").length} chars read)`);
+    restartShot(screen).forEach((r, i) => this.diag(`  row ${i}: ${r}`));
+  }
   async readScreen(po, lines) {
     try { const o = await hc(["read", po, "--lines", String(lines)]); return o && o.code === 0 ? String(o.stdout ?? "") : null; } catch { return null; }
   }
@@ -1873,6 +1904,15 @@ export default class Inbox extends View {
     const no = (why) => ({ ok: false, why });
     if (this.isBlocked(po)) return no("PO가 질문 중입니다");
     if (!still()) return no("취소되었습니다");
+    // Before anything is pasted: the input must be empty (a half-typed text of the person would be sent together with the line). Nothing is pasted otherwise.
+    const pre = await this.readScreen(po, PROMPT_LINES);
+    if (!still()) return no("취소되었습니다");
+    if (pre === null) return no("PO 화면을 읽지 못해 붙여 넣지 않았습니다");
+    const empty = restartInputEmpty(pre);
+    if (empty !== true) {
+      this.diagShot(empty === null ? "input box not found before paste" : "input not empty before paste", pre);
+      return no(empty === null ? "PO 입력칸을 화면에서 찾지 못해 붙여 넣지 않았습니다" : "PO 입력칸을 비워 주세요(쓰던 글이 있어 붙여 넣지 않았습니다)");
+    }
     let back = "";
     try { back = focused()?.pane ?? ""; } catch {}
     try {
@@ -1885,14 +1925,14 @@ export default class Inbox extends View {
     // Enter is pressed only when, right now: the run was not cancelled, the PO is neither on a prompt nor working, and its input holds the
     // pasted line and nothing else (a half-typed text of the person would be sent together with it). Otherwise the pasted line stays in the
     // input for the person to remove.
-    const stop = (why) => { this.restore(back, cx); return no(`${why} — PO 입력칸에 붙여 넣은 줄이 남아 있으면 지워 주세요`); };
+    const stop = (why, shot) => { this.restore(back, cx); if (shot !== undefined) this.diagShot(why, shot); return { ok: false, unsent: true, why: `${why} — PO 입력칸에 붙여 넣은 줄이 남아 있으면 지워 주세요` }; }; // unsent: pasted, Enter not pressed
     if (!still()) return stop("취소되어 Enter를 누르지 않았습니다");
     const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "").trim().toLowerCase();
     if (st === "blocked") return stop("PO가 그 사이 질문 중이 되어 Enter를 누르지 않았습니다");
     if (st === "working") return stop("PO가 그 사이 일을 시작해 Enter를 누르지 않았습니다");
     const screen = await this.readScreen(po, PROMPT_LINES);
     if (screen === null) return stop("PO 화면을 읽지 못해 Enter를 누르지 않았습니다");
-    if (!restartInputOnly(screen, text)) return stop("PO 입력칸에 붙여 넣은 줄만 있는 것이 아니라서 Enter를 누르지 않았습니다");
+    if (!restartInputOnly(screen, text)) return stop(restartInputText(screen) === null ? "PO 입력칸을 화면에서 찾지 못해 Enter를 누르지 않았습니다" : "PO 입력칸에 붙여 넣은 줄만 있는 것이 아니라서 Enter를 누르지 않았습니다", screen);
     if (!still()) return stop("취소되어 Enter를 누르지 않았습니다");
     let k = null;
     try { k = await hc(["keys", po, "enter"]); } catch {}
@@ -1922,8 +1962,24 @@ export default class Inbox extends View {
     this.restartSet(room, g, { path, since: Date.now() }, cx);
     const ask = await this.typeLine(po, handoffAsk(path), cx, alive);
     if (!alive()) return;
-    if (!ask.ok) { this.restartFail(room, g, `노트를 요청하지 못했습니다(${ask.why})`, cx); return; }
-    if (!this.restartSet(room, g, { n: 1 }, cx)) return;
+    if (!ask.ok) {
+      this.restartFail(room, g, `노트를 요청하지 못했습니다(${ask.why})`, cx);
+      if (!ask.unsent) return;
+      // The line is in the PO's input but Enter was not pressed. The person may send it by hand: keep looking for a fresh note (stopped as shown,
+      // 다시 / 닫기 end the run) and carry on with steps 2-4 when it appears.
+      const since = this.rs.get(room)?.since ?? 0;
+      for (;;) {
+        await this.sleepOn(cx, RESTART_POLL_MS);
+        const r = this.rs.get(room);
+        if (!r || r.gen !== g || r.phase !== "fail") return;
+        const note = await this.handoffRead(r.id);
+        if (!this.restartAlive(room, g)) return;
+        if (restartNoteFresh(note, since)) break;
+        if (Date.now() - since >= RESTART_WAIT_MS) return;
+      }
+      this.say("PO에 직접 보낸 요청으로 노트가 작성되어 새로 시작을 이어 갑니다.");
+      if (!this.restartSet(room, g, { n: 1, phase: "run", why: "" }, cx)) return;
+    } else if (!this.restartSet(room, g, { n: 1 }, cx)) return;
     // Steps 2-3: look for the note every RESTART_POLL_MS; the note is fresh (written after the request) -> show it; the PO idle after it -> /clear.
     for (;;) {
       await this.sleepOn(cx, RESTART_POLL_MS);
