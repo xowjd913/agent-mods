@@ -225,6 +225,22 @@ function chatTarget(terms, to = [], pick = "") {
 // list (its label alone), placed at `now` (the newest). Reports of kind answered/start are not messages.
 const TL_GAP_MS = 5 * 60 * 1000; // the same sender within this gap shares one header
 const tlShown = (it) => Boolean(it) && it.kind !== "answered" && it.kind !== "start";
+// Memo for the text work a redraw repeats (#47): every render compares each of the person's messages with each sent record and strips the
+// wrapper tags (regex) of every bubble again; one very long paste made that slow enough that the host cut the render off ("interrupted").
+// Keyed by kind + the text itself, bounded (cleared when full). Only for pure functions of the text.
+const TL_MEMO_MAX = 2000;
+const tlMemo = new Map(); // kind -> Map(text -> result); the text itself is the key (no joined key string built per lookup)
+function tlMemoGet(kind, v, make) {
+  const s = String(v ?? "");
+  let m = tlMemo.get(kind);
+  if (!m) tlMemo.set(kind, (m = new Map()));
+  let r = m.get(s);
+  if (r !== undefined) return r;
+  r = make(s);
+  if (m.size >= TL_MEMO_MAX) m.clear();
+  m.set(s, r);
+  return r;
+}
 function timeline(room, leaders, says, mine, waits = [], now = 0) {
   const out = [];
   const seen = new Set();
@@ -251,8 +267,8 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
   const taken = new Set();
   const tnorm = (v) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 2000);
   // Compared without wrapper tags (the terminal's paste wrapper must not make a copy look different) and, as a second chance, by words + pictures.
-  const full = (v) => tnorm(unwrapTags(v));
-  const core = (v) => { const sp = splitImgs(v); return `${tnorm(sp.text)}|${sp.imgs.join(",")}`; };
+  const full = (v) => tlMemoGet("f", v, (s) => tnorm(unwrapTags(s)));
+  const core = (v) => tlMemoGet("c", v, (s) => { const sp = splitImgs(s); return `${tnorm(sp.text)}|${sp.imgs.join(",")}`; });
   if (room && room !== PO_OTHER) for (const x of says ?? []) {
     if (x.me) {
       const t = full(x.text), c = core(x.text);
@@ -435,7 +451,8 @@ const tlFollow = (seen, key, atEnd) => key !== (seen ?? "") && (String(seen ?? "
 const atBottom = (y, viewport, content) => (Number(y) || 0) + (Number(viewport) || 0) >= (Number(content) || 0) - 1;
 // A message text as HTML for a TextView: escaped, one paragraph per line, http(s) links clickable (trailing punctuation stays outside).
 const escHtml = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-function chatHtml(text) {
+function chatHtml(text) { return tlMemoGet("h", text, chatHtmlRaw); }
+function chatHtmlRaw(text) {
   return unwrapTags(text).replace(/\r\n?/g, "\n").split("\n").map((line) => {
     let out = "", at = 0;
     for (const m of line.matchAll(/https?:\/\/[^\s<>"]+/g)) {
@@ -645,8 +662,20 @@ const WRAP_CLOSE = /(?<![ \t])[ \t]*<\\?\/(?:hc|pasted_content)\b[^<>\n]*>[ \t]*
 function unwrapTags(text) {
   const t = String(text ?? "");
   if (!t.includes("<")) return t;
-  return t.replace(/\r\n?/g, "\n").replace(WRAP_OPEN, "").replace(WRAP_CLOSE, "").replace(/\n{3,}/g, "\n\n").trim();
+  return tlMemoGet("u", t, (s) => s.replace(/\r\n?/g, "\n").replace(WRAP_OPEN, "").replace(WRAP_CLOSE, "").replace(/\n{3,}/g, "\n\n").trim());
 }
+// A long message drawn in a bubble (#47): at most LONG_LINES lines and LONG_CHARS characters until the person presses "더 보기", so one huge
+// paste (a whole log) cannot make every redraw lay out thousands of lines. -> {text, cut: true when something was left out, more: chars left out}.
+// The 복사 chip still copies the whole text. Pure.
+const LONG_LINES = 14, LONG_CHARS = 1500;
+function clipLong(text) {
+  const s = String(text ?? "");
+  let end = Math.min(s.length, LONG_CHARS), n = 0, i = -1;
+  while ((i = s.indexOf("\n", i + 1)) !== -1 && i < end) if (++n >= LONG_LINES) { end = i; break; }
+  if (end >= s.length) return { text: s, cut: false, more: 0 };
+  return { text: s.slice(0, end).trimEnd(), cut: true, more: s.length - end };
+}
+const moreLabel = (more) => `더 보기 · ${String(Math.max(0, Number(more) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}자 더`;
 // Where the **bold** runs of a Markdown text (the string given to TextView.markdown) sit, as [{start,end}] UTF-16 offsets into that same string,
 // markers included. The TextView draws no heavier weight for them (it ignores bold), so main.js paints a tint behind these ranges instead.
 // Fenced blocks and `code spans` are skipped, a \\* is not a marker, an opening ** must be followed and a closing ** preceded by a non-blank.
@@ -691,7 +720,8 @@ function boldRanges(md) {
 // A message text as Markdown for a TextView.markdown(...).raw_html(false): wrapper tags removed first (they would print literally), a line that
 // is only 【...】 made bold, images switched off (![x](y) -> a plain link), and single line breaks kept as line breaks (Markdown would join them).
 // Code fences are left as written. Never produces HTML: the view shows tags as text. Pure.
-function mdText(text) {
+function mdText(text) { return tlMemoGet("m", text, mdTextRaw); }
+function mdTextRaw(text) {
   const src = unwrapTags(text).replace(/\r\n?/g, "\n").split("\n");
   let fence = false;
   const rows = src.map((ln) => {
@@ -704,10 +734,11 @@ function mdText(text) {
   return rows.map((r, i) => (r.flow && r.s.trim() && rows[i + 1]?.flow && rows[i + 1].s.trim() && !/ {2}$/.test(r.s) ? r.s + "  " : r.s)).join("\n");
 }
 // A message text -> {text without its "[image: ...]" lines, imgs: the paths those lines named}.
-function splitImgs(text) {
+function splitImgs(text) { return tlMemoGet("s", unwrapTags(text), splitImgsRaw); }
+function splitImgsRaw(text) {
   const imgs = [];
   const keep = [];
-  for (const ln of unwrapTags(text).split("\n")) {
+  for (const ln of String(text).split("\n")) {
     const m = IMG_LINE.exec(ln.trim());
     if (m && imgs.length < MAX_IMGS) imgs.push(m[1]); else keep.push(ln);
   }
@@ -964,6 +995,7 @@ export default class Inbox extends View {
     this.inputs = new Map(); // leader -> InputState
     this.msg = null; // {text, bad}
     this.copied = null; // key of the command whose 복사 button just ran
+    this.more = new Set(); // bubble ids the person opened with "더 보기" (#47: long messages start folded)
     this.chat = TextareaState.new({ value: "", rows: 1, placeholder: "PO에게 말하기 — Enter로 보내기, Shift+Enter로 줄바꿈, @로 리더 부르기, 그림은 붙여넣기" });
     try { this.chat.set_auto_grow(1, 6); } catch {}
     this.menu = null; // the open "@" menu: {start, end, query, items, sel}
@@ -2122,6 +2154,21 @@ export default class Inbox extends View {
     return tv;
   }
 
+  // A PO message folded like the person's own (#47): a long one shows its first lines and a "더 보기" under them.
+  mdFolded(id, src, t) {
+    const lc = clipLong(unwrapTags(src)), open = lc.cut && this.more.has(id);
+    if (!lc.cut) return this.md(id, src, t);
+    return v_flex().min_w(0).gap(6).child(this.md(id, open ? src : lc.text, t)).child(this.moreToggle(t, id, lc, open));
+  }
+
+  // "더 보기 · N자 더" / "접기" under a folded bubble. Only this bubble opens; the 복사 chip copies the whole text either way.
+  moreToggle(t, id, lc, open) {
+    return div().id(`${id}-more`).flex_none().text_size(11).cursor_pointer().text_color(t.working).hover((s) => s.text_color(t.foreground))
+      .on_mouse_down("left", stop)
+      .on_click((_e, cx) => { if (this.more.has(id)) this.more.delete(id); else this.more.add(id); try { cx.notify(); } catch {} })
+      .tooltip(open ? "다시 접습니다" : "이 메시지 전체를 펼칩니다").child(open ? "접기" : moreLabel(lc.more));
+  }
+
   text(id, html) {
     this.tvN = (this.tvN ?? 0) + 1;
     return TextView.html(id, html).selectable(true).on_link_click((url, c) => openUrl(url, c)).on_selection_change((sel, c) => this.onSel(id, sel, c));
@@ -2267,7 +2314,8 @@ export default class Inbox extends View {
       const cap = this.capOf(pics);
       // Only a column too narrow for the picture and the chip (the cap stayed below the picture) scales the pictures down to the cap.
       if (cap != null && pics > cap) { sizes = dims.map((d) => fitImg(d?.[0], d?.[1], Math.max(24, cap - 26), 180)); pics = Math.max(0, ...sizes.map((f) => f.w + 26)); }
-      const width = Math.min(Math.max(bubbleWidth(bp.text), pics, 64), cap ?? Infinity);
+      const lc = clipLong(bp.text), open = lc.cut && this.more.has(id), words = open ? bp.text : lc.text;
+      const width = Math.min(Math.max(bubbleWidth(words), pics, 64), cap ?? Infinity);
       return v_flex().id(id).flex_none().px(10).pt(top).gap(2).items_end()
         .when(Boolean(e.to), (el) => el.child(div().max_w("85%").min_w(0).truncate().text_size(10).text_color(t.dim).child(`→ ${shortName(e.to)}`)))
         .child(h_flex().w_full().min_w(0).gap(6).items_end().justify_end() // always the right edge: the chip and the time are left of the bubble
@@ -2277,7 +2325,8 @@ export default class Inbox extends View {
               .on_click(() => openFile(p)).tooltip("눌러서 그림 열기")
               .child(image(imgRel(root, p)).w(sizes[i].w).h(sizes[i].h)))) // image() loads only paths under the app folder: data/inbox/img/<file>
             .when(bp.chips.length > 0, (el) => el.child(h_flex().gap(4).flex_wrap().children(bp.chips.map((n) => div().flex_none().px(6).h(17).rounded(5).flex().items_center().bg(t.raised).text_size(10.5).text_color(t.muted).child(`사진 #${n}`)))))
-            .when(Boolean(bp.text), (el) => el.child(this.text(`${id}-t`, chatHtml(bp.text))))))
+            .when(Boolean(bp.text), (el) => el.child(this.text(`${id}-t`, chatHtml(words))))
+            .when(lc.cut, (el) => el.child(this.moreToggle(t, id, lc, open)))))
         .when(Boolean(note), (el) => el.child(h_flex().max_w("100%").min_w(0).gap(6).items_center().flex_wrap().justify_end()
           .child(div().min_w(0).text_size(10.5).text_color(bad ? t.blocked : t.dim).child(note))
           .children(Boolean(e.id) ? acts.map((k, i) => this.button(t, `ma-${k}-${e.id}`, ACT[k][0], ACT[k][2], { primary: i === 0, tip: ACT[k][1] })) : [])));
@@ -2291,7 +2340,7 @@ export default class Inbox extends View {
             .when(Boolean(e.to), (x) => x.child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(`→ ${shortName(e.to)}`)))))
           .child(h_flex().min_w(0).gap(6).items_end()
             .child(div().flex_1().min_w(0).max_w(this.capOf() ?? "75%").px(12).py(9).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(12.5).text_color(t.foreground)
-              .child(this.md(id, e.text, t)))
+              .child(this.mdFolded(id, e.text, t)))
             .child(this.sideTools(t, id, e.text, e.ms))));
     }
     const a = e.waiting ? v.asks.find((x) => x.s.leader === e.leader) : null;
