@@ -2166,3 +2166,79 @@ test("usageLine: main.js 배선 — 파일만 읽고(exec·네트워크 없음),
   const room = src.slice(src.indexOf("const room = v_flex()"));
   assert.ok(room.indexOf("child(head)") < room.indexOf("el.child(usage)") && room.indexOf("el.child(usage)") < room.indexOf("el.child(bar)"));
 });
+
+// ---- PO 새로 시작: 리뷰 1회차 보강 (#41) ----
+test("restartHasMark/restartInputOnly: 전체 기록에 표식이 있는지, 입력칸에 붙여 넣은 줄만 있는지", () => {
+  assert.equal(I.restartHasMark(`x\n${I.RESTART_MARK} note\ny`), true);
+  assert.equal(I.restartHasMark("nothing"), false);
+  assert.equal(I.restartInputOnly("out\n│ ❯ /clear │\n? help", "/clear"), true);
+  assert.equal(I.restartInputOnly("out\n│ ❯ my draft/clear │", "/clear"), false); // 쓰던 글이 앞에 있으면 아니다
+  assert.equal(I.restartInputOnly("out\n❯ \n? help", "/clear"), false);
+  const ask = I.handoffAsk("~/.herdr-inbox/po/x.handoff.md");
+  assert.equal(I.restartInputOnly(`o\n❯ ${ask.slice(0, 80)}\n  ${ask.slice(80)}\n`, ask), true);
+  assert.equal(I.restartInputOnly("o\n❯ draft " + ask.slice(0, 80), ask), false);
+  assert.equal(I.restartInputOnly("o\n❯ [Pasted text #1 +3 lines]", ask), true);
+});
+const typeLineHarness = ({ status = "idle", screen = "❯ /clear", alive = () => true } = {}) => {
+  const src = mainSrc();
+  const calls = [];
+  const timers = [];
+  const g = mkGlobals({
+    hc: (a) => { calls.push(a[0]); return { code: 0, stdout: a[0] === "read" ? screen : "" }; },
+    focused: () => ({ pane: "pp" }), panes: () => [{ terminal: "t9" }], run: () => {}, PASTE_SETTLE_MS: 350, PROMPT_LINES: 40, restartInputOnly: I.restartInputOnly,
+  });
+  const self = { isBlocked: () => status === "blocked", liveTerms: () => [{ address: "t9", status }], restore: () => {} };
+  const { typeLine } = runMethod(src, "  typeLine(po, text, c, cb, still = () => true) {", "  // 새로 시작 / 다시", g);
+  const c = { write_to_clipboard() {}, timer: { after: (ms, f) => timers.push(f) } };
+  const res = [];
+  typeLine.call(self, "t9", "/clear", c, (ok, why) => res.push([ok, why]), alive);
+  return { calls, res, fire: async () => { timers.shift()(c); await tick(); await tick(); await tick(); } };
+};
+test("typeLine: 붙여 넣은 뒤 Enter 직전에 취소·작업 중·질문 중·다른 글이 있으면 hc keys를 누르지 않는다", async () => {
+  let live = true;
+  let h = typeLineHarness({ alive: () => live });
+  live = false; await h.fire(); // 붙여 넣은 뒤 취소
+  assert.ok(!h.calls.includes("keys"));
+  assert.equal(h.res[0][0], false);
+  assert.match(h.res[0][1], /취소/);
+  h = typeLineHarness({ status: "working" }); await h.fire();
+  assert.ok(!h.calls.includes("keys")); assert.match(h.res[0][1], /일을 시작/);
+  h = typeLineHarness({ status: "blocked" });
+  assert.deepEqual(h.res[0], [false, "PO가 질문 중입니다"]); // 붙여 넣기 전에 이미 막힘
+  h = typeLineHarness({ screen: "❯ my draft/clear" }); await h.fire();
+  assert.ok(!h.calls.includes("keys")); assert.match(h.res[0][1], /붙여 넣은 줄만/);
+  h = typeLineHarness(); await h.fire(); // 정상
+  assert.ok(h.calls.includes("keys"));
+  assert.deepEqual(h.res[0], [true, ""]);
+});
+const clearHarness = ({ reads }) => {
+  const src = mainSrc();
+  const sent = [], fails = [];
+  const timers = [];
+  let n = 0;
+  const g = mkGlobals({ hc: (a) => ({ code: 0, stdout: reads[Math.min(n++, reads.length - 1)] }), RESTART_READ_LINES: 400, RESTART_CLEAR_MS: 10000, restartHasMark: I.restartHasMark, restartCleared: I.restartCleared });
+  const self = {
+    rs: new Map([["r", { po: "t9", gen: 1, phase: "run", n: 2 }]]),
+    restartAlive: () => true, restartSet: () => true, say: () => {},
+    restartFail: (room, gen, why) => fails.push(why),
+    typeLine: (po, text, c, cb) => { sent.push(text); cb(true); },
+  };
+  const { restartClear } = runMethod(src, "  restartClear(room, g, c) {", "  // The strip above the chat box", g);
+  const c = { timer: { after: (ms, f) => timers.push(f) } };
+  restartClear.call(self, "r", 1, c);
+  return { sent, fails, step: async () => { await tick(); await tick(); await tick(); const f = timers.shift(); if (f) { f(c); await tick(); await tick(); await tick(); } } };
+};
+test("restartClear: /clear 전 전체 기록에 표식이 없으면 /clear를 보내지 않는다", async () => {
+  const h = clearHarness({ reads: ["only other text"] });
+  await h.step();
+  assert.deepEqual(h.sent, []);
+  assert.match(h.fails[0], /\/clear를 보내지 않았습니다/);
+});
+test("restartClear: /clear 뒤에도 표식이 기록에 남아 있으면 /PO를 보내지 않고, 사라지면 보낸다", async () => {
+  let h = clearHarness({ reads: [`old\n${I.RESTART_MARK} ask`, `old\n${I.RESTART_MARK} ask`] });
+  await h.step(); await h.step();
+  assert.deepEqual(h.sent, ["/clear"]); // /PO는 아직 아님
+  h = clearHarness({ reads: [`old\n${I.RESTART_MARK} ask`, "Claude Code\n❯ /clear"] });
+  await h.step(); await h.step();
+  assert.deepEqual(h.sent, ["/clear", "/PO"]);
+});

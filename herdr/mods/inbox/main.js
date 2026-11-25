@@ -874,6 +874,19 @@ function restartPoll({ note, since, now, status, quiet = 0 } = {}) {
   return Number(quiet) >= 1 ? "go" : "idle-wait";
 }
 
+// The request marker is in the PO's whole history (`hc read` with many lines): proof that the history the desk is about to clear is the one it asked.
+const restartHasMark = (screen) => cleanText(screen).includes(RESTART_MARK);
+// Whether the PO's input holds the pasted `line` and nothing else: some screen row (box borders and the prompt mark dropped) is the line itself
+// (a long line: starts with it; a paste the PO folded into "[Pasted text ...]" counts too). Text the person had typed there first would come
+// before the line on that row, so Enter is not pressed over it.
+function restartInputOnly(screen, line) {
+  const squeeze = (s) => String(s).replace(/[│┃|]/g, " ").replace(/\s+/g, " ").trim();
+  const want = squeeze(cleanText(line));
+  if (!want) return false;
+  const rows = cleanText(screen).split("\n").filter((l) => l.trim()).slice(-14).map((l) => squeeze(l).replace(/^[❯>›]\s*/, ""));
+  return rows.some((r) => (want.length > 40 ? r.startsWith(want.slice(0, 40)) : r === want) || /^\[Pasted text/i.test(r));
+}
+const RESTART_READ_LINES = 400; // the whole history is read (scrollback included) before and after /clear
 // chat:end
 
 // The pending-question card: the screen lines scroll inside it (all options stay reachable), the buttons stay under them.
@@ -1850,9 +1863,10 @@ export default class Inbox extends View {
     return { path: "", exists: false, ms: 0, size: 0, text: "" };
   }
   // One line into the PO's input (paste, then Enter), the way every desk send goes. cb(ok, why). Never into a PO that waits on a prompt.
-  typeLine(po, text, c, cb) {
+  typeLine(po, text, c, cb, still = () => true) {
     const fin = (ok, why = "") => { try { cb(ok, why); } catch {} };
     if (this.isBlocked(po)) { fin(false, "PO가 질문 중입니다"); return; }
+    if (!still()) { fin(false, "취소되었습니다"); return; }
     let back = "";
     try { back = focused()?.pane ?? ""; } catch {}
     try {
@@ -1861,11 +1875,27 @@ export default class Inbox extends View {
       run("pane.focus", { terminal: po });
       try { run("terminal.paste", {}); } catch { this.restore(back, c); fin(false, "붙여 넣지 못했습니다"); return; }
     } catch (e) { fin(false, String(e?.message ?? e).slice(0, 100)); return; }
+    // Enter is pressed only when, right now: the run was not cancelled, the PO is neither on a prompt nor working, and its input holds the
+    // pasted line and nothing else (a half-typed text of the person would be sent together with it). Otherwise the pasted line stays in the
+    // input for the person to remove.
+    const stop = (cx, why) => { this.restore(back, cx); fin(false, `${why} — PO 입력칸에 붙여 넣은 줄이 남아 있으면 지워 주세요`); };
     const press = (cx) => {
-      if (this.isBlocked(po)) { this.restore(back, cx); fin(false, "PO가 그 사이 질문 중이 되었습니다"); return; }
-      let r;
-      try { r = hc(["keys", po, "enter"]); } catch { this.restore(back, cx); fin(false, "Enter를 누르지 못했습니다"); return; }
-      Promise.resolve(r).then((o) => { this.restore(back, cx); if (o && o.code === 0) fin(true); else fin(false, "Enter를 누르지 못했습니다"); }).catch(() => { this.restore(back, cx); fin(false, "Enter를 누르지 못했습니다"); });
+      if (!still()) { stop(cx, "취소되어 Enter를 누르지 않았습니다"); return; }
+      const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "").trim().toLowerCase();
+      if (st === "blocked") { stop(cx, "PO가 그 사이 질문 중이 되어 Enter를 누르지 않았습니다"); return; }
+      if (st === "working") { stop(cx, "PO가 그 사이 일을 시작해 Enter를 누르지 않았습니다"); return; }
+      let rd;
+      try { rd = hc(["read", po, "--lines", String(PROMPT_LINES)]); } catch { stop(cx, "PO 화면을 읽지 못해 Enter를 누르지 않았습니다"); return; }
+      Promise.resolve(rd).then((o) => {
+        if (!(o && o.code === 0)) { stop(cx, "PO 화면을 읽지 못해 Enter를 누르지 않았습니다"); return null; }
+        if (!restartInputOnly(String(o.stdout ?? ""), text)) { stop(cx, "PO 입력칸에 붙여 넣은 줄만 있는 것이 아니라서 Enter를 누르지 않았습니다"); return null; }
+        if (!still()) { stop(cx, "취소되어 Enter를 누르지 않았습니다"); return null; }
+        return hc(["keys", po, "enter"]);
+      }).then((k) => {
+        if (k === null) return;
+        this.restore(back, cx);
+        if (k && k.code === 0) fin(true); else fin(false, "Enter를 누르지 못했습니다");
+      }).catch(() => { this.restore(back, cx); fin(false, "Enter를 누르지 못했습니다"); });
     };
     try { c.timer.after(PASTE_SETTLE_MS + Math.min(600, Math.floor(String(text).length / 2)), press); } catch { press(c); }
   }
@@ -1885,7 +1915,7 @@ export default class Inbox extends View {
       this.typeLine(po, handoffAsk(path), c, (ok, w) => {
         if (!ok) { this.restartFail(room, g, `노트를 요청하지 못했습니다(${w})`, c); return; }
         if (this.restartSet(room, g, { n: 1 }, c)) this.restartWait(room, g, c);
-      });
+      }, () => this.restartAlive(room, g));
     });
   }
   // Steps 2-3: look for the note every RESTART_POLL_MS; the note is fresh (written after the request) -> show it; the PO idle after it -> /clear.
@@ -1914,27 +1944,37 @@ export default class Inbox extends View {
     const r = this.rs.get(room);
     if (!r || r.gen !== g) return;
     this.rs.set(room, { ...r, phase: "clear" });
-    this.typeLine(r.po, "/clear", c, (ok, w) => {
-      if (!ok) { this.restartFail(room, g, `/clear를 보내지 못했습니다(${w})`, c); return; }
-      const t0 = Date.now();
-      const look = (cx) => {
-        if (!this.restartAlive(room, g)) return;
-        let rd;
-        try { rd = hc(["read", r.po, "--lines", String(PROMPT_LINES)]); } catch { rd = null; }
-        Promise.resolve(rd).then((o) => {
-          if (!this.restartAlive(room, g)) return;
-          if (o && o.code === 0 && restartCleared(String(o.stdout ?? ""))) {
-            this.restartSet(room, g, { n: 3 }, cx);
-            this.typeLine(r.po, "/PO", cx, (ok2, w2) => {
-              if (!ok2) { this.restartFail(room, g, `/PO를 보내지 못했습니다(${w2})`, cx); return; }
-              this.restartSet(room, g, { n: 4, phase: "done" }, cx);
-              this.say("PO를 새로 시작했습니다.");
-            });
-          } else if (Date.now() - t0 >= RESTART_CLEAR_MS) this.restartFail(room, g, "/clear 뒤에도 이전 대화가 화면에 남아 있어 /PO를 보내지 않았습니다", cx);
-          else try { cx.timer.after(800, look); } catch {}
-        }).catch(() => { try { cx.timer.after(800, look); } catch {} });
-      };
-      try { c.timer.after(800, look); } catch { look(c); }
+    const alive = () => this.restartAlive(room, g);
+    const readAll = (cb) => {
+      let rd;
+      try { rd = hc(["read", r.po, "--lines", String(RESTART_READ_LINES)]); } catch { cb(null); return; }
+      Promise.resolve(rd).then((o) => cb(o && o.code === 0 ? String(o.stdout ?? "") : null)).catch(() => cb(null));
+    };
+    // Before /clear: the request marker must be in the PO's whole history, else the desk cannot tell later whether /clear happened.
+    readAll((before) => {
+      if (!alive()) return;
+      if (before === null) { this.restartFail(room, g, "PO 화면을 읽지 못해 /clear를 보내지 않았습니다", c); return; }
+      if (!restartHasMark(before)) { this.restartFail(room, g, "PO 기록에서 노트 요청을 찾지 못해 /clear가 실행됐는지 확인할 수 없어 /clear를 보내지 않았습니다", c); return; }
+      this.typeLine(r.po, "/clear", c, (ok, w) => {
+        if (!ok) { this.restartFail(room, g, `/clear를 보내지 못했습니다(${w})`, c); return; }
+        const t0 = Date.now();
+        const look = (cx) => {
+          if (!alive()) return;
+          readAll((after) => {
+            if (!alive()) return;
+            if (after !== null && restartCleared(after)) {
+              this.restartSet(room, g, { n: 3 }, cx);
+              this.typeLine(r.po, "/PO", cx, (ok2, w2) => {
+                if (!ok2) { this.restartFail(room, g, `/PO를 보내지 못했습니다(${w2})`, cx); return; }
+                this.restartSet(room, g, { n: 4, phase: "done" }, cx);
+                this.say("PO를 새로 시작했습니다.");
+              }, alive);
+            } else if (Date.now() - t0 >= RESTART_CLEAR_MS) this.restartFail(room, g, "/clear 뒤에도 이전 대화가 기록에 남아 있어 /PO를 보내지 않았습니다", cx);
+            else try { cx.timer.after(800, look); } catch {}
+          });
+        };
+        try { c.timer.after(800, look); } catch { look(c); }
+      }, alive);
     });
   }
   // The strip above the chat box: the button (idle), the confirm line, or the four steps of the run.
