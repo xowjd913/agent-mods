@@ -2302,6 +2302,7 @@ test("새로 시작: 흐름 도중 spawn cx가 낡으면(모드 다시 읽힘) �
   // let the request go in and the first note looks happen, then the host closes the build: the spawn cx throws from now on
   while (reads < 2) await tick();
   w.log.spawnCx.valid = false;
+  w.po.noteMs = 0; // no fresh note can show up: only a stopped flow ends here
   const at = reads;
   for (let i = 0; i < 50; i++) await tick();
   assert.ok(reads <= at + 1, `handoffRead kept running: ${reads} after ${at}`);
