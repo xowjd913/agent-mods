@@ -666,6 +666,8 @@ const quietNow = (st, now) => Boolean((st?.sel && now - (st.selAt || 0) < SEL_HO
 
 // The pending-question card: the screen lines scroll inside it (all options stay reachable), the buttons stay under them.
 const PROMPT_LINES_H = 240, PROMPT_MAX_H = 340;
+const DIAG_FLUSH_MS = 2000; // the diag queue is written out this often (one timer started in init)
+const BOLD_TINT = "33"; // alpha (hex) of the tint laid behind **bold** runs: the foreground colour at 20%, readable on both themes
 const PIN_TICK_MS = 250; // how often the timeline checks that it still sits at the newest
 const LOAD_REDRAW_MS = 25000; // an unchanged load still redraws this often (the "5분 전" clocks)
 
@@ -837,8 +839,11 @@ export default class Inbox extends View {
     try {
       const o = this.scroll.offset(), vp = this.scroll.viewport_size(), ct = this.scroll.content_size();
       const r = pinStep(this.pin, { y: o.y, vh: vp.height, ch: ct.height });
+      // A scroll that is held back (drag / selection) leaves the pin as it was: pinned and the old content height stay, so the next tick after the
+      // release still sees the growth and goes to the bottom (storing r.ct now would turn it into "pinned: false").
+      if (r.go && quietNow(this.ui, Date.now())) return;
       this.pin = { pinned: r.pinned, ct: r.ct };
-      if (r.go && !quietNow(this.ui, Date.now())) this.scroll.scroll_to_item(this.lastIdx);
+      if (r.go) this.scroll.scroll_to_item(this.lastIdx);
     } catch {}
   }
 
@@ -1033,7 +1038,7 @@ export default class Inbox extends View {
   pruneReply(asks) {
     const live = new Set(asks.map((a) => a.s.leader));
     for (const m of [this.replyPics, this.replyBusy]) for (const k of [...m.keys()]) if (!live.has(k)) m.delete(k);
-    for (const [k, st] of [...this.inputs]) if (!live.has(k)) { try { st.set_value(""); } catch {} } // an old draft must not reappear on the leader's next card
+    for (const [k, st] of [...this.inputs]) if (!live.has(k)) { try { if (String(st.value() ?? "") !== "") st.set_value(""); } catch {} } // an old draft must not reappear on the leader's next card
   }
   pruneSent(asks) {
     try {
@@ -1067,10 +1072,10 @@ export default class Inbox extends View {
 
   // A command's copy button: exactly that text goes on the clipboard (no paste, no send); the button says "복사됨" for a moment.
   copy(key, text, cx) {
-    try { cx.write_to_clipboard(String(text)); } catch (e) { this.say(`복사하지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); cx.notify(); return; }
+    try { cx.write_to_clipboard(String(text)); } catch (e) { this.say(`복사하지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); this.softNotify(cx); return; }
     this.copied = key;
-    cx.notify();
-    try { cx.timer.after(1800, (c) => { if (this.copied === key) { this.copied = null; c.notify(); } }); } catch {}
+    this.softNotify(cx); // a selection held in another bubble is not rebuilt by this
+    try { cx.timer.after(1800, (c) => { if (this.copied === key) { this.copied = null; this.softNotify(c); } }); } catch {}
   }
 
   // "옆에 열기": the PO desk as a pane beside the tab's leader (else the focused terminal); a tab that has one already focuses it.

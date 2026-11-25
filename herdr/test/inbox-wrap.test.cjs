@@ -436,9 +436,96 @@ test("R17: each bubble has a 복사 chip that copies the unwrapped text; backgro
   // every background source goes through softNotify or the quiet check
   assert.match(MAIN, /if \(!same\) this\.softNotify\(cx\);/);
   assert.match(MAIN, /this\.narrow = n; this\.softNotify\(c\)/);
-  assert.match(MAIN, /if \(r\.go && !quietNow\(this\.ui, Date\.now\(\)\)\) this\.scroll\.scroll_to_item/);
+  assert.match(MAIN, /if \(r\.go && quietNow\(this\.ui, Date\.now\(\)\)\) return;/);
   assert.doesNotMatch(MAIN, /!this\.ui\.press\) this\.scroll/);
   // TextView ids are the content-keyed timeline ids (or the same id + part index): they do not change between draws
   assert.match(MAIN, /const id = tlId\(e\.key\);/);
   assert.match(MAIN, /const key = `\$\{id\}-\$\{i\}`;/);
+});
+
+// ---- Round 18: main.js is run for real (nothing is injected), so a name that is used but never defined fails here
+// (R17 used DIAG_FLUSH_MS and BOLD_TINT without defining them: init threw, and md() swallowed the error)
+function loadInbox(over = {}) {
+  const chain = new Proxy(function () {}, {
+    get: (_t, k) => (k === Symbol.toPrimitive ? () => "" : k === "then" ? undefined : chain),
+    apply: () => chain,
+    construct: () => chain,
+  });
+  class View {}
+  const mods = {
+    "gpui-kit": { View, div: chain, svg: chain, image: chain },
+    "gpui-base": { v_flex: chain, h_flex: chain, InputState: chain, Input: chain, TextareaState: chain, Textarea: chain, TextView: chain, ScrollHandle: chain, ...over.base },
+    herdr: { theme: () => ({}), exec: () => Promise.resolve({ code: 0, stdout: "" }), appHome: () => "/nonexistent-app-home", checking: () => false, window: chain, run: chain, hc: () => Promise.resolve({}),
+      terminals: () => [], panes: () => [], focused: () => null, setBadge: () => {}, shared: () => undefined, setShared: () => {}, props: () => ({ mode: "window" }),
+      openOverlay: () => {}, closeOverlay: () => {}, watchFolder: () => {}, pickFiles: () => Promise.resolve([]), ...over.herdr },
+  };
+  let src = MAIN.replace(/^import \{([^}]*)\} from "([^"]+)";/gm, (_m, names, mod) => `const {${names}} = __mods[${JSON.stringify(mod)}];`);
+  src = src.replace("export default class Inbox", "class Inbox") + "\nreturn Inbox;";
+  return new Function("__mods", `"use strict";\n${src}`)(mods);
+}
+function initCx() {
+  const timers = [];
+  const base = { timers, notify() {}, write_to_clipboard() {}, timer: { every: (ms, fn) => timers.push({ ms, fn }), after: () => {} } };
+  return new Proxy(base, { get: (t, k) => (k in t ? t[k] : anyOf) }); // any other cx method is a no-op
+}
+const anyOf = new Proxy(function () {}, { get: () => anyOf, apply: () => anyOf });
+
+test("R18: main.js loads and init() runs to the end: the flush timer is set and the init line is queued", () => {
+  const Inbox = loadInbox();
+  const d = new Inbox();
+  const cx = initCx();
+  d.init({}, cx);
+  assert.ok(cx.timers.some((t) => t.ms === 2000), "the diag flush timer (2000 ms) is set");
+  assert.ok(cx.timers.some((t) => t.ms === 250), "the pin tick is set");
+  assert.equal(d.diagQ.length, 1);
+  assert.match(d.diagQ[0], /init: window$/);
+});
+
+test("R18: the tint constants are defined as numbers/hex alpha, and md() paints with them (no stub injects them)", () => {
+  assert.match(MAIN, /^const DIAG_FLUSH_MS = \d+/m);
+  assert.match(MAIN, /^const BOLD_TINT = "[0-9a-f]{2}"/m);
+  const calls = [];
+  const tv = { raw_html() { return this; }, selectable() { return this; }, on_link_click() { return this; }, on_selection_change() { return this; }, highlight_range(a, b, c) { calls.push([a, b, c]); return this; } };
+  const Inbox = loadInbox({ base: { TextView: { markdown: () => tv } } });
+  const d = new Inbox();
+  d.md("x", "a **b** c", { foreground: "#112233" });
+  assert.deepEqual(calls, [[2, 7, "#11223333"]], "a ReferenceError inside md() would have been swallowed and painted nothing");
+});
+
+test("R18: pinTick keeps the pin when a scroll is held back, so the view goes to the bottom after the release", () => {
+  const Inbox = loadInbox();
+  const d = new Inbox();
+  const jumps = [];
+  let ch = 1000;
+  d.scroll = { offset: () => ({ y: 600 }), viewport_size: () => ({ height: 400 }), content_size: () => ({ height: ch }), scroll_to_item: (i) => jumps.push(i) };
+  d.drawnAt = 1; d.lastIdx = 7;
+  d.pin = { pinned: true, ct: 1000 };
+  d.ui = { sels: new Map(), sel: true, selAt: Date.now(), press: false, pressAt: 0 }; // a settled selection holds the scroll
+  ch = 1100; // the content grew without a redraw (a late picture, a narrower window)
+  d.pinTick({ notify() {} });
+  assert.deepEqual(d.pin, { pinned: true, ct: 1000 }, "held: pinned and the old height stay");
+  d.pinTick({ notify() {} });
+  d.pinTick({ notify() {} });
+  assert.deepEqual(d.pin, { pinned: true, ct: 1000 });
+  assert.equal(jumps.length, 0);
+  d.ui.sel = false; // released
+  d.pinTick({ notify() {} });
+  assert.deepEqual(jumps, [7], "the next tick after the release still sees the growth and goes to the bottom");
+  assert.deepEqual(d.pin, { pinned: true, ct: 1100 });
+  // not held and no growth: the pin is stored as before
+  d.pinTick({ notify() {} });
+  assert.equal(jumps.length, 1);
+});
+
+test("R18: pruneReply clears only a leader's non-empty draft; copy() redraws through softNotify", () => {
+  const d = replyDesk();
+  let sets = 0;
+  const empty = fakeInput(""); const set0 = empty.set_value.bind(empty); empty.set_value = (x) => { sets++; set0(x); };
+  d.inputs.set("lead-gone", empty); d.pruneReply([ASK("lead-a")]);
+  assert.equal(sets, 0, "an empty box of a gone leader is not touched on every draw");
+  d.inputs.set("lead-gone2", fakeInput("draft")); d.pruneReply([ASK("lead-a")]);
+  assert.equal(d.inputs.get("lead-gone2").v, "");
+  const copy = MAIN.slice(MAIN.indexOf("  copy(key, text, cx)"), MAIN.indexOf("  // \"옆에 열기\":"));
+  assert.doesNotMatch(copy, /cx\.notify\(\)|c\.notify\(\)/);
+  assert.equal((copy.match(/softNotify/g) ?? []).length, 3);
 });
