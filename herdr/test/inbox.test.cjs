@@ -2190,15 +2190,15 @@ const strictCx = (log, kind = "sync") => {
   cx.write_to_clipboard = (t) => { need("write_to_clipboard"); log.clip = t; };
   cx.notify = () => { need("notify"); };
   cx.timer = { after: (ms, f) => { need("timer.after"); setImmediate(() => { const c2 = strictCx(log, "timer"); try { f(c2); } finally { c2.valid = false; } }); } };
-  cx.spawn = (f) => { need("spawn"); const sc = strictCx(log, "spawn"); log.spawned++; Promise.resolve().then(() => f(sc)).catch(() => {}); };
+  cx.spawn = (f) => { need("spawn"); const sc = strictCx(log, "spawn"); log.spawnCx = sc; log.spawned++; Promise.resolve().then(() => f(sc)).catch(() => {}); };
   return cx;
 };
-const restartWorld = ({ clearWorks = true, markInHistory = true, busyAfterPaste = false } = {}) => {
+const restartWorld = ({ clearWorks = true } = {}) => {
   const src = mainSrc();
   const log = { stale: [], spawned: 0, keys: [], clip: "", pasted: [], says: [] };
-  const po = { hist: markInHistory ? "older talk" : "older talk", input: "", status: "idle", noteMs: 0, sent: [] };
+  const po = { hist: "older talk", input: "", status: "idle", noteMs: 0, sent: [] };
   const g = mkGlobals({
-    RESTART_READ_LINES: 400, RESTART_POLL_MS: 2000, RESTART_CLEAR_MS: 10000, PASTE_SETTLE_MS: 350, RESTART_MARK: I.RESTART_MARK,
+    RESTART_READ_LINES: 400, RESTART_POLL_MS: 2000, RESTART_CLEAR_MS: 300, PASTE_SETTLE_MS: 350, RESTART_MARK: I.RESTART_MARK,
     restartBlock: I.restartBlock, restartPoll: I.restartPoll, restartHasMark: I.restartHasMark, restartCleared: I.restartCleared, restartInputOnly: I.restartInputOnly,
     handoffAsk: I.handoffAsk, HELPER: () => "h.cjs", focused: () => ({ pane: "pp" }), panes: () => [{ terminal: "t9" }],
     run: (name) => { if (name === "terminal.paste") { log.pasted.push(log.clip); po.input = log.clip; } },
@@ -2232,7 +2232,6 @@ const restartWorld = ({ clearWorks = true, markInHistory = true, busyAfterPaste 
   grab("  async typeLine(", "  // 새로 시작 / 다시");
   grab("  restartRun(room, po, id, c) {", "  // Steps 1-4.");
   grab("  async restartFlow(", "  // The strip above the chat box");
-  self.restrestoreBack = null;
   const click = () => { const c = strictCx(log); try { self.restartRun("r", "t9", "r", c); } finally { c.valid = false; } };
   const settle = async (ms = 4000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { await tick(); const r = self.rs.get("r"); if (r && (r.phase === "done" || r.phase === "fail" || r.phase === "timeout")) break; } };
   return { self, po, log, click, settle };
@@ -2292,4 +2291,19 @@ test("restartFlow: /clear 전 기록에 표식이 없으면 /clear를 보내지 
   await w.settle(20000);
   assert.equal(w.self.rs.get("r").phase, "fail");
   assert.deepEqual(w.log.keys.slice(1), []); // no /clear
+});
+test("새로 시작: 흐름 도중 spawn cx가 낡으면(모드 다시 읽힘) 더 확인하지 않고 끝난다", async () => {
+  const w = restartWorld();
+  let reads = 0;
+  const orig = w.self.handoffRead;
+  w.self.handoffRead = async (id) => { reads++; return orig.call(w.self, id); };
+  w.po.noteMs = 0;
+  w.click();
+  // let the request go in and the first note looks happen, then the host closes the build: the spawn cx throws from now on
+  while (reads < 2) await tick();
+  w.log.spawnCx.valid = false;
+  const at = reads;
+  for (let i = 0; i < 50; i++) await tick();
+  assert.ok(reads <= at + 1, `handoffRead kept running: ${reads} after ${at}`);
+  assert.equal(w.self.rs.get("r").phase, "fail");
 });

@@ -1864,7 +1864,7 @@ export default class Inbox extends View {
   }
   // The whole run is ONE async function inside cx.spawn: a click's or a timer's cx is only good during its own call, so after an await
   // only the spawn's cx is used (never the click's c). Waiting is sleepOn (a timer that resolves a promise), never a callback chain.
-  sleepOn(cx, ms) { return new Promise((res) => { try { cx.timer.after(ms, () => res()); } catch { res(); } }); }
+  sleepOn(cx, ms) { return new Promise((res, rej) => { try { cx.timer.after(ms, () => res()); } catch (e) { rej(e); } }); } // a cx the host closed throws: the run ends (restartRun's catch)
   async readScreen(po, lines) {
     try { const o = await hc(["read", po, "--lines", String(lines)]); return o && o.code === 0 ? String(o.stdout ?? "") : null; } catch { return null; }
   }
