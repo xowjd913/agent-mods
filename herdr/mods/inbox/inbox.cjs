@@ -599,6 +599,46 @@ function rememberNames(memo, terms, max = 60) {
 }
 // leaderName:end
 
+// usageLine:begin
+// The Claude usage line under the room title: "Claude 5h ▬ 54% · 7d ▬ 34%". It reads ~/.claude/usage-limits.json (written by the Claude Code
+// status line; no network, no exec). The parsing is parseUsage of the usage-status mod plus the reset time; the mods cannot require each
+// other, so it is a copy (a test keeps the rows of both equal). A file not updated for USAGE_STALE_MS is Unknown (null).
+const USAGE_FILE = ".claude/usage-limits.json", USAGE_REFRESH_MS = 60 * 1000, USAGE_STALE_MS = 10 * 60 * 1000;
+const USAGE_WARN = 80, USAGE_LABEL = { five_hour: "5h", seven_day: "7d" };
+const USAGE_TRACK_W = 40, USAGE_TRACK_H = 3, USAGE_MIN_FILL = 2;
+// The filled width (px) of a bar: 0 for <= 0 and NaN, at least USAGE_MIN_FILL above 0, never past the track.
+function usageFill(percent, track = USAGE_TRACK_W) {
+  const p = Number.isFinite(percent) ? Math.max(0, percent) : 0;
+  return p === 0 ? 0 : Math.min(track, Math.max(USAGE_MIN_FILL, Math.round((p / 100) * track)));
+}
+// The file's text -> [{label, percent, resetsAt}] (resetsAt in ms, 0 when unknown) or null (Unknown: none, broken, stale, no 5h/7d row).
+function parseUsage(raw, now) {
+  if (!raw) return null;
+  let data;
+  try { data = JSON.parse(raw); } catch { return null; }
+  const updated = Date.parse(data?.updatedAt ?? "");
+  if (!Number.isFinite(updated) || now - updated > USAGE_STALE_MS) return null;
+  const rows = (Array.isArray(data.limits) ? data.limits : [])
+    .filter((l) => USAGE_LABEL[l?.kind] && Number.isFinite(l.percentUsed))
+    .map((l) => ({ label: USAGE_LABEL[l.kind], percent: Math.round(l.percentUsed), resetsAt: Math.max(0, Date.parse(l.resetsAt ?? "") || 0) }));
+  return rows.length ? rows : null;
+}
+// A reset time in local time: HH:MM when it is today, else month/day HH:MM.
+function usageReset(ms, now) {
+  const d = new Date(ms), n = new Date(now);
+  if (!ms || Number.isNaN(d.getTime())) return "";
+  const p = (x) => String(x).padStart(2, "0");
+  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  return d.toDateString() === n.toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+}
+// The tooltip: the reset time of every row that has one ("5h 리셋 19:20 · 7d 리셋 11/30 22:00"), or why there are no numbers.
+function usageTip(rows, now) {
+  if (!rows) return "사용률을 알 수 없습니다: ~/.claude/usage-limits.json이 없거나 10분 넘게 갱신되지 않았습니다";
+  const parts = rows.filter((r) => r.resetsAt).map((r) => `${r.label} 리셋 ${usageReset(r.resetsAt, now)}`);
+  return parts.length ? parts.join(" · ") : "리셋 시각 정보가 없습니다";
+}
+// usageLine:end
+
 // The PO of a leader: that leader's terminal's parent, accepted only when the parent carries the label role=po. No guessing from
 // sibling lead-* terminals: a wrong guess would put an answer into some other agent's prompt. null when there is none.
 // `terms` are Herdr's terminals() entries ({address, name, parent, labels}); the leader is found by name, else by `address`.
@@ -1433,7 +1473,7 @@ function readHandoff(dir = inboxDir(), id = "") {
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartCleared, restartNoteFresh, restartPoll, unwrapTags, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartCleared, restartNoteFresh, restartPoll, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, parseUsage, usageReset, usageTip, unwrapTags, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)
