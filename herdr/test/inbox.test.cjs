@@ -1,5 +1,6 @@
 // inbox.cjs 단위 테스트: node --test herdr/test/inbox.test.cjs
 const test = require("node:test");
+const POSIX = process.platform !== "win32"; // Windows has no POSIX file modes: only the mode asserts are skipped there
 const assert = require("node:assert/strict");
 const fs = require("fs");
 const os = require("os");
@@ -76,7 +77,7 @@ test("answerLine: 한 줄이고, 원문을 그대로 따옴표에 넣고, 링크
 
 // 요약 칸이 채팅 창을 여는 약속: 같은 키로 위치를 기억하고(keep) 다시 켤 때 돌아오며, 창 안 버튼은 끌기를 시작하지 않는다.
 test("main.js: 요약 칸은 key·keep이 있는 떠 있는 창으로 채팅 보기를 열고, 창에는 닫기 버튼이 있다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /const WINDOW = \{[^}]*kind: "window"[^}]*key: "inbox"[^}]*keep: true/);
   assert.match(src, /props: \{ mode: "window" \}/);
   assert.match(src, /openOverlay\(WINDOW\)/);
@@ -88,7 +89,7 @@ test("main.js: 요약 칸은 key·keep이 있는 떠 있는 창으로 채팅 보
 });
 
 // 패널이 PO 터미널에 넣는 길은 하나(deliver): 클립보드 → PO 칸 포커스 → 붙여넣기 → Enter(hc keys). hc send는 쓰지 않는다.
-const mainSrc = () => fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+const mainSrc = () => fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
 const methodOf = (src, head, next) => { const a = src.indexOf(head), b = src.indexOf(next, a + 1); assert.ok(a > 0 && b > a, head); return src.slice(a, b); };
 const deliverOf = (src) => methodOf(src, '  deliver(po, text, c, rec = null, ok = null, id = "", opened = false) {', "  // A send to a PO with no pane");
 
@@ -176,10 +177,10 @@ test("answerLine: 한 줄·끝 개행 없음(붙여 넣고 Enter 한 번이면 �
 });
 
 test("main.js: 배지는 요약 칸이 맡고 30초마다 새로 읽는다(창은 닫혀 있어도 된다)", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /PANE_REFRESH_MS = 30000/);
   assert.match(src, /if \(this\.windowed\) return;/);
-  const tabs = fs.readFileSync(path.join(__dirname, "../mods/tabs-mine/main.js"), "utf8");
+  const tabs = fs.readFileSync(path.join(__dirname, "../mods/tabs-mine/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(tabs, /inboxWaiting\(\)/);
   assert.ok(!/shared\("inbox\.waiting"\)/.test(tabs)); // 받은편지함 칸이 닫혀 있어도 터미널 라벨로 센다
 });
@@ -196,7 +197,7 @@ test("waitingKind: lead-* 이름과 wait=decision|verify 라벨만 대기 리더
 });
 
 test("waitingKind: 탭 줄(tabs-mine)·요약 칸(inbox/main.js)·inbox.cjs가 같은 줄을 쓴다", () => {
-  const line = (f) => fs.readFileSync(path.join(__dirname, f), "utf8").split("\n").find((l) => l.startsWith("const waitingKind = "));
+  const line = (f) => fs.readFileSync(path.join(__dirname, f), "utf8").replace(/\r\n/g, "\n").split("\n").find((l) => l.startsWith("const waitingKind = "));
   const a = line("../mods/inbox/inbox.cjs");
   assert.ok(a);
   assert.equal(line("../mods/inbox/main.js"), a);
@@ -204,7 +205,7 @@ test("waitingKind: 탭 줄(tabs-mine)·요약 칸(inbox/main.js)·inbox.cjs가 �
 });
 
 test("main.js: 보고 기록이 없어도 라벨만으로 카드를 만들고 보낸 표시는 공유 상태에 둔다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /for \(const term of list\) \{\s*const kind = waitingKind\(term\);/); // 터미널을 돈다(보고 파일 목록이 아니라)
   assert.match(src, /items: \[\], last: null/); // 보고 없는 리더의 빈 기록
   assert.match(src, /setShared\(SENT_KEY/);
@@ -321,7 +322,7 @@ test("summarize: 카드마다 blocks·head·lead·long을 붙인다(진짜 확�
 });
 
 test("main.js: 카드는 접힌 채 시작하고, 펼침은 공유 상태에 두며, 복사 버튼은 클립보드에만 쓴다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /shared\(OPEN_KEY\)/);
   assert.match(src, /setShared\(OPEN_KEY/);
   assert.match(src, /"접기" : "자세히"/);
@@ -352,7 +353,7 @@ test("toParts·escapeHtml: 글자는 이스케이프하고, 목록은 <ul>로 �
 });
 
 test("main.js: 카드 글자는 모두 선택 가능한 TextView이고, 눌러서 펼치는 곳은 자세히/접기 버튼뿐이다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /TextView\.html\(id, html\)\.selectable\(true\)\.on_link_click/);
   for (const k of ["-lead`", "-link`"]) assert.ok(src.includes("this.text(`${id}" + k), k); // 요약·링크
   assert.ok(src.includes("this.heading_text(t, `${id}-h`") && src.includes("this.heading_text(t, key, p.html")); // 제목·소제목: TextView 자체에 굵기를 준 선택 가능한 글
@@ -364,7 +365,7 @@ test("main.js: 카드 글자는 모두 선택 가능한 TextView이고, 눌러�
 });
 
 test("main.js: 오른쪽 칸(Dock)도 창과 같은 메신저 화면이다: 좁은 방 칸 + 타임라인 + 채팅 상자, 창 열기 버튼", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.ok(!/summary\(cx\)|paneRow|openCard|MAX_ROWS|rowsScroll|FOCUS_KEY|inbox-rows/.test(src)); // 카드 목록·칩 보기는 없다
   assert.match(src, /render\(cx\) \{ return this\.full\(cx\); \}/); // 창과 Dock이 같은 그림
   assert.match(src, /const strip = this\.windowed && this\.narrow;/); // 위쪽 띠는 좁은 창에서만, Dock(460px)은 좁은 방 칸
@@ -413,7 +414,7 @@ test("dockTarget: 포커스가 리더면 그 옆, 아니면 탭의 가장 새 �
 });
 
 test("main.js: 페인 모드: 같은 메신저 화면, 자기 제목줄을 쓰고, 방 목록은 폭으로 고르며, 옆에 열기는 dockTarget을 따른다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /this\.paned = mode === "pane"/);
   assert.match(src, /this\.windowed = mode === "window"/);
   assert.match(src, /this\.narrow = !this\.windowed;/); // Dock과 페인은 좁게 시작, 창은 넓게
@@ -447,7 +448,7 @@ test("main.js: 페인 모드: 같은 메신저 화면, 자기 제목줄을 쓰�
 // (flex_1 + min_h(0)) collapsed to nothing — the room showed a header and the chat box with an empty gap above. The row stretches and
 // both columns are h_full.
 test("main.js: 방 목록과 방 칸이 행의 전체 높이를 채운다(타임라인이 0 높이로 접히지 않는다)", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /h_flex\(\)\.flex_1\(\)\.min_h\(0\)\.items_stretch\(\)/);
   assert.match(src, /const room = v_flex\(\)\.flex_1\(\)\.min_w\(0\)\.min_h\(0\)\.when\(!strip, \(el\) => el\.h_full\(\)\)/);
   assert.match(src, /id\("po-rooms"\)\.flex_none\(\)\.w\(ROOM_W\)\.h_full\(\)/);
@@ -508,7 +509,7 @@ test("답함 표시: answered의 본문 종류가 맞는 가장 가까운 앞선
 });
 
 test("메신저 창: 방 목록·타임라인·인라인 버튼·답함 표시 규칙이 main.js에 있다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.ok(!/SECT_KEY|collapsed\(|toggleSection|sec-ask|sec-rep|chatRow|askCard|heading\(/.test(src)); // 두 줄기·접기 구역은 없다
   assert.match(src, /\$\{k\[0\]\} · 답함/); // 답함 태그
   assert.match(src, /this\.nameRow\(t, e\.s, e\.it, null, Boolean\(e\.waiting\), !e\.head\)/); // 같은 보낸이가 이어지면 이름 줄을 줄인다
@@ -576,7 +577,7 @@ test("rememberNames: 오래된 것부터 버려 상한을 지킨다", () => {
 
 test("leaderName: 받은편지함·에이전트 목록·inbox.cjs가 같은 블록을 쓴다", () => {
   const block = (f) => {
-    const src = fs.readFileSync(path.join(__dirname, f), "utf8");
+    const src = fs.readFileSync(path.join(__dirname, f), "utf8").replace(/\r\n/g, "\n");
     const a = src.indexOf("// leaderName:begin"), b = src.indexOf("// leaderName:end");
     assert.ok(a >= 0 && b > a, f);
     return src.slice(a, b);
@@ -589,10 +590,10 @@ test("leaderName: 받은편지함·에이전트 목록·inbox.cjs가 같은 블�
 });
 
 test("leader-tabs·work: 리더 이름을 hc 이름(lead-x) 그대로 그리지 않는다", () => {
-  const tabs = fs.readFileSync(path.join(__dirname, "../mods/leader-tabs/main.js"), "utf8");
+  const tabs = fs.readFileSync(path.join(__dirname, "../mods/leader-tabs/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(tabs, /return leaderName\(term\.name, term, namesMemo\(\)\)/);
   assert.doesNotMatch(tabs, /term\.name \|\| term\.address/);
-  const work = fs.readFileSync(path.join(__dirname, "../mods/work/main.js"), "utf8");
+  const work = fs.readFileSync(path.join(__dirname, "../mods/work/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(work, /const label = sessionLabel\(s\)/);
   // The rule itself: a closed or untitled leader reads as its task, a titled one as its title.
   assert.equal(NAMES.leaderName("lead-po-inbox", { name: "lead-po-inbox", address: "t1", title: "리더 · 받은편지함 정리" }, {}), "받은편지함 정리");
@@ -602,7 +603,7 @@ test("leader-tabs·work: 리더 이름을 hc 이름(lead-x) 그대로 그리지 
 // The scroll lists keep their place across presses: handles the view owns, tracked on both lists, and an anchor after every press that
 // changes a card's or a section's height. (The kit gives no way to read a pixel offset, so this checks the wiring, not the pixels.)
 test("받은편지함: 타임라인은 새 글을 따라 맨 아래로 가고, 올려 읽는 중이면 붙든다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /ScrollHandle\.new\(\)/);
   assert.match(src, /id\("inbox-list"\)[^\n]*/);
   assert.match(src, /track_scroll\(this\.scroll\)/);
@@ -747,7 +748,7 @@ test("poProject·poList: 칩 이름은 탭 이름 'PO · <프로젝트>'의 프�
 });
 
 test("main.js: 칩 줄에 PO 머리말, 이름 'PO 모름', 세션 제목은 툴팁", () => {
-  const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /const OTHER_LABEL = "PO 모름"/);
   assert.match(src, /child\("PO"\)\)\n\s+\.children\(v\.tabs/);
   assert.match(src, /세션: \$\{x\.title\}/);
@@ -847,7 +848,7 @@ test("collect: po/<id>.jsonl을 PO별로 읽고, 옛 po.jsonl과 잘못된 파�
 
 test("chat 블록: main.js가 inbox.cjs와 한 글자도 다르지 않은 같은 블록을 쓴다", () => {
   const block = (f) => {
-    const src = fs.readFileSync(path.join(__dirname, f), "utf8");
+    const src = fs.readFileSync(path.join(__dirname, f), "utf8").replace(/\r\n/g, "\n");
     const a = src.indexOf("// chat:begin"), b = src.indexOf("// chat:end");
     assert.ok(a >= 0 && b > a, f);
     return src.slice(a, b);
@@ -996,7 +997,7 @@ test("needsNewline·strayBreak: 위젯이 줄바꿈을 이미 넣었으면 더 �
 });
 
 test("main.js: 채팅 입력은 Textarea, Enter는 붙여넣고 hc keys enter까지, 막힌 PO에는 Enter를 누르지 않는다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /TextareaState\.new\(/);
   assert.match(src, /Textarea\.new\(this\.chat\)/);
   assert.match(src, /hc\(\["keys", po, "enter"\]\)/);
@@ -1010,7 +1011,7 @@ test("main.js: 채팅 입력은 Textarea, Enter는 붙여넣고 hc keys enter까
 });
 
 test("main.js: 창은 고른 PO 하나만 보이고(카드·보고·@ 목록·채팅 대상·PO 답글), 이름은 'PO 데스크'다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /const PICK_KEY = "inbox\.po"/);
   assert.match(src, /choosePick\(pos, last, hasOther\)/);
   assert.match(src, /leaderMenu\(this\.liveTerms\(\), namesMemo\(\), q\.query, 8, this\.view\(\)\.pick\)/);
@@ -1050,7 +1051,7 @@ test("poFile: 앞뒤 공백이 낀 id는 다듬은 id로 파일을 만든다", (
 });
 
 test("main.js: Enter 전송은 imeHold를 거치고, PO 라벨이 없으면 안내를 보인다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /imeHold\(value, this\.editAt, this\.heldAt, now\)/); // 글자가 바뀐 때 기준(위젯이 넣은 줄바꿈은 편집이 아니다)
   assert.match(src, /id\("po-hint"\)/);
   assert.match(src, /\.child\(this\.picker\(t, v\)\)/); // 전체 보기는 PO가 0개여도 안내를 그린다
@@ -1064,7 +1065,7 @@ test("holdShown: 붙든 Enter가 둘째 Enter를 기다리는 동안만 안내�
 });
 
 test("main.js: 붙든 Enter 안내를 그리고, PO를 고르거나 보내면 heldAt을 비운다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /한 번 더 Enter로 보냅니다/);
   assert.match(src, /pickPo\(id, c\) \{\n\s+this\.heldAt = 0;/);
   assert.match(src, /sendChat\(c\) \{\n\s+this\.sentAt = Date\.now\(\);\n\s+this\.heldAt = 0;/);
@@ -1111,7 +1112,7 @@ test("main.js: 칩은 대기 중인 결정(decision) 말풍선에만, 같은 sen
 });
 
 test("decisionOptions: inbox.cjs와 main.js의 chat 블록이 같다", () => {
-  const cut = (f) => { const s = fs.readFileSync(path.join(__dirname, f), "utf8"); const a = s.indexOf("function decisionOptions("); return s.slice(a, s.indexOf("\n}\n", a)); };
+  const cut = (f) => { const s = fs.readFileSync(path.join(__dirname, f), "utf8").replace(/\r\n/g, "\n"); const a = s.indexOf("function decisionOptions("); return s.slice(a, s.indexOf("\n}\n", a)); };
   assert.equal(cut("../mods/inbox/main.js"), cut("../mods/inbox/inbox.cjs"));
 });
 
@@ -1527,7 +1528,7 @@ test("timeline: 같은 시각·같은 글이 둘이어도 key(=요소 id)가 겹
 });
 test("main.js: chat 블록(필터 함수 포함)은 inbox.cjs와 같다", () => {
   const cut = (t) => t.slice(t.indexOf("// chat:begin"), t.indexOf("// chat:end"));
-  const cjs = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8");
+  const cjs = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8").replace(/\r\n/g, "\n");
   assert.equal(cut(mainSrc()), cut(cjs));
   assert.match(cut(mainSrc()), /function filterEntries/);
 });
@@ -1735,6 +1736,7 @@ test("po-hook: 폴더를 쓸 수 없어도 run은 던지고 진입점은 0으로
   assert.equal(bad.status, 0); assert.equal(bad.stdout, ""); assert.equal(bad.stderr, "");
   const junk = spawnSync(process.execPath, [script], { input: "not json", encoding: "utf8", env: { ...env, HERDR_INBOX_DIR: dir } });
   assert.equal(junk.status, 0); assert.equal(junk.stdout, "");
+  if (!POSIX) return; // 가짜 hc가 #!/bin/sh 스크립트라 Windows에서는 실행되지 않는다: 끝까지 가는 부분만 건너뛴다
   // 가짜 hc로 끝까지: 한 줄이 쓰인다
   const good = spawnSync(process.execPath, [script], { input: JSON.stringify(STOP), encoding: "utf8", env: { ...env, HERDR_INBOX_DIR: path.join(dir, "inbox") } });
   assert.equal(good.status, 0); assert.equal(good.stdout, "");
@@ -1825,7 +1827,7 @@ test("po-hook: 쓰는 파일은 0600이고(이미 있던 파일도 조인다), 1
   const file = path.join(dir, "devnotes.jsonl");
   fs.writeFileSync(file, '{"a":1}\n', { mode: 0o644 });
   HOOK.appendLine(file, '{"b":2}\n');
-  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  if (POSIX) assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   assert.equal(fs.readFileSync(file, "utf8"), '{"a":1}\n{"b":2}\n');
   const row = JSON.stringify({ k: "x".repeat(1000) }) + "\n";
   fs.writeFileSync(file, row.repeat(Math.ceil(HOOK.FILE_MAX / row.length) + 5));
@@ -1834,7 +1836,7 @@ test("po-hook: 쓰는 파일은 0600이고(이미 있던 파일도 조인다), 1
   assert.ok(text.length <= HOOK.KEEP + 20, `줄어듦 ${text.length}`);
   assert.ok(text.endsWith('{"last":1}\n'));
   for (const l of text.trim().split("\n")) JSON.parse(l); // 잘린 줄이 남지 않는다
-  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  if (POSIX) assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   assert.deepEqual(fs.readdirSync(dir), ["devnotes.jsonl"]); // 임시 파일이 남지 않는다
 });
 
@@ -1959,7 +1961,7 @@ test("typingRow·full: ··· 말풍선은 모든 필터에서 그리고, 안 �
   assert.ok(typingAt > 0 && typingAt < keyAt); // 따라가기 키를 만들기 전에 붙이되
   assert.ok(!/typingNow|typingRow/.test(full.slice(keyAt))); // 키·안 읽은 것·seenNext는 건드리지 않는다
   assert.ok(!/at\.set\([^)]*typing/.test(full));
-  const cjs = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8");
+  const cjs = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8").replace(/\r\n/g, "\n");
   assert.ok(!/typingNow|isWorking/.test(cjs.slice(0, cjs.indexOf("// chat:begin")))); // 순수 블록 안에만 있다
 });
 

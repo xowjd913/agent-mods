@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const I = require("../mods/inbox/inbox.cjs");
 
-const MAIN = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+const MAIN = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
 const ROOT = "/app";
 const PIC = `${ROOT}/data/inbox/img/ab12.png`;
 
@@ -355,7 +355,7 @@ test("R17: boldRanges is bounded (long lines, many markers)", () => {
 
 test("R17: the mod copy of boldRanges is the same code, and md() paints a tint behind each run of the same string", () => {
   const grab = (src) => src.slice(src.indexOf("function boldRanges(md)"), src.indexOf("// A message text as Markdown for a TextView"));
-  const CJS = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8");
+  const CJS = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8").replace(/\r\n/g, "\n");
   assert.equal(grab(MAIN), grab(CJS));
   const md = MAIN.slice(MAIN.indexOf("  md(id, src, t) {"), MAIN.indexOf("  text(id, html) {"));
   assert.match(md, /const m = mdText\(src\);/);
@@ -953,7 +953,7 @@ test("R22 diag: a settle or clear paints nothing and never calls notify; only a 
 });
 
 test("R22: no selection overlay machinery is left in main.js or inbox.cjs; the pointer and list handlers still clear selections", () => {
-  const CJS = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8");
+  const CJS = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8").replace(/\r\n/g, "\n");
   for (const [name, src] of [["main.js", MAIN], ["inbox.cjs", CJS]]) {
     assert.doesNotMatch(src, /hlSkip|dropHl|mdSeen|ui\.hl\b|HL_ECHO_MS/, `${name}: no overlay state`);
     assert.doesNotMatch(src, /tintHex\([^)]*"sel"\)|tintWarn\([^)]*"sel"\)/, `${name}: no selection tint call`);

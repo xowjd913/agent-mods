@@ -2,6 +2,7 @@
 // whether a drag-select survives in the real app, whether image() takes an absolute path) cannot be tested here; these cover the rules
 // behind them and the shape of the code that uses them.
 const test = require("node:test");
+const POSIX = process.platform !== "win32"; // Windows has no POSIX file modes: only the mode asserts are skipped there
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -9,7 +10,7 @@ const path = require("node:path");
 const I = require("../mods/inbox/inbox.cjs");
 const HOOK = require("../mods/inbox/po-hook.cjs");
 
-const MAIN = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+const MAIN = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "inbox-img-"));
 // a fake but sniffable PNG: signature, IHDR with w x h, padded
 const png = (w = 30, h = 20, pad = 0) => {
@@ -198,8 +199,8 @@ test("saveImage: 0600 file in a 0700 folder under <root>/data/inbox/img, same by
   try {
     const p = I.saveImage(png(10, 10), d, Date.now());
     assert.ok(p && I.imgOk(d, p), p);
-    assert.equal(fs.statSync(p).mode & 0o777, 0o600);
-    assert.equal(fs.statSync(path.dirname(p)).mode & 0o777, 0o700);
+    if (POSIX) assert.equal(fs.statSync(p).mode & 0o777, 0o600);
+    if (POSIX) assert.equal(fs.statSync(path.dirname(p)).mode & 0o777, 0o700);
     assert.equal(I.saveImage(png(10, 10), d, Date.now()), p);
     assert.notEqual(I.saveImage(png(10, 10, 1), d, Date.now()), p);
     assert.equal(I.saveImage(Buffer.from("plain text, not an image at all"), d), null);
@@ -234,7 +235,7 @@ test("transcriptImages: the images of the prompt with this id (else of the text)
     fs.writeFileSync(tr, userTurn("p1", "첫 질문", [png(5, 5, 1)]) + tline({ type: "assistant", message: { content: [{ type: "text", text: "네" }] } }) + userTurn("p2", "이거 봐줘", [png(6, 6, 2), png(7, 7, 3)]) + "garbage line\n");
     const r = I.transcriptImages(tr, "p2", "이거 봐줘", d, Date.now());
     assert.equal(r.length, 2);
-    for (const p of r) { assert.ok(I.imgOk(d, p)); assert.equal(fs.statSync(p).mode & 0o777, 0o600); }
+    for (const p of r) { assert.ok(I.imgOk(d, p)); if (POSIX) assert.equal(fs.statSync(p).mode & 0o777, 0o600); }
     const r1 = I.transcriptImages(tr, "p1", "", d, Date.now());
     assert.equal(r1.length, 1);
     assert.deepEqual(I.transcriptImages(tr, "nope", "", d), []); // no id and no text -> nothing guessed
@@ -314,12 +315,12 @@ test("hook run: a prompt with '[Image #N]' spawns the image worker; one without 
     const lines = fs.readFileSync(r.file, "utf8").trim().split("\n").map((x) => JSON.parse(x));
     assert.ok(lines.some((x) => x.kind === "img" && x.pid === "p1" && x.imgs.length === 1));
     assert.equal(spawned.length, 1);
-    assert.equal(fs.statSync(r.file).mode & 0o777, 0o600);
+    if (POSIX) assert.equal(fs.statSync(r.file).mode & 0o777, 0o600);
   } finally { if (prev === undefined) delete process.env.HERDR_INBOX_DIR; else process.env.HERDR_INBOX_DIR = prev; if (prevApp === undefined) delete process.env.HERDR_APP_HOME; else process.env.HERDR_APP_HOME = prevApp; fs.rmSync(d, { recursive: true, force: true }); }
 });
 
 test("chat block of main.js is identical to inbox.cjs (the pure picture / pin / bubble code included)", () => {
-  const CJS = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8");
+  const CJS = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8").replace(/\r\n/g, "\n");
   const cut = (s) => s.slice(s.indexOf("// chat:begin"), s.indexOf("// chat:end"));
   assert.equal(cut(MAIN), cut(CJS));
   assert.ok(/function bubbleWidth/.test(cut(MAIN)) && /function pinStep/.test(cut(MAIN)) && /const quietNow/.test(cut(MAIN)));
@@ -358,7 +359,7 @@ test("main.js: selection survives background redraws (quiet gate, unchanged data
 });
 
 test("the pure chat block never reaches for Node modules (a mod cannot require them)", () => {
-  const CJS = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8");
+  const CJS = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8").replace(/\r\n/g, "\n");
   const blk = CJS.slice(CJS.indexOf("// chat:begin"), CJS.indexOf("// chat:end"));
   assert.ok(!/require\(/.test(blk));
 });
@@ -387,7 +388,7 @@ test("diagAppend: 0600 file, one line each, cut long lines, rotates past the cap
   const root = tmp();
   const f = I.diagAppend(["a one", "b\ntwo", "x".repeat(1000)], root);
   assert.equal(f, path.join(root, "data", "inbox", "diag.log"));
-  assert.equal(fs.statSync(f).mode & 0o777, 0o600);
+  if (POSIX) assert.equal(fs.statSync(f).mode & 0o777, 0o600);
   const lines = fs.readFileSync(f, "utf8").trimEnd().split("\n");
   assert.equal(lines.length, 3);
   assert.equal(lines[1], "b two");
