@@ -32,12 +32,10 @@ const CHAT_KEY = "inbox.chat"; // the lines the person sent through the chat box
 const MAX_CHAT = 100, MAX_ENTRIES = 80; // MAX_ENTRIES: the newest timeline entries drawn (a waiting one is always drawn)
 const SEEN_KEY = "inbox.seen"; // {<room id>: ms of the newest message the person had on screen when last opening that room}
 const WIDE_MIN = 520; // the window is two columns (rooms | room) from this width, else the rooms are a strip on top
-const ROOM_W = 168;
+const ROOM_W = 168, SLIM_W = 58; // the window's room list / the dock's slim room column (initial circle + badges, the project as the tooltip)
 const PASTE_SETTLE_MS = 350; // the PO terminal takes the paste before Enter is pressed
 const OPEN_KEY = "inbox.expanded"; // cards the person opened ("자세히"), shared so they stay open across re-renders and window reopens
 const MAX_OPEN = 60;
-const FOCUS_KEY = "inbox.focus"; // "<leader>|<report time>" the window should show first and open (set by a pane row), "" for none
-const MAX_ROWS = 20; // pane rows below the pinned asks; the rest is in the window
 const NO_PO = "이 리더의 PO 터미널을 찾지 못했습니다(리더 터미널의 부모가 role=po 라벨이어야 합니다).";
 const OTHER_LABEL = "PO 모름";
 const OTHER_TIP = "PO를 알 수 없는 리더와 보고: 이미 닫힌 리더인데 보고 줄에 po가 없고 그 PO도 지금 없는 것(이 변경 전에 쓴 보고 줄 등). 여기서는 채팅을 보낼 수 없습니다";
@@ -328,8 +326,8 @@ function rememberLeaders() {
   } catch {}
 }
 
-// Two shapes of one mod: the small summary pane (lane counts, opens the window) and the full chat view, which runs in a floating
-// window (props().mode === "window") and works the same as a pane.
+// One view, two places: the Dock pane (slim room column + timeline + chat box, "창 열기") and the floating window (full room list), which
+// runs as an overlay (props().mode === "window"). Same timeline and chat box in both.
 export default class Inbox extends View {
   init(_props, cx) {
     this.windowed = safeProps().mode === "window";
@@ -363,20 +361,19 @@ export default class Inbox extends View {
     this.chat.on("submit", (e, c) => { if (this.menu) this.pickMenu(this.menu.sel, c); else this.enterBox(e?.shift ? "newline" : "send", c); });
     this.pickedAt = 0; // a menu pick just now: the Enter that made it must not also send
     this.tlSeen = ""; // tlKey of the timeline last drawn (follow-the-newest)
-    this.focusDone = ""; // the focus key already scrolled to
+    this.drawnAt = 0; // the last time render ran: a view that is not drawn (hidden dock / window) is not reading
     // The scroll position of both lists is held by handles the view owns (not only by the element id), and every press that changes the
     // height of a card or a section asks for that spot to stay in view (see reveal).
-    this.scroll = null; // the window's list
-    this.rowsScroll = null; // the pane's list
-    try { this.scroll = ScrollHandle.new(); this.rowsScroll = ScrollHandle.new(); } catch {}
+    this.scroll = null; // the timeline
+    try { this.scroll = ScrollHandle.new(); } catch {}
     this.at = new Map(); // spot key -> index of that child in the window's list, rebuilt on every frame
     if (checking()) return;
     this.load(cx);
-    // The always-on summary pane owns the slow refresh and the badge; the window refreshes faster while it is open.
+    // The always-on Dock pane owns the slow refresh and the badge; the window refreshes faster while it is open.
     cx.timer.every(this.windowed ? WINDOW_REFRESH_MS : PANE_REFRESH_MS, (cx) => this.load(cx));
   }
 
-  // The number of leaders that wait on a decision, on the app icon badge. Only the summary pane sets it (the window would repeat
+  // The number of leaders that wait on a decision, on the app icon badge. Only the Dock pane sets it (the window would repeat
   // the same number); tabs-mine counts the wait labels itself for the tab-row button (even with the panel closed).
   badge() {
     if (this.windowed) return;
@@ -428,23 +425,6 @@ export default class Inbox extends View {
     cx.notify();
     try { cx.timer.after(1800, (c) => { if (this.copied === key) { this.copied = null; c.notify(); } }); } catch {}
   }
-
-  // A pane row: open that card (expanded) and show the window with it first. The window reads FOCUS_KEY, so it also follows a row
-  // pressed while it is already open (at its next refresh at the latest). Without an item the window just opens.
-  openCard(s, it) {
-    try {
-      if (it) {
-        const cur = { ...(shared(OPEN_KEY) ?? {}) };
-        const k = this.cardKey(s, it);
-        if (it.long && !cur[k]) { cur[k] = 1; const keys = Object.keys(cur); for (const old of keys.slice(0, Math.max(0, keys.length - MAX_OPEN))) delete cur[old]; setShared(OPEN_KEY, cur); }
-      }
-      setShared(FOCUS_KEY, it ? this.cardKey(s, it) : "");
-      if (it) setShared(PICK_KEY, leaderOwner(this.liveTerms(), s.leader, s.terminal, s.po)); // the card is in its leader's room
-    } catch {}
-    this.openWindow();
-  }
-  focusKey() { try { return String(shared(FOCUS_KEY) ?? ""); } catch { return ""; } }
-  clearFocus() { try { setShared(FOCUS_KEY, ""); } catch {} }
 
   openWindow() {
     this.msg = null;
@@ -535,15 +515,16 @@ export default class Inbox extends View {
     const tabs = rooms.map((r) => {
       const entries = room(r.id);
       if (r.id === pick) raw = entries;
-      return { ...r, n: all.filter((a) => a.owner === r.id).length, unread: this.windowed && r.id === pick ? 0 : unreadCount(entries, seen[r.id]) };
+      return { ...r, n: all.filter((a) => a.owner === r.id).length, unread: r.id === pick ? 0 : unreadCount(entries, seen[r.id]) };
     });
     const entries = groupTimeline(raw.filter((e, i) => i >= raw.length - MAX_ENTRIES || e.waiting));
     return { terms, tabs, pick, raw, entries, asks: all.filter((a) => a.owner === pick), reports: reps.filter((r) => r.owner === pick) };
   }
 
-  // Remembers that the person has the picked room's newest message on screen (the window only: the dock does not read a room).
+  // Remembers that the person has the picked room's newest message on screen. Both the window and the dock show a room, so both
+  // count — but only while the view is being drawn (a hidden dock keeps loading; that is not reading).
   markSeen() {
-    if (!this.windowed) return;
+    if (Date.now() - this.drawnAt > (this.windowed ? WINDOW_REFRESH_MS : PANE_REFRESH_MS) * 2 + 2000) return;
     try {
       const v = this.view();
       const next = seenNext(shared(SEEN_KEY) ?? {}, v.pick, v.raw);
@@ -767,10 +748,10 @@ export default class Inbox extends View {
       .child("PO 터미널에 role=po, po=<id> 라벨을 달면 PO별로 나뉩니다. 지금은 PO가 없어 채팅을 보낼 수 없습니다.");
   }
 
-  // The count badges of a room: unread (green, the window only) and waiting leaders (red).
+  // The count badges of a room: unread (green) and waiting leaders (red).
   roomBadges(t, x) {
     return [
-      x.unread > 0 && this.windowed ? div().flex_none().px(5).h(15).rounded(8).bg(t.working).flex().items_center().text_size(10).font_semibold().text_color(t.chrome).child(String(x.unread)) : null,
+      x.unread > 0 ? div().flex_none().px(5).h(15).rounded(8).bg(t.working).flex().items_center().text_size(10).font_semibold().text_color(t.chrome).child(String(x.unread)) : null,
       x.n > 0 ? div().flex_none().px(5).h(15).rounded(8).bg(t.blocked + "26").flex().items_center().text_size(10).text_color(t.blocked).child(String(x.n)) : null,
     ].filter(Boolean);
   }
@@ -791,9 +772,25 @@ export default class Inbox extends View {
       }));
   }
 
+  // The dock's room column: one slim cell per room — the initial circle with its badges under it. The project is the tooltip.
+  slimRooms(t, v) {
+    return v_flex().id("po-rooms").flex_none().w(SLIM_W).h_full().min_h(0).py(6).px(4).gap(3).border_r(1).border_color(t.border).overflow_y_scrollbar()
+      .children(v.tabs.map((x) => {
+        const on = x.id === v.pick;
+        const color = x.id === PO_OTHER ? t.dim : tint(t, x.id);
+        const badges = this.roomBadges(t, x);
+        return v_flex().id(`po-${x.id}`).flex_none().items_center().py(5).gap(3).rounded(8).cursor_pointer().on_mouse_down("left", stop)
+          .bg(on ? t.selected : t.chrome).hover((s) => s.bg(on ? t.selected : t.hover)).on_click((_e, c) => this.pickPo(x.id, c))
+          .tooltip(x.id === PO_OTHER ? OTHER_TIP : `${x.label} · po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
+          .child(this.circle(t, color, x.id === PO_OTHER ? "?" : String(x.label).slice(0, 1).toUpperCase()))
+          .child(div().w(SLIM_W - 10).truncate().text_center().text_size(9.5).text_color(on ? t.foreground : t.dim).child(x.label))
+          .when(badges.length > 0, (el) => el.child(h_flex().gap(3).items_center().children(badges)));
+      }));
+  }
+
   // The room list (the wide window): one row per room — a colored initial circle, the project, its badges.
   roomList(t, v) {
-    return v_flex().id("po-rooms").flex_none().w(ROOM_W).min_h(0).p(6).gap(3).border_r(1).border_color(t.border).overflow_y_scrollbar()
+    return v_flex().id("po-rooms").flex_none().w(ROOM_W).h_full().min_h(0).p(6).gap(3).border_r(1).border_color(t.border).overflow_y_scrollbar()
       .children(v.tabs.map((x) => {
         const on = x.id === v.pick;
         const color = x.id === PO_OTHER ? t.dim : tint(t, x.id);
@@ -968,71 +965,21 @@ export default class Inbox extends View {
         .when(Boolean(a), (el) => el.child(this.askActions(t, a, cx))));
   }
 
-  render(cx) { return this.windowed ? this.full(cx) : this.summary(cx); }
-
-  // One pane row: leader, kind badge, first line (ellipsized). A press opens the window at this item. Plain text: the cards in the window
-  // are the selectable ones.
-  paneRow(t, s, it, kind, ask) {
-    const parts = it ? [it.head, it.lead].filter((x, n, a) => x && a.indexOf(x) === n) : [];
-    const text = (parts.join(" — ") || (it?.title ?? "")) || "보고 기록 없이 대기 표시만 있습니다";
-    const key = this.cardKey(s, it);
-    return h_flex().id(`row-${key}`).flex_none().h(30).px(8).gap(7).items_center().rounded(8).cursor_pointer()
-      .bg(ask ? t.blocked + "14" : t.raised).border(1).border_color(ask ? t.blocked + "55" : t.border)
-      .hover((x) => x.bg(t.hover)).on_click((_e, c) => { this.openCard(s, it); c.notify(); }).tooltip("누르면 이 보고를 창에서 엽니다")
-      .child(div().flex_none().w(74).truncate().text_size(12).font_semibold().text_color(tint(t, s.leader)).child(shortName(s.leader)))
-      .child(this.kindTag(t, it, kind ?? it?.kind, ask))
-      .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(text))
-      .child(div().flex_none().text_size(10.5).text_color(t.dim).child(it?.ts ? ago(it.ts) : ""));
-  }
-
-  // The small pane: ONE list, no category step. Open asks pinned on top, then the latest reports; the counts are small badges in the header.
-  summary(cx) {
-    const t = theme();
-    const v = this.view();
-    const asks = v.asks;
-    const all = v.reports;
-    const rows = all.slice(0, MAX_ROWS);
-    const badge = (label, n, color) => h_flex().flex_none().h(18).px(7).gap(4).items_center().rounded(9).text_size(10.5)
-      .bg(n > 0 && color ? color + "26" : t.raised).text_color(n > 0 && color ? color : t.muted)
-      .child(label).child(div().font_semibold().child(String(n)));
-    const list = [];
-    asks.forEach((a) => list.push(this.paneRow(t, a.s, a.item, a.kind, true)));
-    rows.forEach((r) => list.push(this.paneRow(t, r.s, r.it, r.it.kind, false)));
-    if (!list.length) list.push(div().px(4).text_size(12).text_color(t.dim).child(this.data ? "받은 보고가 없습니다." : "불러오는 중…"));
-    if (all.length > rows.length) {
-      list.push(div().id("inbox-more").flex_none().px(8).h(26).flex().items_center().rounded(8).cursor_pointer().text_size(11.5).text_color(t.muted)
-        .hover((x) => x.bg(t.hover).text_color(t.foreground)).on_click((_e, c) => { try { setShared(FOCUS_KEY, ""); } catch {} this.openWindow(); c.notify(); })
-        .child(`나머지 ${all.length - rows.length}개는 창에서 열 수 있습니다`));
-    }
-    return v_flex().id("inbox-summary").size_full().min_h(0).bg(t.chrome).p(12).gap(8)
-      .child(h_flex().items_center().gap(7)
-        .child(div().text_size(14).font_semibold().text_color(t.foreground).child("PO 데스크"))
-        .child(badge("결정", asks.length, t.blocked))
-        .child(badge("보고", all.length, null))
-        .child(div().flex_1())
-        .child(div().flex_none().text_size(11).text_color(t.dim).child(this.data ? ago(this.data.at) : "불러오는 중…"))
-        .child(this.button(t, "inbox-open", "창 열기", (c) => { this.clearFocus(); this.openWindow(); c.notify(); }, { tip: "PO 데스크 창을 엽니다" })))
-      .when(v.tabs.length > 1 || v.pick === PO_OTHER, (el) => el.child(this.picker(t, v)))
-      .when(Boolean(this.error), (el) => el.child(div().text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
-      .when(Boolean(this.msg), (el) => el.child(div().text_size(11.5).text_color(this.msg.bad ? t.blocked : t.working).child(this.msg.text)))
-      .child(v_flex().id("inbox-rows").flex_1().min_h(0).gap(4).overflow_y_scrollbar().mode("always").when(Boolean(this.rowsScroll), (el) => el.track_scroll(this.rowsScroll)).children(list));
-  }
+  render(cx) { return this.full(cx); }
 
   // The messenger view: rooms (one per PO) beside one room's timeline, and the chat box under it. Narrow: the rooms are a strip on top.
   full(cx) {
     const t = theme();
     const v = this.view();
-    const wide = !this.narrow;
+    this.drawnAt = Date.now();
+    const strip = this.windowed && this.narrow; // a narrow window: the rooms are a strip on top; the dock always has the slim column
     const blocks = [];
     const at = new Map(); // spot key -> index in blocks (the direct children of the scroll list)
     this.at = at;
-    const f = this.focusKey();
-    let focusAt = -1;
     v.entries.forEach((e) => {
       if (e.who !== "po" && e.who !== "me" && e.it) {
         const k = this.spot(e.s, e.it);
         at.set(k, blocks.length);
-        if (f && this.cardKey(e.s, e.it) === f) focusAt = blocks.length;
       }
       blocks.push(this.entryRow(t, e, v, cx));
     });
@@ -1049,12 +996,7 @@ export default class Inbox extends View {
         const o = this.scroll.offset(), vp = this.scroll.viewport_size(), ct = this.scroll.content_size();
         atEnd = atBottom(o.y, vp.height, ct.height);
       } catch {}
-      if (!f) this.focusDone = "";
-      if (f && focusAt >= 0 && this.focusDone !== f) {
-        this.focusDone = f;
-        const i = focusAt;
-        try { cx.timer.after(60, (c) => { try { this.scroll?.scroll_to_item(i); } catch {} }); } catch {}
-      } else if (!(f && focusAt >= 0) && tlFollow(this.tlSeen, key, atEnd)) {
+      if (tlFollow(this.tlSeen, key, atEnd)) {
         const last = blocks.length - 1;
         const go = () => { try { this.scroll?.scroll_to_item(last); } catch {} };
         go();
@@ -1062,11 +1004,12 @@ export default class Inbox extends View {
       }
     }
     this.tlSeen = key;
+    const waiting = v.tabs.reduce((n, x) => n + x.n, 0); // leaders waiting on a decision, over every room
     const head = v.pick === PO_OTHER ? OTHER_LABEL : v.tabs.find((x) => x.id === v.pick)?.label ?? "";
     const lines = v_flex().id("inbox-list").on_mouse_down("left", stop).flex_1().min_h(0).pb(8).overflow_y_scrollbar().mode("always")
       .when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks);
-    const room = v_flex().flex_1().min_w(0).min_h(0)
-      .when(wide && Boolean(head), (el) => el.child(h_flex().flex_none().h(30).px(14).gap(6).items_center().border_b(1).border_color(t.border)
+    const room = v_flex().flex_1().min_w(0).min_h(0).when(!strip, (el) => el.h_full()) // beside the rooms the column must fill the row (h_flex centers children)
+      .when(!strip && Boolean(head), (el) => el.child(h_flex().flex_none().h(30).px(14).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(head))
         .child(div().flex_none().text_size(10.5).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : `리더 ${new Set(v.raw.filter((e) => e.leader).map((e) => e.leader)).size}명`))))
       .child(lines)
@@ -1079,19 +1022,21 @@ export default class Inbox extends View {
       .child(h_flex().h(38).px(this.compact ? 10 : 14).flex_none().items_center().justify_between()
         .child(h_flex().gap(6).items_center()
           .child(div().text_size(15).font_semibold().text_color(t.foreground).child("PO 데스크"))
+          .when(!this.windowed && waiting > 0, (el) => el.child(this.tag(t, `대기 ${waiting}`, "blocked")))
           .child(div().id("inbox-refresh").p(3).rounded(5).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
             .on_mouse_down("left", stop).on_click((_e, c) => { this.gen++; this.busy = false; this.load(c); }).tooltip("새로고침")
             .child(this.busy ? svg(ICON("spinner")).size(13).spin(900) : div().text_size(14).child("↻"))))
         .child(h_flex().gap(8).items_center()
           .child(div().text_size(11).text_color(t.dim).child(this.data ? ago(this.data.at) : ""))
+          .when(!this.windowed, (el) => el.child(this.button(t, "inbox-open", "창 열기", (c) => { this.openWindow(); c.notify(); }, { tip: "PO 데스크 창을 엽니다" })))
           .when(this.windowed, (el) => el.child(div().id("inbox-close").p(4).rounded(5).text_color(t.dim).cursor_pointer().hover((x) => x.bg(t.hover).text_color(t.foreground))
-            .on_mouse_down("left", stop).on_click((_e, c) => { this.clearFocus(); try { closeOverlay(safeProps().overlay); } catch {} c.notify(); }).tooltip("닫기")
+            .on_mouse_down("left", stop).on_click((_e, c) => { try { closeOverlay(safeProps().overlay); } catch {} c.notify(); }).tooltip("닫기")
             .child(svg("mods/pane/close.svg").size(13))))))
-      .when(!wide, (el) => el.child(this.picker(t, v)))
-      .when(wide && !v.tabs.some((x) => x.id !== PO_OTHER), (el) => el.child(this.poHint(t)))
+      .when(strip, (el) => el.child(this.picker(t, v)))
+      .when(!strip && !v.tabs.some((x) => x.id !== PO_OTHER), (el) => el.child(this.poHint(t)))
       .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
       .when(Boolean(this.msg), (el) => el.child(div().id("inbox-msg").px(14).pb(6).text_size(11.5).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
         .on_mouse_down("left", stop).on_click((_e, c) => { this.msg = null; c.notify(); }).child(this.msg.text)))
-      .child(wide ? h_flex().flex_1().min_h(0).child(this.roomList(t, v)).child(room) : room);
+      .child(strip ? room : h_flex().flex_1().min_h(0).items_stretch().child(this.windowed ? this.roomList(t, v) : this.slimRooms(t, v)).child(room));
   }
 }

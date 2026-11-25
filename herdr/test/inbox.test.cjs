@@ -287,28 +287,40 @@ test("main.js: 카드 글자는 모두 선택 가능한 TextView이고, 눌러�
   assert.ok(!/linkChip|codeSpan/.test(src));
 });
 
-test("main.js: 오른쪽 칸은 분류 단계 없이 한 목록이고, 줄을 누르면 그 카드를 펼쳐 창을 연다", () => {
+test("main.js: 오른쪽 칸(Dock)도 창과 같은 메신저 화면이다: 좁은 방 칸 + 타임라인 + 채팅 상자, 창 열기 버튼", () => {
   const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
-  const sum = src.slice(src.indexOf("  summary(cx) {"), src.indexOf("  // The messenger view"));
-  assert.ok(sum.length > 200);
-  assert.ok(!/결정 필요|결과 보고|눌러서 채팅 창 열기/.test(sum)); // 분류 버튼·안내 줄이 없다
-  assert.ok(!/id\("inbox-summary"\)[^\n]*on_click/.test(sum) && !/\.on_click\(\(\) => this\.openWindow/.test(sum)); // 칸 전체 클릭 없음
-  assert.match(sum, /badge\("결정", asks\.length/); // 개수는 머리줄의 작은 표시
-  assert.match(sum, /badge\("보고", all\.length/);
-  assert.match(sum, /asks\.forEach\(\(a\) => list\.push\(this\.paneRow/); // 결정·확인이 맨 위
-  assert.match(sum, /const all = v\.reports;/); // 고른 PO의 보고 전부를 세고, 줄은 MAX_ROWS까지
-  assert.match(src, /const MAX_ROWS = 20;/);
-  assert.match(sum, /나머지 \$\{all\.length - rows\.length\}개는 창에서/);
-  const row = src.slice(src.indexOf("  paneRow("), src.indexOf("  // The small pane"));
-  assert.match(row, /on_click\(\(_e, c\) => \{ this\.openCard\(s, it\)/);
-  assert.match(row, /\.truncate\(\)/); // 한 줄로 줄임표
-  // 창은 공유 상태의 선택을 읽어 그 카드를 맨 앞에 둔다(스크롤 이동 API가 없다)
-  assert.match(src, /const FOCUS_KEY = "inbox\.focus"/);
-  assert.match(src, /openCard\(s, it\) \{[\s\S]*cur\[k\] = 1[\s\S]*setShared\(FOCUS_KEY, it \? this\.cardKey\(s, it\) : ""\)[\s\S]*this\.openWindow\(\)/);
-  assert.match(src, /this\.cardKey\(e\.s, e\.it\) === f/); // 창은 선택한 카드를 타임라인에서 찾아 한 번 보여 준다
-  assert.match(src, /clearFocus\(\); try \{ closeOverlay/); // 창을 닫으면 선택도 지운다
-  // 창 카드에는 여전히 카드 전체 클릭이 없다
-  assert.equal((src.match(/toggleOpen\(/g) ?? []).length, 2);
+  assert.ok(!/summary\(cx\)|paneRow|openCard|MAX_ROWS|rowsScroll|FOCUS_KEY|inbox-rows/.test(src)); // 카드 목록·칩 보기는 없다
+  assert.match(src, /render\(cx\) \{ return this\.full\(cx\); \}/); // 창과 Dock이 같은 그림
+  assert.match(src, /const strip = this\.windowed && this\.narrow;/); // 위쪽 띠는 좁은 창에서만, Dock(460px)은 좁은 방 칸
+  assert.match(src, /this\.windowed \? this\.roomList\(t, v\) : this\.slimRooms\(t, v\)/);
+  assert.match(src, /const SLIM_W = 58|SLIM_W = 58/);
+  const slim = src.slice(src.indexOf("  slimRooms("), src.indexOf("  // The room list (the wide window)"));
+  assert.match(slim, /this\.circle\(t, color,/); // 이니셜 동그라미
+  assert.match(slim, /this\.roomBadges\(t, x\)/); // 안 읽은 수·대기 수
+  assert.match(slim, /\.tooltip\(/); // 프로젝트 이름은 툴팁
+  assert.match(slim, /\.on_click\(\(_e, c\) => this\.pickPo\(x\.id, c\)\)/);
+  assert.match(src, /this\.button\(t, "inbox-open", "창 열기"/); // Dock 머리줄의 창 열기
+  assert.match(src, /\.when\(!this\.windowed, \(el\) => el\.child\(this\.button\(t, "inbox-open"/);
+  assert.match(src, /대기 \$\{waiting\}/); // 머리줄의 대기 수 표시
+  // Dock이 방을 보여 주는 동안 읽은 것으로 친다(그려지지 않는 동안은 아니다)
+  assert.match(src, /this\.drawnAt = Date\.now\(\);/);
+  assert.match(src, /markSeen\(\) \{\s*if \(Date\.now\(\) - this\.drawnAt >/);
+  assert.ok(!/if \(!this\.windowed\) return;\s*\n\s*try \{\s*\n\s*const v = this\.view/.test(src));
+  assert.match(src, /unread: r\.id === pick \? 0 : unreadCount/);
+});
+
+// Regression: h_flex() centers its children on the cross axis, so a column placed in it takes only its content height and the timeline
+// (flex_1 + min_h(0)) collapsed to nothing — the room showed a header and the chat box with an empty gap above. The row stretches and
+// both columns are h_full.
+test("main.js: 방 목록과 방 칸이 행의 전체 높이를 채운다(타임라인이 0 높이로 접히지 않는다)", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  assert.match(src, /h_flex\(\)\.flex_1\(\)\.min_h\(0\)\.items_stretch\(\)/);
+  assert.match(src, /const room = v_flex\(\)\.flex_1\(\)\.min_w\(0\)\.min_h\(0\)\.when\(!strip, \(el\) => el\.h_full\(\)\)/);
+  assert.match(src, /id\("po-rooms"\)\.flex_none\(\)\.w\(ROOM_W\)\.h_full\(\)/);
+  assert.match(src, /id\("po-rooms"\)\.flex_none\(\)\.w\(SLIM_W\)\.h_full\(\)/);
+  // the timeline itself keeps taking the rest of the column above the pinned chat box
+  assert.match(src, /id\("inbox-list"\)[^\n]*\.flex_1\(\)\.min_h\(0\)/);
+  assert.match(src, /\.child\(lines\)\s*\n\s*\.child\(this\.chatBox\(t, v\)\)/);
 });
 
 test("답함 표시: 실제 lead-sched-acct 순서(결정·답, 확인·답, 결정·답)는 모두 답함이고 열린 것이 없다", () => {
@@ -371,8 +383,8 @@ test("메신저 창: 방 목록·타임라인·인라인 버튼·답함 표시 �
   for (const id of ["link-", "ok-", "write-", "send-"]) assert.ok(act.includes(id));
   assert.match(act, /kind === "verify"/); // 확인 완료는 verify에만
   assert.match(src, /roomList\(t, v\) \{[\s\S]*border_r\(1\)/); // 왼쪽 방 목록
-  assert.match(src, /\.child\(wide \? h_flex\(\)\.flex_1\(\)\.min_h\(0\)\.child\(this\.roomList\(t, v\)\)\.child\(room\) : room\)/);
-  assert.match(src, /\.when\(!wide, \(el\) => el\.child\(this\.picker\(t, v\)\)\)/); // 좁으면 위쪽 띠
+  assert.match(src, /\.child\(strip \? room : h_flex\(\)\.flex_1\(\)\.min_h\(0\)\.items_stretch\(\)/);
+  assert.match(src, /\.when\(strip, \(el\) => el\.child\(this\.picker\(t, v\)\)\)/); // 좁은 창은 위쪽 띠
   assert.match(src, /const WIDE_MIN = 520/);
   assert.match(src, /e\.who === "me"[\s\S]*items_end\(\)/); // 내 글은 오른쪽
   assert.match(src, /this\.circle\(t, color, letter\)|circle\(t, color, letter\) \{/);
@@ -460,7 +472,6 @@ test("받은편지함: 타임라인은 새 글을 따라 맨 아래로 가고, �
   assert.match(src, /ScrollHandle\.new\(\)/);
   assert.match(src, /id\("inbox-list"\)[^\n]*/);
   assert.match(src, /track_scroll\(this\.scroll\)/);
-  assert.match(src, /id\("inbox-rows"\)[^\n]*track_scroll\(this\.rowsScroll\)/);
   assert.match(src, /atBottom\(o\.y, vp\.height, ct\.height\)/); // 마지막 레이아웃의 값으로 바닥 여부를 읽는다
   assert.match(src, /tlFollow\(this\.tlSeen, key, atEnd\)/);
   assert.match(src, /scroll_to_item\(last\)/); // ScrollHandle에는 scroll_to_bottom이 없다
