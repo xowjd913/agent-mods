@@ -2040,15 +2040,25 @@ test("usageLine: 선 막대 폭은 0이면 0, 0보다 크면 최소 폭, 넘쳐�
   assert.ok(I.usageFill(30) > 0 && I.usageFill(30) < I.usageFill(100));
 });
 
-test("usageLine: 툴팁은 오늘이면 시각만, 다른 날이면 월/일 시각의 리셋 시각을 보여 준다", () => {
-  const at = (d, h, m) => new Date(2026, 10, d, h, m).getTime(); // 현지 시각
-  const now = at(25, 14, 0);
-  assert.equal(I.usageReset(at(25, 19, 5), now), "19:05");
-  assert.equal(I.usageReset(at(30, 22, 0), now), "11/30 22:00");
-  assert.equal(I.usageReset(0, now), "");
-  const rows = [{ label: "5h", percent: 54, resetsAt: at(25, 19, 20) }, { label: "7d", percent: 34, resetsAt: at(30, 22, 0) }];
-  assert.equal(I.usageTip(rows, now), "5h 리셋 19:20 · 7d 리셋 11/30 22:00");
-  assert.equal(I.usageTip([{ label: "5h", percent: 1, resetsAt: 0 }], now), "리셋 시각 정보가 없습니다");
+test("usageLine: 툴팁은 초기화까지 남은 일·시간·분을 보여 주고 0인 단위는 뺀다", () => {
+  const now = new Date(2026, 10, 25, 14, 0).getTime();
+  const MIN = 60000, HOUR = 60 * MIN, DAY = 24 * HOUR;
+  assert.equal(I.usageLeft(now + 2 * HOUR + 15 * MIN, now), "2시간 15분");
+  assert.equal(I.usageLeft(now + 5 * DAY + 4 * HOUR + 41 * MIN, now), "5일 4시간 41분");
+  assert.equal(I.usageLeft(now + 5 * DAY + 41 * MIN, now), "5일 41분");
+  assert.equal(I.usageLeft(now + 3 * HOUR, now), "3시간");
+  assert.equal(I.usageLeft(now + 59 * MIN + 59000, now), "59분");
+  assert.equal(I.usageLeft(now + 30000, now), "1분 미만");
+  assert.equal(I.usageLeft(now - MIN, now), "");
+  assert.equal(I.usageLeft(0, now), "");
+  assert.equal(I.usageLeft(now + DAY, now), "1일");
+  assert.equal(I.usageLeft(now + DAY - 1, now), "23시간 59분");
+  assert.equal(I.usageLeft(now + MIN, now), "1분");
+  assert.equal(I.usageLeft(now, now), "1분 미만");
+  const rows = [{ label: "5h", percent: 54, resetsAt: now + 2 * HOUR + 15 * MIN }, { label: "7d", percent: 34, resetsAt: now + 5 * DAY + 4 * HOUR + 41 * MIN }];
+  assert.equal(I.usageTip(rows, now), "5h 초기화까지 2시간 15분 · 7d 초기화까지 5일 4시간 41분");
+  assert.equal(I.usageTip([{ label: "5h", percent: 1, resetsAt: now - HOUR }, rows[1]], now), "5h 초기화 시각이 지났습니다 · 7d 초기화까지 5일 4시간 41분");
+  assert.equal(I.usageTip([{ label: "5h", percent: 1, resetsAt: 0 }], now), "초기화 시각 정보가 없습니다");
   assert.match(I.usageTip(null, now), /알 수 없습니다/);
 });
 
@@ -2067,6 +2077,7 @@ test("usageLine: main.js 배선 — 파일만 읽고(exec·네트워크 없음),
   const fn = src.slice(src.indexOf("  loadUsage(cx) {"), src.indexOf("  usageLine(t) {"));
   assert.match(fn, /readTextFile\(`\$\{home\(\)\}\/\$\{USAGE_FILE\}`\)/);
   assert.doesNotMatch(fn, /exec\(|fetch\(/);
+  assert.match(fn, /JSON\.stringify\(\[rows, usageTip\(rows, Date\.now\(\)\)\]\)/);
   assert.match(src, /cx\.timer\.every\(USAGE_REFRESH_MS, \(cx\) => this\.loadUsage\(cx\)\)/);
   assert.match(fn, /if \(sig === this\.usageSig\) return;/);
   const line = src.slice(src.indexOf("  usageLine(t) {"), src.indexOf("  // ---- redraw gating"));
