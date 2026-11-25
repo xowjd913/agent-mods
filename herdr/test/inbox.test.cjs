@@ -2007,3 +2007,73 @@ test("Enter 흐름: 위젯이 넣은 줄바꿈은 IME 붙들기를 매번 켜지
   assert.match(src, /if \(strayHeld\(value, now, now\) && now - this\.changedAt <= 25\) this\.dropBreak\(value\)/);
   assert.match(src, /needsNewline\(this\.changedAt, now\)/); // Shift+Enter의 줄바꿈 보충은 원래 시각(changedAt) 그대로
 });
+
+// ---- Claude 사용률 한 줄 (#42)
+const usageFile = (limits, updatedAt = "2026-11-25T05:05:00Z") => JSON.stringify({ updatedAt, limits });
+const USAGE_NOW = Date.parse("2026-11-25T05:10:00Z");
+
+test("usageLine: parseUsage가 5h·7d 행과 리셋 시각을 돌려주고, 없음·깨짐·10분 넘게 오래됨은 null(Unknown)이다", () => {
+  const rows = I.parseUsage(usageFile([
+    { kind: "five_hour", percentUsed: 53.6, resetsAt: "2026-11-25T10:20:00.000Z" },
+    { kind: "seven_day", percentUsed: 34 },
+    { kind: "spend_limit", percentUsed: 3 },
+  ]), USAGE_NOW);
+  assert.deepEqual(rows, [{ label: "5h", percent: 54, resetsAt: Date.parse("2026-11-25T10:20:00.000Z") }, { label: "7d", percent: 34, resetsAt: 0 }]);
+  assert.equal(I.parseUsage(null, USAGE_NOW), null);
+  assert.equal(I.parseUsage("{oops", USAGE_NOW), null);
+  assert.equal(I.parseUsage(usageFile([{ kind: "five_hour", percentUsed: 7 }], "2026-11-25T04:59:00Z"), USAGE_NOW), null); // 11분 전
+  assert.ok(I.parseUsage(usageFile([{ kind: "five_hour", percentUsed: 7 }], "2026-11-25T05:01:00Z"), USAGE_NOW)); // 9분 전
+  assert.equal(I.parseUsage(usageFile([]), USAGE_NOW), null);
+  assert.equal(I.parseUsage(usageFile([{ kind: "five_hour", percentUsed: "x" }]), USAGE_NOW), null);
+  assert.equal(I.USAGE_REFRESH_MS, 60000);
+  assert.equal(I.USAGE_STALE_MS, 600000);
+  assert.equal(I.USAGE_WARN, 80);
+});
+
+test("usageLine: 선 막대 폭은 0이면 0, 0보다 크면 최소 폭, 넘쳐도 track을 넘지 않는다", () => {
+  assert.equal(I.usageFill(50, 40), 20);
+  assert.equal(I.usageFill(0, 40), 0);
+  assert.equal(I.usageFill(1, 40), 2);
+  assert.equal(I.usageFill(250, 40), 40);
+  assert.equal(I.usageFill(-5, 40), 0);
+  assert.equal(I.usageFill(NaN, 40), 0);
+  assert.ok(I.usageFill(30) > 0 && I.usageFill(30) < I.usageFill(100));
+});
+
+test("usageLine: 툴팁은 오늘이면 시각만, 다른 날이면 월/일 시각의 리셋 시각을 보여 준다", () => {
+  const at = (d, h, m) => new Date(2026, 10, d, h, m).getTime(); // 현지 시각
+  const now = at(25, 14, 0);
+  assert.equal(I.usageReset(at(25, 19, 5), now), "19:05");
+  assert.equal(I.usageReset(at(30, 22, 0), now), "11/30 22:00");
+  assert.equal(I.usageReset(0, now), "");
+  const rows = [{ label: "5h", percent: 54, resetsAt: at(25, 19, 20) }, { label: "7d", percent: 34, resetsAt: at(30, 22, 0) }];
+  assert.equal(I.usageTip(rows, now), "5h 리셋 19:20 · 7d 리셋 11/30 22:00");
+  assert.equal(I.usageTip([{ label: "5h", percent: 1, resetsAt: 0 }], now), "리셋 시각 정보가 없습니다");
+  assert.match(I.usageTip(null, now), /알 수 없습니다/);
+});
+
+test("usageLine: main.js와 inbox.cjs가 같은 블록을 쓴다", () => {
+  const block = (f) => {
+    const src = fs.readFileSync(path.join(__dirname, f), "utf8").replace(/\r\n/g, "\n");
+    const a = src.indexOf("// usageLine:begin"), b = src.indexOf("// usageLine:end");
+    assert.ok(a >= 0 && b > a, f);
+    return src.slice(a, b);
+  };
+  assert.equal(block("../mods/inbox/main.js"), block("../mods/inbox/inbox.cjs"));
+});
+
+test("usageLine: main.js 배선 — 파일만 읽고(exec·네트워크 없음), 1분 주기, 80% 경고색, 툴팁, 방 제목 아래, 바뀔 때만 다시 그린다", () => {
+  const src = mainSrc();
+  const fn = src.slice(src.indexOf("  loadUsage(cx) {"), src.indexOf("  usageLine(t) {"));
+  assert.match(fn, /readTextFile\(`\$\{home\(\)\}\/\$\{USAGE_FILE\}`\)/);
+  assert.doesNotMatch(fn, /exec\(|fetch\(/);
+  assert.match(src, /cx\.timer\.every\(USAGE_REFRESH_MS, \(cx\) => this\.loadUsage\(cx\)\)/);
+  assert.match(fn, /if \(sig === this\.usageSig\) return;/);
+  const line = src.slice(src.indexOf("  usageLine(t) {"), src.indexOf("  // ---- redraw gating"));
+  assert.match(line, /u\.percent >= USAGE_WARN/);
+  assert.match(line, /\.tooltip\(usageTip\(rows, Date\.now\(\)\)\)/);
+  assert.match(line, /"Unknown"/);
+  // 방 제목 줄 다음, 걸러내기 줄 앞
+  const room = src.slice(src.indexOf("const room = v_flex()"));
+  assert.ok(room.indexOf("child(head)") < room.indexOf("el.child(usage)") && room.indexOf("el.child(usage)") < room.indexOf("el.child(bar)"));
+});
