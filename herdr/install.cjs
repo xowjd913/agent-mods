@@ -18,11 +18,12 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const CORE = ["tabs-mine", "work", "prs", "wt-menu", "schedules"];
-const EXTRAS = ["usage-status", "agent-groups", "leader-tabs", "path-menu"];
+const EXTRAS = ["usage-status", "agent-groups", "leader-tabs", "path-menu", "gh-accounts", "inbox"];
 const ALL = [...CORE, ...EXTRAS];
 // 모드 설명과 꼭 함께 있어야 하는 모드. deps는 코드에서 확인한 것만 적는다.
 //   work·prs: wt-menu 팝업을 연다(work/main.js, prs/main.js의 openOverlay). 패널 버튼은 tabs-mine에만 있다.
 //   prs: 데이터를 mods/work/collect.cjs로 읽는다. schedules: 30초 tick을 tabs-mine이 부른다.
+//   gh-accounts: 패널 버튼이 tabs-mine에만 있다. gh-account 도구(--gh-account)는 모드가 아니라 따로 설치한다.
 const MODS = {
   "tabs-mine": { desc: "탭 줄. 오른쪽 패널에 Work·PRs·예약 버튼을 더하고 예약 실행을 맡는다", deps: [] },
   work: { desc: "Work 패널: 누가 무엇을 하고 있나", deps: ["tabs-mine", "wt-menu"] },
@@ -33,6 +34,8 @@ const MODS = {
   "agent-groups": { desc: "왼쪽 사이드바 에이전트 목록을 작업별로 묶는다", deps: [] },
   "leader-tabs": { desc: "칸 머리줄에 리더 탭을 보여 준다", deps: [] },
   "path-menu": { desc: "터미널 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄운다", deps: [] },
+  "gh-accounts": { desc: "계정 패널: 스페이스·저장소마다 쓸 GitHub 계정 고르기 (--gh-account 도구 필요)", deps: ["tabs-mine"] },
+  inbox: { desc: "받은편지함 패널: 리더 결과 보고를 채팅처럼 보고, 결정을 PO에게 답한다", deps: ["tabs-mine"] },
 };
 const MARK = ".installed-by-herdr-installer";
 // 예전 설치 스크립트가 남긴 표시. 이 표시가 있는 폴더도 우리 것으로 보고 덮어쓴다.
@@ -43,6 +46,8 @@ const LEGACY_LAYOUT = "agent-groups";
 // 이 설치기가 쓰는 레이아웃 이름(dashboard 또는 예전 agent-groups) 기록. 블록이 모두 빠진 뒤에도 같은 레이아웃을 알아본다.
 const LAYOUT_MARK = ".herdr-installer-layout";
 const SRC = path.join(__dirname, "mods");
+// 모드 폴더 밖에 있지만 모드와 함께 복사할 파일. gh-accounts 패널은 설치·확인·계정 추가에 gh-account 도구를 쓴다.
+const BUNDLE = { "gh-accounts": [["gh-account/gh-account.cjs", "gh-account.cjs"]] };
 
 function log(msg) { process.stdout.write(msg + "\n"); }
 
@@ -117,6 +122,7 @@ function installMods(home, opts = {}) {
     }
     fs.mkdirSync(target, { recursive: true });
     fs.cpSync(path.join(SRC, mod), target, { recursive: true, force: true });
+    for (const [from, to] of BUNDLE[mod] || []) fs.copyFileSync(path.join(__dirname, from), path.join(target, to));
     fs.writeFileSync(path.join(target, MARK), "");
     log(`모드 설치: ${target}`);
     result.installed.push(mod);
@@ -286,6 +292,22 @@ const STEPS = [
     done: () => false,
     apply: (l) => addPanel(l, "schedules-board", "schedules"),
     undo: (l) => dropPanel(l, "schedules"),
+  },
+  {
+    name: "오른쪽 패널 계정(gh-accounts)",
+    needs: ["gh-accounts"],
+    mark: ["gh-accounts", ".board-added"],
+    done: () => false,
+    apply: (l) => addPanel(l, "accounts-board", "gh-accounts"),
+    undo: (l) => dropPanel(l, "gh-accounts"),
+  },
+  {
+    name: "오른쪽 패널 받은편지함(inbox)",
+    needs: ["inbox"],
+    mark: ["inbox", ".board-added"],
+    done: () => false,
+    apply: (l) => addPanel(l, "inbox-board", "inbox"),
+    undo: (l) => dropPanel(l, "inbox"),
   },
   {
     name: "칸 머리줄(leader-tabs)",

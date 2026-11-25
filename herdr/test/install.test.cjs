@@ -81,6 +81,9 @@ test("--extras는 추가 모드도 복사하고, 이후 기본 설치도 추가 
   const home = tempHome();
   quiet(() => inst.installMods(home, true));
   for (const m of inst.EXTRAS) assert.ok(fs.existsSync(path.join(home, "mods", m, "main.js")), m);
+  // 계정 패널은 gh-account 도구를 함께 가져간다
+  assert.equal(fs.readFileSync(path.join(home, "mods", "gh-accounts", "gh-account.cjs"), "utf8"),
+    fs.readFileSync(path.join(__dirname, "..", "gh-account", "gh-account.cjs"), "utf8"));
   fs.writeFileSync(path.join(home, "mods", "usage-status", "main.js"), "old");
   const { result } = quiet(() => inst.installMods(home, false));
   assert.ok(result.installed.includes("usage-status"));
@@ -160,8 +163,8 @@ test("기본 설치 뒤 --extras로 다시 설치하면 추가 모드 블록만 
 
 // 예전 설치: 모든 모드에 예전 표시·기록, layouts/agent-groups.json, 레이아웃 이름 기록 없음.
 // full이면 예전 --extras 설치처럼 모든 블록이 바뀐 레이아웃을 만든다.
-// 예전 설치기에는 path-menu가 없었다.
-const LEGACY_MODS = inst.ALL.filter((m) => m !== "path-menu");
+// 예전 설치기에는 path-menu·gh-accounts·inbox가 없었다.
+const LEGACY_MODS = inst.ALL.filter((m) => m !== "path-menu" && m !== "gh-accounts" && m !== "inbox");
 function legacyHome(full) {
   const home = tempHome();
   for (const m of LEGACY_MODS) {
@@ -391,6 +394,21 @@ test("예전 work/.panels-added 기록은 단계별 기록으로 옮기고 되�
   assert.ok(fs.existsSync(path.join(home, "mods", "prs", ".pr-board-added")));
 });
 
+test("inbox는 tabs-mine과 함께 설치돼 오른쪽 패널에 inbox-board를 한 번만 더하고, 제거하면 뺀다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { only: ["inbox"] }));
+  assert.ok(fs.existsSync(path.join(home, "mods", "tabs-mine", "main.js")));
+  const file = cloneInto(home, inst.LAYOUT_NAME);
+  quiet(() => inst.applyLayout(home, true));
+  const count = () => (JSON.stringify(readJson(file)).match(/"mod":\s*"inbox"/g) ?? []).length;
+  assert.equal(count(), 1);
+  assert.ok(fs.existsSync(path.join(home, "mods", "inbox", ".board-added")));
+  quiet(() => inst.applyLayout(home, false));
+  assert.equal(count(), 1);
+  quiet(() => inst.removeMods(home, ["inbox"]));
+  assert.equal(count(), 0);
+});
+
 test("path-menu는 레이아웃 link_handlers 끝에 한 번만 넣고, 제거하면 원래 목록으로 돌린다", () => {
   const home = tempHome();
   quiet(() => inst.installMods(home, { only: ["path-menu"] }));
@@ -424,4 +442,18 @@ test("path-menu만 넣은 레이아웃도 우리 것으로 보고, 사용자가 
   assert.deepEqual(readJson(file).link_handlers, ["path-menu"]);
   quiet(() => inst.removeMods(home, ["path-menu"]));
   assert.deepEqual(readJson(file), clonedMain());
+});
+
+test("--add gh-accounts는 오른쪽 패널에 accounts-board를 더하고, 제거하면 뺀다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { add: ["gh-accounts"] }));
+  assert.deepEqual(installed(home).sort(), ["gh-accounts", "tabs-mine"]);
+  const file = cloneInto(home, inst.LAYOUT_NAME);
+  quiet(() => inst.applyLayout(home, true));
+  const ids = () => JSON.stringify(readJson(file)).match(/"id":"accounts-board"/g) ?? [];
+  assert.equal(ids().length, 1);
+  assert.ok(mods(readJson(file)).includes("gh-accounts"));
+  quiet(() => inst.removeMods(home, ["gh-accounts"]));
+  assert.equal(ids().length, 0);
+  assert.ok(!fs.existsSync(path.join(home, "mods", "gh-accounts")));
 });

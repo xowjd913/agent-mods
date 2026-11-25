@@ -24,9 +24,11 @@ Herdr는 터미널 작업 공간 앱이고, 모드는 그 화면에 패널과 �
 | 예약 (`schedules`) | 정해진 시각에 Claude나 Codex 세션을 띄워 프롬프트를 보냅니다 | 기본 | [schedules](docs/mods/schedules.md) |
 | 워크트리 메뉴 (`wt-menu`) | 워크트리를 IDE, Herdr 공간, Finder·탐색기, GitHub로 바로 엽니다 | 기본 | [wt-menu](docs/mods/wt-menu.md) |
 | Claude 사용률 (`usage-status`) | 아래 상태 줄에 Claude 5시간·7일 사용률을 막대로 보여 줍니다 | 추가 | [usage-status](docs/mods/usage-status.md) |
-| 작업별 묶음 (`agent-groups`) | 사이드바에서 터미널을 이슈 번호별로 묶고 리더를 맨 위에 둡니다 | 추가 | [agent-groups](docs/mods/agent-groups.md) |
+| 작업별 묶음 (`agent-groups`) | 사이드바에서 터미널을 리더별로 묶고 리더 아래에 팀원을 둡니다 | 추가 | [agent-groups](docs/mods/agent-groups.md) |
 | 리더 탭 (`leader-tabs`) | 리더 세션이 둘 이상이면 칸 머리줄에 리더 탭을 띄웁니다 | 추가 | [leader-tabs](docs/mods/leader-tabs.md) |
 | 경로 메뉴 (`path-menu`) | 터미널의 파일 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄웁니다 | 추가 | [path-menu](docs/mods/path-menu.md) |
+| 계정 (`gh-accounts`) | 스페이스·저장소마다 쓸 GitHub 계정을 보고 고릅니다([gh-account](docs/gh-account.md) 도구 필요) | 추가 | [gh-accounts](docs/mods/gh-accounts.md) |
+| 받은편지함 (`inbox`) | 리더 결과 보고를 채팅처럼 보여 주고, 결정이 필요한 보고에 답하면 PO 터미널에 입력으로 전해 줍니다 | 추가 | [inbox](docs/mods/inbox.md) |
 
 <!-- 새 모드: docs/mods/<모드>.md를 만들고 이 표와 herdr/README.md 모드 표에 한 줄씩 더합니다. -->
 

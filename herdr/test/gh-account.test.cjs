@@ -25,6 +25,9 @@ function fakeRun({ logged = ["acct-a", "acct-b"], remotes = {}, gitVersion = "gi
       const user = args[args.indexOf("--user") + 1];
       return logged.includes(user) ? { status: 0, stdout: `tok-${user}\n`, stderr: "" } : { status: 1, stdout: "", stderr: "no account" };
     }
+    if (cmd === "fake-gh" && args[0] === "auth" && args[1] === "status" && args.includes("--json")) {
+      return { status: 0, stdout: JSON.stringify({ hosts: { "github.com": logged.map((login, i) => ({ login, active: i === 0, state: "success" })) } }), stderr: "" };
+    }
     if (cmd === "fake-gh" && args[0] === "api" && args[1] === "user") {
       const login = String(opts.env.GH_TOKEN || "").replace(/^tok-/, "");
       if (!logged.includes(login)) return { status: 1, stdout: "", stderr: "401" };
@@ -32,7 +35,7 @@ function fakeRun({ logged = ["acct-a", "acct-b"], remotes = {}, gitVersion = "gi
     }
     if (cmd === "git" && args[0] === "version") return { status: 0, stdout: gitVersion + "\n", stderr: "" };
     if (cmd === "git" && args[0] === "remote") {
-      const url = remotes[opts.cwd];
+      const url = remotes[opts.cwd] || Object.entries(remotes).find(([k]) => path.resolve(k) === path.resolve(opts.cwd || ""))?.[1];
       return url ? { status: 0, stdout: url + "\n", stderr: "" } : { status: 2, stdout: "", stderr: "" };
     }
     if (cmd === "git" && args[0] === "config") return { status: 1, stdout: "", stderr: "" };
@@ -384,6 +387,87 @@ test("main set/unset/default: 매핑 파일을 고치고, 깨진 파일은 덮�
   assert.equal(fs.readFileSync(file, "utf8"), "{broken");
 });
 
+// 스페이스 폴더: 저장소가 아닌 폴더 안에 저장소 둘(같은 owner)과 .git 없는 폴더, 따로 있는 다른 owner 저장소.
+function spaceDirs() {
+  const root = tmpdir("gh-space");
+  const ws = path.join(root, "ws");
+  for (const d of ["app", "api", "notes"]) fs.mkdirSync(path.join(ws, d), { recursive: true });
+  for (const d of ["app", "api"]) fs.mkdirSync(path.join(ws, d, ".git"));
+  const solo = path.join(root, "solo");
+  fs.mkdirSync(solo);
+  const remotes = {
+    [path.join(ws, "app")]: "https://github.com/example-org/app.git",
+    [path.join(ws, "api")]: "git@github.com:Example-Org/api.git",
+    [path.join(ws, "notes")]: "https://github.com/other-org/notes.git",
+    [solo]: "https://github.com/acct-a/tool.git",
+  };
+  return { ws, solo, remotes, missing: path.join(root, "gone") };
+}
+
+test("space: 폴더와 그 아래 저장소를 owner 별로 묶고 지금 쓰는 계정을 붙인다", () => {
+  const s = spaceDirs();
+  const { ctx } = setup({ rules: [{ match: "example-org/api", account: "acct-a" }, { match: "example-org/*", account: "acct-b" }], default: null }, { remotes: s.remotes });
+  const t = io();
+  assert.equal(ga.main(["space", "--json", s.ws, s.solo, s.missing, s.ws], ctx, t.io), 0);
+  const out = JSON.parse(t.o.lines[0]);
+  assert.equal(out.error, null);
+  assert.deepEqual(out.owners, [
+    { owner: "acct-a", personal: true, rule: null, repos: [{ repo: "acct-a/tool", dir: s.solo, account: null, by: null, match: null }] },
+    { owner: "Example-Org", personal: false, rule: "acct-b", repos: [
+      { repo: "Example-Org/api", dir: path.join(s.ws, "api"), account: "acct-a", by: "rule", match: "example-org/api" },
+      { repo: "example-org/app", dir: path.join(s.ws, "app"), account: "acct-b", by: "rule", match: "example-org/*" },
+    ] },
+  ]);
+  // .git 이 없는 하위 폴더(notes)는 원격이 있어도 보지 않는다.
+  assert.ok(!t.o.lines[0].includes("other-org"));
+  const txt = io();
+  ga.main(["space", s.ws, s.solo], ctx, txt.io);
+  assert.ok(txt.o.lines.some((l) => l.includes("Example-Org/api -> acct-a (규칙 example-org/api)")));
+  assert.ok(txt.o.lines.includes("acct-a/*: (규칙 없음) (로그인된 계정)"));
+});
+
+test("assign: 찾은 owner 마다 owner/* 규칙을 정하거나 지우고, 저장소 하나 규칙은 그대로 둔다", () => {
+  const s = spaceDirs();
+  const { app, ctx } = setup({ rules: [{ match: "example-org/api", account: "acct-a" }, { match: "example-org/*", account: "acct-a" }], default: null }, { remotes: s.remotes });
+  const file = path.join(app, "gh-accounts.json");
+  let t = io();
+  assert.equal(ga.main(["assign", "acct-b", s.ws, s.solo], ctx, t.io), 0);
+  let m = JSON.parse(fs.readFileSync(file, "utf8"));
+  // acct-a 는 gh 에 로그인된 계정이라 acct-a/* (개인 저장소일 수 있음)는 acct-b 로 묶지 않는다.
+  assert.deepEqual(m.rules, [
+    { match: "example-org/api", account: "acct-a" },
+    { match: "Example-Org/*", account: "acct-b" },
+  ]);
+  assert.ok(t.o.lines.some((l) => l.includes("\n주의: acct-a/* 은(는) 로그인된 계정이라")), t.o.lines.join("\n"));
+  t = io();
+  assert.equal(ga.main(["assign", "acct-b", s.ws, s.solo, "--json"], ctx, t.io), 0);
+  const j = JSON.parse(t.o.lines.at(-1));
+  assert.deepEqual([j.changed, j.skipped, j.account], [["Example-Org/*"], ["acct-a/*"], "acct-b"]);
+  assert.equal(t.o.lines.length, 1, "--json 은 한 줄만 쓴다");
+  // 같은 계정으로 정하는 것은 막지 않는다.
+  assert.equal(ga.main(["assign", "acct-a", s.solo], ctx, io().io), 0);
+  m = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.deepEqual(m.rules.at(-1), { match: "acct-a/*", account: "acct-a" });
+  // owner 하나만 직접 정하면(set) 다른 계정이어도 그대로 따른다.
+  assert.equal(ga.main(["set", "acct-a/*", "acct-b"], ctx, io().io), 0);
+  t = io();
+  assert.equal(ga.main(["assign", "none", s.ws], ctx, t.io), 0);
+  m = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.deepEqual(m.rules, [{ match: "example-org/api", account: "acct-a" }, { match: "acct-a/*", account: "acct-b" }]);
+  // 원격을 못 찾거나 인자가 틀리면 아무것도 바꾸지 않는다.
+  assert.equal(ga.main(["assign", "acct-b", s.missing], ctx, io().io), 1);
+  assert.equal(ga.main(["assign", "bad name", s.ws], ctx, io().io), 2);
+  assert.equal(ga.main(["assign", "acct-b"], ctx, io().io), 2);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).rules, m.rules);
+  // 깨진 매핑 파일은 덮어쓰지 않고, space --json 은 error 를 담아 0 으로 끝난다.
+  fs.writeFileSync(file, "{broken");
+  assert.equal(ga.main(["assign", "acct-b", s.ws], ctx, io().io), 1);
+  assert.equal(fs.readFileSync(file, "utf8"), "{broken");
+  t = io();
+  assert.equal(ga.main(["space", "--json", s.ws], ctx, t.io), 0);
+  assert.ok(JSON.parse(t.o.lines[0]).error);
+});
+
 test("main resolve: 폴더와 -R 로 계정을 보여 준다", () => {
   const { ctx } = setup(MAP);
   let t = io();
@@ -633,4 +717,371 @@ test("e2e: 원래 도우미 저장 거르기, URL 경로 우선, gh 가 없을 �
   } finally {
     fs.renameSync(away, fake);
   }
+});
+
+test("move: 규칙을 한 칸씩 옮기고, 끝이나 없는 규칙은 바꾸지 않는다", () => {
+  const rules = [{ match: "example-org/*", account: "acct-b" }, { match: "example-org/api", account: "acct-a" }, { match: "acct-a/*", account: "acct-a" }];
+  const { app, ctx } = setup({ rules, default: null });
+  const file = path.join(app, "gh-accounts.json");
+  const order = () => JSON.parse(fs.readFileSync(file, "utf8")).rules.map((r) => r.match);
+  assert.equal(ga.main(["move", "Example-Org/API", "up"], ctx, io().io), 0);
+  assert.deepEqual(order(), ["example-org/api", "example-org/*", "acct-a/*"]);
+  assert.equal(ga.main(["move", "example-org/*", "down"], ctx, io().io), 0);
+  assert.deepEqual(order(), ["example-org/api", "acct-a/*", "example-org/*"]);
+  const t = io();
+  assert.equal(ga.main(["move", "example-org/api", "up"], ctx, t.io), 0);
+  assert.ok(t.o.lines.some((l) => l.includes("옮길 수 없습니다")));
+  ga.main(["move", "nobody/*", "down"], ctx, io().io);
+  assert.deepEqual(order(), ["example-org/api", "acct-a/*", "example-org/*"]);
+  assert.equal(ga.main(["move", "acct-a/*", "sideways"], ctx, io().io), 2);
+  assert.equal(ga.main(["move"], ctx, io().io), 2);
+});
+
+// ---- 계정 패널이 쓰는 명령: status, install/uninstall --dry-run, check, login, shell-path ----
+// gh 는 가짜다. 활성 계정은 이 객체 안에서만 바뀌고, 진짜 gh auth login·switch 는 부르지 않는다.
+function ghState(over = {}) {
+  const g = { logged: ["acct-a", "acct-b"], active: "acct-a", switchFails: false, perms: { admin: false, push: true, pull: true }, calls: [], ...over };
+  const base = fakeRun({ logged: g.logged, remotes: { "/w/repo": "https://user:secret@github.com/example-org/app.git", "/w/ssh": "git@github.com:example-org/app.git" }, calls: g.calls });
+  g.run = (cmd, args, opts = {}) => {
+    if (cmd === "fake-gh" && args[0] === "auth" && args[1] === "status") {
+      g.calls.push({ cmd, args });
+      return { status: 0, stdout: JSON.stringify({ hosts: { "github.com": g.logged.map((login) => ({ login, active: login === g.active, state: "success" })) } }), stderr: "" };
+    }
+    if (cmd === "fake-gh" && args[0] === "auth" && args[1] === "switch") {
+      g.calls.push({ cmd, args });
+      if (g.switchFails) return { status: 1, stdout: "", stderr: "failed" };
+      g.active = args[args.indexOf("--user") + 1];
+      return { status: 0, stdout: "", stderr: "" };
+    }
+    if (cmd === "fake-gh" && args[0] === "api" && args[1] === "user") {
+      g.calls.push({ cmd, args, env: opts.env });
+      const login = String(opts.env.GH_TOKEN || "").replace(/^tok-/, "");
+      return g.logged.includes(login) ? { status: 0, stdout: `${login}\n`, stderr: "" } : { status: 1, stdout: "", stderr: "401" };
+    }
+    if (cmd === "fake-gh" && args[0] === "api" && /^repos\//.test(args[1])) {
+      g.calls.push({ cmd, args, env: opts.env });
+      return g.perms ? { status: 0, stdout: JSON.stringify(g.perms), stderr: "" } : { status: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+    }
+    return base(cmd, args, opts);
+  };
+  return g;
+}
+function panelSetup(map = MAP, over = {}) {
+  const s = setup(map);
+  const g = ghState(over);
+  s.ctx.run = g.run;
+  return { ...s, g };
+}
+const switches = (g) => g.calls.filter((c) => c.args && c.args[0] === "auth" && (c.args[1] === "switch" || c.args[1] === "login"));
+
+test("status/install --dry-run: 아무것도 쓰지 않고 바뀔 것과 설치 상태를 보여 준다", () => {
+  const { ctx, app, home } = panelSetup();
+  const bin = path.join(home, "bin");
+  ctx.env.GH_ACCOUNT_BIN = bin;
+  let s = ga.statusInfo(ctx);
+  assert.equal(s.installed, false);
+  assert.equal(s.map.rules, 2);
+  const { o, io: x } = io();
+  assert.equal(ga.main(["install", "--dry-run", "--json"], ctx, x), 0);
+  const plan = JSON.parse(o.lines[0]);
+  assert.deepEqual(plan.blocked, []);
+  assert.ok(plan.files.every((f) => f.action === "create"));
+  assert.ok(plan.lines.some((l) => l.startsWith("설치 폴더:")));
+  assert.ok(plan.lines.some((l) => l.startsWith("주의: PATH")), "PATH 에 없으면 알린다");
+  assert.equal(fs.existsSync(bin), false, "dry-run 은 쓰지 않는다");
+  assert.equal(fs.existsSync(ctx.env.GIT_CONFIG_GLOBAL), false);
+
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, "gh"), "#!/bin/sh\n# someone else\n");
+  const blocked = ga.planInstall(ctx);
+  assert.deepEqual(blocked.blocked, [path.join(bin, "gh")]);
+  fs.rmSync(path.join(bin, "gh"));
+
+  const quiet = { out() {}, err() {} };
+  assert.equal(ga.install(ctx, { src: CLI }, quiet.out), 0);
+  s = ga.statusInfo(ctx);
+  assert.equal(s.installed, true);
+  assert.equal(s.filesOk, true);
+  assert.equal(s.block, true);
+  assert.equal(s.appCurrent, true, "설치한 파일이 이 모듈과 같다");
+  const u = io();
+  assert.equal(ga.main(["uninstall", "--dry-run", "--json"], ctx, u.io), 0);
+  const up = JSON.parse(u.o.lines[0]);
+  assert.equal(up.files.length, 3);
+  assert.equal(up.block, true);
+  assert.ok(up.lines.some((l) => l.startsWith("남기는 것: 매핑 파일")));
+  assert.ok(fs.existsSync(path.join(app, "gh-account", "state.json")), "dry-run 은 지우지 않는다");
+  ga.writeLogin(ctx, { state: "done", prev: "acct-a", pid: null, startedAt: Date.now() });
+  assert.equal(ga.uninstall(ctx, {}, () => {}), 0);
+  assert.equal(fs.existsSync(path.join(app, "gh-account")), false, "끝난 계정 추가 기록까지 지워 폴더가 남지 않는다");
+});
+
+test("check: gh·push·신원 계정과 경고, --test 는 매핑 계정 토큰으로 접속해 본다", () => {
+  const { ctx, home, g } = panelSetup({ rules: [{ match: "example-org/*", account: "acct-b" }, { match: "acct-a/*", account: "acct-b" }], default: null });
+  let c = ga.check(ctx, { dir: "/w/repo" });
+  assert.equal(c.repo, "example-org/app");
+  assert.equal(c.remote, "https://github.com/example-org/app.git", "원격 URL 의 사용자 정보는 지운다");
+  assert.equal(c.account, "acct-b");
+  assert.deepEqual(c.gh, { account: "acct-a", how: "active" }, "설치 전에는 활성 계정");
+  assert.deepEqual(c.push, { account: null, how: "prior" });
+  assert.ok(c.warn.some((w) => w.includes("설치돼 있지 않아")));
+
+  ctx.env.GH_ACCOUNT_BIN = path.join(home, "bin");
+  ctx.env.PATH = path.join(home, "bin");
+  ga.install(ctx, { src: CLI }, () => {});
+  c = ga.check(ctx, { dir: "/w/repo", test: true });
+  assert.deepEqual(c.gh, { account: "acct-b", how: "mapped" });
+  assert.deepEqual(c.push, { account: "acct-b", how: "mapped" });
+  assert.deepEqual(c.warn, []);
+  assert.deepEqual(c.test, { ok: true, login: "acct-b", access: "push" });
+  assert.ok(g.calls.filter((x) => x.args[0] === "api").every((x) => x.env.GH_TOKEN === "tok-acct-b"));
+  assert.equal(switches(g).length, 0);
+
+  c = ga.check(ctx, { dir: "/w/ssh" });
+  assert.equal(c.push.how, "ssh");
+
+  c = ga.check(ctx, { repo: ga.parseRepo("acct-a/notes") });
+  assert.ok(c.warn.some((w) => w.includes("acct-a 은(는) 로그인된 계정인데 이 저장소는 acct-b")), "로그인 계정의 개인 저장소를 다른 계정으로 쓰면 알린다");
+
+  // 래퍼가 PATH 에서 진짜 gh 보다 뒤에 있으면 gh 는 활성 계정(acct-a)이지만 push 는 acct-b 라 역시 알린다.
+  const real = path.join(home, "real");
+  fs.mkdirSync(real);
+  fs.writeFileSync(path.join(real, "gh"), "#!/bin/sh\n", { mode: 0o755 });
+  ctx.env.PATH = [real, path.join(home, "bin")].join(path.delimiter);
+  c = ga.check(ctx, { repo: ga.parseRepo("acct-a/notes") });
+  assert.equal(c.wrapperFirst, false);
+  assert.deepEqual([c.gh.account, c.push.account], ["acct-a", "acct-b"]);
+  assert.ok(c.warn.some((w) => w.includes("acct-a 은(는) 로그인된 계정인데 이 저장소는 acct-b")), c.warn.join("\n"));
+  ctx.env.PATH = path.join(home, "bin");
+
+  g.perms = null;
+  c = ga.check(ctx, { repo: ga.parseRepo("example-org/private"), test: true });
+  assert.deepEqual(c.test, { ok: false, login: "acct-b", access: "notfound" });
+
+  const { o, io: x } = io();
+  ctx.cwd = home;
+  fs.mkdirSync(path.join(home, "w"));
+  assert.equal(ga.main(["check", "~/w", "--json"], ctx, x), 0);
+  assert.equal(JSON.parse(o.lines[0]).dir, path.join(home, "w"), "~ 는 홈 폴더로 편다");
+});
+
+test("restoreActive: 바뀌었을 때만 한 번 되돌리고, 실패하면 터미널 명령을 알려 준다", () => {
+  const { ctx, g } = panelSetup();
+  assert.deepEqual(ga.restoreActive(ctx, null, "acct-b"), { ok: true, switched: false });
+  assert.deepEqual(ga.restoreActive(ctx, "acct-a", "ACCT-A"), { ok: true, switched: false });
+  assert.equal(switches(g).length, 0);
+  g.active = "acct-b";
+  assert.deepEqual(ga.restoreActive(ctx, "acct-a", "acct-b"), { ok: true, switched: true });
+  assert.equal(g.active, "acct-a");
+  assert.equal(switches(g).length, 1);
+  g.active = "acct-b";
+  g.switchFails = true;
+  const r = ga.restoreActive(ctx, "acct-a", "acct-b");
+  assert.equal(r.ok, false);
+  assert.match(r.message, /gh auth switch --hostname github.com --user acct-a/);
+});
+
+// 가짜 gh auth login 프로세스. 출력과 끝을 시험이 정한다.
+function fakeChild() {
+  const { EventEmitter } = require("node:events");
+  const c = new EventEmitter();
+  c.stdout = new EventEmitter();
+  c.stderr = new EventEmitter();
+  c.stdin = { on() {}, end: (s) => { c.stdinText = s; } };
+  c.kill = (sig) => { c.killed = sig; setImmediate(() => c.emit("close", 143)); };
+  return c;
+}
+
+test("loginRun: 코드와 주소를 적고, 성공하면 원래 활성 계정으로 한 번 되돌린다", async () => {
+  const { ctx, g, app, home } = panelSetup();
+  ctx.env.GH_ACCOUNT_BIN = path.join(home, "bin");
+  assert.equal(ga.install(ctx, { src: CLI }, () => {}), 0);
+  const child = fakeChild();
+  const spawned = [];
+  ctx.spawn = (cmd, args, opts) => { spawned.push({ cmd, args, env: opts.env }); return child; };
+  const p = ga.loginRun(ctx, "acct-a");
+  assert.deepEqual(spawned[0].args, ["auth", "login", "--hostname", "github.com", "--web", "--git-protocol", "https"]);
+  assert.equal(spawned[0].env.GH_TOKEN, undefined);
+  child.stderr.emit("data", Buffer.from("! First copy your one-time code: AB12-CD34\nOpen this URL to continue in your web browser: https://github.com/login/device\n"));
+  let st = ga.loginStatus(ctx);
+  assert.equal(st.state, "waiting");
+  assert.equal(st.code, "AB12-CD34");
+  assert.equal(st.url, "https://github.com/login/device");
+  g.logged.push("acct-c");
+  g.active = "acct-c"; // gh auth login 이 새 계정을 활성으로 바꾼다.
+  child.emit("close", 0);
+  assert.equal(await p, 0);
+  st = ga.loginStatus(ctx);
+  assert.equal(st.state, "done");
+  assert.equal(st.added, "acct-c");
+  assert.equal(st.restored, true);
+  assert.equal(st.switched, true);
+  assert.equal(g.active, "acct-a");
+  assert.equal(switches(g).length, 1);
+  // 진짜 gh 를 바로 돌려 래퍼가 끼지 않으므로 loginRun 이 직접 다시 맞춘다: 새 계정이 로그인 목록에 적힌다.
+  assert.equal(st.synced, true);
+  const logins = JSON.parse(fs.readFileSync(path.join(app, "gh-account", "logins.json"), "utf8")).logins;
+  assert.ok(logins.includes("acct-c"), logins.join(","));
+});
+
+test("loginRun: 매핑 파일만 있고 설치돼 있지 않으면(설치 전·되돌린 뒤) git 블록과 신원 파일을 쓰지 않는다", async () => {
+  const { ctx, app, home } = panelSetup();
+  // 설치했다가 되돌린 상태: 매핑 파일은 남고 state.json 은 없다.
+  ctx.env.GH_ACCOUNT_BIN = path.join(home, "bin");
+  assert.equal(ga.install(ctx, { src: CLI }, () => {}), 0);
+  assert.equal(ga.uninstall(ctx, {}, () => {}), 0);
+  assert.ok(fs.existsSync(path.join(app, "gh-accounts.json")), "되돌려도 매핑 파일은 남는다");
+  const before = fs.existsSync(ctx.env.GIT_CONFIG_GLOBAL) ? fs.readFileSync(ctx.env.GIT_CONFIG_GLOBAL, "utf8") : null;
+  for (const run of [0, 1]) {
+    if (run === 1) assert.equal(fs.existsSync(path.join(app, "gh-account")), false, "되돌리면 폴더가 없다");
+    const child = fakeChild();
+    ctx.spawn = () => child;
+    const p = ga.loginRun(ctx, "acct-a");
+    child.emit("close", 0);
+    assert.equal(await p, 0);
+    assert.equal(ga.loginStatus(ctx).synced, null);
+    const now = fs.existsSync(ctx.env.GIT_CONFIG_GLOBAL) ? fs.readFileSync(ctx.env.GIT_CONFIG_GLOBAL, "utf8") : null;
+    assert.equal(now, before, "git 설정이 그대로");
+    assert.ok(!now || !now.includes("gh-account"), "gh-account 블록이 없다");
+    assert.equal(fs.existsSync(path.join(app, "gh-account", "identity")), false, "신원 파일을 쓰지 않는다");
+    assert.equal(fs.existsSync(path.join(app, "gh-account", "logins.json")), false);
+    assert.equal(ga.statusInfo(ctx).block, false);
+    fs.rmSync(path.join(app, "gh-account"), { recursive: true, force: true });
+  }
+});
+
+test("loginRun: 성공해도 설치·매핑이 없으면 git 설정을 건드리지 않는다", async () => {
+  const { ctx, app } = panelSetup();
+  fs.rmSync(path.join(app, "gh-accounts.json"));
+  const child = fakeChild();
+  ctx.spawn = () => child;
+  const p = ga.loginRun(ctx, "acct-a");
+  child.emit("close", 0);
+  assert.equal(await p, 0);
+  assert.equal(ga.loginStatus(ctx).synced, null);
+  assert.equal(fs.existsSync(ctx.env.GIT_CONFIG_GLOBAL), false);
+  assert.equal(fs.existsSync(path.join(app, "gh-account", "logins.json")), false);
+});
+
+test("check: 커밋 신원은 git 이 읽은 신원 파일의 계정으로 알리고, 매핑 계정과 다르면 경고한다", () => {
+  const { ctx, app, g } = panelSetup();
+  let idFile = "acct-a";
+  const base = g.run;
+  ctx.run = (cmd, args, opts = {}) => {
+    if (cmd === "git" && args[0] === "config" && args.includes("--show-origin")) {
+      const file = path.join(app, "gh-account", "identity", `${idFile}.gitconfig`);
+      const v = args.includes("user.email") ? `1001+${idFile}@users.noreply.github.com` : idFile;
+      return { status: 0, stdout: `file:${file}\t${v}\n`, stderr: "" };
+    }
+    return base(cmd, args, opts);
+  };
+  let c = ga.check(ctx, { dir: "/w/repo" });
+  assert.equal(c.account, "acct-b");
+  assert.equal(c.identity.how, "mapped");
+  assert.equal(c.identity.account, "acct-a", "매핑 계정이 아니라 실제 신원 파일의 계정");
+  assert.ok(c.warn.some((w) => w.includes("커밋 신원은 acct-a 계정 것인데 이 저장소는 acct-b")), c.warn.join("\n"));
+  const { o, io: x } = io();
+  ctx.cwd = "/w/repo";
+  assert.equal(ga.main(["check"], ctx, x), 0);
+  assert.ok(o.lines.some((l) => l.includes("(acct-a 계정 매핑)")), o.lines.join("\n"));
+
+  idFile = "ACCT-B";
+  c = ga.check(ctx, { dir: "/w/repo" });
+  assert.equal(c.identity.account, "ACCT-B");
+  assert.ok(!c.warn.some((w) => w.includes("커밋 신원은")), "대소문자만 다르면 같은 계정");
+});
+
+test("loginRun: 실패·취소·시간 초과는 되돌리지 않고, 토큰 모양 문자열은 메시지에서 가린다", async () => {
+  {
+    const { ctx, g } = panelSetup();
+    const child = fakeChild();
+    ctx.spawn = () => child;
+    const p = ga.loginRun(ctx, "acct-a");
+    child.stderr.emit("data", Buffer.from("error: bad token gho_ABCDEFGHIJKLMNOPQRST\n"));
+    child.emit("close", 1);
+    assert.equal(await p, 1);
+    const st = ga.loginStatus(ctx);
+    assert.equal(st.state, "failed");
+    assert.ok(!st.message.includes("gho_ABCDEFGHIJKLMNOPQRST"));
+    assert.match(st.message, /\[가림\]/);
+    assert.equal(switches(g).length, 0);
+    assert.equal(st.synced, undefined, "실패하면 다시 맞추지 않는다");
+  }
+  {
+    const { ctx, g } = panelSetup();
+    const child = fakeChild();
+    ctx.spawn = () => child;
+    const p = ga.loginRun(ctx, "acct-a", { timeout: 5 });
+    assert.equal(await p, 1);
+    assert.equal(child.killed, "SIGTERM");
+    assert.match(ga.loginStatus(ctx).message, /15분/);
+    assert.equal(switches(g).length, 0);
+  }
+  {
+    const { ctx, g } = panelSetup();
+    const child = fakeChild();
+    ctx.spawn = () => child;
+    const p = ga.loginRun(ctx, "acct-a");
+    process.emit("SIGTERM");
+    assert.equal(await p, 1);
+    assert.equal(ga.loginStatus(ctx).state, "cancelled");
+    assert.equal(switches(g).length, 0);
+  }
+  {
+    // 이미 로그인된 활성 계정으로 다시 로그인하면 바꿀 것이 없다.
+    const { ctx, g } = panelSetup();
+    const child = fakeChild();
+    ctx.spawn = () => child;
+    const p = ga.loginRun(ctx, "acct-a");
+    child.emit("close", 0);
+    assert.equal(await p, 0);
+    assert.equal(ga.loginStatus(ctx).switched, false);
+    assert.equal(switches(g).length, 0);
+  }
+});
+
+test("loginStart/Status/Cancel: 뒤에서 도는 프로세스를 띄우고, 겹치면 막고, 멈춘 진행은 실패로 바꾼다", () => {
+  const { ctx, g } = panelSetup();
+  const spawned = [];
+  ctx.spawn = (cmd, args, opts) => { spawned.push({ cmd, args, opts }); return { unref() {} }; };
+  const r = ga.loginStart(ctx);
+  assert.equal(r.ok, true);
+  assert.equal(r.login.prev, "acct-a");
+  assert.deepEqual(spawned[0].args.slice(1), ["login", "run", "--prev", "acct-a"]);
+  assert.equal(spawned[0].opts.detached, true);
+  assert.ok(!JSON.stringify(spawned[0]).includes("tok-"), "토큰은 인자·환경에 넣지 않는다");
+  assert.equal(ga.loginStart(ctx).ok, false, "진행 중이면 다시 시작하지 않는다");
+  assert.equal(spawned.length, 1);
+
+  // pid 없는 starting 이 30초 넘으면 멈춘 것으로 본다.
+  ga.writeLogin(ctx, { state: "starting", prev: "acct-a", pid: null, startedAt: Date.now() - 60000 });
+  assert.equal(ga.loginStatus(ctx).state, "failed");
+  // 죽은 pid 의 waiting 도 멈춘 것이다.
+  ga.writeLogin(ctx, { state: "waiting", prev: "acct-a", pid: 2 ** 22 + 12345, startedAt: Date.now() });
+  assert.equal(ga.loginStatus(ctx).state, "failed");
+  ga.writeLogin(ctx, { state: "starting", prev: "acct-a", pid: null, startedAt: Date.now() });
+  assert.equal(ga.loginCancel(ctx).ok, true);
+  assert.equal(ga.loginStatus(ctx).state, "cancelled");
+  assert.equal(ga.loginCancel(ctx).ok, false);
+  assert.equal(switches(g).length, 0);
+
+  const w = panelSetup();
+  w.ctx.platform = "win32";
+  assert.equal(ga.loginStart(w.ctx).ok, false);
+});
+
+test("shell-path: 로그인 셸의 PATH 를 표시 사이에서 읽고, 못 읽으면 1", () => {
+  const { ctx } = panelSetup();
+  ctx.env.SHELL = "/bin/zsh";
+  const seen = [];
+  ctx.run = (cmd, args) => { seen.push([cmd, ...args]); return { status: 0, stdout: "motd noise\n__GHA_PATH__/opt/bin:/usr/bin__GHA_PATH__\n", stderr: "" }; };
+  const { o, io: x } = io();
+  assert.equal(ga.main(["shell-path"], ctx, x), 0);
+  assert.deepEqual(o.lines, ["/opt/bin:/usr/bin"]);
+  assert.equal(seen[0][0], "/bin/zsh");
+  ctx.env.SHELL = "zsh";
+  ctx.run = (cmd) => { seen.push([cmd]); return { status: 1, stdout: "", stderr: "" }; };
+  const y = io();
+  assert.equal(ga.main(["shell-path"], ctx, y.io), 1);
+  assert.equal(seen[1][0], "/bin/sh", "상대 경로 SHELL 은 쓰지 않는다");
 });
