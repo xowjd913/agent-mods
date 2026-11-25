@@ -544,6 +544,47 @@ function unwrapTags(text) {
   if (!t.includes("<")) return t;
   return t.replace(/\r\n?/g, "\n").replace(WRAP_OPEN, "").replace(WRAP_CLOSE, "").replace(/\n{3,}/g, "\n\n").trim();
 }
+// Where the **bold** runs of a Markdown text (the string given to TextView.markdown) sit, as [{start,end}] UTF-16 offsets into that same string,
+// markers included. The TextView draws no heavier weight for them (it ignores bold), so main.js paints a tint behind these ranges instead.
+// Fenced blocks and `code spans` are skipped, a \\* is not a marker, an opening ** must be followed and a closing ** preceded by a non-blank.
+// Bounded: a line over 2000 chars, work past 20000 chars or more than 100 ranges is left plain. Pure.
+function boldRanges(md) {
+  const out = [];
+  let fence = false, pos = 0, work = 0;
+  for (const ln of String(md ?? "").split("\n")) {
+    const at = pos;
+    pos += ln.length + 1;
+    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; continue; }
+    if (fence || ln.length > 2000 || !ln.includes("**")) continue;
+    work += ln.length;
+    if (work > 20000 || out.length >= 100) break;
+    let m = ln, i = 0;
+    while (i < m.length) { // blank out the code spans (same length, so the offsets stay)
+      if (m[i] === "\\") { i += 2; continue; }
+      if (m[i] !== "`") { i++; continue; }
+      let n = 1;
+      while (m[i + n] === "`") n++;
+      const run = "`".repeat(n);
+      let j = m.indexOf(run, i + n);
+      while (j !== -1 && m[j + n] === "`") j = m.indexOf(run, j + n + 1);
+      if (j === -1) { i += n; continue; }
+      m = m.slice(0, i) + " ".repeat(j + n - i) + m.slice(j + n);
+      i = j + n;
+    }
+    i = 0;
+    while (i < m.length - 1 && out.length < 100) {
+      if (m[i] === "\\") { i += 2; continue; }
+      if (m[i] === "*" && m[i + 1] === "*" && i + 2 < m.length && !/[\s*]/.test(m[i + 2])) {
+        let j = m.indexOf("**", i + 2);
+        while (j !== -1 && (/\s/.test(m[j - 1]) || m[j - 1] === "\\" || m[j + 2] === "*")) j = m.indexOf("**", j + 1);
+        if (j !== -1) { out.push({ start: at + i, end: at + j + 2 }); i = j + 2; continue; }
+        i += 2; continue;
+      }
+      i++;
+    }
+  }
+  return out;
+}
 // A message text as Markdown for a TextView.markdown(...).raw_html(false): wrapper tags removed first (they would print literally), a line that
 // is only 【...】 made bold, images switched off (![x](y) -> a plain link), and single line breaks kept as line breaks (Markdown would join them).
 // Code fences are left as written. Never produces HTML: the view shows tags as text. Pure.
@@ -785,6 +826,8 @@ export default class Inbox extends View {
     // row, the dots, a picture that finished loading) is seen here and the view goes back to the bottom. A held-back redraw is let go
     // once the selection / press is over.
     cx.timer.every(PIN_TICK_MS, (cx) => this.pinTick(cx));
+    cx.timer.every(DIAG_FLUSH_MS, () => this.flushDiag());
+    this.diag(`init: ${this.windowed ? "window" : this.paned ? "pane" : "dock"}`);
   }
 
   // ---- redraw gating (a drag-select must not be rebuilt under the pointer) and the pin to the newest
@@ -795,7 +838,7 @@ export default class Inbox extends View {
       const o = this.scroll.offset(), vp = this.scroll.viewport_size(), ct = this.scroll.content_size();
       const r = pinStep(this.pin, { y: o.y, vh: vp.height, ch: ct.height });
       this.pin = { pinned: r.pinned, ct: r.ct };
-      if (r.go && !this.ui.press) this.scroll.scroll_to_item(this.lastIdx);
+      if (r.go && !quietNow(this.ui, Date.now())) this.scroll.scroll_to_item(this.lastIdx);
     } catch {}
   }
 
@@ -815,19 +858,23 @@ export default class Inbox extends View {
     for (const ch of s) h = (Math.imul(h, 33) ^ ch.codePointAt(0)) >>> 0;
     return `${s.match(/^[A-Za-z]{1,8}/)?.[0] ?? "?"}~${h.toString(16).padStart(8, "0")}`;
   }
-  diag(msg, cx) {
+  // Only queues a line; flushDiag (a timer started in init, on the view's own cx) writes it. A caller never needs a timer of its own: render,
+  // selection and pointer callbacks may carry a cx without .timer, which once made every line vanish.
+  diag(msg, _cx) {
     try {
       const q = (this.diagQ ??= []);
       if (q.length < 40) q.push(`${new Date().toISOString()} ${msg}`);
-      if (this.diagBusy) return;
-      this.diagBusy = true;
-      if (!cx?.timer) { this.diagBusy = false; return; }
-      cx.timer.after(2000, async () => {
-        const out = this.diagQ.splice(0);
-        try { if (out.length) await exec("node", [HELPER(), "diag", JSON.stringify(out)], { timeout: 5000 }); } catch {}
-        this.diagBusy = false;
-      });
     } catch {}
+  }
+  flushDiag() {
+    try {
+      if (this.diagBusy && Date.now() - (this.diagBusyAt ?? 0) < 15000) return; // a write that hung does not block the log for good
+      const out = (this.diagQ ??= []).splice(0);
+      if (!out.length) return;
+      this.diagBusy = true;
+      this.diagBusyAt = Date.now();
+      Promise.resolve(exec("node", [HELPER(), "diag", JSON.stringify(out)], { timeout: 5000 })).catch(() => {}).then(() => { this.diagBusy = false; });
+    } catch { this.diagBusy = false; }
   }
   pointerUp(cx) {
     this.diag("release (window mouse up)", cx);
@@ -986,6 +1033,7 @@ export default class Inbox extends View {
   pruneReply(asks) {
     const live = new Set(asks.map((a) => a.s.leader));
     for (const m of [this.replyPics, this.replyBusy]) for (const k of [...m.keys()]) if (!live.has(k)) m.delete(k);
+    for (const [k, st] of [...this.inputs]) if (!live.has(k)) { try { st.set_value(""); } catch {} } // an old draft must not reappear on the leader's next card
   }
   pruneSent(asks) {
     try {
@@ -1376,7 +1424,7 @@ export default class Inbox extends View {
       this.prompt = same ? { ...this.prompt, at: Date.now() } : { po, at: Date.now(), text };
       const chain = ++this.promptChain;
       try {
-        if (!same) cx.notify();
+        if (!same) this.softNotify(cx);
         cx.timer.after(PROMPT_REFRESH_MS + 100, (c2) => { if (chain === this.promptChain && this.isBlocked(po)) this.readPrompt(po, c2); });
       } catch {}
     };
@@ -1753,14 +1801,31 @@ export default class Inbox extends View {
 
   // A message as Markdown (bold, headings, lists, `code`, links; no raw HTML: tags show as text). The wrapper tags are removed first (mdText).
   // Selectable like text(); a link opens only when it is http(s) (openUrl ignores everything else).
-  md(id, src) {
+  // The TextView draws **bold** at the normal weight (it ignores bold and the weight around it), so each bold run also gets a tint behind it
+  // (highlight_range, offsets into the very string given to markdown): bold stays visible without a weight.
+  md(id, src, t) {
     this.tvN = (this.tvN ?? 0) + 1;
-    return TextView.markdown(id, mdText(src)).raw_html(false).selectable(true).on_link_click((url, c) => openUrl(url, c)).on_selection_change((sel, c) => this.onSel(id, sel, c));
+    const m = mdText(src);
+    let tv = TextView.markdown(id, m).raw_html(false).selectable(true).on_link_click((url, c) => openUrl(url, c)).on_selection_change((sel, c) => this.onSel(id, sel, c));
+    if (t) { try { for (const r of boldRanges(m)) tv = tv.highlight_range(r.start, r.end, t.foreground + BOLD_TINT); } catch {} }
+    return tv;
   }
 
   text(id, html) {
     this.tvN = (this.tvN ?? 0) + 1;
     return TextView.html(id, html).selectable(true).on_link_click((url, c) => openUrl(url, c)).on_selection_change((sel, c) => this.onSel(id, sel, c));
+  }
+
+  // A small "복사" under a bubble: its whole text (wrapper tags removed) goes on the clipboard, so a message can be copied even when a drag-select
+  // cannot be made. `ms` is the time label beside it.
+  sideTools(t, id, text, ms) {
+    const key = `bc-${id}`;
+    const done = this.copied === key;
+    return v_flex().flex_none().items_end().gap(2)
+      .child(div().id(key).flex_none().px(6).h(17).rounded(5).flex().items_center().text_size(10).cursor_pointer().text_color(done ? t.working : t.dim)
+        .hover((x) => x.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
+        .on_click((_e, cx) => this.copy(key, unwrapTags(text), cx)).tooltip("이 말풍선의 글 전체를 클립보드에 복사합니다").child(done ? "복사됨" : "복사"))
+      .child(div().flex_none().pb(1).text_size(10).text_color(t.dim).child(ms ? clock(ms) : ""));
   }
 
   codeBlock(t, text, html, id) {
@@ -1784,7 +1849,7 @@ export default class Inbox extends View {
       const key = `${id}-${i}`;
       if (p.t === "code") return div().min_w(0).pl(p.depth ? p.depth * 14 + 18 : 0).child(this.codeBlock(t, p.text, p.html, `copy-${key}`));
       if (p.t === "h") return div().min_w(0).pt(4).child(this.heading_text(t, key, p.html, 14.5));
-      return div().min_w(0).text_size(12.5).text_color(t.foreground).child(typeof p.md === "string" && p.md ? this.md(key, p.md) : this.text(key, p.html));
+      return div().min_w(0).text_size(12.5).text_color(t.foreground).child(typeof p.md === "string" && p.md ? this.md(key, p.md, t) : this.text(key, p.html));
     }));
   }
 
@@ -1871,7 +1936,7 @@ export default class Inbox extends View {
       return v_flex().id(id).flex_none().px(10).pt(top).gap(2).items_end()
         .when(Boolean(e.to), (el) => el.child(div().max_w("85%").min_w(0).truncate().text_size(10).text_color(t.dim).child(`→ ${shortName(e.to)}`)))
         .child(h_flex().w_full().min_w(0).gap(6).items_end().justify_end()
-          .child(when(e.ms))
+          .child(this.sideTools(t, id, e.text, e.ms))
           .child(v_flex().flex_none().w(width).max_w("80%").min_w(0).px(12).py(9).gap(6).rounded(12).bg(t.working + "33").border(1).border_color((bad ? t.blocked : t.working) + "66").text_size(12.5).text_color(t.foreground)
             .children(bp.imgs.map((p, i) => div().id(`${id}-img${i}`).flex_none().w(sizes[i].w).h(sizes[i].h).rounded(6).overflow_hidden().cursor_pointer().on_mouse_down("left", stop)
               .on_click(() => openFile(p)).tooltip("눌러서 그림 열기")
@@ -1891,8 +1956,8 @@ export default class Inbox extends View {
             .when(Boolean(e.to), (x) => x.child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(`→ ${shortName(e.to)}`)))))
           .child(h_flex().min_w(0).gap(6).items_end()
             .child(div().flex_1().min_w(0).px(12).py(9).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(12.5).text_color(t.foreground)
-              .child(this.md(id, e.text)))
-            .child(when(e.ms))));
+              .child(this.md(id, e.text, t)))
+            .child(this.sideTools(t, id, e.text, e.ms))));
     }
     const a = e.waiting ? v.asks.find((x) => x.s.leader === e.leader) : null;
     const wait = e.it ? { ...e.it, kind: e.waiting || e.it.kind } : null;
@@ -1977,9 +2042,9 @@ export default class Inbox extends View {
     this.tlSeen = key;
     // Re-pin after this draw: the person was at the bottom (within PIN_SLACK) and the content may have changed height (a row, the dots, a
     // picture); the handle still holds the last layout, so go to the end now and again once the new layout exists.
-    if (this.scroll && this.pin.pinned && !this.ui.press) {
+    if (this.scroll && this.pin.pinned && !quietNow(this.ui, Date.now())) {
       const last = blocks.length - 1;
-      const go = () => { try { if (!this.ui.press) this.scroll?.scroll_to_item(last); } catch {} };
+      const go = () => { try { if (!quietNow(this.ui, Date.now())) this.scroll?.scroll_to_item(last); } catch {} };
       try { cx.timer.after(60, () => go()); cx.timer.after(220, () => go()); } catch {}
     }
     const waiting = v.tabs.reduce((n, x) => n + x.n, 0); // leaders waiting on a decision, over every room
@@ -2004,7 +2069,7 @@ export default class Inbox extends View {
       .on_window_mouse_up("left", (_e, c) => this.pointerUp(c))
       .on_size_change((size, c) => {
         const x = size.width < 360, n = size.width < WIDE_MIN;
-        if (x !== this.compact || n !== this.narrow) { this.compact = x; this.narrow = n; c.notify(); }
+        if (x !== this.compact || n !== this.narrow) { this.compact = x; this.narrow = n; this.softNotify(c); }
       })
       .child(h_flex().h(38).px(this.compact ? 10 : 14).flex_none().items_center().justify_between()
         .child(h_flex().gap(6).items_center()

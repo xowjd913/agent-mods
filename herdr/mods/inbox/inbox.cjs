@@ -1058,6 +1058,47 @@ function unwrapTags(text) {
   if (!t.includes("<")) return t;
   return t.replace(/\r\n?/g, "\n").replace(WRAP_OPEN, "").replace(WRAP_CLOSE, "").replace(/\n{3,}/g, "\n\n").trim();
 }
+// Where the **bold** runs of a Markdown text (the string given to TextView.markdown) sit, as [{start,end}] UTF-16 offsets into that same string,
+// markers included. The TextView draws no heavier weight for them (it ignores bold), so main.js paints a tint behind these ranges instead.
+// Fenced blocks and `code spans` are skipped, a \\* is not a marker, an opening ** must be followed and a closing ** preceded by a non-blank.
+// Bounded: a line over 2000 chars, work past 20000 chars or more than 100 ranges is left plain. Pure.
+function boldRanges(md) {
+  const out = [];
+  let fence = false, pos = 0, work = 0;
+  for (const ln of String(md ?? "").split("\n")) {
+    const at = pos;
+    pos += ln.length + 1;
+    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; continue; }
+    if (fence || ln.length > 2000 || !ln.includes("**")) continue;
+    work += ln.length;
+    if (work > 20000 || out.length >= 100) break;
+    let m = ln, i = 0;
+    while (i < m.length) { // blank out the code spans (same length, so the offsets stay)
+      if (m[i] === "\\") { i += 2; continue; }
+      if (m[i] !== "`") { i++; continue; }
+      let n = 1;
+      while (m[i + n] === "`") n++;
+      const run = "`".repeat(n);
+      let j = m.indexOf(run, i + n);
+      while (j !== -1 && m[j + n] === "`") j = m.indexOf(run, j + n + 1);
+      if (j === -1) { i += n; continue; }
+      m = m.slice(0, i) + " ".repeat(j + n - i) + m.slice(j + n);
+      i = j + n;
+    }
+    i = 0;
+    while (i < m.length - 1 && out.length < 100) {
+      if (m[i] === "\\") { i += 2; continue; }
+      if (m[i] === "*" && m[i + 1] === "*" && i + 2 < m.length && !/[\s*]/.test(m[i + 2])) {
+        let j = m.indexOf("**", i + 2);
+        while (j !== -1 && (/\s/.test(m[j - 1]) || m[j - 1] === "\\" || m[j + 2] === "*")) j = m.indexOf("**", j + 1);
+        if (j !== -1) { out.push({ start: at + i, end: at + j + 2 }); i = j + 2; continue; }
+        i += 2; continue;
+      }
+      i++;
+    }
+  }
+  return out;
+}
 // A message text as Markdown for a TextView.markdown(...).raw_html(false): wrapper tags removed first (they would print literally), a line that
 // is only 【...】 made bold, images switched off (![x](y) -> a plain link), and single line breaks kept as line breaks (Markdown would join them).
 // Code fences are left as written. Never produces HTML: the view shows tags as text. Pure.
@@ -1152,7 +1193,7 @@ function diagAppend(lines, root = appRoot()) {
   try { try { fs.fchmodSync(fd, 0o600); } catch {} fs.writeSync(fd, text); } finally { fs.closeSync(fd); }
   return f;
 }
-module.exports = { unwrapTags, mdText, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { unwrapTags, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)

@@ -1170,7 +1170,7 @@ test("main.js: 모든 데스크 보내기는 deliver 한 곳에서 한 번만 �
   const row = methodOf(src, "  entryRow(t, e, v, cx) {", "  render(cx)");
   assert.match(row, /justify_end\(\)/);
   assert.match(row, /bg\(t\.working \+ "33"\)/);
-  assert.match(row, /\.child\(when\(e\.ms\)\)\s*\n\s*\.child\(v_flex\(\)\.flex_none\(\)\.w\(width\)\.max_w\("80%"\)/); // 내 말풍선: 시간이 말풍선 앞(왼쪽), 폭은 글에서 정한다
+  assert.match(row, /\.child\(this\.sideTools\(t, id, e\.text, e\.ms\)\)\s*\n\s*\.child\(v_flex\(\)\.flex_none\(\)\.w\(width\)\.max_w\("80%"\)/); // 내 말풍선: 시간이 말풍선 앞(왼쪽), 폭은 글에서 정한다
   assert.match(row, /items_end\(\)\s*\n\s*\.child\(div\(\)\.flex_1\(\)\.min_w\(0\)\.px\(12\)/); // PO: 말풍선 뒤(오른쪽)에 시간
   assert.match(row, /mineNote\(e\.status, blockedNow, age\)/);
   assert.ok(!/clock\(it\.ms\)/.test(methodOf(src, "  nameRow(t,", "  // What a waiting leader"))); // 머리줄에서 시간이 빠졌다
@@ -1815,7 +1815,7 @@ test("main.js: 질문 패널 — 왼쪽 눌림 stop, 같은 화면이면 상태�
   assert.ok(!/초 전 화면/.test(pp));
   const rp = methodOf(src, "  readPrompt(po, cx) {", "  // A key press from the question panel");
   assert.match(rp, /promptSame\(this\.prompt\.text, text\)/);
-  assert.match(rp, /if \(!same\) cx\.notify\(\)/);
+  assert.match(rp, /if \(!same\) this\.softNotify\(cx\)/); // 드래그 중에는 softNotify가 다시 그리기를 미룬다
   assert.match(rp, /chain === this\.promptChain && this\.isBlocked\(po\)\) this\.readPrompt\(po, c2\)/);
   assert.match(src, /id = tlId\(e\.key\)/);
 });

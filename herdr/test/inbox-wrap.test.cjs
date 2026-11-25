@@ -110,8 +110,8 @@ test("D: toParts gives each prose part its Markdown source (bold markers kept)",
 test("B/D: the code draws a thumbnail from the app-relative path, and bubbles use the Markdown view with raw_html(false)", () => {
   assert.match(MAIN, /thumb\(t, x\) \{[\s\S]*?imgRel\(this\.data\?\.root \?\? "", x\.path\)/);
   assert.ok(!/image\(x\.path\)/.test(MAIN), "the chip must not pass an absolute path to image()");
-  assert.match(MAIN, /TextView\.markdown\(id, mdText\(src\)\)\.raw_html\(false\)\.selectable\(true\)\.on_link_click/);
-  assert.match(MAIN, /this\.md\(id, e\.text\)/);
+  assert.match(MAIN, /TextView\.markdown\(id, m\)\.raw_html\(false\)\.selectable\(true\)\.on_link_click/);
+  assert.match(MAIN, /this\.md\(id, e\.text, t\)/);
 });
 
 // ---- E: the "···" rows (round 14)
@@ -323,4 +323,122 @@ test("R16: a late clear removes only what was sent, not words or pictures added 
   d.clearBox(a, "sent");
   assert.equal(d.inputs.get("lead-a").v, "");
   assert.equal(d.picsOf("lead-a").length, 0);
+});
+
+// ---- Round 17: bold that shows, diag that is always flushed, copy fallback, drag hardening
+const ranges = (s) => I.boldRanges(s).map((r) => s.slice(r.start, r.end));
+
+test("R17: boldRanges finds **bold** runs as UTF-16 source offsets, skipping code, fences and escapes", () => {
+  assert.deepEqual(ranges("a **b** c **d e** end"), ["**b**", "**d e**"]);
+  assert.deepEqual(ranges("`**x**` and ``**y** ` **z**`` then **w**"), ["**w**"]);
+  assert.deepEqual(ranges("```\n**in fence**\n```\n**out**"), ["**out**"]);
+  assert.deepEqual(ranges("\\**not** and **yes**"), ["**yes**"]);
+  assert.deepEqual(ranges("** lone ** and **w **"), []);
+  assert.deepEqual(ranges("**unterminated"), []);
+  // offsets count UTF-16 units: Korean is one unit, an emoji two - the slice above is the proof, and so is the exact number here
+  const s = "😀한글 **굵게😀** 끝";
+  const [r] = I.boldRanges(s);
+  assert.deepEqual([r.start, r.end], [s.indexOf("**"), s.lastIndexOf("**") + 2]);
+  assert.equal(s.slice(r.start, r.end), "**굵게😀**");
+  // the ranges are computed on the very string given to markdown (a 【...】 line is made bold by mdText)
+  assert.deepEqual(ranges(I.mdText("【결과】\nplain **b**")), ["**【결과】**", "**b**"]);
+});
+
+test("R17: boldRanges is bounded (long lines, many markers)", () => {
+  const t0 = process.hrtime.bigint();
+  assert.deepEqual(I.boldRanges("**a** ".repeat(5000)).length <= 100, true);
+  I.boldRanges("`".repeat(1999) + "**x**");
+  I.boldRanges("** ".repeat(600));
+  I.boldRanges(("`a ".repeat(600) + "\n").repeat(20));
+  assert.ok(Number(process.hrtime.bigint() - t0) / 1e6 < 500);
+});
+
+test("R17: the mod copy of boldRanges is the same code, and md() paints a tint behind each run of the same string", () => {
+  const grab = (src) => src.slice(src.indexOf("function boldRanges(md)"), src.indexOf("// A message text as Markdown for a TextView"));
+  const CJS = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8");
+  assert.equal(grab(MAIN), grab(CJS));
+  const md = MAIN.slice(MAIN.indexOf("  md(id, src, t) {"), MAIN.indexOf("  text(id, html) {"));
+  assert.match(md, /const m = mdText\(src\);/);
+  assert.match(md, /TextView\.markdown\(id, m\)/);
+  assert.match(md, /for \(const r of boldRanges\(m\)\) tv = tv\.highlight_range\(r\.start, r\.end, t\.foreground \+ BOLD_TINT\)/);
+  assert.match(MAIN, /this\.md\(key, p\.md, t\)/);
+});
+
+test("R17: md() really calls highlight_range once per bold run (stub TextView)", () => {
+  const body = MAIN.slice(MAIN.indexOf("  md(id, src, t) {"), MAIN.indexOf("  text(id, html) {"));
+  const calls = [];
+  const tv = { raw_html() { return this; }, selectable() { return this; }, on_link_click() { return this; }, on_selection_change() { return this; }, highlight_range(a, b, c) { calls.push([a, b, c]); return this; } };
+  const make = new Function("TextView", "mdText", "boldRanges", "openUrl", "BOLD_TINT", `return class D { ${body} }`);
+  const d = new (make({ markdown: () => tv }, I.mdText, I.boldRanges, () => {}, "2e"))();
+  d.md("x", "a **b** c **d**", { foreground: "#aabbcc" });
+  assert.deepEqual(calls, [[2, 7, "#aabbcc2e"], [10, 15, "#aabbcc2e"]]);
+  calls.length = 0;
+  d.md("x", "a **b**"); // no theme: nothing painted
+  assert.equal(calls.length, 0);
+});
+
+test("R17: pruneReply also empties the reply text of a leader that is gone", () => {
+  const d = replyDesk();
+  d.inputs.set("lead-a", fakeInput("keep me")); d.inputs.set("lead-gone", fakeInput("old draft"));
+  d.pruneReply([ASK("lead-a")]);
+  assert.equal(d.inputs.get("lead-a").v, "keep me");
+  assert.equal(d.inputs.get("lead-gone").v, "");
+});
+
+function diagDesk(exec) {
+  const body = MAIN.slice(MAIN.indexOf("  diag(msg, _cx) {"), MAIN.indexOf("  pointerUp(cx) {"));
+  const make = new Function("exec", "HELPER", `return class D { ${body} }`);
+  return new (make(exec, () => "inbox.cjs"))();
+}
+
+test("R17: diag() needs no timer: a line queued with a cx that has no .timer is still written by flushDiag", async () => {
+  const written = [];
+  const d = diagDesk((cmd, args) => { written.push(JSON.parse(args[2])); return Promise.resolve({ code: 0 }); });
+  d.diag("render line", {}); d.diag("selection line", { notify() {} }); d.diag("no cx at all");
+  assert.equal(written.length, 0, "diag itself only queues");
+  d.flushDiag();
+  assert.equal(written.length, 1);
+  assert.equal(written[0].length, 3);
+  assert.match(written[0][0], / render line$/);
+  d.flushDiag(); // nothing queued: no call
+  assert.equal(written.length, 1);
+});
+
+test("R17: diagBusy cannot stick: a failing or hanging write does not stop later flushes", async () => {
+  let n = 0;
+  const d = diagDesk(() => { n++; return n === 1 ? Promise.reject(new Error("boom")) : n === 2 ? new Promise(() => {}) : Promise.resolve({}); });
+  d.diag("a"); d.flushDiag();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(d.diagBusy, false, "a rejected write frees the flag");
+  d.diag("b"); d.flushDiag(); // hangs
+  d.diag("c"); d.flushDiag();
+  assert.equal(n, 2, "while a write is in flight the next flush waits");
+  d.diagBusyAt -= 20000; // the hung write is given up after 15s
+  d.flushDiag();
+  assert.equal(n, 3);
+  const full = diagDesk(() => Promise.resolve({}));
+  for (let i = 0; i < 100; i++) full.diag("x");
+  assert.equal(full.diagQ.length, 40, "the queue is capped");
+});
+
+test("R17: init starts the flush timer on the view's own cx and logs one init line; callers never need cx.timer", () => {
+  assert.match(MAIN, /cx\.timer\.every\(DIAG_FLUSH_MS, \(\) => this\.flushDiag\(\)\);/);
+  assert.match(MAIN, /this\.diag\(`init: /);
+  const diag = MAIN.slice(MAIN.indexOf("  diag(msg, _cx) {"), MAIN.indexOf("  pointerUp(cx) {"));
+  assert.doesNotMatch(diag, /cx\.timer|cx\?\.timer/);
+});
+
+test("R17: each bubble has a 복사 chip that copies the unwrapped text; background redraws and the pin wait for a drag", () => {
+  const side = MAIN.slice(MAIN.indexOf("  sideTools(t, id, text, ms) {"), MAIN.indexOf("  codeBlock("));
+  assert.match(side, /this\.copy\(key, unwrapTags\(text\), cx\)/);
+  assert.match(side, /on_mouse_down\("left", stop\)/);
+  assert.equal((MAIN.match(/this\.sideTools\(t, id, e\.text, e\.ms\)/g) ?? []).length, 2, "mine and the PO's");
+  // every background source goes through softNotify or the quiet check
+  assert.match(MAIN, /if \(!same\) this\.softNotify\(cx\);/);
+  assert.match(MAIN, /this\.narrow = n; this\.softNotify\(c\)/);
+  assert.match(MAIN, /if \(r\.go && !quietNow\(this\.ui, Date\.now\(\)\)\) this\.scroll\.scroll_to_item/);
+  assert.doesNotMatch(MAIN, /!this\.ui\.press\) this\.scroll/);
+  // TextView ids are the content-keyed timeline ids (or the same id + part index): they do not change between draws
+  assert.match(MAIN, /const id = tlId\(e\.key\);/);
+  assert.match(MAIN, /const key = `\$\{id\}-\$\{i\}`;/);
 });
