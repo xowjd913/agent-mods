@@ -568,6 +568,11 @@ test("훅: 이름이 비슷한 다른 스크립트는 우리 것으로 보지 �
   assert.equal(inst.isOurHook({ command: 'node "C:\\Users\\a\\mods\\inbox\\po-hook.cjs"' }), true);
   assert.equal(inst.isOurHook({ command: 'node "/a/mods/inbox/po-hook.cjs"' }), true);
   assert.equal(inst.isOurHook({}), false);
+  // 우리 표식(node "<home>/mods/inbox/po-hook.cjs")이 아닌 po-hook.cjs는 다른 사람의 훅이다: 설치·제거가 건드리지 않는다.
+  assert.equal(inst.isOurHook({ command: 'node "/other/tools/po-hook.cjs"' }), false);
+  assert.equal(inst.isOurHook({ command: 'node /a/mods/inbox/po-hook.cjs' }), false);
+  assert.equal(inst.isOurHook({ command: 'node "/a/mods/inbox/po-hook.cjs" --extra' }), false);
+  assert.equal(inst.isOurHook({ command: 'bash -c "node /a/mods/inbox/po-hook.cjs"' }), false);
 });
 
 test("훅: 심볼릭 링크로 연결된 설정 파일은 링크를 그대로 두고 대상 파일에 쓴다", () => {

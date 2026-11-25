@@ -302,7 +302,7 @@ function parsePoLines(text) {
 //   UserPromptSubmit (what was typed or pasted) -> {ts, kind:"me", text, src:"hook", pid}
 // `pid` is the prompt id that pairs a prompt with its reply. Control and bidi characters are dropped; a text longer than MAX_PO_TEXT ends
 // in "…" (the desk shows at most that much). A prompt that is a harness message (<task-notification>, <system-reminder>, ...) is skipped.
-const HARNESS_PROMPT = /^<[a-z][a-z-]*[\s>]/i;
+const HARNESS_PROMPT = /^<(system-reminder|task-notification|command-name|command-message|command-args|local-command-stdout|local-command-stderr|user-prompt-submit-hook|bash-input|bash-stdout|bash-stderr)[\s>]/i;
 function hookLine(payload, now = Date.now()) {
   const ev = payload?.hook_event_name;
   const stop = ev === "Stop";

@@ -453,11 +453,11 @@ function listMods(home) {
 }
 
 // ---- PO hook: one entry in Claude Code's settings.json (Stop and UserPromptSubmit) that runs inbox/po-hook.cjs.
-// Our entry is told apart from every other hook by its script name in the command.
+// Our entry is told apart from every other hook by its exact command shape: node "<home>/mods/inbox/po-hook.cjs" (what hookCommand writes).
 const HOOK_EVENTS = ["Stop", "UserPromptSubmit"];
 const HOOK_SCRIPT = "po-hook.cjs";
 const HOOK_TIMEOUT_S = 5;
-const isOurHook = (h) => h && typeof h.command === "string" && /(^|[\\/\s"'])po-hook\.cjs(["'\s]|$)/.test(h.command);
+const isOurHook = (h) => h && typeof h.command === "string" && /^node "[^"\n\r]*[\\/]mods[\\/]inbox[\\/]po-hook\.cjs"$/.test(h.command);
 const settingsPath = (env = process.env) => path.join(env.CLAUDE_CONFIG_DIR || path.join(require("node:os").homedir(), ".claude"), "settings.json");
 const hookScript = (home) => path.join(modDir(home, "inbox"), HOOK_SCRIPT);
 // The command that runs the script with node (no sh needed: it runs the same on macOS, Linux and Windows).

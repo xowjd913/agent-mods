@@ -1619,6 +1619,9 @@ test("hookLine: 다른 이벤트·빈 글·Stop 훅이 이어 가는 턴·하네
   assert.equal(I.hookLine(null), null);
   assert.equal(I.hookLine("x"), null);
   assert.ok(I.hookLine({ hook_event_name: "UserPromptSubmit", prompt: "a < b 를 비교해 줘" }));
+  assert.ok(I.hookLine({ hook_event_name: "UserPromptSubmit", prompt: "<div> 태그가 깨져요" })); // 알려진 하네스 태그가 아니면 사람이 친 글이다
+  assert.ok(I.hookLine({ hook_event_name: "UserPromptSubmit", prompt: "<b>굵게</b> 해줘" }));
+  assert.equal(I.hookLine({ hook_event_name: "UserPromptSubmit", prompt: "<command-name>/x</command-name>" }), null);
 });
 
 test("hookLine: 제어·양방향 문자를 지우고 2000자로 줄이며 끝에 …을 붙인다", () => {
@@ -1815,4 +1818,22 @@ test("main.js: 질문 패널 — 왼쪽 눌림 stop, 같은 화면이면 상태�
   assert.match(rp, /if \(!same\) cx\.notify\(\)/);
   assert.match(rp, /chain === this\.promptChain && this\.isBlocked\(po\)\) this\.readPrompt\(po, c2\)/);
   assert.match(src, /id = tlId\(e\.key\)/);
+});
+
+test("po-hook: 쓰는 파일은 0600이고(이미 있던 파일도 조인다), 1MiB를 넘으면 새 줄만 남기고 줄 단위로 줄인다", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "po-hook-cap-"));
+  const file = path.join(dir, "devnotes.jsonl");
+  fs.writeFileSync(file, '{"a":1}\n', { mode: 0o644 });
+  HOOK.appendLine(file, '{"b":2}\n');
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.equal(fs.readFileSync(file, "utf8"), '{"a":1}\n{"b":2}\n');
+  const row = JSON.stringify({ k: "x".repeat(1000) }) + "\n";
+  fs.writeFileSync(file, row.repeat(Math.ceil(HOOK.FILE_MAX / row.length) + 5));
+  HOOK.appendLine(file, '{"last":1}\n');
+  const text = fs.readFileSync(file, "utf8");
+  assert.ok(text.length <= HOOK.KEEP + 20, `줄어듦 ${text.length}`);
+  assert.ok(text.endsWith('{"last":1}\n'));
+  for (const l of text.trim().split("\n")) JSON.parse(l); // 잘린 줄이 남지 않는다
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.deepEqual(fs.readdirSync(dir), ["devnotes.jsonl"]); // 임시 파일이 남지 않는다
 });

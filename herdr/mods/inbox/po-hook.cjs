@@ -11,7 +11,9 @@ const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
-const WAIT_MS = 3000; // the one `hc get` may take this long; longer means no desk line, not a slow session
+const WAIT_MS = 1200; // the one `hc get` may take this long; longer means no desk line, not a slow session
+const FILE_MAX = 1 << 20; // a PO file past 1 MiB is cut down to its newest KEEP bytes (whole lines) before the next line is added
+const KEEP = 256 << 10;
 
 // stdin of a hook is one JSON object. Anything else is nothing to do.
 function readPayload() {
@@ -27,6 +29,28 @@ function terminalLabels(id) {
   } catch { return null; }
 }
 
+// Appends one line to `file`, which holds plaintext prompts: created 0600 (an older file is tightened to 0600), and cut down to its newest
+// whole lines when it grew past FILE_MAX.
+function appendLine(file, text) {
+  let size = 0;
+  try { size = fs.statSync(file).size; } catch {}
+  if (size > FILE_MAX) {
+    const fd = fs.openSync(file, "r");
+    let tail = "";
+    try {
+      const buf = Buffer.alloc(KEEP);
+      const n = fs.readSync(fd, buf, 0, KEEP, size - KEEP);
+      tail = buf.toString("utf8", 0, n);
+    } finally { fs.closeSync(fd); }
+    tail = tail.slice(tail.indexOf("\n") + 1);
+    const tmp = `${file}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, tail, { mode: 0o600 });
+    fs.renameSync(tmp, file);
+  }
+  const fd = fs.openSync(file, "a", 0o600);
+  try { try { fs.fchmodSync(fd, 0o600); } catch {} fs.writeSync(fd, text); } finally { fs.closeSync(fd); }
+}
+
 function run(env = process.env, payload = readPayload(), I = require("./inbox.cjs"), get = terminalLabels, now = Date.now()) {
   const id = String(env.HC_TERMINAL_ID ?? "").trim();
   if (!id) return null;
@@ -39,11 +63,11 @@ function run(env = process.env, payload = readPayload(), I = require("./inbox.cj
   const file = po ? I.poFile(I.inboxDir(), po) : null;
   if (!file) return null;
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  fs.appendFileSync(file, JSON.stringify(line) + "\n");
+  appendLine(file, JSON.stringify(line) + "\n");
   return { file, line };
 }
 
-module.exports = { run, terminalLabels };
+module.exports = { run, terminalLabels, appendLine, FILE_MAX, KEEP };
 
 if (require.main === module) {
   try { run(); } catch { /* never fail the session */ }
