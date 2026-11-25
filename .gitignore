@@ -3,3 +3,5 @@ node_modules/
 # Herdr가 모드 폴더에 만드는 편집기용 파일
 gpui-kit.d.ts
 jsconfig.json
+# 모드 상태 폴더(테스트·실행이 만드는 그림·진단 파일)
+herdr/data/

@@ -444,6 +444,189 @@ test("path-menu만 넣은 레이아웃도 우리 것으로 보고, 사용자가 
   assert.deepEqual(readJson(file), clonedMain());
 });
 
+// ---- PO 훅: Claude Code 설정(settings.json)에 한 줄 넣기·빼기. 진짜 ~/.claude는 건드리지 않고 임시 폴더의 파일로만 시험한다.
+function hookEnv() {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { only: ["inbox"] }));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-claude-"));
+  return { home, dir, file: path.join(dir, "settings.json"), script: path.join(home, "mods", "inbox", "po-hook.cjs") };
+}
+const ourCommands = (settings) => Object.values(settings.hooks ?? {}).flat().flatMap((g) => g.hooks ?? []).filter(inst.isOurHook);
+const OTHER = { hooks: { Stop: [{ hooks: [{ type: "command", command: "herdr-hook stop" }] }], UserPromptSubmit: [{ matcher: "", hooks: [{ type: "command", command: "orca hook prompt", timeout: 3 }] }], PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "echo hi" }] }] }, theme: "dark", permissions: { allow: ["Bash(ls)"] } };
+
+test("inbox 설치는 po-hook.cjs를 모드 폴더에 함께 복사한다(설정은 건드리지 않는다)", () => {
+  const { script, dir } = hookEnv();
+  assert.ok(fs.existsSync(script));
+  assert.deepEqual(fs.readdirSync(dir), []);
+});
+
+test("훅: 설정 파일이 없으면 만들고 Stop·UserPromptSubmit에 우리 줄만 넣는다", () => {
+  const { home, file, script } = hookEnv();
+  const r = inst.hookSettings(home, file);
+  assert.equal(r.status, "installed");
+  assert.equal(r.backup, undefined);
+  const s = readJson(file);
+  assert.deepEqual(Object.keys(s.hooks).sort(), ["Stop", "UserPromptSubmit"]);
+  for (const ev of ["Stop", "UserPromptSubmit"]) assert.deepEqual(s.hooks[ev], [{ hooks: [{ type: "command", command: `node "${script}"`, timeout: 5 }] }]);
+});
+
+test("훅: 다른 훅·다른 키를 그대로 두고 우리 줄만 더하며, 쓰기 전에 백업한다", () => {
+  const { home, file } = hookEnv();
+  const text = JSON.stringify(OTHER, null, 4) + "\n";
+  fs.writeFileSync(file, text);
+  const r = inst.hookSettings(home, file, false, Date.UTC(2026, 0, 2, 3, 4, 5));
+  assert.equal(r.status, "installed");
+  assert.equal(fs.readFileSync(r.backup, "utf8"), text);
+  assert.match(path.basename(r.backup), /^settings\.json\.bak-herdr-20260102030405$/);
+  const s = readJson(file);
+  assert.deepEqual(s.hooks.PreToolUse, OTHER.hooks.PreToolUse);
+  assert.equal(s.theme, "dark");
+  assert.deepEqual(s.permissions, OTHER.permissions);
+  assert.deepEqual(s.hooks.Stop[0], OTHER.hooks.Stop[0]);
+  assert.deepEqual(s.hooks.UserPromptSubmit[0], OTHER.hooks.UserPromptSubmit[0]);
+  assert.equal(ourCommands(s).length, 2);
+  assert.match(fs.readFileSync(file, "utf8"), /^\{\n {4}"hooks"/); // 들여쓰기 4칸과 끝 줄바꿈을 지킨다
+  assert.ok(fs.readFileSync(file, "utf8").endsWith("\n"));
+});
+
+test("훅: 두 번 넣어도 한 번만 들어가고, 두 번째는 파일도 백업도 만들지 않는다", () => {
+  const { home, dir, file } = hookEnv();
+  fs.writeFileSync(file, JSON.stringify(OTHER, null, 2));
+  inst.hookSettings(home, file);
+  const first = fs.readFileSync(file, "utf8");
+  const names = fs.readdirSync(dir).sort();
+  const r = inst.hookSettings(home, file);
+  assert.equal(r.status, "present");
+  assert.equal(fs.readFileSync(file, "utf8"), first);
+  assert.deepEqual(fs.readdirSync(dir).sort(), names);
+  assert.equal(ourCommands(readJson(file)).length, 2);
+});
+
+test("훅: 설치 위치가 바뀌면 우리 줄의 명령만 새 경로로 고친다(줄이 늘지 않는다)", () => {
+  const { home, file } = hookEnv();
+  inst.hookSettings(home, file);
+  const s = readJson(file);
+  for (const ev of Object.keys(s.hooks)) s.hooks[ev][0].hooks[0].command = 'node "/old/place/mods/inbox/po-hook.cjs"';
+  fs.writeFileSync(file, JSON.stringify(s));
+  assert.equal(inst.hookSettings(home, file).status, "installed");
+  const cmds = ourCommands(readJson(file));
+  assert.equal(cmds.length, 2);
+  assert.ok(cmds.every((h) => h.command === inst.hookCommand(inst.hookScript(home))));
+});
+
+test("훅: JSON을 읽지 못하거나 모양이 이상하면 아무것도 쓰지 않는다(백업도 임시 파일도 없다)", () => {
+  const { home, dir, file } = hookEnv();
+  const bad = ["{ not json", "[]", '"x"', JSON.stringify({ hooks: [] }), JSON.stringify({ hooks: { Stop: {} } }), JSON.stringify({ hooks: { Stop: [null] } }), JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: "x" }] } })];
+  for (const text of bad) {
+    fs.writeFileSync(file, text);
+    const r = inst.hookSettings(home, file);
+    assert.equal(r.status, "invalid", text);
+    assert.match(r.error, /건드리지 않았습니다/);
+    assert.equal(fs.readFileSync(file, "utf8"), text);
+    assert.deepEqual(fs.readdirSync(dir), ["settings.json"]);
+    assert.equal(inst.hookSettings(home, file, true).status, "invalid", `remove: ${text}`);
+    assert.equal(fs.readFileSync(file, "utf8"), text);
+  }
+});
+
+test("훅: 스크립트가 설치돼 있지 않으면 넣지 않는다", () => {
+  const home = tempHome();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-claude-"));
+  const r = inst.hookSettings(home, path.join(dir, "settings.json"));
+  assert.equal(r.status, "skipped");
+  assert.deepEqual(fs.readdirSync(dir), []);
+});
+
+test("훅 제거: 우리 줄만 빼고 다른 훅은 그대로, 비게 된 묶음·이벤트만 치운다", () => {
+  const { home, file } = hookEnv();
+  fs.writeFileSync(file, JSON.stringify(OTHER, null, 2));
+  inst.hookSettings(home, file);
+  const r = inst.hookSettings(home, file, true);
+  assert.equal(r.status, "removed");
+  assert.ok(r.backup);
+  assert.deepEqual(readJson(file), OTHER);
+  assert.equal(inst.hookSettings(home, file, true).status, "absent");
+});
+
+test("훅 제거: 우리가 만든 파일은 hooks 키까지 비우고, 파일이 없으면 만들지 않는다", () => {
+  const { home, dir, file } = hookEnv();
+  assert.equal(inst.hookSettings(home, file, true).status, "absent");
+  assert.deepEqual(fs.readdirSync(dir), []);
+  inst.hookSettings(home, file);
+  inst.hookSettings(home, file, true);
+  assert.deepEqual(readJson(file), {});
+});
+
+test("훅 제거: 한 묶음에 다른 훅과 함께 있던 우리 줄도 그것만 빠진다", () => {
+  const { home, file } = hookEnv();
+  const mixed = { hooks: { Stop: [{ hooks: [{ type: "command", command: "keep-me" }, { type: "command", command: `node "/x/mods/inbox/po-hook.cjs"`, timeout: 5 }] }] } };
+  fs.writeFileSync(file, JSON.stringify(mixed));
+  inst.hookSettings(home, file, true);
+  assert.deepEqual(readJson(file), { hooks: { Stop: [{ hooks: [{ type: "command", command: "keep-me" }] }] } });
+});
+
+test("훅: 이름이 비슷한 다른 스크립트는 우리 것으로 보지 않는다", () => {
+  assert.equal(inst.isOurHook({ command: 'node "/a/b/my-po-hook.cjs"' }), false);
+  assert.equal(inst.isOurHook({ command: "po-hook.cjs.bak" }), false);
+  assert.equal(inst.isOurHook({ command: 'node "C:\\Users\\a\\mods\\inbox\\po-hook.cjs"' }), true);
+  assert.equal(inst.isOurHook({ command: 'node "/a/mods/inbox/po-hook.cjs"' }), true);
+  assert.equal(inst.isOurHook({}), false);
+  // 우리 표식(node "<home>/mods/inbox/po-hook.cjs")이 아닌 po-hook.cjs는 다른 사람의 훅이다: 설치·제거가 건드리지 않는다.
+  assert.equal(inst.isOurHook({ command: 'node "/other/tools/po-hook.cjs"' }), false);
+  assert.equal(inst.isOurHook({ command: 'node /a/mods/inbox/po-hook.cjs' }), false);
+  assert.equal(inst.isOurHook({ command: 'node "/a/mods/inbox/po-hook.cjs" --extra' }), false);
+  assert.equal(inst.isOurHook({ command: 'bash -c "node /a/mods/inbox/po-hook.cjs"' }), false);
+});
+
+test("훅: 심볼릭 링크로 연결된 설정 파일은 링크를 그대로 두고 대상 파일에 쓴다", () => {
+  const { home, dir, file } = hookEnv();
+  const real = path.join(dir, "real.json");
+  fs.writeFileSync(real, JSON.stringify(OTHER));
+  try { fs.symlinkSync(real, file); } catch { return; } // 심볼릭 링크를 못 만드는 환경은 건너뛴다
+  inst.hookSettings(home, file);
+  assert.ok(fs.lstatSync(file).isSymbolicLink());
+  assert.equal(ourCommands(readJson(real)).length, 2);
+});
+
+test("훅: 설정 파일의 권한과 BOM 없는 JSON을 지키고, 임시 파일을 남기지 않는다", () => {
+  const { home, dir, file } = hookEnv();
+  fs.writeFileSync(file, "\uFEFF" + JSON.stringify({ a: 1 }), { mode: 0o640 });
+  inst.hookSettings(home, file);
+  if (process.platform !== "win32") assert.equal(fs.statSync(file).mode & 0o777, 0o640);
+  assert.equal(readJson(file).a, 1);
+  assert.ok(fs.readdirSync(dir).every((n) => n === "settings.json" || n.startsWith("settings.json.bak-herdr-")));
+});
+
+test("훅 명령줄: --settings 경로로 넣고 빼며, 읽지 못하는 파일이면 1로 끝나고 그대로 둔다", () => {
+  const { home, dir, file } = hookEnv();
+  let r = cli("hook", "--home", home, "--settings", file);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /PO 훅을 넣었습니다/);
+  assert.equal(ourCommands(readJson(file)).length, 2);
+  r = cli("hook", "--home", home, "--settings", file);
+  assert.match(r.stdout, /이미 들어 있습니다/);
+  r = cli("hook", "--home", home, "--settings", file, "--remove");
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /PO 훅을 뺐습니다/);
+  assert.equal(ourCommands(readJson(file)).length, 0);
+  fs.writeFileSync(file, "{ nope");
+  r = cli("hook", "--home", home, "--settings", file);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /올바른 JSON이 아니라 건드리지 않았습니다/);
+  assert.equal(fs.readFileSync(file, "utf8"), "{ nope");
+  assert.equal(cli("hook", "--home", home, "--settings").status, 2);
+});
+
+test("mods·remove 명령은 Claude 설정 파일을 건드리지 않는다(CLAUDE_CONFIG_DIR을 임시 폴더로 돌려 확인)", () => {
+  const home = tempHome();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-claude-"));
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: dir };
+  assert.equal(spawnSync(process.execPath, [CLI, "mods", "--home", home, "--only", "inbox"], { encoding: "utf8", env }).status, 0);
+  assert.equal(spawnSync(process.execPath, [CLI, "remove", "--home", home, "--mods", "inbox"], { encoding: "utf8", env }).status, 0);
+  assert.deepEqual(fs.readdirSync(dir), []);
+  assert.equal(inst.settingsPath({ CLAUDE_CONFIG_DIR: dir }), path.join(dir, "settings.json"));
+});
+
 test("--add gh-accounts는 오른쪽 패널에 accounts-board를 더하고, 제거하면 뺀다", () => {
   const home = tempHome();
   quiet(() => inst.installMods(home, { add: ["gh-accounts"] }));

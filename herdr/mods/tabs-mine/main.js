@@ -170,7 +170,7 @@ export default class Tabs extends View {
     });
   }
 
-  // 답을 기다리는 리더 수: 대기 라벨(decision|verify)이 붙은 lead-* 터미널(받은편지함 요약 칸과 같은 규칙, inbox.cjs의 waitingKind). 받은편지함 칸이 닫혀 있어도 터미널 라벨만 보므로 늘 맞다.
+  // 답을 기다리는 리더 수: 대기 라벨(decision|verify)이 붙은 lead-* 터미널(PO 데스크 요약 칸과 같은 규칙, inbox.cjs의 waitingKind). PO 데스크 칸이 닫혀 있어도 터미널 라벨만 보므로 늘 맞다.
   inboxWaiting() { return (terminals() ?? []).filter((t) => waitingKind(t)).length; }
 
   // One tab per wheel notch. A touchpad or smooth-scrolling mouse sends many
@@ -282,7 +282,7 @@ export default class Tabs extends View {
           else { run("layout.select", { stack: "panel-body", child: id }); run("layout.show", { id: "panel" }); }
         }).child(svg(icon).size(14)).child(label)
         .when(badge > 0, (el) => el.child(div().flex_none().min_w(16).h(16).px(4).rounded(8).bg(t.blocked).flex().items_center().justify_center().text_size(10.5).font_semibold().text_color("#ffffff")
-          .tooltip("알림 수: PRs는 내 확인이 필요한 PR(내 PR 중 CI 실패·수정 요청, 내게 온 리뷰 요청), 받은편지함은 답을 기다리는 리더").child(String(badge))));
+          .tooltip("알림 수: PRs는 내 확인이 필요한 PR(내 PR 중 CI 실패·수정 요청, 내게 온 리뷰 요청), PO 데스크는 답을 기다리는 리더").child(String(badge))));
     };
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
@@ -297,7 +297,7 @@ export default class Tabs extends View {
       .when(enabled.includes("pr-board"), el => el.child(panelButton("pr-board", "PRs", "mods/workspace-chrome/git-compare.svg", this.attention)))
       .when(enabled.includes("schedules-board"), el => el.child(panelButton("schedules-board", "예약", "mods/workspace-chrome/clock.svg")))
       .when(enabled.includes("accounts-board"), el => el.child(panelButton("accounts-board", "계정", "mods/workspace-chrome/git-branch.svg")))
-      .when(enabled.includes("inbox-board"), el => el.child(panelButton("inbox-board", "받은편지함", "mods/workspace-chrome/archive.svg", this.inboxWaiting())))
+      .when(enabled.includes("inbox-board"), el => el.child(panelButton("inbox-board", "PO 데스크", "mods/workspace-chrome/archive.svg", this.inboxWaiting())))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/tabs/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));

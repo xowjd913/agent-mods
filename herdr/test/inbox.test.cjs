@@ -1,5 +1,6 @@
 // inbox.cjs 단위 테스트: node --test herdr/test/inbox.test.cjs
 const test = require("node:test");
+const POSIX = process.platform !== "win32"; // Windows has no POSIX file modes: only the mode asserts are skipped there
 const assert = require("node:assert/strict");
 const fs = require("fs");
 const os = require("os");
@@ -76,7 +77,7 @@ test("answerLine: 한 줄이고, 원문을 그대로 따옴표에 넣고, 링크
 
 // 요약 칸이 채팅 창을 여는 약속: 같은 키로 위치를 기억하고(keep) 다시 켤 때 돌아오며, 창 안 버튼은 끌기를 시작하지 않는다.
 test("main.js: 요약 칸은 key·keep이 있는 떠 있는 창으로 채팅 보기를 열고, 창에는 닫기 버튼이 있다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /const WINDOW = \{[^}]*kind: "window"[^}]*key: "inbox"[^}]*keep: true/);
   assert.match(src, /props: \{ mode: "window" \}/);
   assert.match(src, /openOverlay\(WINDOW\)/);
@@ -87,23 +88,99 @@ test("main.js: 요약 칸은 key·keep이 있는 떠 있는 창으로 채팅 보
   assert.match(src, /setBadge\(text \|\| null\)/);
 });
 
-// 답은 진짜 사용자 입력이 된다: 클립보드 → PO 칸 포커스 → 붙여넣기. Enter는 누르지 않고, hc send 경로는 없다.
-test("main.js: 답은 클립보드·포커스·붙여넣기로 넣고 hc send와 Enter 입력은 쓰지 않는다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
-  assert.match(src, /write_to_clipboard\(line\)/);
-  assert.match(src, /run\("pane\.focus", \{ terminal: po \}\)/);
-  assert.match(src, /run\("terminal\.paste"/);
-  assert.ok(!/\bhc\b[^"\n]*\(\[?"send"/.test(src) && !/hc\(\[/.test(src));
-  assert.ok(!/import \{[^}]*\bhc\b[^}]*\} from "herdr"/.test(src));
-  assert.ok(!/terminal\.send|send_key|"enter"/i.test(src));
+// 패널이 PO 터미널에 넣는 길은 하나(deliver): 클립보드 → PO 칸 포커스 → 붙여넣기 → Enter(hc keys). hc send는 쓰지 않는다.
+const mainSrc = () => fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
+const methodOf = (src, head, next) => { const a = src.indexOf(head), b = src.indexOf(next, a + 1); assert.ok(a > 0 && b > a, head); return src.slice(a, b); };
+const deliverOf = (src) => methodOf(src, '  deliver(po, text, c, rec = null, ok = null, id = "", opened = false) {', "  // A send to a PO with no pane");
+
+test("main.js: 답 버튼·답 상자·N안 칩·채팅은 모두 deliver() 한 길로 붙여넣고 Enter까지 보낸다", () => {
+  const src = mainSrc();
+  assert.ok(!/hc\(\["send"/.test(src) && !/terminal\.send|send_key/i.test(src)); // hc send는 <hc from=...> 꼬리표가 붙어 쓰지 않는다
+  const send = methodOf(src, "  send(a, text, cx, kind = \"answer\") {", "  clearBox(a");
+  const chat = methodOf(src, "  sendChat(c) {", "  // The chat footer");
+  const del = deliverOf(src);
+  assert.match(send, /answerLine\(a\.kind, a\.s\.leader, /); assert.match(send, /this\.deliver\(po, line, cx, \{/);
+  assert.match(chat, /this\.deliver\(po, line, c, \{/);
+  assert.ok(!/run\("terminal\.paste"|submitPo|hc\(/.test(send + chat)); // 붙여넣기·Enter는 deliver 안에서만
+  // 순서: 클립보드 → 포커스 → 붙여넣기 → Enter
+  const at = (re) => del.search(re);
+  assert.ok(at(/write_to_clipboard\(text\)/) >= 0 && at(/pane\.focus", \{ terminal: po \}/) > at(/write_to_clipboard/));
+  assert.ok(at(/run\("terminal\.paste"/) > at(/pane\.focus", \{ terminal: po \}/) && at(/this\.submitPo\(/) > at(/run\("terminal\.paste"/));
+  assert.match(src, /write_to_clipboard\(text\)/);
   assert.match(src, /disabled: a\.po \? "" : NO_PO/); // PO를 못 찾으면 답 버튼이 막힌다
+  assert.ok(!/Enter를 눌러 보내세요|PO에서 Enter로 보내면 리더가 받고/.test(src)); // 이제 보내므로 '직접 Enter' 안내는 막힌 경우에만
+});
+
+test("main.js: deliver — 막힌 PO(blocked)는 붙여넣기만, 칸 없는 PO는 열고 칸이 생기면 한 번만 자동으로 보낸다", () => {
+  const src = mainSrc();
+  const del = deliverOf(src);
+  const nopane = del.slice(del.indexOf("if (!(panes()"), del.indexOf("const blocked"));
+  assert.match(nopane, /terminal\.keep/);
+  assert.match(nopane, /this\.awaitPane\(/);
+  assert.match(nopane, /return "opening"/);
+  assert.match(nopane, /if \(opened\)[^\n]*return "nopane"/); // 한 번 연 뒤에도 칸이 없으면 다시 열지 않고 멈춘다
+  assert.ok(!/submitPo/.test(nopane)); // 칸이 없는 채로는 Enter 없음
+  assert.match(del, /if \(!opened && this\.opening\.has\(po\)\)[^\n]*return "busy"/); // 같은 PO에 둘째 보내기는 시작하지 않는다(이중 전송 없음)
+  assert.ok(del.indexOf("const blocked") < del.indexOf('run("terminal.paste"'));
+  const afterPaste = del.slice(del.indexOf('run("terminal.paste"'));
+  assert.ok(afterPaste.indexOf("if (blocked)") >= 0 && afterPaste.indexOf('return "held"') < afterPaste.indexOf("this.submitPo(")); // blocked는 submitPo 앞에서 끝난다
+  assert.ok(afterPaste.indexOf('return "failed"') >= 0 && afterPaste.indexOf('return "failed"') < afterPaste.indexOf("this.submitPo(")); // 붙여넣기 실패도 Enter 없음
+  // awaitPane: 300ms마다 6초까지 보고, 칸이 보이면 붙여넣기가 들어갈 틈 뒤에 opened=true로 한 번만 deliver, 끝내 안 열리면 nopane
+  const aw = methodOf(src, "  awaitPane(po, text, c, rec, ok, id) {", "  isBlocked(po)");
+  assert.match(aw, /this\.opening\.add\(po\)/);
+  assert.match(aw, /this\.mark\(id, "opening"\)/);
+  assert.match(aw, /PANE_WAIT_MS/);
+  assert.match(aw, /PANE_POLL_MS/);
+  assert.match(aw, /cx\.timer\.after\(PASTE_SETTLE_MS, go\)/);
+  assert.match(aw, /this\.deliver\(po, text, c2, rec, ok, id, true\)/);
+  assert.match(aw, /this\.mark\(id, "nopane"\)/);
+  assert.equal((aw.match(/this\.opening\.delete\(po\)/g) ?? []).length, 2); // 열렸을 때와 포기했을 때 모두 잠금을 푼다
+  assert.match(src, /const PANE_POLL_MS = 300, PANE_WAIT_MS = 6000/);
+  // 닫기·지우기는 PO에 닿았을 때(sent·held), 칸을 여는 중이면 글이 가는 순간(ok)에
+  const send = methodOf(src, "  send(a, text, cx, kind = \"answer\") {", "  clearBox(a");
+  assert.match(send, /r === "sent" \|\| r === "held"/);
+  assert.match(send, /this\.clearBox\(a, r, sent\)/);
+  assert.match(send, /\(r2\) => \{ this\.clearBox\(a, r2, sent\); \}/);
+});
+
+test("main.js: 보내도 PO 데스크는 닫히지 않고(Dock·창·페인), 페인이면 Enter 뒤에 키보드를 돌려준다", () => {
+  const src = mainSrc();
+  const send = methodOf(src, "  send(a, text, cx, kind = \"answer\") {", "  clearBox(a");
+  const chat = methodOf(src, "  sendChat(c) {", "  // The chat footer");
+  const sub = methodOf(src, "  submitPo(po, c, settle", "  sendChat(c) {");
+  const del = deliverOf(src);
+  for (const part of [send, chat, sub, del]) assert.ok(!/closeOverlay/.test(part));
+  // 닫기는 창의 닫기 버튼과 '옆에 열기'(창 → 페인)에만 남는다
+  assert.equal((src.match(/closeOverlay\(/g) ?? []).length, 2); // openBeside(창 → 페인)와 닫기 버튼, 두 곳뿐
+  // 키보드를 돌려받는 길(모든 모드): 보내기 전에 포커스가 있던 칸(아무 칸) id를 적어 두고 Enter 뒤에 pane.focus
+  assert.match(del, /focused\(\)\?\.pane/);
+  assert.ok(!/p\.mod/.test(del)); // 모드 칸만이 아니라 어느 칸이든
+  assert.match(del, /this\.submitPo\(po, c, [^\n]*, back, id\)/);
+  const rs = methodOf(src, "  restore(back, c, id", "  // One line of the person");
+  assert.match(rs, /run\("pane\.focus", \{ pane: back \}\)/);
+  assert.match(rs, /this\.chat\.focus\(\)/);
+  assert.match(sub, /this\.restore\(back, cx, id\)/);
+  assert.equal((sub.match(/this\.restore\(/g) ?? []).length, 3); // Enter 뒤, Enter 실패 뒤, 그 사이 질문이 열려 Enter를 건너뛴 뒤
+  assert.match(del, /this\.restore\(back, c, id, PASTE_SETTLE_MS\)/); // 막힌 PO에 붙여 넣기만 한 뒤에도 돌려준다
+  assert.match(sub, /this\.mark\(id, "sent"\)/); // 기록은 Enter가 지나간 뒤에야 sent
+  assert.match(sub, /this\.mark\(id, "noenter"\)/);
+  // 붙여 넣은 글이 길면 Enter까지 더 기다린다
+  assert.match(del, /PASTE_SETTLE_MS \+ Math\.min\(600, /);
+});
+
+test("answerLine: 한 줄·끝 개행 없음(붙여 넣고 Enter 한 번이면 한 번 제출)", () => {
+  const l = I.answerLine("decision", "lead-herdr-mobile", "그래 니가 추천하는 방식으로 진행하자", "");
+  assert.equal(l, 'Panel answer (decision) for lead-herdr-mobile: "그래 니가 추천하는 방식으로 진행하자".');
+  assert.ok(!/[\r\n]/.test(l));
+  assert.ok(!/[\r\n]/.test(I.answerLine("verify", "lead-x", "첫 줄\n\n둘째 줄", "https://x.test/1")));
+  assert.ok(!/\s$/.test(I.answerLine("verify", "lead-x", "확인 완료", "https://x.test/1")));
 });
 
 test("main.js: 배지는 요약 칸이 맡고 30초마다 새로 읽는다(창은 닫혀 있어도 된다)", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /PANE_REFRESH_MS = 30000/);
   assert.match(src, /if \(this\.windowed\) return;/);
-  const tabs = fs.readFileSync(path.join(__dirname, "../mods/tabs-mine/main.js"), "utf8");
+  const tabs = fs.readFileSync(path.join(__dirname, "../mods/tabs-mine/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(tabs, /inboxWaiting\(\)/);
   assert.ok(!/shared\("inbox\.waiting"\)/.test(tabs)); // 받은편지함 칸이 닫혀 있어도 터미널 라벨로 센다
 });
@@ -120,7 +197,7 @@ test("waitingKind: lead-* 이름과 wait=decision|verify 라벨만 대기 리더
 });
 
 test("waitingKind: 탭 줄(tabs-mine)·요약 칸(inbox/main.js)·inbox.cjs가 같은 줄을 쓴다", () => {
-  const line = (f) => fs.readFileSync(path.join(__dirname, f), "utf8").split("\n").find((l) => l.startsWith("const waitingKind = "));
+  const line = (f) => fs.readFileSync(path.join(__dirname, f), "utf8").replace(/\r\n/g, "\n").split("\n").find((l) => l.startsWith("const waitingKind = "));
   const a = line("../mods/inbox/inbox.cjs");
   assert.ok(a);
   assert.equal(line("../mods/inbox/main.js"), a);
@@ -128,13 +205,15 @@ test("waitingKind: 탭 줄(tabs-mine)·요약 칸(inbox/main.js)·inbox.cjs가 �
 });
 
 test("main.js: 보고 기록이 없어도 라벨만으로 카드를 만들고 보낸 표시는 공유 상태에 둔다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /for \(const term of list\) \{\s*const kind = waitingKind\(term\);/); // 터미널을 돈다(보고 파일 목록이 아니라)
   assert.match(src, /items: \[\], last: null/); // 보고 없는 리더의 빈 기록
   assert.match(src, /setShared\(SENT_KEY/);
   assert.match(src, /shared\(SENT_KEY\)/);
   assert.ok(!/this\.sent\b/.test(src)); // 창 안에만 있던 표시는 없다
-  assert.match(src, /다른 것을 복사하기 전에/);
+  assert.match(src, /PO에 보냄 — 리더가 받으면 사라집니다/); // 보낸 표시(Enter까지 누른 경우)
+  assert.match(src, /PO에 넣음 — PO가 질문 중입니다\. 방의 질문에 먼저 답하세요/); // 막힌 PO에는 붙여넣기만(아직 질문 중)
+  assert.match(src, /PO에 넣음 — 말풍선의 'Enter 누르기'로 보내세요/); // 질문에 답한 뒤에는 말풍선 버튼으로
 });
 
 // ---- 읽기 쉬운 본문(parseBody)
@@ -243,19 +322,19 @@ test("summarize: 카드마다 blocks·head·lead·long을 붙인다(진짜 확�
 });
 
 test("main.js: 카드는 접힌 채 시작하고, 펼침은 공유 상태에 두며, 복사 버튼은 클립보드에만 쓴다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /shared\(OPEN_KEY\)/);
   assert.match(src, /setShared\(OPEN_KEY/);
   assert.match(src, /"접기" : "자세히"/);
   assert.match(src, /const open = it\.long && this\.isOpen/); // 기본은 접힘
   // 복사: 클립보드에만 쓰고 붙여 넣기·PO 이동·hc send 경로는 없다
-  const copy = src.slice(src.indexOf("  copy(key, text, cx)"), src.indexOf("  openWindow()"));
+  const copy = src.slice(src.indexOf("  copy(key, text, cx)"), src.indexOf("  // \"옆에 열기\":"));
   assert.match(copy, /cx\.write_to_clipboard\(String\(text\)\)/);
   assert.ok(!/terminal\.paste|pane\.focus|hc send|exec\(/.test(copy));
   // 링크: 앱의 open_url 먼저, http(s)만
   assert.match(src, /cx\.open_url\(url\)/);
   assert.match(src, /if \(!\/\^https\?:\\\/\\\/\/i\.test\(url\)\) return;/);
-  assert.ok(!/hc send|"hc"/.test(src)); // 답은 여전히 hc send 없이 클립보드로만
+  assert.ok(!/hc send|hc\(\["send"/.test(src)); // hc send 없이 클립보드로만(채팅의 Enter는 hc keys)
 });
 
 test("toParts·escapeHtml: 글자는 이스케이프하고, 목록은 <ul>로 묶고, 명령은 코드 조각으로 뺀다", () => {
@@ -274,7 +353,7 @@ test("toParts·escapeHtml: 글자는 이스케이프하고, 목록은 <ul>로 �
 });
 
 test("main.js: 카드 글자는 모두 선택 가능한 TextView이고, 눌러서 펼치는 곳은 자세히/접기 버튼뿐이다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /TextView\.html\(id, html\)\.selectable\(true\)\.on_link_click/);
   for (const k of ["-lead`", "-link`"]) assert.ok(src.includes("this.text(`${id}" + k), k); // 요약·링크
   assert.ok(src.includes("this.heading_text(t, `${id}-h`") && src.includes("this.heading_text(t, key, p.html")); // 제목·소제목: TextView 자체에 굵기를 준 선택 가능한 글
@@ -285,28 +364,98 @@ test("main.js: 카드 글자는 모두 선택 가능한 TextView이고, 눌러�
   assert.ok(!/linkChip|codeSpan/.test(src));
 });
 
-test("main.js: 오른쪽 칸은 분류 단계 없이 한 목록이고, 줄을 누르면 그 카드를 펼쳐 창을 연다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
-  const sum = src.slice(src.indexOf("  summary(cx) {"), src.indexOf("  // The full chat view"));
-  assert.ok(sum.length > 200);
-  assert.ok(!/결정 필요|결과 보고|눌러서 채팅 창 열기/.test(sum)); // 분류 버튼·안내 줄이 없다
-  assert.ok(!/id\("inbox-summary"\)[^\n]*on_click/.test(sum) && !/\.on_click\(\(\) => this\.openWindow/.test(sum)); // 칸 전체 클릭 없음
-  assert.match(sum, /badge\("결정", asks\.length/); // 개수는 머리줄의 작은 표시
-  assert.match(sum, /badge\("보고", all\.length/);
-  assert.match(sum, /asks\.forEach\(\(a\) => list\.push\(this\.paneRow/); // 결정·확인이 맨 위
-  assert.match(sum, /reports\(asks, Infinity\)/); // 개수는 전부, 줄은 MAX_ROWS까지
-  assert.match(src, /const MAX_ROWS = 20;/);
-  assert.match(sum, /나머지 \$\{all\.length - rows\.length\}개는 창에서/);
-  const row = src.slice(src.indexOf("  paneRow("), src.indexOf("  // The small pane"));
-  assert.match(row, /on_click\(\(_e, c\) => \{ this\.openCard\(s, it\)/);
-  assert.match(row, /\.truncate\(\)/); // 한 줄로 줄임표
-  // 창은 공유 상태의 선택을 읽어 그 카드를 맨 앞에 둔다(스크롤 이동 API가 없다)
-  assert.match(src, /const FOCUS_KEY = "inbox\.focus"/);
-  assert.match(src, /openCard\(s, it\) \{[\s\S]*cur\[k\] = 1[\s\S]*setShared\(FOCUS_KEY, it \? this\.cardKey\(s, it\) : ""\)[\s\S]*this\.openWindow\(\)/);
-  assert.match(src, /선택한 보고/);
-  assert.match(src, /clearFocus\(\); try \{ closeOverlay/); // 창을 닫으면 선택도 지운다
-  // 창 카드에는 여전히 카드 전체 클릭이 없다
-  assert.equal((src.match(/toggleOpen\(/g) ?? []).length, 2);
+test("main.js: 오른쪽 칸(Dock)도 창과 같은 메신저 화면이다: 좁은 방 칸 + 타임라인 + 채팅 상자, 창 열기 버튼", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
+  assert.ok(!/summary\(cx\)|paneRow|openCard|MAX_ROWS|rowsScroll|FOCUS_KEY|inbox-rows/.test(src)); // 카드 목록·칩 보기는 없다
+  assert.match(src, /render\(cx\) \{ return this\.full\(cx\); \}/); // 창과 Dock이 같은 그림
+  assert.match(src, /const strip = this\.windowed && this\.narrow;/); // 위쪽 띠는 좁은 창에서만, Dock(460px)은 좁은 방 칸
+  assert.match(src, /this\.narrow \? this\.slimRooms\(t, v\) : this\.roomList\(t, v\)/); // 방 목록은 모드가 아니라 자기 폭으로 고른다
+  assert.match(src, /const SLIM_W = 58|SLIM_W = 58/);
+  const slim = src.slice(src.indexOf("  slimRooms("), src.indexOf("  // The room list (the wide window)"));
+  assert.match(slim, /this\.circle\(t, color,/); // 이니셜 동그라미
+  assert.match(slim, /this\.roomBadges\(t, x\)/); // 안 읽은 수·대기 수
+  assert.match(slim, /\.tooltip\(/); // 프로젝트 이름은 툴팁
+  assert.match(slim, /\.on_click\(\(_e, c\) => this\.pickPo\(x\.id, c\)\)/);
+  assert.match(src, /this\.button\(t, "inbox-open", "창 열기"/); // Dock 머리줄의 창 열기
+  assert.match(src, /\.when\(!this\.windowed, \(el\) => el\.child\(this\.button\(t, "inbox-open"/);
+  assert.match(src, /markSeen\(\) \{\s*if \(!this\.drawnAt \|\| !this\.drawing\(\)\) return;/);
+  assert.match(src, /대기 \$\{waiting\}/); // 머리줄의 대기 수 표시
+  // Dock이 방을 보여 주는 동안 읽은 것으로 친다(그려지지 않는 동안은 아니다)
+  assert.match(src, /this\.drawnAt = Date\.now\(\);/);
+  assert.ok(!/if \(!this\.windowed\) return;\s*\n\s*try \{\s*\n\s*const v = this\.view/.test(src));
+  assert.match(src, /unread: r\.id === pick \? 0 : unreadCount/);
+});
+
+// The PO desk as a pane of its own (pane.split {mod: "inbox", props: {mode: "pane"}}), beside the Dock and the window.
+test("dockTarget: 포커스가 리더면 그 옆, 아니면 탭의 가장 새 리더, 리더가 없으면 포커스한 터미널 옆, 이미 있으면 그 페인으로 간다", () => {
+  const terms = [
+    { address: "t1", labels: { role: "leader" }, created_ms: 100 },
+    { address: "t2", labels: { role: "LEADER " }, created_ms: 300 },
+    { address: "t3", labels: { role: "worker" }, created_ms: 500 },
+  ];
+  const here = [
+    { pane: "p1", terminal: "t1", focused: false },
+    { pane: "p2", terminal: "t2", focused: false },
+    { pane: "p3", terminal: "t3", focused: true },
+  ];
+  assert.deepEqual(I.dockTarget(here, { pane: "p3" }, terms), { action: "split", pane: "p2" }); // 가장 새 리더
+  assert.deepEqual(I.dockTarget(here, { pane: "p1" }, terms), { action: "split", pane: "p1" }); // 포커스한 리더
+  assert.deepEqual(I.dockTarget(here.filter((p) => p.pane === "p3"), { pane: "p3" }, terms), { action: "split", pane: "p3" }); // 리더 없음
+  assert.deepEqual(I.dockTarget([{ pane: "p9", mod: "x", focused: true }], { pane: "p9" }, []), { action: "split", pane: "p9" }); // 터미널 아닌 페인도 마지막 후보
+  assert.deepEqual(I.dockTarget([], null, terms), { action: "split" }); // 기준이 없으면 인자 없이
+  // 이 탭에 이미 PO 데스크 페인이 있으면 새로 만들지 않고 그쪽으로
+  const had = [...here, { pane: "p7", mod: "inbox", terminal: null, focused: false }];
+  assert.deepEqual(I.dockTarget(had, { pane: "p3" }, terms), { action: "focus", pane: "p7" });
+  assert.deepEqual(I.dockTarget(had.concat({ pane: "p8", mod: "prs" }), { pane: "p1" }, terms), { action: "focus", pane: "p7" });
+  // 다른 mod 페인(prs)은 PO 데스크로 세지 않는다
+  assert.deepEqual(I.dockTarget([...here, { pane: "p8", mod: "prs" }], { pane: "p3" }, terms), { action: "split", pane: "p2" });
+  // 잘못된 입력도 던지지 않는다
+  assert.deepEqual(I.dockTarget(null, undefined, null), { action: "split" });
+});
+
+test("main.js: 페인 모드: 같은 메신저 화면, 자기 제목줄을 쓰고, 방 목록은 폭으로 고르며, 옆에 열기는 dockTarget을 따른다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
+  assert.match(src, /this\.paned = mode === "pane"/);
+  assert.match(src, /this\.windowed = mode === "window"/);
+  assert.match(src, /this\.narrow = !this\.windowed;/); // Dock과 페인은 좁게 시작, 창은 넓게
+  // 옆에 열기: 리더 옆 오른쪽 분할, 이미 있으면 포커스, props는 {mode: "pane"}
+  const open = src.slice(src.indexOf("  openBeside()"), src.indexOf("  openWindow()"));
+  assert.match(open, /dockTarget\(here, f, terminals\(\) \?\? \[\]\)/);
+  assert.match(open, /\(panes\(\) \?\? \[\]\)\.filter\(\(p\) => p\.tab === f\?\.tab\)/); // 보이는 탭의 페인만
+  assert.match(open, /run\("pane\.focus", \{ pane: d\.pane \}\)/);
+  assert.match(open, /run\("pane\.split", \{ direction: "right", mod: "inbox", props: \{ mode: "pane" \}/);
+  assert.match(open, /if \(this\.windowed\) \{ try \{ closeOverlay/); // 창에서 열면 창을 닫는다
+  assert.ok(!/hc send|hc\(/.test(open));
+  // 머리줄: 페인은 제목·옆에 열기가 없고(페인 머리줄·이미 페인), 닫기 버튼도 만들지 않는다
+  assert.match(src, /\.when\(!this\.paned, \(el\) => el\.child\(div\(\)\.text_size\(15\)[^\n]*PO 데스크/);
+  assert.match(src, /\.when\(!this\.paned, \(el\) => el\.child\(this\.button\(t, "inbox-beside", "옆에 열기"/);
+  assert.match(src, /\.when\(this\.windowed, \(el\) => el\.child\(div\(\)\.id\("inbox-close"\)/);
+  // 갱신·뱃지: 창과 페인은 5초(페인은 그려지는 동안만), Dock만 30초, 뱃지는 창만 건너뛴다
+  assert.match(src, /refreshMs\(\) \{ return this\.windowed \|\| this\.paned \? WINDOW_REFRESH_MS : PANE_REFRESH_MS; \}/);
+  assert.match(src, /cx\.timer\.every\(this\.refreshMs\(\), \(cx\) => \{ if \(!this\.paned \|\| this\.drawing\(\)\) this\.load\(cx\); \}\)/);
+  assert.match(src, /badge\(\) \{\s*if \(this\.windowed\) return;/);
+  assert.match(src, /drawing\(\) \{ return !this\.drawnAt \|\| Date\.now\(\) - this\.drawnAt <= this\.refreshMs\(\) \* 2 \+ 2000; \}/);
+  // 보낸 글·고른 방·안 읽은 시각은 모두 공유 상태라 Dock·페인·창이 같다
+  assert.match(src, /shared\(PICK_KEY\)/);
+  assert.match(src, /setShared\(SEEN_KEY/);
+  assert.match(src, /setShared\(CHAT_KEY/);
+  // focusable은 두지 않는다: 켜면 pane.go가 복사본에 "focus"를 보내는데 nextCommand 처리가 없다
+  const mod = JSON.parse(fs.readFileSync(path.join(__dirname, "../mods/inbox/mod.json"), "utf8"));
+  assert.ok(!("focusable" in mod));
+});
+
+// Regression: h_flex() centers its children on the cross axis, so a column placed in it takes only its content height and the timeline
+// (flex_1 + min_h(0)) collapsed to nothing — the room showed a header and the chat box with an empty gap above. The row stretches and
+// both columns are h_full.
+test("main.js: 방 목록과 방 칸이 행의 전체 높이를 채운다(타임라인이 0 높이로 접히지 않는다)", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
+  assert.match(src, /h_flex\(\)\.flex_1\(\)\.min_h\(0\)\.items_stretch\(\)/);
+  assert.match(src, /const room = v_flex\(\)\.flex_1\(\)\.min_w\(0\)\.min_h\(0\)\.when\(!strip, \(el\) => el\.h_full\(\)\)/);
+  assert.match(src, /id\("po-rooms"\)\.flex_none\(\)\.w\(ROOM_W\)\.h_full\(\)/);
+  assert.match(src, /id\("po-rooms"\)\.flex_none\(\)\.w\(SLIM_W\)\.h_full\(\)/);
+  // the timeline itself keeps taking the rest of the column above the pinned chat box
+  assert.match(src, /id\("inbox-list"\)[^\n]*\.flex_1\(\)\.min_h\(0\)/);
+  assert.match(src, /\.child\(lines\)\s*\n\s*\.when\(Boolean\(panel\), \(el\) => el\.child\(panel\)\)\s*\n\s*\.child\(this\.chatBox\(t, v\)\)/);
 });
 
 test("답함 표시: 실제 lead-sched-acct 순서(결정·답, 확인·답, 결정·답)는 모두 답함이고 열린 것이 없다", () => {
@@ -359,18 +508,23 @@ test("답함 표시: answered의 본문 종류가 맞는 가장 가까운 앞선
   assert.deepEqual(d.map((i) => i.answered), [true, true, undefined, undefined]);
 });
 
-test("창 구역 접기와 답함 표시: 머리줄 누름·공유 상태·기본값·붉은색 규칙이 main.js에 있다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
-  assert.match(src, /const SECT_KEY = "inbox\.sections"/);
-  assert.match(src, /collapsed\(name, count, force\)/);
-  assert.match(src, /return name === "ask" && count === 0/); // 결정 필요는 비면 스스로 접힘
-  assert.match(src, /st\.n === count/); // 직접 누른 것은 개수가 바뀔 때까지 이김
-  assert.match(src, /setShared\(SECT_KEY/);
-  assert.match(src, /id: "sec-ask"[^\n]*this\.collapsed|collapsed\("ask", asks\.length, fa >= 0\)/);
-  assert.match(src, /"▸" : "▾"/);
-  assert.match(src, /\$\{k\[0\]\} · 답함/);
-  assert.match(src, /nameRow\(t, s, item \? \{ \.\.\.item, kind \} : null, null, true\)/); // 대기 카드만 붉은 종류 표시
-  assert.match(src, /this\.kindTag\(t, it, kind \?\? it\?\.kind, ask\)/); // 창 보고 줄과 같은 규칙을 창 옆 목록 줄도 쓴다
+test("메신저 창: 방 목록·타임라인·인라인 버튼·답함 표시 규칙이 main.js에 있다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
+  assert.ok(!/SECT_KEY|collapsed\(|toggleSection|sec-ask|sec-rep|chatRow|askCard|heading\(/.test(src)); // 두 줄기·접기 구역은 없다
+  assert.match(src, /\$\{k\[0\]\} · 답함/); // 답함 태그
+  assert.match(src, /this\.nameRow\(t, e\.s, e\.it, null, Boolean\(e\.waiting\), !e\.head\)/); // 같은 보낸이가 이어지면 이름 줄을 줄인다
+  assert.match(src, /this\.askActions\(t, a, cx\)/); // 기다리는 메시지에만 인라인 버튼
+  const act = src.slice(src.indexOf("  askActions("), src.indexOf("  entryRow("));
+  for (const id of ["link-", "ok-", "write-", "send-"]) assert.ok(act.includes(id));
+  assert.match(act, /kind === "verify"/); // 확인 완료는 verify에만
+  assert.match(src, /roomList\(t, v\) \{[\s\S]*border_r\(1\)/); // 왼쪽 방 목록
+  assert.match(src, /\.child\(strip \? room : h_flex\(\)\.flex_1\(\)\.min_h\(0\)\.items_stretch\(\)/);
+  assert.match(src, /\.when\(strip, \(el\) => el\.child\(this\.picker\(t, v\)\)\)/); // 좁은 창은 위쪽 띠
+  assert.match(src, /const WIDE_MIN = 520/);
+  assert.match(src, /e\.who === "me"[\s\S]*items_end\(\)/); // 내 글은 오른쪽
+  assert.match(src, /this\.circle\(t, color, letter\)|circle\(t, color, letter\) \{/);
+  assert.match(src, /채팅 없음/); // PO 모름 방에는 채팅 상자가 없다
+  assert.match(src, /v\.pick === PO_OTHER[\s\S]*chat-none/);
 });
 
 // ---- 리더 이름(#33): 받은편지함과 에이전트 목록이 같은 규칙으로 세션 이름을 고른다.
@@ -423,7 +577,7 @@ test("rememberNames: 오래된 것부터 버려 상한을 지킨다", () => {
 
 test("leaderName: 받은편지함·에이전트 목록·inbox.cjs가 같은 블록을 쓴다", () => {
   const block = (f) => {
-    const src = fs.readFileSync(path.join(__dirname, f), "utf8");
+    const src = fs.readFileSync(path.join(__dirname, f), "utf8").replace(/\r\n/g, "\n");
     const a = src.indexOf("// leaderName:begin"), b = src.indexOf("// leaderName:end");
     assert.ok(a >= 0 && b > a, f);
     return src.slice(a, b);
@@ -436,10 +590,10 @@ test("leaderName: 받은편지함·에이전트 목록·inbox.cjs가 같은 블�
 });
 
 test("leader-tabs·work: 리더 이름을 hc 이름(lead-x) 그대로 그리지 않는다", () => {
-  const tabs = fs.readFileSync(path.join(__dirname, "../mods/leader-tabs/main.js"), "utf8");
+  const tabs = fs.readFileSync(path.join(__dirname, "../mods/leader-tabs/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(tabs, /return leaderName\(term\.name, term, namesMemo\(\)\)/);
   assert.doesNotMatch(tabs, /term\.name \|\| term\.address/);
-  const work = fs.readFileSync(path.join(__dirname, "../mods/work/main.js"), "utf8");
+  const work = fs.readFileSync(path.join(__dirname, "../mods/work/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(work, /const label = sessionLabel\(s\)/);
   // The rule itself: a closed or untitled leader reads as its task, a titled one as its title.
   assert.equal(NAMES.leaderName("lead-po-inbox", { name: "lead-po-inbox", address: "t1", title: "리더 · 받은편지함 정리" }, {}), "받은편지함 정리");
@@ -448,29 +602,26 @@ test("leader-tabs·work: 리더 이름을 hc 이름(lead-x) 그대로 그리지 
 
 // The scroll lists keep their place across presses: handles the view owns, tracked on both lists, and an anchor after every press that
 // changes a card's or a section's height. (The kit gives no way to read a pixel offset, so this checks the wiring, not the pixels.)
-test("받은편지함: 자세히·접기·섹션·답 쓰기가 스크롤을 맨 위로 되돌리지 않게 위치를 붙든다", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+test("받은편지함: 타임라인은 새 글을 따라 맨 아래로 가고, 올려 읽는 중이면 붙든다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /ScrollHandle\.new\(\)/);
-  assert.match(src, /id\("inbox-list"\)[^\n]*track_scroll\(this\.scroll\)/);
-  assert.match(src, /id\("inbox-rows"\)[^\n]*track_scroll\(this\.rowsScroll\)/);
-  assert.match(src, /scroll_to_item\(i\)/);
+  assert.match(src, /id\("inbox-list"\)[^\n]*/);
+  assert.match(src, /track_scroll\(this\.scroll\)/);
+  assert.match(src, /atBottom\(o\.y, vp\.height, ct\.height\)/); // 마지막 레이아웃의 값으로 바닥 여부를 읽는다
+  assert.match(src, /tlFollow\(this\.tlSeen, key, atEnd\)/);
+  assert.match(src, /scroll_to_item\(last\)/); // ScrollHandle에는 scroll_to_bottom이 없다
+  assert.match(src, /this\.tlSeen = key/);
+  assert.match(src, /this\.reveal\(this\.spot\(s, item\)\)/); // 답 상자가 열려도 그 자리를 붙든다
   assert.match(src, /this\.toggleOpen\(s, it\); this\.reveal\(this\.spot\(s, it\)\)/);
-  assert.match(src, /o\.toggle\?\.\(\); this\.reveal\(o\.id\)/);
-  assert.match(src, /this\.reveal\(this\.spot\(s, item\)\)/);
-  // Every child of the list is recorded with the spot key reveal looks up.
-  assert.match(src, /add\(this\.askCard\(t, a, cx\), this\.spot\(a\.s, a\.item\)\)/);
-  assert.match(src, /add\(this\.chatRow\(t, r\), this\.spot\(r\.s, r\.it\)\)/);
-  assert.match(src, /"sec-ask"\)/);
-  assert.match(src, /"sec-rep"\)/);
 });
 
-// ---- PO 채팅: @ 멘션, 리더 메뉴, po.jsonl
+// ---- PO 채팅: @ 멘션, 리더 메뉴, po/<id>.jsonl
 const TERMS = [
-  { address: "t28", name: "", labels: { role: "po" } },
+  { address: "t28", name: "", title: "PO · DevNotes", labels: { role: "po", po: "devnotes" } },
   { address: "t12", name: "lead-b", title: "받은편지함 패널", parent: "t28" },
   { address: "t13", name: "lead-a", title: "리더 · 가나다", parent: "t28" },
   { address: "t99", name: "lead-orphan", parent: "t5" },
-  { address: "t40", name: "", labels: { role: "po" } },
+  { address: "t40", name: "", labels: { role: "po", po: "mascoz" } },
   { address: "t41", name: "lead-c", parent: "t40" },
 ];
 
@@ -486,9 +637,9 @@ test("parseMention: @리더는 살아 있는 리더만 대상이 되고, @here�
   assert.deepEqual(I.parseMention("둘 다 @lead-a, @lead-b! 그리고 @lead-a", known).to, ["lead-a", "lead-b"]);
 });
 
-test("parseMention: 줄바꿈은 한 줄로, 멘션만 있거나 빈 글은 empty, 단어 중간의 @는 멘션이 아니다", () => {
+test("parseMention: 줄바꿈은 지키고, 멘션만 있거나 빈 글은 empty, 단어 중간의 @는 멘션이 아니다", () => {
   const known = ["lead-a"];
-  assert.equal(I.parseMention("위\n  아래", known).text, "위 아래");
+  assert.equal(I.parseMention("위\n  아래", known).text, "위\n아래");
   assert.equal(I.parseMention("@lead-a", known).empty, true);
   assert.equal(I.parseMention("@here  ", known).empty, true);
   assert.equal(I.parseMention("   ", known).empty, true);
@@ -515,36 +666,135 @@ test("mentionQuery: 커서 바로 앞의 @글자만 질의이고, 칩 안이나 
   assert.deepEqual(I.mentionQuery("@lead-a @", 9, [{ range: { start: 0, end: 7 } }]), { start: 8, end: 9, query: "" });
 });
 
-test("leaderMenu: @here가 맨 위, 그다음 PO가 있는 살아 있는 리더를 세션 이름으로, 질의로 거른다", () => {
-  const all = I.leaderMenu(TERMS, {});
-  assert.deepEqual(all.map((x) => x.id), ["here", "lead-c", "lead-a", "lead-b"]); // 이름 순(글자 코드 순)
-  assert.equal(all.some((x) => x.id === "lead-orphan"), false); // 부모가 PO가 아닌 리더는 뺀다
+test("leaderMenu: @here가 맨 위, 그다음 고른 PO의 살아 있는 리더를 세션 이름으로, 질의로 거른다", () => {
+  const all = I.leaderMenu(TERMS, {}, "", 8, "devnotes");
+  assert.deepEqual(all.map((x) => x.id), ["here", "lead-a", "lead-b"]); // 이름 순(글자 코드 순)
+  assert.equal(all.some((x) => x.id === "lead-orphan" || x.id === "lead-c"), false); // 다른 PO나 PO 없는 리더는 뺀다
   assert.equal(all.find((x) => x.id === "lead-b").label, "받은편지함 패널");
   assert.equal(all.find((x) => x.id === "lead-a").label, "가나다"); // '리더 · ' 머리말은 뗀다
-  assert.equal(all.find((x) => x.id === "lead-c").label, "c"); // 제목이 없으면 hc 이름에서
-  assert.deepEqual(I.leaderMenu(TERMS, {}, "받은").map((x) => x.id), ["lead-b"]);
-  assert.deepEqual(I.leaderMenu(TERMS, {}, "LEAD-A").map((x) => x.id), ["lead-a"]);
-  assert.deepEqual(I.leaderMenu(TERMS, {}, "he").map((x) => x.id), ["here"]);
-  assert.deepEqual(I.leaderMenu(TERMS, {}, "없는이름"), []);
-  assert.equal(I.leaderMenu(TERMS, {}, "", 2).length, 2);
-  assert.deepEqual(I.leaderMenu([], {}).map((x) => x.id), ["here"]);
+  const m = I.leaderMenu(TERMS, {}, "", 8, "mascoz");
+  assert.deepEqual(m.map((x) => x.id), ["here", "lead-c"]);
+  assert.equal(m.find((x) => x.id === "lead-c").label, "c"); // 제목이 없으면 hc 이름에서
+  assert.deepEqual(I.leaderMenu(TERMS, {}, "받은", 8, "devnotes").map((x) => x.id), ["lead-b"]);
+  assert.deepEqual(I.leaderMenu(TERMS, {}, "LEAD-A", 8, "devnotes").map((x) => x.id), ["lead-a"]);
+  assert.deepEqual(I.leaderMenu(TERMS, {}, "he", 8, "devnotes").map((x) => x.id), ["here"]);
+  assert.deepEqual(I.leaderMenu(TERMS, {}, "없는이름", 8, "devnotes"), []);
+  assert.equal(I.leaderMenu(TERMS, {}, "", 2, "devnotes").length, 2);
+  assert.deepEqual(I.leaderMenu([], {}, "", 8, "devnotes").map((x) => x.id), ["here"]);
+  assert.deepEqual(I.leaderMenu(TERMS, {}).map((x) => x.id), ["here"]); // 고른 PO가 없으면 리더도 없다
+  assert.deepEqual(I.leaderMenu(TERMS, {}, "", 8, I.PO_OTHER).map((x) => x.id), ["here"]); // 기타에는 리더 메뉴가 없다
 });
 
 test("leaderMenu: 닫힌 리더는 없고, 기억한 이름은 터미널 제목이 없을 때만 쓴다", () => {
-  const terms = [{ address: "t1", name: "", labels: { role: "po" } }, { address: "t2", name: "lead-x", parent: "t1" }];
-  assert.equal(I.leaderMenu(terms, { "lead-x": "기억한 이름" }).find((x) => x.id === "lead-x").label, "기억한 이름");
-  assert.deepEqual(I.leaderMenu([terms[0]], { "lead-x": "기억한 이름" }).map((x) => x.id), ["here"]);
+  const terms = [{ address: "t1", name: "", labels: { role: "po", po: "p1" } }, { address: "t2", name: "lead-x", parent: "t1" }];
+  assert.equal(I.leaderMenu(terms, { "lead-x": "기억한 이름" }, "", 8, "p1").find((x) => x.id === "lead-x").label, "기억한 이름");
+  assert.deepEqual(I.leaderMenu([terms[0]], { "lead-x": "기억한 이름" }, "", 8, "p1").map((x) => x.id), ["here"]);
 });
 
-test("chatTarget: 부른 리더들의 PO, 서로 다른 PO나 PO 없는 리더는 거절, 멘션이 없으면 리더가 가장 많은 PO", () => {
-  assert.deepEqual(I.chatTarget(TERMS, ["lead-a"]), { po: "t28" });
-  assert.deepEqual(I.chatTarget(TERMS, ["lead-a", "lead-b"]), { po: "t28" });
-  assert.deepEqual(I.chatTarget(TERMS, ["lead-c"]), { po: "t40" });
-  assert.deepEqual(I.chatTarget(TERMS, ["lead-a", "lead-c"]), { po: null, why: "many" });
-  assert.deepEqual(I.chatTarget(TERMS, ["lead-orphan"]), { po: null, why: "orphan" });
-  assert.deepEqual(I.chatTarget(TERMS, []), { po: "t28" }); // 리더 둘인 t28 > 하나인 t40
-  assert.deepEqual(I.chatTarget(TERMS.slice(0, 1), []), { po: "t28" }); // 리더가 없어도 role=po면 보낼 수 있다
-  assert.deepEqual(I.chatTarget([{ address: "t1", name: "", labels: { role: "dev" } }], []), { po: null, why: "none" });
+test("chatTarget: 부른 리더들의 PO, 서로 다른 PO나 PO 없는 리더는 거절, 멘션이 없으면 고른 PO", () => {
+  assert.deepEqual(I.chatTarget(TERMS, ["lead-a"], "devnotes"), { po: "t28" });
+  assert.deepEqual(I.chatTarget(TERMS, ["lead-a", "lead-b"], "devnotes"), { po: "t28" });
+  assert.deepEqual(I.chatTarget(TERMS, ["lead-c"], "mascoz"), { po: "t40" });
+  assert.deepEqual(I.chatTarget(TERMS, ["lead-a", "lead-c"], "devnotes"), { po: null, why: "many" });
+  assert.deepEqual(I.chatTarget(TERMS, ["lead-orphan"], "devnotes"), { po: null, why: "orphan" });
+  assert.deepEqual(I.chatTarget(TERMS, [], "devnotes"), { po: "t28" });
+  assert.deepEqual(I.chatTarget(TERMS, [], "mascoz"), { po: "t40" }); // 리더가 적어도 고른 PO가 받는다
+  assert.deepEqual(I.chatTarget(TERMS.slice(0, 1), [], "devnotes"), { po: "t28" }); // 리더가 없어도 고른 PO면 보낼 수 있다
+  assert.deepEqual(I.chatTarget(TERMS, [], ""), { po: null, why: "none" }); // 고른 PO가 없다
+  assert.deepEqual(I.chatTarget(TERMS, [], "gone"), { po: null, why: "none" }); // 닫힌 PO
+  assert.deepEqual(I.chatTarget(TERMS, [], I.PO_OTHER), { po: null, why: "none" }); // 기타에는 보내지 않는다
+  assert.deepEqual(I.chatTarget([{ address: "t1", name: "", labels: { role: "po" } }], [], "x"), { po: null, why: "none" });
+});
+
+test("cleanPoId·poId: 소문자·숫자·하이픈 1~40자만 id이고, po 라벨은 role=po 터미널에서만 읽는다", () => {
+  assert.equal(I.cleanPoId("devnotes"), "devnotes");
+  assert.equal(I.cleanPoId(" mascoz-2 "), "mascoz-2"); // 앞뒤 공백은 뗀다
+  for (const bad of ["", "DevNotes", "a_b", "a b", "../x", "a/b", "a.b", "한글", null, undefined, 5 === 5 ? "x".repeat(41) : ""]) assert.equal(I.cleanPoId(bad), "", String(bad));
+  assert.equal(I.cleanPoId("x".repeat(40)), "x".repeat(40));
+  assert.equal(I.poId({ labels: { role: "po", po: "devnotes" } }), "devnotes");
+  assert.equal(I.poId({ labels: { role: "PO", po: "devnotes" } }), "devnotes");
+  assert.equal(I.poId({ labels: { role: "po" } }), ""); // po 라벨이 없다
+  assert.equal(I.poId({ labels: { role: "dev", po: "devnotes" } }), ""); // PO가 아니다
+  assert.equal(I.poId({ labels: { role: "po", po: "Bad Id" } }), "");
+  assert.equal(I.poId({}), "");
+  assert.equal(I.poId(null), "");
+});
+
+test("poList: po id가 있는 살아 있는 PO만, 터미널 제목(없으면 id)과 살아 있는 리더 수와 함께, 같은 id는 첫 터미널", () => {
+  assert.deepEqual(I.poList(TERMS), [
+    { id: "devnotes", address: "t28", label: "devnotes", title: "PO · DevNotes", n: 2 },
+    { id: "mascoz", address: "t40", label: "mascoz", title: "", n: 1 },
+  ]);
+  assert.deepEqual(I.poList([{ address: "t1", labels: { role: "po" } }, { address: "t2", labels: { role: "dev", po: "x" } }]), []); // po 라벨 없음·PO 아님
+  assert.deepEqual(I.poList(null), []);
+  const dup = [{ address: "t1", title: "첫째", labels: { role: "po", po: "a" } }, { address: "t2", title: "둘째", labels: { role: "po", po: "a" } }];
+  assert.deepEqual(I.poList(dup).map((p) => [p.id, p.address]), [["a", "t1"]]);
+  assert.equal(I.poList([{ address: "t1", name: "po-main", title: "po-main", labels: { role: "po", po: "a" } }])[0].label, "a"); // 제목이 이름·주소 그대로면 id
+});
+
+test("poProject·poList: 칩 이름은 탭 이름 'PO · <프로젝트>'의 프로젝트이고, 없으면 po id, 세션 제목은 title로만 간다", () => {
+  assert.equal(I.poProject({ where: "DevNotes / PO · DevNotes" }), "DevNotes");
+  assert.equal(I.poProject({ where: "Mascoz / PO · Mascoz" }), "Mascoz");
+  assert.equal(I.poProject({ where: "a / PO: 한글 프로젝트" }), "한글 프로젝트");
+  assert.equal(I.poProject({ where: "DevNotes / PO" }), ""); // 프로젝트 이름이 없다
+  assert.equal(I.poProject({ where: "DevNotes / 리더 · DevNotes" }), ""); // PO 탭이 아니다
+  assert.equal(I.poProject({ where: "POSTMAN / 1" }), ""); // 공간 이름은 보지 않는다
+  assert.equal(I.poProject({}), "");
+  const t = { address: "t28", title: "/po 세션 중단과 하위 작업 상태", where: "DevNotes / PO · DevNotes", labels: { role: "po", po: "devnotes" } };
+  const [p] = I.poList([t]);
+  assert.equal(p.label, "DevNotes");
+  assert.equal(p.title, "/po 세션 중단과 하위 작업 상태");
+  assert.equal(I.poList([{ ...t, where: "DevNotes / 3" }])[0].label, "devnotes"); // 탭 이름에서 못 읽으면 id
+});
+
+test("main.js: 칩 줄에 PO 머리말, 이름 'PO 모름', 세션 제목은 툴팁", () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8").replace(/\r\n/g, "\n");
+  assert.match(src, /const OTHER_LABEL = "PO 모름"/);
+  assert.match(src, /child\("PO"\)\)\n\s+\.children\(v\.tabs/);
+  assert.match(src, /세션: \$\{x\.title\}/);
+  assert.doesNotMatch(src, /label: "기타"|OTHER_LABEL = "기타"/);
+});
+
+test("poFile: po/<id>.jsonl 경로만 만들고, 잘못된 id는 null이라 폴더를 벗어나지 못한다", () => {
+  assert.equal(I.poFile("/h/.herdr-inbox", "devnotes"), path.join("/h/.herdr-inbox", "po", "devnotes.jsonl"));
+  for (const bad of ["", "../x", "a/b", "A", "..", ".", "a.jsonl", null]) assert.equal(I.poFile("/h/.herdr-inbox", bad), null, String(bad));
+});
+
+test("leaderOwner: 살아 있는 리더는 부모 PO, 닫힌 리더는 보고에 적힌 po(그 PO가 살아 있을 때), 나머지는 기타", () => {
+  const O = I.leaderOwner, X = I.PO_OTHER;
+  assert.equal(O(TERMS, "lead-a", "t13"), "devnotes");
+  assert.equal(O(TERMS, "lead-c", "t41"), "mascoz");
+  assert.equal(O(TERMS, "lead-a", "t13", "mascoz"), "devnotes"); // 터미널이 보고의 po보다 앞선다
+  assert.equal(O(TERMS, "lead-gone", "", "mascoz"), "mascoz"); // 닫힌 리더는 보고의 po
+  assert.equal(O(TERMS, "lead-gone", "", "nobody"), X); // 그 PO가 닫혀 있다
+  assert.equal(O(TERMS, "lead-gone", "", ""), X); // po 없음
+  assert.equal(O(TERMS, "lead-gone", "", "../x"), X); // 잘못된 id
+  assert.equal(O(TERMS, "lead-orphan", "t99", "devnotes"), X); // 살아 있는데 부모가 PO가 아니다: 보고의 po를 믿지 않는다
+  assert.equal(O([{ address: "t1", name: "", labels: { role: "po" } }, { address: "t2", name: "lead-x", parent: "t1" }], "lead-x", "t2"), X); // 부모 PO에 po 라벨이 없다
+  assert.equal(O([], "lead-a", "t1", "devnotes"), X); // PO가 하나도 안 살아 있다
+});
+
+test("choosePick: 마지막에 고른 PO(살아 있으면), 아니면 살아 있는 리더가 가장 많은 PO, 같으면 앞의 PO, 기타만 남으면 기타", () => {
+  const pos = [{ id: "a", n: 1 }, { id: "b", n: 3 }, { id: "c", n: 3 }];
+  assert.equal(I.choosePick(pos, "a", false), "a");
+  assert.equal(I.choosePick(pos, "gone", false), "b"); // 닫힌 PO는 건너뛴다
+  assert.equal(I.choosePick(pos, "", false), "b"); // 같은 3이면 앞의 b
+  assert.equal(I.choosePick(pos, undefined, true), "b");
+  assert.equal(I.choosePick(pos, I.PO_OTHER, true), I.PO_OTHER); // 기타에 볼 것이 남아 있으면 유지
+  assert.equal(I.choosePick(pos, I.PO_OTHER, false), "b"); // 기타가 비면 기본으로
+  assert.equal(I.choosePick([], "a", true), I.PO_OTHER);
+  assert.equal(I.choosePick([], "a", false), "");
+  assert.equal(I.choosePick([{ id: "a", n: 0 }, { id: "b", n: 0 }], "", false), "a");
+});
+
+test("parseLines·summarize: 보고 줄의 po는 규칙에 맞을 때만 읽고, 리더의 po는 가장 최근 줄의 것이다", () => {
+  const l1 = JSON.stringify({ ts: "2026-01-01T00:00:00Z", kind: "done", po: "devnotes" });
+  const l2 = JSON.stringify({ ts: "2026-01-02T00:00:00Z", kind: "done" });
+  const l3 = JSON.stringify({ ts: "2026-01-03T00:00:00Z", kind: "done", po: "Bad Id" });
+  assert.deepEqual(I.parseLines([l1, l2, l3].join("\n")).map((x) => x.po), ["devnotes", "", ""]);
+  assert.equal(I.summarize("lead-a", [l1, l2].join("\n")).po, "devnotes"); // po가 없는 줄은 건너뛰고 있는 줄의 것
+  assert.equal(I.summarize("lead-a", l2).po, "");
+  assert.equal(I.summarize("lead-a", [l1, l3].join("\n")).po, "devnotes"); // 잘못된 id는 없는 것과 같다
 });
 
 test("parsePoLines: say 줄만, 오래된 것부터, 깨진 줄·모르는 종류·빈 글·잘못된 시각은 건너뛴다", () => {
@@ -574,22 +824,31 @@ test("parsePoLines: 최근 100줄만 남긴다. 빈 글은 빈 목록", () => {
   assert.deepEqual(I.parsePoLines(undefined), []);
 });
 
-test("collect: po.jsonl은 리더가 아니라 po 줄로 읽고, 없거나 비어 있어도 오류 없이 빈 목록이다", () => {
+test("collect: po/<id>.jsonl을 PO별로 읽고, 옛 po.jsonl과 잘못된 파일 이름은 무시하며, 리더로 보이지 않는다", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "inbox-po-"));
-  fs.writeFileSync(path.join(dir, "lead-a.jsonl"), text({ ts: "2026-01-01T00:00:00Z", kind: "done" }));
-  assert.deepEqual(I.collect(dir).po, []); // 파일 없음
-  fs.writeFileSync(path.join(dir, "po.jsonl"), "");
-  assert.deepEqual(I.collect(dir).po, []); // 빈 파일
-  fs.writeFileSync(path.join(dir, "po.jsonl"), JSON.stringify({ ts: "2026-01-02T00:00:00Z", kind: "say", text: "안녕하세요", to: "here" }) + "\n");
+  fs.writeFileSync(path.join(dir, "lead-a.jsonl"), text({ ts: "2026-01-01T00:00:00Z", kind: "done", po: "devnotes" }));
+  assert.deepEqual(I.collect(dir).po, {}); // 폴더 없음
+  fs.mkdirSync(path.join(dir, "po"));
+  fs.writeFileSync(path.join(dir, "po", "devnotes.jsonl"), ""); // 빈 파일
+  assert.deepEqual(I.collect(dir).po, {}); // 줄이 없는 파일은 항목이 아니다
+  const line = (t, to) => JSON.stringify({ ts: "2026-01-02T00:00:00Z", kind: "say", text: t, to }) + "\n";
+  fs.writeFileSync(path.join(dir, "po", "devnotes.jsonl"), line("안녕하세요", "here"));
+  fs.writeFileSync(path.join(dir, "po", "mascoz.jsonl"), line("마스코즈", ""));
+  fs.writeFileSync(path.join(dir, "po", "Bad.jsonl"), line("버려진다", "")); // id 규칙에 안 맞는 파일 이름
+  fs.writeFileSync(path.join(dir, "po", "notes.txt"), "x");
+  fs.writeFileSync(path.join(dir, "po.jsonl"), line("옛 파일", "")); // 옛 전역 파일: 읽지 않고 리더도 아니다
   const d = I.collect(dir);
-  assert.deepEqual(d.leaders.map((x) => x.leader), ["lead-a"]); // po가 리더로 보이지 않는다
-  assert.deepEqual(d.po.map((x) => [x.text, x.to]), [["안녕하세요", "here"]]);
-  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, leaders: [], po: [] });
+  assert.deepEqual(d.leaders.map((x) => [x.leader, x.po]), [["lead-a", "devnotes"]]);
+  assert.deepEqual(Object.keys(d.po).sort(), ["devnotes", "mascoz"]);
+  assert.deepEqual(d.po.devnotes.map((x) => [x.text, x.to]), [["안녕하세요", "here"]]);
+  assert.deepEqual(d.po.mascoz.map((x) => x.text), ["마스코즈"]);
+  assert.deepEqual(I.readPo(dir), d.po);
+  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, dir: path.join(dir, "none"), root: I.appRoot(), leaders: [], po: {}, imgd: {} });
 });
 
 test("chat 블록: main.js가 inbox.cjs와 한 글자도 다르지 않은 같은 블록을 쓴다", () => {
   const block = (f) => {
-    const src = fs.readFileSync(path.join(__dirname, f), "utf8");
+    const src = fs.readFileSync(path.join(__dirname, f), "utf8").replace(/\r\n/g, "\n");
     const a = src.indexOf("// chat:begin"), b = src.indexOf("// chat:end");
     assert.ok(a >= 0 && b > a, f);
     return src.slice(a, b);
@@ -606,19 +865,1145 @@ test("parseMention: 글 가운데 @here는 빠지고 남는 공백·문장부호
   assert.deepEqual([u.text, u.to, u.empty], ["@lead-zzz 이거 해줘", [], false]);
 });
 
-test("채팅 줄 따라가기: 열 때와 새 줄이 올 때만 맨 아래로, 위로 올려 읽는 중이면 건드리지 않는다", () => {
-  const a = [{ ms: 1, me: true, text: "안녕" }];
-  const b = [...a, { ms: 2, me: false, text: "네" }];
-  assert.equal(I.chatKey([]), "");
-  assert.notEqual(I.chatKey(a), I.chatKey(b));
-  assert.equal(I.chatFollow(null, I.chatKey(a), 0), true); // 창을 막 열었다
-  assert.equal(I.chatFollow(I.chatKey(a), I.chatKey(a), 0), false); // 같은 줄: 그대로
-  assert.equal(I.chatFollow(I.chatKey(a), I.chatKey(b), 0), true); // 새 줄
-  assert.equal(I.chatFollow(I.chatKey(a), I.chatKey(b), 120), false); // 위로 올려 읽는 중
-  assert.equal(I.chatFollow(null, "", 0), false); // 줄이 없다
-  let up = 0;
-  up = I.chatWheel(up, 80); assert.equal(up, 80);
-  up = I.chatWheel(up, -200); assert.equal(up, 0); // 맨 아래로 돌아오면 다시 따라간다
-  assert.equal(I.chatWheel(0, 99999), 4000);
-  assert.equal(I.chatWheel(5, undefined), 5);
+// ---- 메신저 타임라인 (PO별 방)
+const sumOf = (leader, ...items) => ({ leader, items: items.map((i) => ({ ...i, ms: Date.parse(i.ts) })) });
+const T = (m) => new Date(Date.UTC(2026, 0, 1, 0, m)).toISOString();
+
+test("timeline: 방에 속한 리더 보고와 PO 말, 내가 보낸 글이 시간순(오래된 것이 위)으로 한 줄에 섞이고 answered·start는 빠진다", () => {
+  const a = sumOf("lead-a", { ts: T(5), kind: "done" }, { ts: T(1), kind: "decision" }, { ts: T(2), kind: "answered" }, { ts: T(0), kind: "start" });
+  const b = sumOf("lead-b", { ts: T(3), kind: "verify" });
+  const says = [{ ts: T(4), ms: Date.parse(T(4)), text: "PO 말", to: "lead-a" }];
+  const mine = [{ ts: T(6), ms: Date.parse(T(6)), text: "내 글", to: "lead-a", po: "p1" }];
+  const t = I.timeline("p1", [{ s: a, owner: "p1" }, { s: b, owner: "p1" }], says, mine);
+  assert.deepEqual(t.map((e) => e.who), ["l:lead-a", "l:lead-b", "po", "l:lead-a", "me"]);
+  assert.deepEqual(t.map((e) => e.ms), t.map((e) => e.ms).slice().sort((x, y) => x - y));
+  assert.equal(t.filter((e) => e.it && (e.it.kind === "answered" || e.it.kind === "start")).length, 0);
+});
+
+test("timeline: 다른 PO의 리더·내 글은 들어오지 않고, PO 모름 방에는 PO 말이 없다", () => {
+  const a = sumOf("lead-a", { ts: T(1), kind: "done" });
+  const b = sumOf("lead-b", { ts: T(2), kind: "done" });
+  const says = [{ ts: T(3), ms: Date.parse(T(3)), text: "x", to: "" }];
+  const mine = [{ ts: T(4), ms: Date.parse(T(4)), text: "y", to: "", po: "p2" }];
+  const t1 = I.timeline("p1", [{ s: a, owner: "p1" }, { s: b, owner: "p2" }], says, mine);
+  assert.deepEqual(t1.map((e) => e.who), ["l:lead-a", "po"]);
+  const t0 = I.timeline(I.PO_OTHER, [{ s: a, owner: "p1" }, { s: b, owner: I.PO_OTHER }], says, []);
+  assert.deepEqual(t0.map((e) => e.who), ["l:lead-b"]);
+});
+
+test("timeline: 같은 시각은 입력 순서를 지키고, 같은 보고가 두 번 와도 한 번만 나온다", () => {
+  const a = sumOf("lead-a", { ts: T(1), kind: "done" }, { ts: T(1), kind: "done" });
+  const says = [{ ts: T(1), ms: Date.parse(T(1)), text: "x" }];
+  const t = I.timeline("p1", [{ s: a, owner: "p1" }], says, []);
+  assert.deepEqual(t.map((e) => e.who), ["l:lead-a", "po"]);
+});
+
+test("timeline: 대기 중인 보고에는 waiting 표시가 붙고, 보고가 목록에 없으면 맨 아래에 대기 항목을 하나 만든다", () => {
+  const a = sumOf("lead-a", { ts: T(1), kind: "decision" }, { ts: T(2), kind: "done" });
+  const t = I.timeline("p1", [{ s: a, owner: "p1" }], [], [], [{ leader: "lead-a", ts: T(1), kind: "decision" }], Date.parse(T(9)));
+  assert.equal(t.find((e) => e.it?.kind === "decision").waiting, "decision");
+  assert.equal(t.some((e) => e.wait), false);
+  const t2 = I.timeline("p1", [{ s: a, owner: "p1" }], [], [], [{ leader: "lead-z", ts: "", kind: "verify" }], Date.parse(T(9)));
+  const last = t2[t2.length - 1];
+  assert.deepEqual([last.wait, last.leader, last.waiting, last.ms], [true, "lead-z", "verify", Date.parse(T(9))]);
+});
+
+test("groupTimeline: 같은 사람이 5분 안에 이어 쓰면 머리말을 접고, 사람이 바뀌거나 5분이 지나면 다시 단다", () => {
+  const m = (who, min) => ({ who, ms: min * 60000 });
+  const g = I.groupTimeline([m("l:a", 0), m("l:a", 4), m("l:a", 10), m("po", 11), m("l:a", 12), m("l:b", 12), m("l:b", 17)]);
+  assert.deepEqual(g.map((e) => e.head), [true, false, true, true, true, true, false]);
+  assert.equal(I.TL_GAP_MS, 300000);
+  assert.deepEqual(I.groupTimeline([]), []);
+  assert.equal(I.groupTimeline([m("me", 0), m("me", 5)])[1].head, false); // 정확히 5분은 접힌다
+});
+
+test("unreadCount: 마지막으로 연 시각 뒤의 남의 메시지만 세고, 내 글과 대기 항목은 세지 않는다", () => {
+  const e = [{ who: "l:a", ms: 10 }, { who: "po", ms: 20 }, { who: "me", ms: 30 }, { who: "l:a", ms: 40, wait: true }, { who: "l:b", ms: 50 }];
+  assert.equal(I.unreadCount(e, 0), 3); // 한 번도 안 연 방은 전부
+  assert.equal(I.unreadCount(e, 10), 2);
+  assert.equal(I.unreadCount(e, 50), 0);
+  assert.equal(I.unreadCount([], 0), 0);
+  assert.equal(I.unreadCount(e, undefined), 3);
+});
+
+test("seenNext: 방을 열면 가장 새 메시지 시각을 기억하고, 달라질 게 없으면 null", () => {
+  const e = [{ who: "l:a", ms: 10 }, { who: "po", ms: 20 }, { who: "l:a", ms: 99, wait: true }];
+  assert.deepEqual(I.seenNext({ x: 5 }, "p1", e), { x: 5, p1: 20 });
+  assert.equal(I.seenNext({ p1: 20 }, "p1", e), null);
+  assert.equal(I.seenNext({}, "p1", []), null);
+  assert.equal(I.seenNext({}, "", e), null);
+  assert.deepEqual(I.seenNext(null, "p1", e), { p1: 20 });
+});
+
+test("tlFollow: 방을 바꿨거나 창을 막 열 때, 그리고 맨 아래에 있는 중 새 글이 올 때만 맨 아래로 간다", () => {
+  const a = [{ ms: 1, key: "k1" }];
+  const b = [...a, { ms: 2, key: "k2" }];
+  const ka = I.tlKey("p1", a), kb = I.tlKey("p1", b);
+  assert.notEqual(ka, kb);
+  assert.equal(I.tlFollow("", ka, false), true); // 창을 막 열었다
+  assert.equal(I.tlFollow(ka, ka, true), false); // 같은 상태
+  assert.equal(I.tlFollow(ka, kb, true), true); // 맨 아래에서 새 글
+  assert.equal(I.tlFollow(ka, kb, false), false); // 위로 올려 읽는 중
+  assert.equal(I.tlFollow(ka, I.tlKey("p2", a), false), true); // 방을 바꿨다
+  assert.equal(I.tlFollow(null, ka, false), true);
+});
+
+test("atBottom: 스크롤 위치+보이는 높이가 내용 높이 가까이면 맨 아래", () => {
+  assert.equal(I.atBottom(500, 300, 800), true);
+  assert.equal(I.atBottom(499.5, 300, 800), true);
+  assert.equal(I.atBottom(100, 300, 800), false);
+  assert.equal(I.atBottom(0, 300, 200), true); // 내용이 짧다
+  assert.equal(I.atBottom(undefined, undefined, undefined), true);
+});
+
+test("chatHtml: HTML을 이스케이프하고 줄마다 문단으로 나누며 http(s) 링크만 누를 수 있게 하고 끝 문장부호는 뺀다", () => {
+  assert.equal(I.chatHtml("a<b>&\"c\""), "<p>a&lt;b&gt;&amp;&quot;c&quot;</p>");
+  assert.equal(I.chatHtml("위\n\n아래"), "<p>위</p><p>&nbsp;</p><p>아래</p>");
+  assert.equal(I.chatHtml("보세요 https://x.io/a?b=1&c=2). 끝"), "<p>보세요 <a href=\"https://x.io/a?b=1&amp;c=2\">https://x.io/a?b=1&amp;c=2</a>). 끝</p>");
+  assert.equal(I.chatHtml("javascript:alert(1) ftp://x"), "<p>javascript:alert(1) ftp://x</p>");
+  assert.equal(I.chatHtml(""), "<p>&nbsp;</p>");
+  assert.equal(I.chatHtml("a\r\nb"), "<p>a</p><p>b</p>");
+});
+
+test("parseMention: 줄바꿈과 빈 줄은 지키고, 줄 끝 공백·연속 빈 줄·CRLF만 정리한다", () => {
+  const known = ["lead-a"];
+  assert.equal(I.parseMention("첫 줄  \r\n\n\n\n  셋째   줄\n", known).text, "첫 줄\n\n셋째 줄");
+  assert.equal(I.parseMention("@lead-a 위\n아래", known).text, "@lead-a 위\n아래");
+  assert.deepEqual(I.parseMention("@lead-a 위\n아래", known).to, ["lead-a"]);
+  assert.equal(I.parseMention("@here 안녕\n둘째 줄", known).text, "안녕\n둘째 줄");
+  assert.equal(I.parseMention("a\n@here, b", known).text, "a\nb"); // 줄 맨 앞 @here는 줄바꿈을 먹지 않는다
+  assert.equal(I.parseMention("a @here, b\nc", known).text, "a, b\nc");
+  assert.equal(I.parseMention("\n\n  \n", known).empty, true);
+  assert.equal(I.parseMention("@here\n@lead-a\n", known).empty, true);
+});
+
+test("enterIntent: Shift+Enter는 줄바꿈, Enter(Cmd/Ctrl 포함)는 보내기, 다른 키는 아무것도 아니다", () => {
+  assert.equal(I.enterIntent("enter", true), "newline");
+  assert.equal(I.enterIntent("Enter", false), "send");
+  assert.equal(I.enterIntent("return", false), "send");
+  assert.equal(I.enterIntent("a", false), "");
+  assert.equal(I.enterIntent(undefined, true), "");
+});
+
+test("needsNewline·strayBreak: 위젯이 줄바꿈을 이미 넣었으면 더 넣지 않고, 보낸 뒤 남은 빈 줄만 지운다", () => {
+  assert.equal(I.needsNewline(0, 1000), true); // 편집이 없었다
+  assert.equal(I.needsNewline(990, 1000), false); // 키와 같은 때 위젯이 넣었다
+  assert.equal(I.needsNewline(1010, 1000), false);
+  assert.equal(I.needsNewline(500, 1000), true);
+  assert.equal(I.strayBreak("\n", 1000, 1050), true);
+  assert.equal(I.strayBreak("\n", 1000, 1500), false); // 한참 뒤 사람이 친 줄바꿈은 지우지 않는다
+  assert.equal(I.strayBreak("글", 1000, 1050), false);
+  assert.equal(I.strayBreak("", 1000, 1050), false);
+});
+
+test("main.js: 채팅 입력은 Textarea, Enter는 붙여넣고 hc keys enter까지, 막힌 PO에는 Enter를 누르지 않는다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
+  assert.match(src, /TextareaState\.new\(/);
+  assert.match(src, /Textarea\.new\(this\.chat\)/);
+  assert.match(src, /hc\(\["keys", po, "enter"\]\)/);
+  assert.ok(!/hc\(\["send"/.test(src));
+  assert.match(src, /=== "blocked"/);
+  assert.match(src, /enterIntent\(e\?\.key, Boolean\(e\?\.modifiers\?\.shift\)\)/);
+  assert.match(src, /PO에 보내기/);
+  const body = deliverOf(src);
+  assert.ok(body.indexOf('run("terminal.paste"') > 0 && body.indexOf("this.submitPo(") > body.indexOf('run("terminal.paste"')); // 붙여넣은 뒤에 Enter
+  assert.match(src, /import \{[^}]*\bhc\b[^}]*\} from "herdr"/);
+});
+
+test("main.js: 창은 고른 PO 하나만 보이고(카드·보고·@ 목록·채팅 대상·PO 답글), 이름은 'PO 데스크'다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
+  assert.match(src, /const PICK_KEY = "inbox\.po"/);
+  assert.match(src, /choosePick\(pos, last, hasOther\)/);
+  assert.match(src, /leaderMenu\(this\.liveTerms\(\), namesMemo\(\), q\.query, 8, this\.view\(\)\.pick\)/);
+  assert.match(src, /chatTarget\(terms, p\.to, v\.pick\)/);
+  assert.match(src, /for \(const x of mine \?\? \[\]\) if \(x\.po === room\)/); // 내 글은 그 방의 것만
+  assert.match(src, /this\.data\?\.po\?\.\[id\]/); // PO 답글도 그 방의 것만
+  assert.match(src, /po: v\.pick, kind: "chat" \}/); // 보낸 글에 PO를 적어 둔다
+  assert.match(src, /setShared\(PICK_KEY, id\)/);
+  assert.match(src, /child\("PO 데스크"\)/);
+  assert.ok(!/받은편지함/.test(src));
+  // 배지·탭 개수는 PO와 상관없이 기다리는 리더 전부
+  const badge = src.slice(src.indexOf("  badge() {"), src.indexOf("  // The \"pasted into the PO\""));
+  assert.match(badge, /this\.asks\(\)/);
+  assert.ok(!/view\(\)/.test(badge));
+});
+
+test("imeHold: 글을 막 고쳤거나 한글·가나·한자로 끝나면 첫 Enter는 한 번 붙들고, 그 뒤 편집 없는 Enter는 보낸다", () => {
+  assert.equal(I.imeHold("hello", 1000, 0, 1200), true); // 막 친 글: 500ms 안
+  assert.equal(I.imeHold("hello", 1000, 0, 1600), false); // 한참 전, 영문 끝: 바로 보낸다
+  assert.equal(I.imeHold("안녕", 1000, 0, 5000), true); // 조합 중일 수 있는 한글 끝
+  assert.equal(I.imeHold("안녕 ", 1000, 0, 5000), true); // 끝 공백은 무시
+  assert.equal(I.imeHold("안녕.", 1000, 0, 5000), false); // 마침표로 끝나면 조합이 끝난 글
+  assert.equal(I.imeHold("ありがとう", 1000, 0, 5000), true);
+  assert.equal(I.imeHold("你好", 1000, 0, 5000), true);
+  assert.equal(I.imeHold("ㅎ", 1000, 0, 5000), true); // 자모
+  // 붙든 뒤 두 번째 Enter: 그 사이 편집이 없으면(확정이 만든 100ms 안 편집 포함) 보낸다
+  assert.equal(I.imeHold("안녕", 1000, 5000, 6000), false);
+  assert.equal(I.imeHold("안녕", 5050, 5000, 6000), false);
+  // 붙든 뒤 새로 쳤으면 다시 붙든다
+  assert.equal(I.imeHold("안녕하", 5500, 5000, 5600), true);
+  assert.equal(I.imeHold("", 0, 0, 100), true);
+});
+
+test("poFile: 앞뒤 공백이 낀 id는 다듬은 id로 파일을 만든다", () => {
+  assert.equal(I.poFile("/h/x", " devnotes "), path.join("/h/x", "po", "devnotes.jsonl"));
+  assert.equal(I.poFile("/h/x", " a/b "), null);
+});
+
+test("main.js: Enter 전송은 imeHold를 거치고, PO 라벨이 없으면 안내를 보인다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8").replace(/\r\n/g, "\n");
+  assert.match(src, /imeHold\(value, this\.editAt, this\.heldAt, now\)/); // 글자가 바뀐 때 기준(위젯이 넣은 줄바꿈은 편집이 아니다)
+  assert.match(src, /id\("po-hint"\)/);
+  assert.match(src, /\.child\(this\.picker\(t, v\)\)/); // 전체 보기는 PO가 0개여도 안내를 그린다
+});
+
+test("holdShown: 붙든 Enter가 둘째 Enter를 기다리는 동안만 안내를 보인다", () => {
+  assert.equal(I.holdShown(1000, 0), false);
+  assert.equal(I.holdShown(1000, 5000), true);
+  assert.equal(I.holdShown(5050, 5000), true); // 확정이 만든 편집
+  assert.equal(I.holdShown(5500, 5000), false); // 새로 쳤다
+});
+
+test("main.js: 붙든 Enter 안내를 그리고, PO를 고르거나 보내면 heldAt을 비운다", () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8").replace(/\r\n/g, "\n");
+  assert.match(src, /한 번 더 Enter로 보냅니다/);
+  assert.match(src, /pickPo\(id, c\) \{\n\s+this\.heldAt = 0;/);
+  assert.match(src, /sendChat\(c\) \{\n\s+this\.sentAt = Date\.now\(\);\n\s+this\.heldAt = 0;/);
+  assert.match(src, /this\.heldAt = now;\n[^\n]*\n\s+c\.notify\(\);/);
+});
+
+// ---- 결정 보고의 N안 칩(리더 보고 규칙의 고정 형식 "1안: …" / "추천: N안")
+test("decisionOptions: '1안: …' 줄이 서로 다른 번호로 둘 이상일 때만 선택지로 본다", () => {
+  const body = "결정이 필요합니다.\n1안: 지금 합친다\n2안: 다음 주에 합친다\n3안: 안 합친다";
+  assert.deepEqual(I.decisionOptions(body), { options: [1, 2, 3], recommended: 0 });
+  assert.deepEqual(I.decisionOptions("- 1안: 가\n* 2안：나"), { options: [1, 2], recommended: 0 }); // 글머리·전각 콜론
+  assert.deepEqual(I.decisionOptions("1안) 가\n  2안: 나"), { options: [1, 2], recommended: 0 });
+  assert.deepEqual(I.decisionOptions("1안: 가\n1안: 같은 번호"), { options: [], recommended: 0 }); // 서로 다른 번호 둘 미만
+  assert.deepEqual(I.decisionOptions("1안: 하나뿐"), { options: [], recommended: 0 });
+  assert.deepEqual(I.decisionOptions("2안: 나\n3안: 다"), { options: [2, 3], recommended: 0 }); // 1부터가 아니어도 번호 그대로
+});
+
+test("decisionOptions: 추천 줄은 그 칩만 primary로 가리킨다(없는 번호면 무시)", () => {
+  assert.deepEqual(I.decisionOptions("1안: 가\n2안: 나\n추천: 2안 (이유)"), { options: [1, 2], recommended: 2 });
+  assert.deepEqual(I.decisionOptions("1안: 가\n2안: 나\n- 추천：1안"), { options: [1, 2], recommended: 1 });
+  assert.deepEqual(I.decisionOptions("1안: 가\n2안: 나\n추천: 3안"), { options: [1, 2], recommended: 0 });
+  assert.deepEqual(I.decisionOptions("추천: 1안\n1안: 가"), { options: [], recommended: 0 }); // 선택지가 둘 미만이면 추천도 없다
+});
+
+test("decisionOptions: 다른 형식은 추측하지 않는다(A:, 1), ①, 번호 목록, 4안, 문장 중간)", () => {
+  for (const body of ["A: 가\nB: 나", "1) 가\n2) 나", "① 가\n② 나", "1. 첫 단계\n2. 둘째 단계", "4안: 가\n5안: 나", "옵션 1안: 가\n옵션 2안: 나", "1안:\n2안:", "1안 가\n2안 나", "", null, undefined])
+    assert.deepEqual(I.decisionOptions(body), { options: [], recommended: 0 }, String(body));
+});
+
+test("main.js: 칩은 대기 중인 결정(decision) 말풍선에만, 같은 send() 길로, 추천만 primary", () => {
+  const src = mainSrc();
+  const a = src.indexOf("  askActions(t, a, cx) {");
+  const body = src.slice(a, src.indexOf("    if (!a.po) box.child", a));
+  assert.match(body, /const opts = kind === "decision" \? decisionOptions\(item\?\.body\)/); // 한 번만 계산
+  assert.match(body, /kind === "decision" \? opts\.options\.map/);
+  assert.match(body, /`\$\{n\}안 선택`/);
+  assert.match(body, /this\.send\(a, `\$\{n\}안 선택`, c, "choice"\)/);
+  assert.match(body, /primary: n === opts\.recommended/);
+  assert.match(body, /disabled: a\.po \? "" : NO_PO, tip: CLIP/);
+  assert.ok(body.indexOf("opt-") < body.indexOf("`ok-${s.leader}`") && body.indexOf("`ok-${s.leader}`") < body.indexOf("`write-${s.leader}`")); // 칩 → 확인 완료 → 답 쓰기
+  // verify에는 칩이 없다(확인 완료만): 칩은 kind === "decision" 안에서만 만든다
+  assert.equal((body.match(/decisionOptions\(/g) ?? []).length, 1);
+  assert.match(body, /kind === "verify", \(el\)/);
+});
+
+test("decisionOptions: inbox.cjs와 main.js의 chat 블록이 같다", () => {
+  const cut = (f) => { const s = fs.readFileSync(path.join(__dirname, f), "utf8").replace(/\r\n/g, "\n"); const a = s.indexOf("function decisionOptions("); return s.slice(a, s.indexOf("\n}\n", a)); };
+  assert.equal(cut("../mods/inbox/main.js"), cut("../mods/inbox/inbox.cjs"));
+});
+
+// ---- 내가 보낸 모든 글을 오른쪽 말풍선으로 (deliver 한 곳에서 한 번 기록)
+test("chatRecord: 사람이 쓴 글만 담고(긴 Panel answer 감싸개 없이), 종류·상태는 정해진 값만", () => {
+  const r = I.chatRecord({ text: " 확인 완료 ", to: "lead-a", po: "p1", kind: "verify" }, "held", 1700000000000);
+  assert.deepEqual(r, { id: "1700000000000-", at: 1700000000000, ts: new Date(1700000000000).toISOString(), ms: 1700000000000, text: "확인 완료", line: "확인 완료", to: "lead-a", po: "p1", kind: "verify", status: "held", ak: "" });
+  const w = I.chatRecord({ text: "확인 완료", line: 'Panel answer (verify) for lead-a: "확인 완료".', po: "p1" }, "sending", 5, "ab3");
+  assert.equal(w.id, "5-ab3"); // 같은 ms에 두 번 보내도 id가 겹치지 않게 seq를 붙인다
+  assert.equal(w.text, "확인 완료"); // 말풍선에는 사람이 쓴 글
+  assert.match(w.line, /^Panel answer/); // 다시 보내기는 실제로 붙여 넣은 줄 그대로
+  assert.equal(I.chatRecord({ text: "  ", po: "p1" }, "sent", 1), null); // 빈 글
+  assert.equal(I.chatRecord({ text: "x", po: "" }, "sent", 1), null); // 방 없음
+  const odd = I.chatRecord({ text: "x", po: "p1", kind: "zzz" }, "weird", 5);
+  assert.equal(odd.kind, "chat");
+  assert.equal(odd.status, "failed"); // 모르는 상태는 '보내지 못함'으로 둔다(보냈다고 거짓 표시 금지)
+  assert.deepEqual(I.CHAT_KINDS, ["answer", "verify", "choice", "chat"]);
+});
+
+test("mineNote: 보낸 것은 비고, 붙여 넣기만 했거나 못 보낸 것은 작은 안내가 붙는다", () => {
+  assert.equal(I.mineNote("sent"), "");
+  assert.match(I.mineNote("held"), /붙여 넣기만/);
+  assert.match(I.mineNote("nopane"), /보내지 못함/);
+  assert.match(I.mineNote("failed"), /보내지 못함/);
+  assert.match(I.mineNote("gone"), /입력창/);
+  assert.match(I.mineNote("held", true), /붙여 넣기만/); // 아직 질문 중
+  assert.match(I.mineNote("held", false, 1000), /질문에 답했습니다/);
+  assert.match(I.mineNote("held", false, 11 * 60000), /다시 보내세요/);
+  assert.match(I.mineNote("noenter", false, 11 * 60000), /다시 보내세요/);
+});
+
+test("timeline: 내 글은 그 방(po)에만, 종류·상태·받는 리더를 달고 오른쪽 말풍선 데이터가 된다(옛 기록은 chat·sent)", () => {
+  const mine = [
+    { ts: "a", ms: 10, text: "1안 선택", to: "lead-a", po: "p1", kind: "choice", status: "sent" },
+    { ts: "b", ms: 20, text: "답", to: "lead-a", po: "p1", kind: "answer", status: "nopane" },
+    { ts: "c", ms: 30, text: "다른 방", to: "lead-b", po: "p2", kind: "chat", status: "sent" },
+    { ts: "d", ms: 5, text: "옛 기록", to: "", po: "p1" },
+  ];
+  const t = I.timeline("p1", [], [], mine).filter((e) => e.who === "me");
+  assert.deepEqual(t.map((e) => [e.text, e.kind, e.status, e.to]), [["옛 기록", "chat", "sent", ""], ["1안 선택", "choice", "sent", "lead-a"], ["답", "answer", "nopane", "lead-a"]]);
+  assert.equal(I.unreadCount(t, 0), 0); // 내 글은 안 읽은 글이 아니다
+});
+
+test("main.js: 모든 데스크 보내기는 deliver 한 곳에서 한 번만 기록하고, 말풍선은 오른쪽(내 것)·왼쪽(리더·PO)에 시간을 바깥 아래에 둔다", () => {
+  const src = mainSrc();
+  const del = deliverOf(src);
+  assert.equal((src.match(/setShared\(CHAT_KEY/g) ?? []).length, 2); // 쓰는 곳은 record()(새 글)와 mark()(상태 바꿈) 둘뿐
+  assert.equal((del.match(/this\.record\(/g) ?? []).length, 1); // 새 기록은 deliver 한 곳에서 한 번(다시 보내기는 같은 id로 상태만 바꾼다)
+  assert.match(del, /if \(!id\) id = this\.record\(\{ \.\.\.rec, line: text \}, "sending"\)/);
+  for (const st of ["failed", "held", "nopane"]) assert.match(del, new RegExp(`this\\.mark\\(id, "${st}"\\)`));
+  assert.match(src, /\{ text: body, imgs: pics\.map\(\(x\) => x\.path\), to: a\.s\.leader, po: a\.owner, kind, ak: this\.askKey\(a\) \}/); // 버튼·칩·답 상자는 사람이 쓴 글(body)을 기록한다
+  assert.match(src, /send\(a, "확인 완료", c, "verify"\)/);
+  assert.match(src, /send\(a, `\$\{n\}안 선택`, c, "choice"\)/);
+  assert.ok(!/answerLine\([^)]*\)[^;]*kind: "chat"/.test(src));
+  // 모양: 내 것은 오른쪽(items_end/justify_end)·강조색 채움, 시간은 말풍선 왼쪽; 남의 것은 말풍선 오른쪽 아래에 시간
+  const row = methodOf(src, "  entryRow(t, e, v, cx) {", "  render(cx)");
+  assert.match(row, /justify_end\(\)/);
+  assert.match(row, /bg\(t\.working \+ "33"\)/);
+  assert.match(row, /\.child\(this\.sideTools\(t, id, e\.text, e\.ms\)\)\s*\n\s*\.child\(v_flex\(\)\.flex_none\(\)\.w\(width\)\.max_w\(cap \?\? "75%"\)/); // 내 말풍선: 시간이 말풍선 앞(왼쪽), 폭은 글에서 정한다
+  assert.match(row, /items_end\(\)\s*\n\s*\.child\(div\(\)\.flex_1\(\)\.min_w\(0\)\.max_w\(this\.capOf\(\) \?\? "75%"\)\.px\(12\)/); // PO: 말풍선 뒤(오른쪽)에 시간
+  assert.match(row, /mineNote\(e\.status, blockedNow, age\)/);
+  assert.ok(!/clock\(it\.ms\)/.test(methodOf(src, "  nameRow(t,", "  // What a waiting leader"))); // 머리줄에서 시간이 빠졌다
+});
+
+test("setChatStatus: 그 id의 기록만 상태와 시각을 바꾸고, 같은 상태·없는 id·모르는 상태는 바꾸지 않는다", () => {
+  const list = [{ id: "1-a", status: "sending", at: 1, text: "x" }, { id: "2-a", status: "sent", at: 2, text: "y" }];
+  const next = I.setChatStatus(list, "1-a", "sent", 99);
+  assert.deepEqual(next.map((x) => [x.id, x.status, x.at]), [["1-a", "sent", 99], ["2-a", "sent", 2]]);
+  assert.equal(list[0].status, "sending"); // 원본은 그대로
+  assert.equal(I.setChatStatus(list, "1-a", "sending", 5), null);
+  assert.equal(I.setChatStatus(list, "9-z", "sent", 5), null);
+  assert.equal(I.setChatStatus(list, "1-a", "weird", 5), null);
+  assert.equal(I.setChatStatus(null, "1-a", "sent", 5), null);
+});
+
+test("mineActs: 아무것도 못 간 것은 다시 보내기, Enter만 빠진 것은 Enter(10분 안)·다시 보내기(오래되면), 질문에 답한 뒤의 held도 버튼이 생긴다", () => {
+  const MIN = 60000;
+  for (const st of ["nopane", "failed", "gone"]) assert.deepEqual(I.mineActs(st), ["resend"], st);
+  assert.deepEqual(I.mineActs("noenter", false, 0), ["enter"]);
+  assert.deepEqual(I.mineActs("noenter", false, 9 * MIN), ["enter"]);
+  assert.deepEqual(I.mineActs("noenter", false, 11 * MIN), ["resend"]); // 10분 지난 Enter 버튼은 사라진다(입력창이 바뀌었을 수 있다)
+  assert.equal(I.ENTER_TTL_MS, 10 * MIN);
+  assert.deepEqual(I.mineActs("held", true, 0), []); // 아직 PO가 질문 중: Enter는 그 질문에 답하는 것이라 버튼 없음
+  assert.deepEqual(I.mineActs("held", false, 1000), ["enter", "resend"]); // 질문에 답한 뒤
+  assert.deepEqual(I.mineActs("held", false, 11 * MIN), ["resend"]);
+  for (const st of ["sent", "sending", "opening"]) assert.deepEqual(I.mineActs(st, false, 0), [], st);
+  assert.equal(I.mineAct, undefined); // 옛 단일 버튼 함수는 없다
+});
+
+test("liveStatus: 20초 넘게 sending/opening에 머문 기록은 각각 noenter/nopane으로 본다(영원히 '보내는 중' 금지)", () => {
+  assert.equal(I.liveStatus("sending", 1000, 1000 + 19000), "sending");
+  assert.equal(I.liveStatus("sending", 1000, 1000 + 21000), "noenter");
+  assert.equal(I.liveStatus("opening", 1000, 1000 + 21000), "nopane");
+  assert.equal(I.liveStatus("opening", 1000, 1000 + 5000), "opening");
+  for (const st of ["sent", "held", "failed", "nopane", "noenter"]) assert.equal(I.liveStatus(st, 1000, 1000 + 999999), st);
+});
+
+test("badgeTurn: 아이콘 배지는 한 번에 한 복사본만 쓴다(주인이거나 주인이 조용해졌을 때만)", () => {
+  assert.equal(I.badgeTurn(null, "a", 1000), "write");
+  assert.equal(I.badgeTurn({ id: "a", ts: 1000 }, "a", 2000), "write");
+  assert.equal(I.badgeTurn({ id: "b", ts: 1000 }, "a", 2000), "skip");
+  assert.equal(I.badgeTurn({ id: "b", ts: 1000 }, "a", 1000 + 66000), "write"); // 주인이 65초 넘게 갱신하지 않음(창을 닫으면 곧 넘겨받는다)
+  assert.equal(I.badgeTurn({ id: "b", ts: 1000 }, "a", 1000 + 64000), "skip");
+});
+
+test("promptTail·promptOptions: PO 화면 끝줄과 1,2,3…으로 이어진 선택지만(강조 표시 포함), 아니면 없음", () => {
+  const screen = "\n  Do you want to proceed?\n  ❯ 1. Yes\n    2. Yes, and don't ask again for this command\n    3. No, and tell Claude what to do differently (esc)\n\n";
+  assert.deepEqual(I.promptTail(screen, 2), ["    2. Yes, and don't ask again for this command", "    3. No, and tell Claude what to do differently (esc)"]);
+  assert.deepEqual(I.promptOptions(screen).map((o) => [o.key, o.on]), [["1", true], ["2", false], ["3", false]]);
+  assert.equal(I.promptOptions(screen)[1].label, "Yes, and don't ask again for this command");
+  assert.deepEqual(I.promptOptions("Proceed?\n 2. a\n 3. b"), []); // 1부터 이어지지 않으면 추측하지 않는다
+  assert.deepEqual(I.promptOptions("Proceed?\n 1. only one"), []);
+  assert.deepEqual(I.promptOptions("Proceed? (y/n)"), []);
+  assert.deepEqual(I.promptOptions(""), []);
+  assert.equal(I.promptTail("a".repeat(300), 1)[0].length, 140);
+});
+
+test("timeline: 내 글은 id와 실시간 상태를 달고, 오래 머문 sending은 noenter로 보인다", () => {
+  const mine = [{ id: "1-a", ts: "t", ms: 1000, at: 1000, text: "x", po: "p1", kind: "chat", status: "sending" }];
+  assert.equal(I.timeline("p1", [], [], mine, [], 1000 + 5000).find((e) => e.who === "me").status, "sending");
+  const late = I.timeline("p1", [], [], mine, [], 1000 + 30000).find((e) => e.who === "me");
+  assert.equal(late.status, "noenter");
+  assert.equal(late.id, "1-a");
+});
+
+test("main.js: 다시 보내기·Enter 누르기·질문 패널은 PO가 지금 질문 중인지로 막고, 배지는 한 곳만 쓴다", () => {
+  const src = mainSrc();
+  const re = methodOf(src, "  resend(id, c) {", "  // The bubble's \"Enter 누르기\"");
+  assert.match(re, /includes\("resend"\)/);
+  assert.ok(re.indexOf('this.mark(id, "sending")') > 0 && re.indexOf('this.mark(id, "sending")') < re.indexOf("this.deliver(")); // 붙여 넣기 전에 sending
+  assert.match(re, /this\.deliver\(po, r\.line \|\| r\.text, c, r, \(r2\) => this\.markAsk\(r, r2\), id\)/); // 같은 기록·같은 줄(새 말풍선 없음)
+  const en = methodOf(src, "  enterNow(id, c) {", "  // ---- A blocked PO's screen");
+  assert.match(en, /includes\("enter"\)/);
+  assert.match(en, /if \(this\.isBlocked\(po\)\) \{.*return; \}/); // 질문 중이면 Enter를 누르지 않는다
+  assert.ok(en.indexOf("this.isBlocked(po)") < en.indexOf('hc(["keys", po, "enter"])'));
+  assert.ok(en.indexOf('hc(["read"') < en.indexOf('hc(["keys", po, "enter"])')); // Enter 전에 PO 화면을 읽는다
+  assert.match(en, /inputHas\(/);
+  assert.match(en, /this\.mark\(id, okk \? "sent" : "noenter"\)/);
+  const pp = methodOf(src, "  pressPrompt(po, key, c) {", "  promptPanel(t, v, cx) {");
+  assert.ok(pp.indexOf("!this.isBlocked(po)") >= 0 && pp.lastIndexOf("!this.isBlocked(po)") < pp.indexOf('hc(["keys", po, key])')); // 질문이 사라졌으면 키를 누르지 않는다
+  assert.ok(pp.indexOf('hc(["read"') < pp.indexOf('hc(["keys", po, key])') && /promptSig\(text\) !== want/.test(pp)); // 키 전에 화면을 다시 읽어 같은 질문인지 본다
+  const panel = methodOf(src, "  promptPanel(t, v, cx) {", "  // A panel answer:");
+  assert.match(panel, /if \(!po \|\| !this\.isBlocked\(po\)\) \{ this\.prompt = null; return null; \}/); // 질문 중일 때만 보인다
+  assert.match(panel, /promptOptions\(shown\.text\)/);
+  assert.match(panel, /"enter"/);
+  assert.match(panel, /"esc"/);
+  const callers = src.match(/this\.pressPrompt\(/g) ?? [];
+  assert.equal(callers.length, 2); // 옵션 버튼과 Enter/Esc 버튼, 둘 다 클릭 핸들러 안
+  assert.ok(!/readPrompt\([^)]*\)[^;]*pressPrompt/.test(src)); // 화면을 읽은 결과로 스스로 누르지 않는다
+  const rp = methodOf(src, "  readPrompt(po, cx) {", "  pressPrompt(po, key, c) {");
+  assert.match(rp, /hc\(\["read", po, "--lines"/);
+  assert.ok(!/"keys"/.test(rp));
+  const badge = methodOf(src, "  badge(", "\n  }\n");
+  assert.match(badge, /badgeTurn\(/);
+  assert.match(badge, /setShared\(BADGE_KEY/);
+});
+
+test("main.js: 말풍선의 다시 보내기/Enter 누르기 버튼은 mineActs로만 정하고, 막힌 PO가 질문 중일 때 질문 패널이 채팅 상자 위에 붙는다", () => {
+  const src = mainSrc();
+  const row = methodOf(src, "  entryRow(t, e, v, cx) {", "  render(cx)");
+  assert.match(row, /mineActs\(e\.status, blockedNow, age\)/);
+  assert.match(row, /this\.resend\(e\.id, c\)/);
+  assert.match(row, /this\.enterNow\(e\.id, c\)/);
+  assert.match(row, /다시 보내기/);
+  assert.match(row, /Enter 누르기/);
+});
+
+// ---- R8: 질문 화면 읽기(실제 샘플), 입력창 확인, 보내기·누르기 직전 재확인
+// 실제 캡처: claude 2.1.332 (빈 CLAUDE_CONFIG_DIR) 로그인 방식 선택 화면(번호가 있는 유일한 화면). 개인 정보 없음.
+const REAL_LOGIN = " Claude Code can be used with your Claude subscription or billed based on API usage through your Console account.\n\n Select login method:\n\n ❯ 1. Claude account with subscription · Individual, Team, or Enterprise\n   2. Anthropic Console account · API usage billing\n   3. 3rd-party platform · Bedrock, Microsoft Foundry, Google Vertex AI\n\n";
+// 실제 캡처: 같은 버전의 폴더 신뢰 화면(경로만 익명화). 이 버전의 선택 메뉴는 번호가 없다.
+const REAL_TRUST = " Do you trust the files in this folder?\n\n /tmp/proj\n\n Claude Code may read, write, or execute files contained in this directory.\n\n ❯ Yes, proceed\n   No, exit\n\n Enter to confirm · Esc to cancel\n";
+// 합성(실제 캡처 아님): 번호 메뉴 + 바닥 힌트줄 + 테두리 — 힌트 문구는 근사치다.
+const SYNTH_FOOTER = "  Do you want to proceed?\n  ❯ 1. Yes\n    2. Yes, and don't ask again\n    3. No, and tell Claude what to do differently (esc)\n\n  Esc to cancel · Tab to amend\n╰──────────────╯\n";
+
+test("promptOptions: 실제 로그인 화면은 3개(1번 강조), 번호 없는 실제 폴더 신뢰 화면은 없음, 바닥 힌트·테두리는 건너뛴다", () => {
+  assert.deepEqual(I.promptOptions(REAL_LOGIN).map((o) => [o.key, o.on]), [["1", true], ["2", false], ["3", false]]);
+  assert.match(I.promptOptions(REAL_LOGIN)[0].label, /^Claude account with subscription/);
+  assert.deepEqual(I.promptOptions(REAL_TRUST), []); // 번호 없는 메뉴는 숫자 키를 추측하지 않는다
+  assert.deepEqual(I.promptOptions(SYNTH_FOOTER).map((o) => o.key), ["1", "2", "3"]);
+  assert.deepEqual(I.promptOptions("  ❯ 1. Yes\n    2. No\n\n  ? for shortcuts\n"), [{ key: "1", label: "Yes", on: true }, { key: "2", label: "No", on: false }]);
+  // 화면 위쪽의 옛 번호 목록은 선택지가 아니다(맨 아래 덩어리만)
+  assert.deepEqual(I.promptOptions("1. old\n2. old\n" + "text\n".repeat(12) + "tail"), []);
+  const two = I.promptOptions("  1. old\n  2. old\n\nresult text\n\nProceed?\n  ❯ 1. Yes\n    2. No\n");
+  assert.deepEqual(two.map((o) => o.label), ["Yes", "No"]);
+});
+
+test("promptSig: 같은 질문이면 같은 값(공백·강조 이동 무관), 질문이 바뀌면 다른 값", () => {
+  assert.equal(I.promptSig(SYNTH_FOOTER), I.promptSig(SYNTH_FOOTER.replace("❯ 1.", "  1.").replace("  2.", "❯ 2.")));
+  assert.notEqual(I.promptSig(SYNTH_FOOTER), I.promptSig(SYNTH_FOOTER.replace("Do you want to proceed?", "Allow this edit?")));
+  assert.notEqual(I.promptSig(SYNTH_FOOTER), I.promptSig(SYNTH_FOOTER.replace("2. Yes, and don't ask again", "2. Yes, always")));
+  assert.notEqual(I.promptSig(REAL_TRUST), I.promptSig(REAL_TRUST.replace("/tmp/proj", "/tmp/other"))); // 번호가 없어도 끝 6줄로 비교
+  assert.equal(I.promptSig(""), "");
+});
+
+test("inputHas: 붙여 넣은 줄이 PO 화면 아래쪽 입력창에 아직 있는지(테두리·공백 무시), 긴 글은 [Pasted text 표시도 인정", () => {
+  const box = "output\n╭──────────────────╮\n│ > 확인 완료 그리고   진행해 │\n╰──────────────────╯\n  ? for shortcuts\n";
+  assert.equal(I.inputHas(box, "확인 완료 그리고 진행해"), true);
+  assert.equal(I.inputHas("output\n  ? for shortcuts\n", "확인 완료 그리고 진행해"), false);
+  assert.equal(I.inputHas(("x\n".repeat(30)) + "> hi\n", "맨 위에 있던 글".repeat(2)), false);
+  const long = "가".repeat(300);
+  assert.equal(I.inputHas("> [Pasted text #1 +1 lines]\n", long), true);
+  assert.equal(I.inputHas("> [Pasted text #1 +1 lines]\n", "짧은 한 줄"), false); // 짧은 한 줄은 표시로 대신하지 않는다
+  assert.equal(I.inputHas("", "x"), false);
+});
+
+test("cleanText: 제어·bidi·제로폭 문자는 지우고 줄바꿈·탭은 둔다(\\r\\n은 \\n)", () => {
+  assert.equal(I.cleanText("a‮b​c\r\nd\u0007e\tf⁦g﻿h\u009bi"), "abc\nde\tfghi");
+  assert.equal(I.cleanText(null), "");
+  const r = I.chatRecord({ text: "답‮변\u0000", line: "줄​", ak: "k|1|l", to: "lead-a", po: "p1" }, "sent", 5);
+  assert.equal(r.text, "답변");
+  assert.equal(r.line, "줄");
+  assert.equal(r.ak, "k|1|l");
+  assert.equal(I.promptTail("a‮b\nc\u0007", 2).join("|"), "ab|c");
+});
+
+test("chatRecord·timeline: gone 상태가 있고, 내 글에 시각(at)이 실린다", () => {
+  assert.ok(I.CHAT_STATUS.includes("gone"));
+  assert.equal(I.chatRecord({ text: "x", po: "p1" }, "gone", 5).status, "gone");
+  const mine = [{ id: "1-a", ts: "t", ms: 1000, at: 4000, text: "x", po: "p1", kind: "chat", status: "gone" }];
+  const e = I.timeline("p1", [], [], mine, [], 5000).find((x) => x.who === "me");
+  assert.equal(e.at, 4000);
+  assert.equal(e.status, "gone");
+});
+
+// main.js 메서드를 가짜 this·전역으로 돌린다(런타임 없이 흐름만 본다).
+const runMethod = (src, head, next, globals) => {
+  const m = methodOf(src, head, next);
+  const names = Object.keys(globals);
+  return new Function(...names, `return ({ ${m.replace(/\n\s*\/\/[^\n]*\s*$/g, "")} });`)(...names.map((k) => globals[k]));
+};
+const tick = () => new Promise((r) => setImmediate(r));
+const mkGlobals = (extra = {}) => ({ hc: () => ({ code: 0, stdout: "" }), liveStatus: I.liveStatus, mineActs: I.mineActs, promptSig: I.promptSig, inputHas: I.inputHas, PROMPT_LINES: 40, NO_PO: "NOPO", chatTarget: null, ...extra });
+
+test("resend: 붙여 넣기 전에 sending으로 바꾸고, sending 중의 두 번째 클릭은 아무것도 보내지 않으며, 같은 카드를 sent로 닫는다", () => {
+  const src = mainSrc();
+  const rec = { id: "1-a", status: "nopane", at: Date.now() - 1000, ms: 1, text: "답", line: "답", to: "lead-a", po: "p1", ak: "decision|t|l" };
+  const log = [];
+  const self = {
+    recordOf: () => rec, recordPo: () => "t5", isBlocked: () => false, say: (m) => log.push(["say", m]),
+    mark: (id, st) => { rec.status = st; log.push(["mark", st]); },
+    deliver: (po, text) => { log.push(["deliver", po, text, rec.status]); return "sent"; },
+    markAsk: (r, how) => log.push(["ask", how]),
+  };
+  self.recordActs = runMethod(src, "  recordActs(r, po", "  // The bubble's \"다시 보내기\"", mkGlobals()).recordActs.bind(self);
+  const { resend } = runMethod(src, "  resend(id, c) {", "  // The bubble's \"Enter 누르기\"", mkGlobals());
+  const c = { notify() {} };
+  resend.call(self, "1-a", c);
+  assert.deepEqual(log.filter((x) => x[0] === "mark" || x[0] === "deliver").map((x) => x[0] === "deliver" ? `deliver:${x[3]}` : `mark:${x[1]}`), ["mark:sending", "deliver:sending"]); // deliver가 시작될 때 이미 sending
+  assert.ok(log.some((x) => x[0] === "ask" && x[1] === "sent"));
+  // sending 중(또 눌러도)
+  rec.status = "sending"; rec.at = Date.now();
+  const before = log.length;
+  resend.call(self, "1-a", c);
+  assert.equal(log.length, before); // 아무 일도 없음
+  // 막혔을 때(busy)는 원래 상태로 되돌린다
+  rec.status = "failed";
+  self.deliver = () => "busy";
+  resend.call(self, "1-a", c);
+  assert.equal(rec.status, "failed");
+});
+
+test("pressPrompt: 키 직전에 화면을 다시 읽어 질문이 바뀌었으면 키를 보내지 않고 패널을 새로 읽는다", async () => {
+  const src = mainSrc();
+  const Q1 = SYNTH_FOOTER, Q2 = SYNTH_FOOTER.replace("Do you want to proceed?", "Allow this edit?");
+  const calls = [];
+  let screen = Q1;
+  const g = mkGlobals({ hc: (a) => { calls.push(a.join(" ")); return { code: 0, stdout: a[0] === "read" ? screen : "" }; } });
+  const { pressPrompt } = runMethod(src, "  pressPrompt(po, key, c) {", "  promptPanel(t, v, cx) {", g);
+  const said = [];
+  const self = { prompt: { po: "t5", at: Date.now(), text: Q1 }, isBlocked: () => true, say: (m, bad) => said.push(m) };
+  const c = { notify() {} };
+  pressPrompt.call(self, "t5", "1", c); await tick(); await tick();
+  assert.deepEqual(calls, ["read t5 --lines 40", "keys t5 1"]); // 같은 질문이면 누른다
+  // 질문이 바뀜
+  calls.length = 0; said.length = 0; screen = Q2; self.prompt = { po: "t5", at: Date.now(), text: Q1 };
+  pressPrompt.call(self, "t5", "2", c); await tick(); await tick();
+  assert.deepEqual(calls, ["read t5 --lines 40"]); // 키 없음
+  assert.ok(said.some((m) => /질문이 바뀌었습니다, 다시 확인하세요/.test(m)));
+  assert.equal(self.prompt.text, Q2); // 패널이 새 화면으로 갱신
+  // 질문이 사라짐(막힘 해제)
+  calls.length = 0; said.length = 0; self.isBlocked = () => false;
+  pressPrompt.call(self, "t5", "1", c); await tick();
+  assert.deepEqual(calls, []);
+  // 화면을 아직 못 읽음
+  self.isBlocked = () => true; self.prompt = null; said.length = 0;
+  pressPrompt.call(self, "t5", "1", c); await tick();
+  assert.deepEqual(calls, []);
+  assert.ok(said.some((m) => /읽지 못해/.test(m)));
+  // 다시 읽기 실패
+  self.prompt = { po: "t5", at: Date.now(), text: Q1 }; screen = Q1;
+  g.hc = null;
+});
+
+test("enterNow: Enter 전에 입력창을 읽어 보낸 글이 없으면 gone으로 두고 Enter를 누르지 않는다, 있으면 누르고 sent + 카드 닫기", async () => {
+  const src = mainSrc();
+  const calls = [];
+  let screen = "╭──╮\n│ > 안녕하세요 PO │\n╰──╯\n";
+  let blockedAfterRead = false;
+  const rec = { id: "1-a", status: "noenter", at: Date.now() - 1000, ms: 1, text: "안녕하세요 PO", line: "안녕하세요 PO", to: "lead-a", po: "p1", ak: "k" };
+  const log = [];
+  const g = mkGlobals({ hc: (a) => { calls.push(a.join(" ")); return { code: 0, stdout: a[0] === "read" ? screen : "" }; } });
+  const self = {
+    recordOf: () => rec, recordPo: () => "t5", say: (m) => log.push(["say", m]),
+    isBlocked: () => blockedAfterRead,
+    mark: (id, st) => { rec.status = st; log.push(["mark", st]); }, markAsk: (r, how) => log.push(["ask", how]),
+  };
+  self.recordActs = runMethod(src, "  recordActs(r, po", "  // The bubble's \"다시 보내기\"", g).recordActs.bind(self);
+  const { enterNow } = runMethod(src, "  enterNow(id, c) {", "  // ---- A blocked PO's screen", g);
+  const c = { notify() {} };
+  enterNow.call(self, "1-a", c); await tick(); await tick(); await tick();
+  assert.deepEqual(calls, ["read t5 --lines 40", "keys t5 enter"]);
+  assert.equal(rec.status, "sent");
+  assert.ok(log.some((x) => x[0] === "ask" && x[1] === "sent"));
+  // 입력창에 글이 없음 → gone
+  calls.length = 0; log.length = 0; rec.status = "noenter"; screen = "output only\n";
+  enterNow.call(self, "1-a", c); await tick(); await tick(); await tick();
+  assert.deepEqual(calls, ["read t5 --lines 40"]);
+  assert.equal(rec.status, "gone");
+  assert.ok(log.some((x) => x[0] === "say" && /입력창에 보낸 글이 없어/.test(x[1])));
+  // 10분 지난 noenter는 Enter 버튼이 없다(아무 일 없음)
+  calls.length = 0; rec.status = "noenter"; rec.at = Date.now() - 11 * 60000; screen = "> 안녕하세요 PO\n";
+  enterNow.call(self, "1-a", c); await tick();
+  assert.deepEqual(calls, []);
+  // 지금 질문 중이면 읽지도 누르지도 않는다
+  rec.at = Date.now() - 1000; blockedAfterRead = true;
+  enterNow.call(self, "1-a", c); await tick();
+  assert.deepEqual(calls, []);
+});
+
+test("main.js: R8 배선 — 방 목록 질문 표시, deliver 정리, awaitPane 순서, readPrompt 시간 제한, submitPo 재확인, ask 카드 표시", () => {
+  const src = mainSrc();
+  // 방 목록(고르개·좁은 목록·방 칸)이 같은 배지 함수로 질문 중 표시를 낸다
+  const rb = methodOf(src, "  roomBadges(t, x) {", "\n  }\n");
+  assert.match(rb, /x\.blocked/);
+  assert.match(rb, /질문/);
+  assert.equal((src.match(/this\.roomBadges\(t, x\)/g) ?? []).length, 3);
+  assert.match(src, /blocked: this\.isBlocked\(p\.address\)/); // 방마다 막힘 여부
+  assert.match(src, /label: OTHER_LABEL, title: "", blocked: false/);
+  // 붙여 넣기 직전 글 정리
+  assert.match(deliverOf(src), /text = cleanText\(text\)/);
+  // opening 표시는 붙여 넣기가 끝난 뒤 지운다(go 안의 try/catch 다음)
+  const ap = methodOf(src, "  awaitPane(", "\n  }\n");
+  assert.ok(ap.indexOf("this.deliver(") < ap.indexOf("this.opening.delete(po)", ap.indexOf("const go"))); // go 안: 붙여 넣기 뒤에 지운다
+  assert.ok(!/this\.opening\.delete\(po\);\s*\n\s*const go/.test(ap)); // go 앞에서 먼저 지우지 않는다
+  // readPrompt: 시간 제한 + 세대 확인
+  const rp = methodOf(src, "  readPrompt(po, cx) {", "  pressPrompt(po, key, c) {");
+  assert.match(rp, /PROMPT_TIMEOUT_MS/);
+  assert.match(rp, /gen !== this\.promptGen/);
+  assert.match(src, /const PROMPT_TIMEOUT_MS = \d+/);
+  // submitPo: Enter 직전 다시 막혔는지 본다
+  const sub = methodOf(src, "  submitPo(po, c, settle", "  sendChat(c) {");
+  assert.ok(sub.indexOf("this.isBlocked(po)") > 0 && sub.indexOf("this.isBlocked(po)") < sub.indexOf('hc(["keys", po, "enter"])'));
+  assert.match(sub, /this\.mark\(id, "held"\)/);
+  // ask 카드: 보낸 표시는 resend·enterNow에서도 닫는다
+  assert.match(src, /markAsk\(r, how\) \{/);
+  assert.match(methodOf(src, "  enterNow(id, c) {", "  // ---- A blocked PO's screen"), /this\.markAsk\(r, "sent"\)/);
+  // 질문 패널은 다시 그리지 않아도 되도록 나이(몇 초 전 화면) 표시를 두지 않는다
+  assert.ok(!/초 전 화면/.test(methodOf(src, "  promptPanel(t, v, cx) {", "  // A panel answer:")));
+});
+
+// ---- 채팅 필터 (#36, #37)
+const LEAD = (kind, ms, extra = {}) => ({ key: `l|a|${ms}`, who: "l:a", ms, leader: "a", it: { kind, ts: String(ms), ms }, ...extra });
+const MIXED = [
+  LEAD("done", 100), LEAD("decision", 200), LEAD("verify", 300), LEAD("stop", 400), LEAD("resume", 500), LEAD("start", 550), LEAD("other", 600),
+  { key: "po|700|x", who: "po", ms: 700, text: "x" },
+  { key: "me|800|y", who: "me", ms: 800, text: "y", status: "sent" },
+];
+const keysOf = (l) => l.map((e) => e.key);
+test("filterEntries: 칩 6개 순서와 이름", () => {
+  assert.deepEqual(I.CHAT_FILTERS.map((f) => f[1]), ["전체", "안 읽은 것", "결정 필요", "최종 확인 요청", "결과", "멈춤"]);
+  assert.deepEqual(I.CHAT_FILTERS.map((f) => f[0]), ["all", "unread", "decision", "verify", "done", "stop"]);
+});
+test("filterEntries: 종류별 필터는 그 종류의 리더 보고만 — 내 글·PO 글·resume/start/other는 전체에만", () => {
+  assert.equal(I.filterEntries(MIXED, "all", 0).length, MIXED.length);
+  assert.deepEqual(keysOf(I.filterEntries(MIXED, "decision", 0)), ["l|a|200"]);
+  assert.deepEqual(keysOf(I.filterEntries(MIXED, "verify", 0)), ["l|a|300"]);
+  assert.deepEqual(keysOf(I.filterEntries(MIXED, "done", 0)), ["l|a|100"]); // 결과는 done만
+  assert.deepEqual(keysOf(I.filterEntries(MIXED, "stop", 0)), ["l|a|400"]);
+  for (const f of ["decision", "verify", "done", "stop"]) {
+    for (const e of I.filterEntries(MIXED, f, 0)) assert.ok(e.who !== "me" && e.who !== "po");
+  }
+  assert.deepEqual(I.filterEntries(MIXED, "bogus", 0), MIXED); // 모르는 필터는 전체
+  assert.deepEqual(I.filterEntries(undefined, "done", 0), []);
+});
+test("filterEntries: 기다리는 리더는 기다리는 종류로 센다(보고 종류가 달라도, 보고 없는 대기 줄도)", () => {
+  const list = [LEAD("done", 100, { waiting: "decision" }), { key: "w|b", who: "l:b", ms: 900, leader: "b", waiting: "verify", wait: true }];
+  assert.deepEqual(keysOf(I.filterEntries(list, "decision", 0)), ["l|a|100"]);
+  assert.deepEqual(keysOf(I.filterEntries(list, "verify", 0)), ["w|b"]);
+  assert.deepEqual(I.filterEntries(list, "done", 0), []);
+});
+test("filterEntries: 안 읽은 것은 방을 열 때의 기준(snapshot)보다 새 글만, 내 글과 대기 줄은 아니다", () => {
+  const seen = 450; // 방을 열 때 마지막으로 본 시각
+  assert.deepEqual(keysOf(I.filterEntries(MIXED, "unread", seen)), ["l|a|500", "l|a|550", "l|a|600", "po|700|x"]);
+  // 방을 열면 실제 기준은 지금으로 올라간다: 그 값으로 거르면 곧바로 비지만, 열 때의 값으로 걸러야 한다
+  assert.equal(I.filterEntries(MIXED, "unread", 800).length, 0);
+  assert.equal(I.filterCounts(MIXED, seen).unread, 4);
+  const w = { key: "w|b", who: "l:b", ms: 9999, leader: "b", waiting: "decision", wait: true };
+  assert.equal(I.filterEntries([...MIXED, w], "unread", seen).includes(w), false);
+  assert.equal(I.filterEntries(MIXED, "unread", undefined).length, MIXED.length - 1); // 기준 0이면 내 글만 빠진다
+});
+test("filterCounts: 칩마다 개수(0도 키가 있다), 빈 방은 모두 0", () => {
+  assert.deepEqual(I.filterCounts(MIXED, 450), { all: 9, unread: 4, decision: 1, verify: 1, done: 1, stop: 1 });
+  assert.deepEqual(I.filterCounts([], 0), { all: 0, unread: 0, decision: 0, verify: 0, done: 0, stop: 0 });
+  assert.deepEqual(I.filterCounts(null, 0), { all: 0, unread: 0, decision: 0, verify: 0, done: 0, stop: 0 });
+});
+test("timeline: 같은 시각·같은 글이 둘이어도 key(=요소 id)가 겹치지 않는다", () => {
+  const po = [{ ms: 5, ts: "t", text: "same" }, { ms: 5, ts: "t", text: "same" }];
+  const mine = [{ ms: 9, ts: "t", text: "me", po: "r", status: "sent" }, { ms: 9, ts: "t", text: "me", po: "r", status: "sent" }];
+  const keys = keysOf(I.timeline("r", [], po, mine, [], 100));
+  assert.equal(new Set(keys).size, 4);
+  assert.ok(keys.includes("po|5|same") && keys.includes("po|5|same#1"));
+});
+test("main.js: chat 블록(필터 함수 포함)은 inbox.cjs와 같다", () => {
+  const cut = (t) => t.slice(t.indexOf("// chat:begin"), t.indexOf("// chat:end"));
+  const cjs = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8").replace(/\r\n/g, "\n");
+  assert.equal(cut(mainSrc()), cut(cjs));
+  assert.match(cut(mainSrc()), /function filterEntries/);
+});
+test("main.js: 필터 배선 — 방별 상태, 열 때 기준 저장(표시 전환 전), 칩 줄, 빈 화면 '전체 보기', 세 화면 공통", () => {
+  const src = mainSrc();
+  assert.match(src, /this\.filt = new Map\(\)/);
+  // 기준은 읽음 표시를 올리기 전에 잡는다
+  const ms = methodOf(src, "  markSeen() {", "  setFilter(");
+  assert.ok(ms.indexOf("snapStep(") > 0 && ms.indexOf("setShared(SNAP_KEY") > 0 && ms.indexOf("setShared(SNAP_KEY") < ms.indexOf("setShared(SEEN_KEY"));
+  assert.ok(!/this\.snap\b/.test(src));
+  // view: 기준으로 거르고, raw(읽음 표시용)는 거르지 않은 전체
+  const vw = methodOf(src, "  view() {", "  // Remembers that the person");
+  assert.match(vw, /filterEntries\(raw, filter, base\)/);
+  assert.match(vw, /snapBase\(snaps, pick, seen, now\)/);
+  assert.match(vw, /keepWaiting\(raw, shown\)/);
+  assert.match(vw, /filterCounts\(raw, base\)/);
+  // 칩 줄: 6칩, 개수, 0이어도 누를 수 있다(on_click은 항상), 누름이 창을 끌지 않게 stop
+  const fb = methodOf(src, "  filterBar(t, v) {", "  pickPo(id, c) {");
+  assert.match(fb, /CHAT_FILTERS\.map/);
+  assert.match(fb, /\$\{label\} \$\{n\}/);
+  assert.match(fb, /on_mouse_down\("left", stop\)/);
+  assert.match(fb, /on_click\(\(_e, c\) => this\.setFilter\(v\.pick, k, c\)\)/);
+  assert.ok(!/disabled/.test(fb));
+  // 빈 상태 + 전체 보기 칩
+  assert.match(src, /해당 메시지 없음 —/);
+  assert.match(src, /"flt-reset", "전체 보기"/);
+  // 한 full()이 Dock·창·페인 모두를 그린다: 칩 줄은 방 칸 안에, 타임라인 위
+  const fl = methodOf(src, "  full(cx) {", "    return v_flex().size_full()");
+  assert.ok(fl.indexOf(".child(el.child(bar))") < 0);
+  assert.ok(fl.indexOf("el.child(bar)") > 0 && fl.indexOf("el.child(bar)") < fl.indexOf(".child(lines)"));
+  assert.equal((src.match(/^  full\(cx\) \{/gm) ?? []).length, 1);
+});
+// 동작: setFilter / markSeen 기준 / view 필터
+test("setFilter: 방마다 따로 기억하고 다시 그린다", () => {
+  const src = mainSrc();
+  let n = 0;
+  const m = runMethod(src, "  setFilter(room, key, c) {", "  // The chips above", mkGlobals()).setFilter;
+  const self = { filt: new Map() };
+  m.call(self, "r1", "done", { notify: () => n++ });
+  m.call(self, "r2", "stop", { notify: () => n++ });
+  m.call(self, "", "stop", { notify: () => n++ });
+  assert.equal(self.filt.get("r1"), "done");
+  assert.equal(self.filt.get("r2"), "stop");
+  assert.equal(self.filt.size, 2);
+  assert.equal(n, 2);
+});
+
+// ---- 글자 드래그 선택 (#36, #37)
+test("글자는 모두 TextView(selectable)로 그린다 — 말풍선·내 글·PO 글·질문 화면 줄, 글자 위 부모에는 누름 처리가 없다", () => {
+  const src = mainSrc();
+  assert.match(methodOf(src, "  text(id, html) {", "  codeBlock("), /TextView\.html\(id, html\)\.selectable\(true\)/);
+  // 질문 패널 화면 줄은 더 이상 그냥 div 글이 아니다
+  const pp = methodOf(src, "  promptPanel(t, v, cx) {", "  // A panel answer:");
+  assert.match(pp, /this\.text\(`pp-l\$\{i\}`, chatHtml\(l\)\)/);
+  assert.ok(!/id\(`pp-l/.test(pp));
+  // 글자를 담는 줄에는 누름 처리가 없다: this.text( 가 있는 줄(말풍선 본문·내 글·PO 글)에 on_click/on_mouse_down이 같이 있으면 안 된다
+  for (const l of src.split("\n")) {
+    if (/this\.text\(/.test(l) && !/^\s*text\(/.test(l)) assert.ok(!/on_click|on_mouse_down/.test(l), l.trim());
+  }
+  // 글자 부모를 감싸는 곳 중 누름을 가로채는 것은 타임라인 목록 하나뿐이고(자식이 먼저 받는다), 나머지 on_mouse_down은 모두 버튼·칩·입력칸 줄이다
+  const downs = src.split("\n").filter((l) => /on_mouse_down\("left", stop\)/.test(l) && /this\.text\(/.test(l));
+  assert.equal(downs.length, 0);
+});
+test("글자 요소 id는 다시 그려도 그대로이고 서로 겹치지 않는다(같은 시각 같은 글 포함)", () => {
+  const po = [{ ms: 5, ts: "t", text: "same" }, { ms: 5, ts: "t", text: "same" }];
+  const a = I.timeline("r", [], po, [], [], 100).map((e) => `tl-${String(e.key).slice(0, 80)}`);
+  const b = I.timeline("r", [], po, [], [], 999).map((e) => `tl-${String(e.key).slice(0, 80)}`); // 나중에 다시 그려도(now만 다름)
+  assert.deepEqual(a, b);
+  assert.equal(new Set(a).size, a.length);
+});
+
+// ---- PO 훅: PO 터미널의 답·입력을 데스크 파일로 옮긴다 ----
+const HOOK = require("../mods/inbox/po-hook.cjs");
+
+test("hookLine: Stop은 마지막 답을 say로, UserPromptSubmit은 입력을 me로 쓴다(출처·프롬프트 id 포함)", () => {
+  const now = Date.UTC(2026, 0, 1, 0, 0, 0);
+  assert.deepEqual(I.hookLine({ hook_event_name: "Stop", last_assistant_message: "  끝났습니다.\n", prompt_id: "p-1" }, now), { ts: "2026-01-01T00:00:00.000Z", kind: "say", text: "끝났습니다.", src: "hook", pid: "p-1" });
+  assert.deepEqual(I.hookLine({ hook_event_name: "UserPromptSubmit", prompt: "이거 해줘" }, now), { ts: "2026-01-01T00:00:00.000Z", kind: "me", text: "이거 해줘", src: "hook", pid: "" });
+});
+
+test("hookLine: 다른 이벤트·빈 글·Stop 훅이 이어 가는 턴·하네스가 넣은 프롬프트는 쓸 것이 없다", () => {
+  assert.equal(I.hookLine({ hook_event_name: "SubagentStop", last_assistant_message: "x" }), null);
+  assert.equal(I.hookLine({ hook_event_name: "PreToolUse", prompt: "x" }), null);
+  assert.equal(I.hookLine({ hook_event_name: "Stop", last_assistant_message: "  \n " }), null);
+  assert.equal(I.hookLine({ hook_event_name: "Stop" }), null);
+  assert.equal(I.hookLine({ hook_event_name: "Stop", stop_hook_active: true, last_assistant_message: "x" }), null);
+  assert.equal(I.hookLine({ hook_event_name: "UserPromptSubmit", prompt: "<task-notification>done</task-notification>" }), null);
+  assert.equal(I.hookLine({ hook_event_name: "UserPromptSubmit", prompt: "<system-reminder>x" }), null);
+  assert.equal(I.hookLine(null), null);
+  assert.equal(I.hookLine("x"), null);
+  assert.ok(I.hookLine({ hook_event_name: "UserPromptSubmit", prompt: "a < b 를 비교해 줘" }));
+  assert.ok(I.hookLine({ hook_event_name: "UserPromptSubmit", prompt: "<div> 태그가 깨져요" })); // 알려진 하네스 태그가 아니면 사람이 친 글이다
+  assert.ok(I.hookLine({ hook_event_name: "UserPromptSubmit", prompt: "<b>굵게</b> 해줘" }));
+  assert.equal(I.hookLine({ hook_event_name: "UserPromptSubmit", prompt: "<command-name>/x</command-name>" }), null);
+});
+
+test("hookLine: 제어·양방향 문자를 지우고 2000자로 줄이며 끝에 …을 붙인다", () => {
+  const dirty = I.hookLine({ hook_event_name: "Stop", last_assistant_message: "a\u0007b‮c\u001b[31md" });
+  assert.equal(/[\u0000-\u0008\u000b\u000c\u000e-\u001f‪-‮⁦-⁩]/.test(dirty.text), false);
+  assert.ok(dirty.text.startsWith("a") && dirty.text.includes("d"));
+  const big = I.hookLine({ hook_event_name: "Stop", last_assistant_message: "가".repeat(5000), prompt_id: "x".repeat(300) });
+  assert.equal(big.text.length, 2000);
+  assert.ok(big.text.endsWith("…"));
+  assert.equal(big.pid.length, 80);
+});
+
+test("parsePoLines: kind:me 줄은 me 표시를 달고, say 줄은 그대로다", () => {
+  const f = (o) => JSON.stringify(o) + "\n";
+  const got = I.parsePoLines(f({ ts: "2026-01-01T00:00:01Z", kind: "say", text: "답" }) + f({ ts: "2026-01-01T00:00:02Z", kind: "me", text: "내 말" }) + f({ ts: "2026-01-01T00:00:03Z", kind: "other", text: "x" }));
+  assert.deepEqual(got.map((x) => [x.text, !!x.me]), [["답", false], ["내 말", true]]);
+});
+
+test("timeline: 터미널에 직접 친 글(me)은 오른쪽 내 말풍선으로, 데스크가 보낸 같은 글은 두 번 나오지 않는다", () => {
+  const ms = Date.parse(T(10));
+  const typed = (text, at = ms) => ({ ts: new Date(at).toISOString(), ms: at, text, to: "", me: true });
+  const kinds = (t) => t.map((e) => `${e.who}${e.typed ? ":typed" : ""}`);
+  // 데스크에서 보낸 기록이 없으면 직접 친 글이 그대로 보인다
+  const only = I.timeline("p1", [], [typed("직접 쳤어")], []);
+  assert.deepEqual(kinds(only), ["me:typed"]);
+  assert.equal(only[0].id, "");
+  assert.equal(only[0].status, "sent");
+  // 데스크 기록(line 또는 text)과 같은 글이면 하나만 남는다 - 공백 차이는 무시
+  const sent = { id: "m1", ms: ms - 5000, at: ms - 5000, text: "데스크 글", line: "@lead-a  데스크   글", to: "lead-a", po: "p1", status: "sent" };
+  assert.deepEqual(kinds(I.timeline("p1", [], [typed("데스크 글")], [sent])), ["me"]);
+  assert.deepEqual(kinds(I.timeline("p1", [], [typed("@lead-a 데스크 글")], [sent])), ["me"]);
+  // 기록 하나는 직접 친 글 하나만 덮는다
+  assert.deepEqual(kinds(I.timeline("p1", [], [typed("데스크 글"), typed("데스크 글", ms + 1000)], [sent])), ["me", "me:typed"]);
+  // 실패·칸 없음·사라짐 기록은 PO에 닿지 않았으니 덮지 않는다
+  for (const status of ["failed", "nopane", "gone"]) assert.deepEqual(kinds(I.timeline("p1", [], [typed("데스크 글")], [{ ...sent, status }])).sort(), ["me", "me:typed"]);
+  // 다른 PO의 기록, 11분보다 오래된 기록, 훅 줄보다 1분 넘게 나중인 기록은 덮지 않는다
+  assert.equal(I.timeline("p1", [], [typed("데스크 글")], [{ ...sent, po: "p2" }]).length, 1);
+  assert.deepEqual(kinds(I.timeline("p1", [], [typed("데스크 글")], [{ ...sent, ms: ms - 12 * 60000 }])), ["me", "me:typed"]);
+  assert.deepEqual(kinds(I.timeline("p1", [], [typed("데스크 글")], [{ ...sent, ms: ms + 2 * 60000 }])).sort(), ["me", "me:typed"]);
+  // PO 모름 방에는 직접 친 글도 없다
+  assert.equal(I.timeline(I.PO_OTHER, [], [typed("x")], []).length, 0);
+});
+
+test("timeline: me 줄이 아닌 say는 왼쪽 PO 말풍선 그대로다", () => {
+  const ms = Date.parse(T(1));
+  const t = I.timeline("p1", [], [{ ts: T(1), ms, text: "답", to: "" }], []);
+  assert.deepEqual(t.map((e) => e.who), ["po"]);
+});
+
+// po-hook.cjs: `hc get`은 주입한 get으로 바꾸고 HERDR_INBOX_DIR은 임시 폴더로 돌려, 진짜 터미널과 홈은 건드리지 않는다.
+function hookRun(env, payload, term) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "po-hook-"));
+  const prev = process.env.HERDR_INBOX_DIR;
+  process.env.HERDR_INBOX_DIR = dir;
+  let calls = 0;
+  try {
+    const r = HOOK.run(env, payload, I, () => { calls++; return term; }, Date.UTC(2026, 0, 1));
+    return { r, dir, calls, files: fs.existsSync(path.join(dir, "po")) ? fs.readdirSync(path.join(dir, "po")) : [] };
+  } finally { if (prev === undefined) delete process.env.HERDR_INBOX_DIR; else process.env.HERDR_INBOX_DIR = prev; }
+}
+const PO_TERM = { id: "t5", labels: { role: "po", po: "devnotes" } };
+const STOP = { hook_event_name: "Stop", last_assistant_message: "다 했습니다" };
+
+test("po-hook: PO 터미널이면 po/<id>.jsonl에 한 줄을 덧붙이고, 같은 파일에 이어 쓴다", () => {
+  const a = hookRun({ HC_TERMINAL_ID: "t5" }, STOP, PO_TERM);
+  assert.deepEqual(a.files, ["devnotes.jsonl"]);
+  const read = I.parsePoLines(fs.readFileSync(path.join(a.dir, "po", "devnotes.jsonl"), "utf8"));
+  assert.deepEqual(read.map((x) => [x.text, !!x.me]), [["다 했습니다", false]]);
+  process.env.HERDR_INBOX_DIR = a.dir;
+  try { HOOK.run({ HC_TERMINAL_ID: "t5" }, { hook_event_name: "UserPromptSubmit", prompt: "다음 것" }, I, () => PO_TERM, Date.UTC(2026, 0, 1, 0, 1)); } finally { delete process.env.HERDR_INBOX_DIR; }
+  assert.deepEqual(I.parsePoLines(fs.readFileSync(path.join(a.dir, "po", "devnotes.jsonl"), "utf8")).map((x) => !!x.me), [false, true]);
+});
+
+test("po-hook: HC_TERMINAL_ID가 없거나 쓸 글이 없으면 hc를 부르지도 않는다", () => {
+  const none = hookRun({}, STOP, PO_TERM);
+  assert.equal(none.r, null); assert.equal(none.calls, 0); assert.deepEqual(none.files, []);
+  const blank = hookRun({ HC_TERMINAL_ID: "  " }, STOP, PO_TERM);
+  assert.equal(blank.calls, 0);
+  const nothing = hookRun({ HC_TERMINAL_ID: "t5" }, { hook_event_name: "Stop", last_assistant_message: "" }, PO_TERM);
+  assert.equal(nothing.calls, 0); assert.deepEqual(nothing.files, []);
+});
+
+test("po-hook: 리더·워커·id 없는 PO·hc 실패 터미널에는 아무것도 쓰지 않는다", () => {
+  const cases = [
+    { id: "t6", name: "lead-x", parent: "t5", labels: { role: "leader" } },
+    { id: "t7", labels: { session: "s1", where: "main / PO · devnotes" } },
+    { id: "t5", labels: { role: "po" } },
+    { id: "t5", labels: { role: "po", po: "../evil" } },
+    { id: "t5", labels: { role: "po", po: "devnotes" }, parent: "t1" },
+    { id: "t5", name: "lead-po", labels: { role: "po", po: "devnotes" } },
+    null,
+  ];
+  for (const term of cases) {
+    const x = hookRun({ HC_TERMINAL_ID: "t5" }, STOP, term);
+    assert.equal(x.r, null, JSON.stringify(term));
+    assert.deepEqual(x.files, [], JSON.stringify(term));
+  }
+});
+
+test("po-hook: 폴더를 쓸 수 없어도 run은 던지고 진입점은 0으로 끝나며 아무것도 출력하지 않는다(진짜 홈은 건드리지 않음)", () => {
+  const { spawnSync } = require("child_process");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "po-hook-e2e-"));
+  const blocker = path.join(dir, "file");
+  fs.writeFileSync(blocker, "x"); // 폴더가 올 자리에 파일이 있어 mkdir이 실패한다
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "po-hook-bin-"));
+  const hc = path.join(bin, "hc");
+  fs.writeFileSync(hc, '#!/bin/sh\necho \'{"id":"t5","labels":{"role":"po","po":"devnotes"}}\'\n', { mode: 0o755 });
+  const script = path.join(__dirname, "..", "mods", "inbox", "po-hook.cjs");
+  const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, HC_TERMINAL_ID: "t5" };
+  const bad = spawnSync(process.execPath, [script], { input: JSON.stringify(STOP), encoding: "utf8", env: { ...env, HERDR_INBOX_DIR: blocker } });
+  assert.equal(bad.status, 0); assert.equal(bad.stdout, ""); assert.equal(bad.stderr, "");
+  const junk = spawnSync(process.execPath, [script], { input: "not json", encoding: "utf8", env: { ...env, HERDR_INBOX_DIR: dir } });
+  assert.equal(junk.status, 0); assert.equal(junk.stdout, "");
+  if (!POSIX) return; // 가짜 hc가 #!/bin/sh 스크립트라 Windows에서는 실행되지 않는다: 끝까지 가는 부분만 건너뛴다
+  // 가짜 hc로 끝까지: 한 줄이 쓰인다
+  const good = spawnSync(process.execPath, [script], { input: JSON.stringify(STOP), encoding: "utf8", env: { ...env, HERDR_INBOX_DIR: path.join(dir, "inbox") } });
+  assert.equal(good.status, 0); assert.equal(good.stdout, "");
+  assert.equal(I.parsePoLines(fs.readFileSync(path.join(dir, "inbox", "po", "devnotes.jsonl"), "utf8"))[0].text, "다 했습니다");
+});
+
+// ---- R9 (PR #39 리뷰): 질문 패널·공유 기준·대기 줄·행 id
+test("promptTail/promptSig: 초 단위로 바뀌는 스피너·타이머 줄은 보이지도, 서명에도 들지 않는다", () => {
+  const a = "Do you want to proceed?\n❯ 1. Yes\n  2. No\n✻ Waiting (12s)";
+  const b = "Do you want to proceed?\n❯ 1. Yes\n  2. No\n✻ Waiting (13s)";
+  assert.deepEqual(I.promptTail(a, 8), ["Do you want to proceed?", "❯ 1. Yes", "  2. No"]);
+  assert.equal(I.promptSig(a), I.promptSig(b));
+  assert.ok(I.PROMPT_TIMER.test("✻ Thinking… (3s · ↓ 1.2k tokens · esc to interrupt)"));
+  assert.ok(I.PROMPT_TIMER.test("  ✶ Cogitating… (1m 5s)"));
+  // 선택지·일반 문장은 지우지 않는다
+  assert.ok(!I.PROMPT_TIMER.test("1. Yes (10s)"));
+  assert.ok(!I.PROMPT_TIMER.test("Run the command for 12s?"));
+  assert.ok(!I.PROMPT_TIMER.test("Waiting for the build"));
+});
+test("promptSame: 타이머·공백만 다르면 같은 화면, 질문이나 선택지가 다르면 다른 화면", () => {
+  const base = "Allow edit?\n❯ 1. Yes\n  2. No";
+  assert.equal(I.promptSame(`${base}\n✻ Waiting (1s)`, `${base}\n✻ Waiting (2s)  `), true);
+  assert.equal(I.promptSame(base, `${base}\n`), true);
+  assert.equal(I.promptSame(base, "Allow edit?\n  1. Yes\n❯ 2. No"), false);
+  assert.equal(I.promptSame(base, "Allow write?\n❯ 1. Yes\n  2. No"), false);
+  assert.equal(I.promptSame("", ""), true);
+  assert.equal(I.promptSame("", base), false);
+});
+test("keepWaiting: 필터가 숨겨도 아직 기다리는 줄은 남고, 순서는 그대로", () => {
+  const raw = [{ key: "a", who: "l:x", it: { kind: "done" } }, { key: "b", who: "l:y", waiting: "decision" }, { key: "c", who: "l:x", it: { kind: "stop" } }, { key: "d", who: "l:y", waiting: "verify", wait: true }];
+  const shown = I.filterEntries(raw, "stop", 0);
+  assert.deepEqual(shown.map((e) => e.key), ["c"]);
+  assert.deepEqual(I.keepWaiting(raw, shown).map((e) => e.key), ["b", "c", "d"]);
+  assert.deepEqual(I.keepWaiting(raw, raw).map((e) => e.key), ["a", "b", "c", "d"]);
+  assert.deepEqual(I.keepWaiting(null, null), []);
+  // 칩 개수는 그대로(필터 결과 기준)
+  assert.equal(I.filterCounts(raw, 0).stop, 1);
+});
+test("snapStep/snapBase: 첫 복사본이 잡은 기준을 다른 복사본이 30초 동안 같이 쓴다", () => {
+  const T = 1_000_000;
+  // 처음: 방의 마지막 읽음(50)을 기준으로 잡아 저장
+  let st = I.snapStep(undefined, "r1", { r1: 50 }, T);
+  assert.equal(st.base, 50);
+  assert.deepEqual(st.next, { r1: { seen: 50, ts: T } });
+  // 읽음 표시가 올라간 뒤(seen=999) 다른 복사본이 열어도 기준은 50
+  assert.equal(I.snapBase(st.next, "r1", { r1: 999 }, T + 5000), 50);
+  let st2 = I.snapStep(st.next, "r1", { r1: 999 }, T + 5000);
+  assert.equal(st2.base, 50);
+  assert.equal(st2.next, null); // ttl/3 안이라 다시 쓰지 않는다
+  // ttl/3 지나면 시각만 갱신
+  st2 = I.snapStep(st.next, "r1", { r1: 999 }, T + 12000);
+  assert.deepEqual(st2.next, { r1: { seen: 50, ts: T + 12000 } });
+  // 30초 동안 아무도 그리지 않으면 만료: 현재 읽음 표시가 새 기준
+  assert.equal(I.snapBase(st.next, "r1", { r1: 999 }, T + 31000), 999);
+  st2 = I.snapStep(st.next, "r1", { r1: 999 }, T + 31000);
+  assert.deepEqual(st2.next, { r1: { seen: 999, ts: T + 31000 } });
+  // 다른 방은 따로, 만료된 방은 지운다
+  st2 = I.snapStep({ r1: { seen: 50, ts: T }, r2: { seen: 7, ts: T + 40000 } }, "r2", { r2: 70 }, T + 45000);
+  assert.deepEqual(st2.next, { r2: { seen: 7, ts: T + 40000 } });
+  assert.equal(st2.base, 7);
+  assert.deepEqual(I.snapStep({}, "", {}, T), { base: 0, next: null });
+  assert.equal(I.snapBase(null, "r1", null, T), 0);
+});
+test("tlId: 80자까지는 그대로, 넘으면 앞 64자 + 전체 해시라 '#n'이 잘려도 id가 다르다", () => {
+  assert.equal(I.tlId("abc#2"), "tl-abc#2");
+  const long = "k".repeat(100);
+  const a = I.tlId(long), b = I.tlId(`${long}#2`);
+  assert.notEqual(a, b);
+  assert.match(a, /^tl-k{64}~[0-9a-f]{8}$/);
+  assert.equal(I.tlId(long), a);
+  assert.ok(a.length <= 3 + 64 + 9);
+  assert.equal(I.tlId(undefined), "tl-");
+});
+test("main.js: 질문 패널 — 왼쪽 눌림 stop, 같은 화면이면 상태·다시 그리기 생략, 한 줄 다시 읽기, 나이 표시 없음", () => {
+  const src = mainSrc();
+  const pp = methodOf(src, "  promptPanel(t, v, cx) {", "  // A panel answer");
+  assert.match(pp, /id\("po-prompt"\)[^\n]*on_mouse_down\("left", stop\)/);
+  assert.ok(!/초 전 화면/.test(pp));
+  const rp = methodOf(src, "  readPrompt(po, cx) {", "  // A key press from the question panel");
+  assert.match(rp, /promptSame\(this\.prompt\.text, text\)/);
+  assert.match(rp, /if \(!same\) this\.softNotify\(cx\)/); // 드래그 중에는 softNotify가 다시 그리기를 미룬다
+  assert.match(rp, /chain === this\.promptChain && this\.isBlocked\(po\)\) this\.readPrompt\(po, c2\)/);
+  assert.match(src, /id = tlId\(e\.key\)/);
+});
+
+test("po-hook: 쓰는 파일은 0600이고(이미 있던 파일도 조인다), 1MiB를 넘으면 새 줄만 남기고 줄 단위로 줄인다", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "po-hook-cap-"));
+  const file = path.join(dir, "devnotes.jsonl");
+  fs.writeFileSync(file, '{"a":1}\n', { mode: 0o644 });
+  HOOK.appendLine(file, '{"b":2}\n');
+  if (POSIX) assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.equal(fs.readFileSync(file, "utf8"), '{"a":1}\n{"b":2}\n');
+  const row = JSON.stringify({ k: "x".repeat(1000) }) + "\n";
+  fs.writeFileSync(file, row.repeat(Math.ceil(HOOK.FILE_MAX / row.length) + 5));
+  HOOK.appendLine(file, '{"last":1}\n');
+  const text = fs.readFileSync(file, "utf8");
+  assert.ok(text.length <= HOOK.KEEP + 20, `줄어듦 ${text.length}`);
+  assert.ok(text.endsWith('{"last":1}\n'));
+  for (const l of text.trim().split("\n")) JSON.parse(l); // 잘린 줄이 남지 않는다
+  if (POSIX) assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.deepEqual(fs.readdirSync(dir), ["devnotes.jsonl"]); // 임시 파일이 남지 않는다
+});
+
+// ---- (C) 입력 중 "···" 말풍선, 폴더 감시로 바로 갱신, Enter(한글 IME)
+const tm = (o) => ({ address: "t1", name: "", labels: {}, status: "idle", parent: "", where: "", title: "", ...o });
+const poT = (o = {}) => tm({ address: "tp", name: "po-a", labels: { role: "po", po: "pa" }, where: "공간 / PO · 데스크", ...o });
+const leadT = (n, o = {}) => tm({ address: `t-${n}`, name: n, parent: "tp", ...o });
+
+test("typingNow: 방의 PO와 그 방 리더 중 working인 것만, 이름순으로 낸다", () => {
+  const terms = [poT({ status: "working" }), leadT("lead-b", { status: "working", title: "베타 작업" }), leadT("lead-a", { status: "working", title: "알파 작업" }), leadT("lead-c", { status: "idle" }), leadT("lead-d", { status: "blocked" })];
+  assert.deepEqual(I.typingNow(terms, "pa", {}), [{ who: "po", name: "데스크", label: "작업중" }, { who: "l:lead-d", name: "d", label: "승인 대기" }, { who: "l:lead-b", name: "베타 작업", label: "작업중" }, { who: "l:lead-a", name: "알파 작업", label: "작업중" }]); // PO 먼저, 리더는 이름순; 권한 기다림(blocked)도 일하는 중으로 센다
+  assert.deepEqual(I.typingNow([poT({ status: "blocked" })], "pa", {}), []); // PO 줄은 working만
+  assert.deepEqual(I.typingNow([poT({ status: "idle" }), leadT("lead-c", { status: "done" })], "pa", {}), []); // 쓰는 중이 아니면 없다
+  assert.deepEqual(I.typingNow([poT({ status: " Working " })], "pa", {}).map((x) => x.who), ["po"]); // 대소문자·공백 무시
+});
+
+test("typingNow: 다른 방의 리더·PO는 내지 않고, PO 모름 방에는 PO 줄이 없다", () => {
+  const other = { address: "tq", name: "po-b", labels: { role: "po", po: "pb" }, status: "working", where: "공간 / PO · 다른", parent: "" };
+  const terms = [poT(), other, leadT("lead-x", { status: "working" }), { address: "t9", name: "lead-orphan", labels: {}, status: "working", parent: "" }];
+  assert.deepEqual(I.typingNow(terms, "pa", {}).map((x) => x.who), ["l:lead-x"]);
+  assert.deepEqual(I.typingNow(terms, "pb", {}).map((x) => x.who), ["po"]);
+  assert.deepEqual(I.typingNow(terms, I.PO_OTHER, {}).map((x) => x.who), ["l:lead-orphan"]); // PO 모름: PO 줄 없음
+  assert.deepEqual(I.typingNow(terms, "", {}), []);
+  assert.deepEqual(I.typingNow(null, "pa", {}), []);
+  assert.deepEqual(I.typingNow([poT({ status: "working" }), leadT("lead-x", { status: "working" }), leadT("lead-x", { address: "t-dup", status: "working" })], "pa", {}).filter((x) => x.who === "l:lead-x").length, 1); // 같은 이름은 한 번
+});
+
+test("statusSig: 상태·기다림 라벨·이름이 바뀔 때만 달라지고, 순서와 상관없는 터미널은 무시한다", () => {
+  const a = [poT(), leadT("lead-a", { title: "알파", status: "working" })];
+  const base = I.statusSig(a);
+  assert.equal(I.statusSig([...a].reverse()), base); // 순서와 무관
+  assert.equal(I.statusSig([...a, tm({ address: "tz", name: "shell", status: "working" })]), base); // PO도 리더도 아닌 터미널
+  assert.notEqual(I.statusSig([poT(), leadT("lead-a", { title: "알파", status: "idle" })]), base); // 상태
+  assert.notEqual(I.statusSig([poT(), leadT("lead-a", { title: "알파", status: "working", labels: { wait: "decision" } })]), base); // 기다림
+  assert.notEqual(I.statusSig([poT(), leadT("lead-a", { title: "새 이름", status: "working" })]), base); // 이름
+  assert.notEqual(I.statusSig([poT({ status: "working" }), a[1]]), base); // PO 상태
+  assert.equal(I.statusSig(null), "");
+});
+
+test("collect: 읽은 폴더 경로(dir)를 돌려준다(폴더 감시용) — 폴더가 없어도", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "inbox-dir-"));
+  assert.equal(I.collect(dir).dir, dir);
+  assert.equal(I.collect(path.join(dir, "nope")).dir, path.join(dir, "nope"));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("main.js: 폴더 감시는 그려질 때만 걸고, 안 그려지면 풀며, 감시가 끝나면 타이머가 대신한다", () => {
+  const src = mainSrc();
+  assert.match(src, /import \{[^}]*\bwatchFolder\b[^}]*\} from "herdr"/);
+  assert.match(src, /cx\.timer\.every\(STATUS_POLL_MS, \(cx\) => this\.pollStatus\(cx\)\)/);
+  assert.match(src, /cx\.timer\.every\(this\.refreshMs\(\)/); // 타이머는 그대로
+  const poll = methodOf(src, "  pollStatus(cx) {", "  refreshMs()");
+  assert.match(poll, /if \(!this\.drawing\(\)\) \{ this\.stopWatch\(\); return; \}/);
+  assert.match(poll, /statusSig\(terms\)/);
+  assert.match(poll, /this\.liveTerms\(\)/);
+  assert.match(poll, /graceKey\(this\.typingAt, now\)/); // 말미 유예가 끝나면 서명이 달라져 점이 사라진다
+  assert.match(poll, /if \(first\) return;/); // 처음 한 번은 다시 그리지 않는다
+  const start = methodOf(src, "  startWatch(cx) {", "  pollStatus(cx)");
+  assert.match(start, /watchFolder\(dir\)/);
+  assert.match(start, /if \(this\.watch \|\| !dir/); // 이미 걸려 있으면 또 걸지 않는다
+  assert.match(start, /mine !== this\.watchGen/); // 취소된 감시는 아무것도 하지 않는다
+  assert.match(start, /!paths\.length\) break/); // []로 끝나면 루프를 접고 다음 poll이 다시 건다
+  assert.match(methodOf(src, "  stopWatch() {", "  startWatch(cx)"), /watchGen\+\+[\s\S]*cancel\(\)/);
+  assert.match(src, /if \(this\.busy\) \{ this\.again = true; return; \}|this\.again = true/); // 읽는 중이면 한 번 더
+  assert.match(src, /if \(this\.again\)/);
+});
+
+test("startWatch·stopWatch·pollStatus: 가짜 런타임으로 감시 한 번, 취소, 변화 때만 다시 그리기", async () => {
+  const src = mainSrc();
+  const calls = { watch: 0, cancel: 0 };
+  let resolve;
+  const mkWatch = () => { calls.watch++; const p = new Promise((r) => { resolve = r; }); p.cancel = () => { calls.cancel++; resolve([]); }; return p; };
+  const g = mkGlobals({ watchFolder: mkWatch, statusSig: I.statusSig, graceKey: I.graceKey, Date, STATUS_POLL_MS: 1500, WATCH_DEBOUNCE_MS: 5, Array });
+  const m = {
+    ...runMethod(src, "  stopWatch() {", "  // Starts watching", g),
+    ...runMethod(src, "  startWatch(cx) {", "  // Every STATUS_POLL_MS", g),
+    ...runMethod(src, "  pollStatus(cx) {", "  refreshMs()", g),
+  };
+  const loads = [];
+  let drawing = true, terms = [poT()], notified = 0, badged = 0;
+  const self = { watch: null, watchGen: 0, debounced: false, sig: null, typingAt: new Map(), syncTyping: () => {}, data: { dir: "/x/inbox" }, drawing: () => drawing, liveTerms: () => terms, badge: () => badged++, load: (c) => loads.push(c), ui: {} };
+  self.softNotify = (c) => c.notify(); // (the real one waits while a selection is held: see the quietNow test)
+  for (const k of Object.keys(m)) self[k] = m[k].bind(self);
+  const cx = { spawn: (f) => f({ timer: { after: (ms, fn) => setTimeout(() => fn({}), ms) } }), notify: () => notified++, timer: { after: (ms, fn) => setTimeout(() => fn({}), ms) } };
+  self.pollStatus(cx); await tick();
+  assert.equal(calls.watch, 1); // 그려지는 동안 감시를 건다
+  self.pollStatus(cx); await tick();
+  assert.equal(calls.watch, 1); // 두 번 걸지 않는다
+  assert.equal(notified, 0); // 처음 poll은 다시 그리지 않는다
+  terms = [poT({ status: "working" })];
+  self.pollStatus(cx);
+  assert.equal(notified, 1); assert.equal(badged, 1); // 바뀌면 한 번
+  self.pollStatus(cx);
+  assert.equal(notified, 1); // 가만하면 다시 그리지 않는다
+  // 폴더에 변화가 오면 짧은 뒤 한 번 읽는다(여러 번 와도 한 번)
+  const first = resolve; first(["/x/inbox/a.jsonl"]); await tick();
+  resolve(["/x/inbox/b.jsonl"]); await tick();
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(loads.length, 1);
+  assert.equal(calls.watch, 3); // 변화 묶음마다 다음 변화를 위해 다시 기다린다(1 + 묶음 2)
+  // 안 그려지면 감시를 푼다
+  drawing = false;
+  self.pollStatus(cx); await tick();
+  assert.equal(calls.cancel, 1); assert.equal(self.watch, null);
+  const w = calls.watch;
+  self.pollStatus(cx); await tick();
+  assert.equal(calls.watch, w); // 풀린 뒤에는 걸지 않는다
+  drawing = true;
+  self.pollStatus(cx); await tick();
+  assert.equal(calls.watch, w + 1); // 다시 그려지면 다시 건다
+  self.stopWatch();
+});
+
+test("typingRow·full: ··· 말풍선은 모든 필터에서 그리고, 안 읽은 수·따라가기·위치 지도에는 넣지 않는다", () => {
+  const src = mainSrc();
+  assert.match(src, /\n    for \(const x of this\.typing\(v\)\) blocks\.push\(this\.typingRow\(t, x\)\);/);
+  const row = methodOf(src, "  typingRow(t, x) {", "  render(cx)");
+  assert.match(row, /"···"/);
+  assert.ok(!/on_mouse_down|text_view|TextView|selectable/.test(row)); // 드래그를 가로채지 않는다
+  const full = methodOf(src, "  full(cx) {", "const waiting = v.tabs");
+  const typingAt = full.indexOf("typingRow"), keyAt = full.indexOf("const key = tlKey(");
+  assert.ok(typingAt > 0 && typingAt < keyAt); // 따라가기 키를 만들기 전에 붙이되
+  assert.ok(!/typingNow|typingRow/.test(full.slice(keyAt))); // 키·안 읽은 것·seenNext는 건드리지 않는다
+  assert.ok(!/at\.set\([^)]*typing/.test(full));
+  const cjs = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8").replace(/\r\n/g, "\n");
+  assert.ok(!/typingNow|isWorking/.test(cjs.slice(0, cjs.indexOf("// chat:begin")))); // 순수 블록 안에만 있다
+});
+
+test("editCore·strayHeld: 위젯이 넣은 줄바꿈은 편집이 아니고, 붙든 Enter가 남긴 줄바꿈만 걷어낸다", () => {
+  assert.equal(I.editCore("안녕\n"), "안녕");
+  assert.equal(I.editCore("안녕\n\n"), "안녕");
+  assert.equal(I.editCore("안\n녕"), "안\n녕"); // 가운데 줄바꿈은 글이다
+  assert.equal(I.editCore(null), "");
+  assert.equal(I.strayHeld("안녕\n", 1000, 1050), true); // 붙든 직후 끝의 줄바꿈
+  assert.equal(I.strayHeld("안녕", 1000, 1050), false); // 줄바꿈이 없다
+  assert.equal(I.strayHeld("안녕\n", 1000, 1000 + I.HELD_BREAK_MS), false); // 오래 지났다
+  assert.equal(I.strayHeld("안녕\n", 0, 1050), false); // 붙든 적 없다(Shift+Enter 줄바꿈은 건드리지 않는다)
+});
+
+test("Enter 흐름: 위젯이 넣은 줄바꿈은 IME 붙들기를 매번 켜지 않아, 한글 뒤 Enter 한 번에 보내고 이중 Enter는 붙들지 않는다", () => {
+  // 사용자 보고: 그냥 Enter를 치면 줄바꿈이 되고 보내지지 않는다. 원인 후보 — 위젯이 Enter에 "\n"을 넣고 change를 내면
+  // changedAt이 '방금'이 되어 imeHold가 첫 Enter를 늘 붙든다. editAt은 줄바꿈을 뗀 글이 바뀐 때만 움직인다.
+  const hold = (value, editAt, heldAt, now) => I.imeHold(value, editAt, heldAt, now);
+  const typedAt = 10_000;
+  // 끝이 한글이 아니면 잠깐 쉰 뒤의 Enter는 바로 보낸다 — 위젯이 "\n"을 넣어 change가 now에 났어도 편집 시각(editAt)은 그대로다
+  assert.equal(hold("hello", typedAt, 0, typedAt + 1000), false);
+  // 끝이 한글이면 IME가 아직 글자를 조합 중인지 키 이벤트로는 알 수 없어(KeyEvent에 composing 표시가 없다) 첫 Enter는 한 번 붙든다
+  assert.equal(hold("가나다", typedAt, 0, typedAt + 1000), true);
+  // 방금(500ms 안) 글이 바뀌었으면 IME 확정 Enter일 수 있으니 한 번 붙든다 — 끝이 한글이면
+  assert.equal(hold("가나다", typedAt, 0, typedAt + 100), true);
+  // 붙든 뒤 둘째 Enter는 보낸다
+  assert.equal(hold("가나다", typedAt, typedAt + 100, typedAt + 400), false);
+  // 편집 시각을 줄바꿈 뗀 글로 재는 흐름을 가짜 change 이벤트로 돌린다
+  let core = "", editAt = 0;
+  const change = (value, now) => { const c = I.editCore(value); if (c !== core) { core = c; editAt = now; } };
+  change("가나다", typedAt);
+  change("가나다\n", typedAt + 1000); // 위젯의 줄바꿈
+  assert.equal(editAt, typedAt);
+  assert.equal(hold("hello\n", typedAt, 0, typedAt + 1000), false);
+  // 붙든 Enter가 위젯의 줄바꿈 change(편집 시각은 그대로)를 만들어도 둘째 Enter는 붙들지 않는다
+  assert.equal(hold("가나다\n", editAt, typedAt + 1000, typedAt + 1500), false);
+  change("가나다\n라", typedAt + 1100); // 진짜 편집
+  assert.equal(editAt, typedAt + 1100);
+  // main.js 배선: 줄바꿈 뗀 글이 바뀔 때만 editAt이 움직이고, 보내기 판단은 editAt을 쓴다
+  const src = mainSrc();
+  assert.match(src, /if \(core !== this\.core\) \{ this\.core = core; this\.editAt = this\.changedAt; \}/);
+  assert.match(src, /dropBreak\(value\) \{/);
+  assert.match(src, /if \(strayHeld\(value, now, now\) && now - this\.changedAt <= 25\) this\.dropBreak\(value\)/);
+  assert.match(src, /needsNewline\(this\.changedAt, now\)/); // Shift+Enter의 줄바꿈 보충은 원래 시각(changedAt) 그대로
 });

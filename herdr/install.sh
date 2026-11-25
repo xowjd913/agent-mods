@@ -97,6 +97,9 @@ if [ "$OPT" = "--remove" ]; then
     [ "$CODE" -eq 2 ] && exit 2
     echo "모드를 지우지 못했습니다."
   }
+  case ",$VAL," in
+    *,inbox,*) node "$DIR/install.cjs" hook --home "$HOME_DIR" --remove || echo "PO 훅을 설정에서 빼지 못했습니다." ;;
+  esac
   exit 0
 fi
 
@@ -112,6 +115,11 @@ node "$DIR/install.cjs" "$@" || {
   echo "모드를 복사하지 못했습니다."
   exit 0
 }
+# PO 훅(inbox): Claude Code 설정(~/.claude/settings.json, CLAUDE_CONFIG_DIR이 있으면 그 폴더)의 Stop·UserPromptSubmit에 한 줄을 넣는다.
+# 다른 훅은 건드리지 않고 쓰기 전에 백업한다. 실패해도 설치는 계속한다.
+if [ -f "$HOME_DIR/mods/inbox/po-hook.cjs" ]; then
+  node "$DIR/install.cjs" hook --home "$HOME_DIR" || echo "PO 훅을 설정에 넣지 못했습니다(PO 답이 데스크에 자동으로 올라오지 않습니다)."
+fi
 command -v gh >/dev/null 2>&1 || echo "gh가 없어 Work·PRs 패널은 GitHub 데이터를 불러오지 못합니다. GitHub CLI를 설치하고 로그인하세요."
 
 # 2) 레이아웃. 우리 레이아웃이 없으면 실행 중인 앱에서 기본 레이아웃(main)을 복제한다.
