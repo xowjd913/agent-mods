@@ -406,7 +406,8 @@ test("diag CLI appends to <HERDR_APP_HOME>/data/inbox/diag.log", () => {
 });
 
 test("main.js logs selection, press/release and the per-draw TextView count to diag, never text content", () => {
-  assert.match(MAIN, /this\.diag\(`selection /);
+  assert.match(MAIN, /`selection settled in \$\{did\} id=/);
+  assert.match(MAIN, /`selection cleared in \$\{did\} id=/);
   assert.match(MAIN, /this\.diag\("press /);
   assert.match(MAIN, /this\.diag\("release /);
   assert.match(MAIN, /selectable TextView\(s\)/);

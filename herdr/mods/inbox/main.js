@@ -765,13 +765,12 @@ const SEL_HOLD_MS = 120000, PRESS_HOLD_MS = 8000;
 // st = {sel: a selection is settled, selAt, press: the pointer is down in the list, pressAt}. While true, background redraws wait.
 const quietNow = (st, now) => Boolean((st?.sel && now - (st.selAt || 0) < SEL_HOLD_MS) || (st?.press && now - (st.pressAt || 0) < PRESS_HOLD_MS));
 
-// ---- highlight colours: the band behind **bold** runs and the overlay on a settled selection, both from the theme's own tokens.
+// ---- highlight colours: the band behind **bold** runs, from the theme's own tokens.
 // A colour is "#rrggbb" + an alpha byte. The alpha starts strong (so the area is clearly visible) and steps down only while the text colour
 // would stop being readable on the blended result (contrast < HL_MIN_CONTRAST), so it holds on a light and a dark theme alike.
 const HL_MIN_CONTRAST = 3.5;
 const HL_KINDS = {
   bold: { alpha: 0x73, floor: 0x40, tokens: ["accent", "ansi4", "foreground"] }, // about 45%
-  sel: { alpha: 0xb8, floor: 0x60, tokens: ["accent", "ansi4", "working"] }, // about 72%: stronger than bold, so a selected area stands out
 };
 const HEX6 = /^#[0-9a-f]{6}$/i;
 // A theme colour as "#rrggbb": "#rgb" is expanded and "#rrggbbaa" loses its alpha (the tint sets its own); anything else -> null.
@@ -813,16 +812,21 @@ function selRangeOf(sel, len) {
 
 // ---- bubble width: every message bubble (mine on the right, the PO's and the leaders' on the left) stops at a share of the chat column, so a long
 // text wraps inside it and never reaches the opposite edge. `colW` is the chat column's width in px (null = not known yet).
-const BUBBLE_SHARE = 0.75, BUBBLE_SIDE = 90, BUBBLE_MIN_CAP = 120;
+const BUBBLE_SHARE = 0.75, BUBBLE_SIDE = 90, BUBBLE_MIN_CAP = 40;
 // The chat column: the view's width less the room list beside it (none in a strip).
 const chatColW = (winW, strip, narrow, roomW, slimW) => { const w = Number(winW); return Number.isFinite(w) && w > 0 ? Math.max(0, w - (strip ? 0 : narrow ? slimW : roomW)) : null; };
-// The px a bubble may take: 75% of the column, and always leaving BUBBLE_SIDE px (the copy chip, the time, the gutters) on its other side.
-// `minInner` keeps room for the widest picture in it. null: width unknown, the caller uses a percentage.
+// The px a bubble may take: 75% of the column, and always leaving BUBBLE_SIDE px (the copy chip, the time, the gutters) on its other side, so
+// the bubble and its chip fit the column down to narrow docks (150px column -> 60, 200 -> 110, 260 -> 170); only a column under ~130px gets the
+// BUBBLE_MIN_CAP floor (a few characters), and the cap is never wider than the column itself. `minInner` is the widest picture (with its padding):
+// when it fits beside the chip (minInner <= column - BUBBLE_SIDE) the cap is raised to it, as before; a column narrower than that keeps the cap
+// and the caller scales the pictures down to it. null: width unknown, the caller uses a percentage.
 function bubbleCap(colW, minInner = 0) {
   const w = Number(colW);
   if (!(Number.isFinite(w) && w > 0)) return null;
-  const cap = Math.max(BUBBLE_MIN_CAP, Math.min(Math.floor(w * BUBBLE_SHARE), Math.floor(w - BUBBLE_SIDE)));
-  return Math.max(cap, Math.ceil(Number(minInner) || 0));
+  const room = Math.floor(w - BUBBLE_SIDE);
+  const cap = Math.min(Math.floor(w), Math.max(BUBBLE_MIN_CAP, Math.min(Math.floor(w * BUBBLE_SHARE), room)));
+  const pic = Math.ceil(Number(minInner) || 0);
+  return pic > cap && pic <= room ? pic : cap;
 }
 
 // chat:end
@@ -944,7 +948,7 @@ export default class Inbox extends View {
     this.replyPics = new Map(); // leader -> pictures waiting in that leader's answer box (same shape as this.pics)
     this.replyBusy = new Map(); // leader -> pictures being read for that answer box
     this.imgd = new Map(); // path -> [w, h] of pictures added here (the helper's list covers the others)
-    this.ui = { sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0, hl: null, hlSkip: null }; // a drag-select in the list: redraws wait while it is held
+    this.ui = { sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0 }; // a drag-select in the list: redraws wait while it is held
     this.dirty = false; // a redraw was held back
     this.pin = { pinned: true, ct: 0 }; // the timeline's pin to the newest (see pinStep)
     this.lastIdx = 0; // index of the last child of the list
@@ -1014,7 +1018,7 @@ export default class Inbox extends View {
   // desk is a press, so redraws and the bottom pin wait until it is released. The press gate used to live on the list's own mouse-down,
   // which a TextView that handles the press itself never lets through - the pin and redraws then ran under a drag and dropped the selection.
   pointer(e, cx) {
-    if (e?.pressed_button === "left") { if (!this.ui.press) { this.diag("press (left held, window move)", cx); this.dropHl(); } this.ui.press = true; this.ui.pressAt = Date.now(); return; }
+    if (e?.pressed_button === "left") { if (!this.ui.press) this.diag("press (left held, window move)", cx); this.ui.press = true; this.ui.pressAt = Date.now(); return; }
     if (this.ui.press) { this.diag("release (move without button)", cx); this.ui.press = false; if (this.dirty) this.softNotify(cx); }
   }
   // Diagnostics for the leader (the person does not read consoles): lines are buffered and written by inbox.cjs in one call at most every 2s
@@ -1057,16 +1061,6 @@ export default class Inbox extends View {
     try { cx.notify(); } catch {}
   }
 
-  // The overlay goes away (and the next redraw must say so): a new press, a click outside, a selection that cleared. `skip` remembers a cleared
-  // range so the very same range is not painted again (a settle -> repaint -> cleared -> settle loop).
-  dropHl(skip = false) {
-    const h = this.ui.hl;
-    if (!h) { if (!skip) this.ui.hlSkip = null; return; }
-    this.ui.hl = null;
-    this.ui.hlSkip = skip ? { id: h.id, start: h.start, end: h.end } : null;
-    this.dirty = true;
-  }
-
   // One diag line per kind when the theme gave nothing to paint with (the next redraws stay quiet).
   tintWarn(t, kind) {
     const w = (this.tintWarned ??= new Set());
@@ -1075,30 +1069,22 @@ export default class Inbox extends View {
     this.diag(tintMiss(t, kind));
   }
 
-  // A TextView's selection settled (sel) or cleared (null). The view reports null only when the selection it reported is gone, so a null always
-  // clears: the overlay, ui.sel and the hold on redraws. The overlay is drawn by the next redraw, never by a notify of its own here: a rebuild
-  // was seen to drop the native selection (docs), so a settle only marks `dirty` and the redraw waits like any other (softNotify / quietNow).
+  // A TextView's selection settled (sel) or cleared (null): only the hold on background redraws (ui.sel / selAt) and the diag.log lines, which
+  // show whether a drag-copy sees the selection come and go (the range is logged when the app sends one). Nothing is painted for a selection.
   onSel(id, sel, cx) {
     this.ui.selEvents = (this.ui.selEvents ?? 0) + 1; // how often a TextView reported a selection at all (see the console line)
     const did = this.diagId(id), now = Date.now();
     const held = this.ui.selAt ? now - this.ui.selAt : -1; // ms since the last settle (a clear's age)
-    const rg = sel && this.mdSeen?.has(id) ? selRangeOf(sel, Infinity) : null;
-    const h0 = this.ui.hl;
+    const rg = sel ? selRangeOf(sel, Infinity) : null;
     this.diag(sel
-      ? `selection settled in ${did} id=${String(id).slice(0, 40)}: ${String(sel.text ?? "").length} chars, range ${rg ? `${rg.start}-${rg.end}` : "missing"}${this.mdSeen?.has(id) ? "" : " (not markdown)"} (#${this.ui.selEvents})`
-      : `selection cleared in ${did} id=${String(id).slice(0, 40)}${held >= 0 ? `, ${held}ms after the last settle` : ""}, overlay ${h0 && h0.id === id ? "was on" : "off"} (#${this.ui.selEvents})`, cx);
+      ? `selection settled in ${did} id=${String(id).slice(0, 40)}: ${String(sel.text ?? "").length} chars, range ${rg ? `${rg.start}-${rg.end}` : "missing"} (#${this.ui.selEvents})`
+      : `selection cleared in ${did} id=${String(id).slice(0, 40)}${held >= 0 ? `, ${held}ms after the last settle` : ""} (#${this.ui.selEvents})`, cx);
     try { console.log(`[inbox] selection ${sel ? `settled in ${did}: ${String(sel.text ?? "").length} chars` : `cleared in ${did}`} (#${this.ui.selEvents})`); } catch {}
     if (sel) this.ui.sels.set(id, true); else this.ui.sels.delete(id);
     this.ui.sel = this.ui.sels.size > 0;
     if (sel) this.ui.selAt = now;
     this.ui.press = false;
-    if (sel) {
-      // A settled selection in a Markdown bubble gets a strong overlay on its range (the native highlight is faint), painted by the next redraw.
-      const sk = this.ui.hlSkip, same = sk && sk.id === id && rg && sk.start === rg.start && sk.end === rg.end;
-      if (!rg || same) { if (h0) this.dropHl(); if (same) this.diag(`selection overlay skipped in ${did}: that range was just cleared`, cx); }
-      else if (!h0 || h0.id !== id || h0.start !== rg.start || h0.end !== rg.end) { this.ui.hl = { id, ...rg }; this.ui.hlSkip = null; this.dirty = true; }
-    } else if (h0 && h0.id === id) this.dropHl(true);
-    if (this.dirty) this.softNotify(cx); // held back (dirty only) while a selection or a press is held; pinTick lets it go afterwards
+    if (this.dirty) this.softNotify(cx); // a redraw held back by the selection or a press goes out once nothing holds it (pinTick too)
   }
 
   // ---- pictures in the box
@@ -2025,16 +2011,8 @@ export default class Inbox extends View {
         const bc = tintHex(t, "bold"); // theme accent at ~45% (less when the text would stop being readable), see HL_KINDS
         if (bc) for (const r of boldRanges(m)) tv = tv.highlight_range(r.start, r.end, bc);
         else this.tintWarn(t, "bold");
-        // The settled selection of this very bubble, drawn over the bold bands (the later range wins where they meet).
-        const h = this.ui?.hl, sc = h && h.id === id && h.end <= m.length ? tintHex(t, "sel") : null;
-        if (sc) {
-          tv = tv.highlight_range(h.start, h.end, sc);
-          if (!h.painted) { h.painted = true; this.diag(`selection overlay painted in ${this.diagId(id)} id=${String(id).slice(0, 40)}: ${h.start}-${h.end} ${sc}`); }
-        } else if (h && h.id === id && h.end <= m.length) this.tintWarn(t, "sel");
       } catch {}
     }
-    (this.mdSeen ??= new Set()).add(id); // ids drawn as Markdown: only their selection ranges mean offsets into the source
-    if (this.mdSeen.size > 600) this.mdSeen = new Set([id]);
     return tv;
   }
 
@@ -2140,6 +2118,16 @@ export default class Inbox extends View {
     return box;
   }
 
+  // The window's width changed: remember it, and redraw (softNotify: held while selecting) when the layout class changed or the width moved to
+  // another 16px step, which is what the bubble cap follows (a redraw per step, not per pixel).
+  onSize(width, cx) {
+    const x = width < 360, n = width < WIDE_MIN;
+    const wb = Math.round(width / 16);
+    const grew = wb !== this.winB;
+    this.winW = width; this.winB = wb;
+    if (x !== this.compact || n !== this.narrow || grew) { this.compact = x; this.narrow = n; this.softNotify(cx); }
+  }
+
   // The most px a message bubble may take (see bubbleCap). null before the first size report: the bubbles then use a percentage.
   capOf(minInner = 0) {
     const strip = this.windowed && this.narrow;
@@ -2162,13 +2150,16 @@ export default class Inbox extends View {
       const ACT = { resend: ["다시 보내기", "같은 글을 같은 PO에게 다시 보냅니다(말풍선은 늘지 않습니다)", (c) => this.resend(e.id, c)], enter: ["Enter 누르기", "PO의 입력창에 보낸 글이 아직 있는지 확인한 뒤 Enter만 누릅니다(PO가 질문 중이면 누르지 않습니다)", (c) => this.enterNow(e.id, c)] };
       const root = this.data?.root ?? "";
       const bp = bubbleParts(e.text, e.imgs, root);
-      const sizes = bp.imgs.map((p) => { const d = this.data?.imgd?.[p] ?? this.imgd.get(p); return fitImg(d?.[0], d?.[1], 240, 180); });
+      const dims = bp.imgs.map((p) => this.data?.imgd?.[p] ?? this.imgd.get(p));
+      let sizes = dims.map((d) => fitImg(d?.[0], d?.[1], 240, 180));
       // The bubble asks for its text's width (up to 80% of the row, like the left bubbles) and never less than its widest picture: a
       // percentage max inside a content-sized box collapsed to ~3 characters, so the row is full width and the bubble has a width of its own.
       // It is also capped (capOf: 75% of the chat column, in px): a long message wraps inside the cap and never reaches the left side, so the
       // bubble, with the 복사 chip and the time on its left, always reads as right-aligned. A picture keeps its own width as the floor.
-      const pics = Math.max(0, ...sizes.map((f) => f.w + 26));
+      let pics = Math.max(0, ...sizes.map((f) => f.w + 26));
       const cap = this.capOf(pics);
+      // Only a column too narrow for the picture and the chip (the cap stayed below the picture) scales the pictures down to the cap.
+      if (cap != null && pics > cap) { sizes = dims.map((d) => fitImg(d?.[0], d?.[1], Math.max(24, cap - 26), 180)); pics = Math.max(0, ...sizes.map((f) => f.w + 26)); }
       const width = Math.min(Math.max(bubbleWidth(bp.text), pics, 64), cap ?? Infinity);
       return v_flex().id(id).flex_none().px(10).pt(top).gap(2).items_end()
         .when(Boolean(e.to), (el) => el.child(div().max_w("85%").min_w(0).truncate().text_size(10).text_color(t.dim).child(`→ ${shortName(e.to)}`)))
@@ -2289,9 +2280,9 @@ export default class Inbox extends View {
     const waiting = v.tabs.reduce((n, x) => n + x.n, 0); // leaders waiting on a decision, over every room
     const head = v.pick === PO_OTHER ? OTHER_LABEL : v.tabs.find((x) => x.id === v.pick)?.label ?? "";
     const lines = v_flex().id("inbox-list").flex_1().min_h(0).pb(8).overflow_y_scrollbar().mode("always")
-      .on_mouse_down("left", (_e, c) => { this.ui.press = true; this.ui.pressAt = Date.now(); this.ui.sels.clear(); this.ui.sel = false; this.dropHl(); c.stop_propagation(); })
+      .on_mouse_down("left", (_e, c) => { this.ui.press = true; this.ui.pressAt = Date.now(); this.ui.sels.clear(); this.ui.sel = false; c.stop_propagation(); })
       .on_mouse_up("left", () => { this.ui.press = false; })
-      .on_mouse_down_out((_e, c) => { this.ui.press = false; if (this.ui.sel) { this.ui.sels.clear(); this.ui.sel = false; } this.dropHl(); if (this.dirty) this.softNotify(c); })
+      .on_mouse_down_out((_e, c) => { this.ui.press = false; if (this.ui.sel) { this.ui.sels.clear(); this.ui.sel = false; } if (this.dirty) this.softNotify(c); })
       .when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks);
     const bar = this.filterBar(t, v);
     const panel = this.promptPanel(t, v, cx); // a blocked PO's screen + its keys (null while the room's PO is not waiting on a prompt)
@@ -2306,13 +2297,7 @@ export default class Inbox extends View {
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .on_window_mouse_move((e, c) => this.pointer(e, c))
       .on_window_mouse_up("left", (_e, c) => this.pointerUp(c))
-      .on_size_change((size, c) => {
-        const x = size.width < 360, n = size.width < WIDE_MIN;
-        const wb = Math.round(size.width / 16); // the bubble cap follows the width in 16px steps (a redraw per step, not per pixel)
-        const grew = wb !== this.winB;
-        this.winW = size.width; this.winB = wb;
-        if (x !== this.compact || n !== this.narrow || grew) { this.compact = x; this.narrow = n; this.softNotify(c); }
-      })
+      .on_size_change((size, c) => this.onSize(size.width, c))
       .child(h_flex().h(38).px(this.compact ? 10 : 14).flex_none().items_center().justify_between()
         .child(h_flex().gap(6).items_center()
           .when(!this.paned, (el) => el.child(div().text_size(15).font_semibold().text_color(t.foreground).child("PO 데스크"))) // a pane's own header already says it

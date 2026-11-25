@@ -438,7 +438,7 @@ test("R17: each bubble has a 복사 chip that copies the unwrapped text; backgro
   assert.equal((MAIN.match(/this\.sideTools\(t, id, e\.text, e\.ms\)/g) ?? []).length, 2, "mine and the PO's");
   // every background source goes through softNotify or the quiet check
   assert.match(MAIN, /if \(!same\) this\.softNotify\(cx\);/);
-  assert.match(MAIN, /this\.narrow = n; this\.softNotify\(c\)/);
+  assert.match(MAIN, /this\.narrow = n; this\.softNotify\(cx\)/, "a resize redraw goes through softNotify (onSize)");
   assert.match(MAIN, /if \(r\.go && quietNow\(this\.ui, Date\.now\(\)\)\) return;/);
   assert.doesNotMatch(MAIN, /!this\.ui\.press\) this\.scroll/);
   // TextView ids are the content-keyed timeline ids (or the same id + part index): they do not change between draws
@@ -669,7 +669,7 @@ test("R19: main.js polls for real: a working team member and the end of the grac
   } finally { Date.now = real; }
 });
 
-// ---- R20: clearly visible bold band and selection overlay
+// ---- R20: clearly visible bold band (R22: the selection overlay is gone)
 const DARK = { foreground: "#e6e6e6", background: "#1e1e1e", accent: "#3b82f6", working: "#22c55e" };
 const LIGHT = { foreground: "#1f1f1f", background: "#ffffff", accent: "#2563eb", working: "#16a34a" };
 const alphaOf = (c) => parseInt(c.slice(7, 9), 16);
@@ -677,18 +677,16 @@ function recTv(calls) {
   const tv = { raw_html() { return this; }, selectable() { return this; }, on_link_click() { return this; }, on_selection_change() { return this; }, highlight_range(a, b, c) { calls.push([a, b, c]); return this; } };
   return { markdown: () => tv, html: () => tv };
 }
-const freshUi = () => ({ sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0, hl: null, hlSkip: null });
+const freshUi = () => ({ sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0 });
 const r20Desk = (calls) => { const d = new (loadInbox({ base: { TextView: recTv(calls) } }))(); d.ui = freshUi(); return d; };
 
 test("R20: tintHex takes the theme accent at a strong alpha on a dark and a light theme, and the text stays readable on it", () => {
   for (const th of [DARK, LIGHT]) {
-    const bold = I.tintHex(th, "bold"), sel = I.tintHex(th, "sel");
+    const bold = I.tintHex(th, "bold");
     assert.match(bold, /^#[0-9a-f]{6}[0-9a-f]{2}$/);
     assert.equal(bold.slice(0, 7), th.accent, "the accent token, no hard-coded colour");
-    assert.equal(sel.slice(0, 7), th.accent);
     assert.ok(alphaOf(bold) >= 0x40, "not fainter than 25% (the old tint was 20%)");
-    assert.ok(alphaOf(sel) > alphaOf(bold), "the selection is stronger than the bold band");
-    for (const c of [bold, sel]) {
+    for (const c of [bold]) {
       const under = (() => { const a = alphaOf(c) / 255; const u = [1, 3, 5].map((i) => parseInt(th.background.slice(i, i + 2), 16)); return "#" + [1, 3, 5].map((i, k) => Math.round(parseInt(c.slice(i, i + 2), 16) * a + u[k] * (1 - a)).toString(16).padStart(2, "0")).join(""); })();
       const lum = (h) => { const [r, g, b] = [1, 3, 5].map((i) => { const v = parseInt(h.slice(i, i + 2), 16) / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
       const x = lum(th.foreground), y = lum(under);
@@ -699,50 +697,15 @@ test("R20: tintHex takes the theme accent at a strong alpha on a dark and a ligh
 
 test("R20: tintHex lowers the alpha when a bright accent would hide the text, and falls back / gives up cleanly", () => {
   const bright = { foreground: "#f0f0f0", background: "#202020", accent: "#ffff00" }; // light text on strong yellow would be unreadable
-  assert.ok(alphaOf(I.tintHex(bright, "sel")) < 0xb8, "stepped down");
-  assert.ok(alphaOf(I.tintHex(bright, "sel")) >= 0x60, "but not below the floor");
+  assert.ok(alphaOf(I.tintHex(bright, "bold")) < 0x73, "stepped down");
+  assert.ok(alphaOf(I.tintHex(bright, "bold")) >= 0x40, "but not below the floor");
   assert.equal(I.tintHex({ foreground: "#e6e6e6", background: "#1e1e1e" }, "bold").slice(0, 7), "#e6e6e6", "no accent: the foreground colour");
-  assert.match(I.tintHex({ accent: "#3b82f680", foreground: "#e6e6e6" }, "sel"), /^#3b82f6[0-9a-f]{2}$/, "R21: #rrggbbaa is normalized (its own alpha dropped)");
-  assert.equal(I.tintHex({ accent: "oops", foreground: "#e6e6e6" }, "sel"), null, "sel has no foreground fallback");
+  assert.match(I.tintHex({ accent: "#3b82f680", foreground: "#e6e6e6" }, "bold"), /^#3b82f6[0-9a-f]{2}$/, "R21: #rrggbbaa is normalized (its own alpha dropped)");
+  assert.equal(I.tintHex({ accent: "oops", foreground: "#e6e6e6" }, "bold").slice(0, 7), "#e6e6e6", "an unusable accent falls to the next token");
+  assert.equal(I.tintHex({ accent: "#3b82f6" }, "sel"), null, "R22: the selection tint is gone");
   assert.equal(I.tintHex({}, "bold"), null);
   assert.equal(I.tintHex(undefined, "bold"), null);
   assert.match(I.tintHex({ accent: "#3b82f6" }, "bold"), /^#3b82f673$/, "no background known: the starting alpha");
-});
-
-test("R20: md() paints the bold bands with the new tint and the selection overlay after them", () => {
-  const calls = [];
-  const d = r20Desk(calls);
-  d.ui.hl = { id: "m1", start: 2, end: 9 };
-  d.md("m1", "a **b** c **d** e", DARK);
-  assert.equal(calls.length, 3);
-  assert.deepEqual(calls.slice(0, 2).map((c) => [c[0], c[1]]), [[2, 7], [10, 15]]);
-  assert.equal(calls[0][2], I.tintHex(DARK, "bold"));
-  assert.deepEqual(calls[2], [2, 9, I.tintHex(DARK, "sel")], "overlay last, on exactly the selected range");
-  calls.length = 0;
-  d.md("other", "a **b** c", DARK);
-  assert.equal(calls.length, 1, "another bubble gets no overlay");
-  calls.length = 0;
-  d.ui.hl = { id: "m1", start: 2, end: 99 };
-  d.md("m1", "a **b**", DARK);
-  assert.equal(calls.length, 1, "a range past the text is not painted");
-  calls.length = 0;
-  d.ui.hl = null;
-  d.md("m1", "a **b**", DARK);
-  assert.equal(calls.length, 1);
-});
-
-test("R20: the overlay offsets are into the unwrapped string: a message with wrapper tags is painted at the right place", () => {
-  const src = '<hc from="t1 lead">\nfirst **bold** words here\n</hc>';
-  const m = I.mdText(src);
-  assert.ok(!m.includes("<hc"), "tags gone");
-  const start = m.indexOf("words"), end = start + 5;
-  assert.deepEqual(I.selRangeOf({ range: { start, end } }, m.length), { start, end });
-  const calls = [];
-  const d = r20Desk(calls);
-  d.ui.hl = { id: "w", start, end };
-  d.md("w", src, DARK);
-  assert.deepEqual(calls[calls.length - 1].slice(0, 2), [start, end]);
-  assert.equal(m.slice(calls[calls.length - 1][0], calls[calls.length - 1][1]), "words");
 });
 
 test("R20: selRangeOf accepts sel.range or a bare range and refuses nonsense", () => {
@@ -762,109 +725,11 @@ function selDesk() {
   return { d, cx, calls, notes: () => notes };
 }
 
-test("R21: a settle marks the overlay for the next redraw and never notifies by itself; the same range again changes nothing", () => {
-  const { d, cx, notes } = selDesk();
-  d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
-  assert.deepEqual(d.ui.hl && { id: d.ui.hl.id, start: d.ui.hl.start, end: d.ui.hl.end }, { id: "m1", start: 8, end: 13 });
-  assert.equal(notes(), 0, "no cx.notify on settle: the selection (quietNow) holds the redraw");
-  assert.equal(d.dirty, true, "the redraw is owed");
-  assert.equal(d.ui.sel, true);
-  d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
-  assert.equal(notes(), 0);
-  const hl = d.ui.hl;
-  d.onSel("m1", { text: "orld ag", range: { start: 9, end: 16 } }, cx);
-  assert.notEqual(d.ui.hl, hl, "a changed range replaces the overlay");
-  assert.equal(notes(), 0);
-});
-
-test("R21: a settle with nothing holding the redraw goes through softNotify once (the only notify path)", () => {
-  const { d, cx, notes } = selDesk();
-  d.ui.sel = false;
-  d.softNotify = (c) => { d.sawSoft = (d.sawSoft ?? 0) + 1; };
-  d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
-  assert.equal(d.sawSoft, 1);
-  assert.equal(notes(), 0);
-});
-
-test("R21: a null after a settle means the selection is gone: overlay off, ui.sel false, the redraw owed (no echo guard)", () => {
-  const { d, cx, notes } = selDesk();
-  d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
-  d.dirty = false;
-  d.onSel("m1", null, cx); // right away: still a clear
-  assert.equal(d.ui.hl, null);
-  assert.equal(d.ui.sel, false);
-  assert.equal(notes(), 1, "dirty, and nothing holds now (selection gone): the overlay-less redraw goes out via softNotify");
-  assert.equal(d.dirty, false, "owed redraw was sent");
-  assert.deepEqual(d.ui.hlSkip, { id: "m1", start: 8, end: 13 }, "the cleared range is remembered");
-});
-
-test("R21: hlSkip stops a settle -> repaint -> clear -> settle loop; a press or another range resets it", () => {
-  const { d, cx } = selDesk();
-  const S = { text: "world", range: { start: 8, end: 13 } };
-  d.onSel("m1", S, cx);
-  d.onSel("m1", null, cx);
-  d.onSel("m1", S, cx); // the same range reported again after the clear
-  assert.equal(d.ui.hl, null, "not painted again");
-  d.onSel("m1", null, cx);
-  d.onSel("m1", S, cx);
-  assert.equal(d.ui.hl, null, "still not (no loop)");
-  d.onSel("m1", { text: "orld", range: { start: 9, end: 13 } }, cx); // the user selects something else
-  assert.deepEqual(d.ui.hl && [d.ui.hl.start, d.ui.hl.end], [9, 13]);
-  assert.equal(d.ui.hlSkip, null);
-  d.onSel("m1", null, cx);
-  assert.ok(d.ui.hlSkip);
-  d.pointer({ pressed_button: "left" }, cx); // a new press: a fresh drag may select that range again
-  d.onSel("m1", { text: "orld", range: { start: 9, end: 13 } }, cx);
-  assert.ok(d.ui.hl, "painted after a press");
-});
-
-test("R21: a clear in another bubble does not touch this overlay", () => {
-  const { d, cx } = selDesk();
-  d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
-  d.onSel("h1", null, cx);
-  assert.ok(d.ui.hl);
-});
-
-test("R21: the press paths (window move, list mouse-down, press outside) clear the overlay AND set dirty", () => {
-  for (const act of [(d, cx) => d.pointer({ pressed_button: "left" }, cx), (d) => d.dropHl()]) {
-    const { d, cx } = selDesk();
-    d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
-    d.dirty = false;
-    act(d, cx);
-    assert.equal(d.ui.hl, null);
-    assert.equal(d.dirty, true, "dirty: the next redraw drops the overlay");
-  }
-  const { d } = selDesk();
-  d.dirty = false;
-  d.dropHl(); // nothing up: nothing owed
-  assert.equal(d.dirty, false);
-});
-
-test("R21: diag.log gets the settled, cleared, skipped and painted lines with the bubble label and a timestamp", () => {
-  const { d, cx } = selDesk();
-  d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
-  d.onSel("m1", null, cx);
-  d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
-  const q = d.diagQ.join("\n");
-  assert.match(q, /selection settled in m~[0-9a-f]+ id=m1: 5 chars, range 8-13/);
-  assert.match(q, /selection cleared in m~[0-9a-f]+ id=m1, \d+ms after the last settle, overlay was on/);
-  assert.match(q, /selection overlay skipped in m~/);
-  for (const line of d.diagQ) assert.match(line, /^\d{4}-\d\d-\d\dT/, "timestamped");
-  const calls = [];
-  const e = r20Desk(calls);
-  e.ui.hl = { id: "m1", start: 8, end: 13 };
-  e.md("m1", "hello **world** again", DARK);
-  e.md("m1", "hello **world** again", DARK);
-  assert.equal(e.diagQ.filter((l) => /selection overlay painted in m~/.test(l)).length, 1, "painted is logged once per overlay");
-});
-
 test("R21: bold alpha never drops below its floor, even for white text on white", () => {
   for (const c of ["#ffffff", "#000000", "#808080"]) {
     const a = alphaOf(I.tintHex({ foreground: c, background: c, accent: c }, "bold"));
     assert.ok(a >= 0x40, `${c}: ${a.toString(16)}`);
   }
-  const t = I.tintHex({ foreground: "#ffffff", background: "#ffffff", accent: "#ffffff" }, "sel");
-  assert.ok(alphaOf(t) >= 0x60);
 });
 
 test("R21: hex6 / tintHex normalize #rgb and #rrggbbaa; tintMiss and tintWarn say once when no token is usable", () => {
@@ -878,35 +743,6 @@ test("R21: hex6 / tintHex normalize #rgb and #rrggbbaa; tintMiss and tintWarn sa
   d.md("x", "a **b**", { accent: "blue" });
   assert.equal(calls.length, 0);
   assert.equal(d.diagQ.filter((l) => /highlight bold: no usable theme token/.test(l)).length, 1, "one line, not one per redraw");
-});
-
-test("R20: no overlay (and no repaint) for a non-Markdown view or a selection without a range; a new press clears it", () => {
-  const { d, cx, notes } = selDesk();
-  d.onSel("h1", { text: "plain", range: { start: 0, end: 5 } }, cx);
-  assert.equal(d.ui.hl, null);
-  assert.equal(notes(), 0);
-  d.onSel("m1", { text: "world" }, cx); // the app gave no range
-  assert.equal(d.ui.hl, null);
-  assert.equal(notes(), 0);
-  d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
-  assert.ok(d.ui.hl);
-  d.pointer({ pressed_button: "left" }, cx); // a new drag begins
-  assert.equal(d.ui.hl, null);
-});
-
-test("R20: background redraws still wait while the selection overlay is up (softNotify / quietNow unchanged)", () => {
-  const { d, cx, notes } = selDesk();
-  d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
-  const n = notes();
-  d.softNotify(cx);
-  assert.equal(notes(), n, "held");
-  assert.equal(d.dirty, true);
-});
-
-test("R20: the list's own press and a press outside also drop the overlay (wiring)", () => {
-  assert.match(MAIN, /this\.ui\.sels\.clear\(\); this\.ui\.sel = false; this\.dropHl\(\); c\.stop_propagation\(\);/);
-  assert.match(MAIN, /on_mouse_down_out\(\(_e, c\) => \{[^\n]*this\.dropHl\(\);/);
-  assert.equal((MAIN.match(/this\.ui\.hl = null/g) ?? []).length, 1, "R21: the only clear is inside dropHl (which sets dirty)");
 });
 
 // ---- R21: a short status label (5 chars at most) beside the "···" bubble, from hc status only
@@ -971,18 +807,42 @@ test("R21 layout: chatColW leaves out the room list (none in a strip) and says n
   for (const bad of [undefined, null, 0, -5, NaN, "x"]) assert.equal(I.chatColW(bad, false, false, 168, 58), null);
 });
 
-test("R21 layout: bubbleCap is 75% of the column, leaves 90px for the chip and time, and follows a resize", () => {
+test("R22 layout: bubbleCap is 75% of the column but never leaves less than 90px beside it (chip and time); tiny columns get a small floor", () => {
   assert.equal(I.bubbleCap(552), 414, "75% of 552");
   assert.equal(I.bubbleCap(1200), 900);
   assert.equal(I.bubbleCap(300), 210);
-  assert.equal(I.bubbleCap(200), 120, "90px kept beside it, with the floor");
-  assert.equal(I.bubbleCap(100), 120, "tiny widths: the floor, never zero");
+  assert.equal(I.bubbleCap(260), 170, "narrow dock: column - 90");
+  assert.equal(I.bubbleCap(200), 110);
+  assert.equal(I.bubbleCap(150), 60);
+  assert.equal(I.bubbleCap(100), 40, "the floor");
+  assert.equal(I.bubbleCap(42), 40);
+  assert.equal(I.bubbleCap(30), 30, "never above the column itself");
   assert.equal(I.bubbleCap(null), null);
   assert.equal(I.bubbleCap(0), null);
-  assert.equal(I.bubbleCap(552, 500), 500, "a picture wider than the cap keeps its room");
-  assert.equal(I.bubbleCap(552, 100), 414);
   let last = 0;
-  for (let w = 160; w <= 1600; w += 16) { const c = I.bubbleCap(w); assert.ok(c >= last, `grows with the window at ${w}`); assert.ok(c <= Math.max(120, w * 0.75), `<= 75% at ${w}`); last = c; }
+  for (let w = 40; w <= 1600; w += 8) {
+    const c = I.bubbleCap(w);
+    assert.ok(c >= last, `grows with the window at ${w}`);
+    assert.ok(c <= w, `never above the column at ${w}`);
+    assert.ok(c <= Math.max(40, w * 0.75), `<= 75% at ${w}`);
+    if (w >= 130) assert.ok(c + 90 <= w, `the chip and time still fit beside it at ${w} (cap ${c})`);
+    last = c;
+  }
+});
+
+test("R22 layout: a picture raises the cap only when it still fits beside the chip; wider than that, the cap stays (the picture is scaled)", () => {
+  assert.equal(I.bubbleCap(552, 440), 440, "fits in the room (552-90=462)");
+  assert.equal(I.bubbleCap(552, 462), 462);
+  assert.equal(I.bubbleCap(552, 500), 414, "does not fit beside the chip: keep the cap");
+  assert.equal(I.bubbleCap(552, 100), 414);
+  assert.equal(I.bubbleCap(200, 180), 110, "a narrow column: the picture does not push past it");
+  assert.equal(I.bubbleCap(260, 240), 170);
+  assert.equal(I.bubbleCap(260, 170), 170);
+  for (const col of [150, 200, 260, 552]) for (const pic of [0, 50, 150, 240, 600]) {
+    const c = I.bubbleCap(col, pic);
+    assert.ok(c <= col, `col ${col} pic ${pic}: cap ${c} within the column`);
+    if (col >= 130) assert.ok(c + 90 <= col, `col ${col} pic ${pic}: cap ${c} leaves 90px`);
+  }
 });
 
 test("R21 layout: my bubble is pinned right and capped; the PO and leader bubbles are capped on the left; the cap follows resizes", () => {
@@ -993,23 +853,112 @@ test("R21 layout: my bubble is pinned right and capped; the PO and leader bubble
   assert.match(row, /div\(\)\.flex_1\(\)\.min_w\(0\)\.max_w\(this\.capOf\(\) \?\? "75%"\)\.px\(12\)/, "PO bubble");
   assert.match(row, /div\(\)\.flex_1\(\)\.min_w\(0\)\.max_w\(this\.capOf\(\) \?\? "75%"\)\.child\(this\.bubble\(/, "leader bubble");
   assert.match(MAIN, /capOf\(minInner = 0\) \{[^}]*bubbleCap\(chatColW\(this\.winW, strip, this\.narrow, ROOM_W, SLIM_W\), minInner\)/);
-  const sz = MAIN.slice(MAIN.indexOf("on_size_change"), MAIN.indexOf("on_size_change") + 700);
-  assert.match(sz, /this\.winW = /);
-  assert.match(sz, /softNotify\(c\)/, "a resize redraws (held while selecting)");
+  const sz = MAIN.slice(MAIN.indexOf("on_size_change"), MAIN.indexOf("on_size_change") + 200);
+  assert.match(sz, /this\.onSize\(size\.width, c\)/, "the size event goes to onSize");
 });
 
-test("R21 layout: the cap sits on the box only; the Markdown given to a TextView is the same string, so offsets and the overlay are unaffected", () => {
+test("R22 layout: the cap sits on the box only; the Markdown given to a TextView is the same string, so the bold band offsets do not move on a resize", () => {
   const calls = [];
   const d = r20Desk(calls);
   d.winW = 400; d.narrow = false; d.windowed = true;
   const src = "a long message with **bold words** that will wrap inside the cap";
   const before = I.boldRanges(I.mdText(src));
-  d.ui.hl = { id: "w", start: 3, end: 9 };
   d.md("w", src, DARK);
   d.winW = 1200; // resized: only the box width changes
   const calls2 = calls.splice(0);
   d.md("w", src, DARK);
   assert.deepEqual(calls.map((c) => [c[0], c[1]]), calls2.map((c) => [c[0], c[1]]));
-  assert.deepEqual(calls2.slice(0, before.length).map((c) => [c[0], c[1]]), before.map((r) => [r.start, r.end]));
-  assert.deepEqual(calls2[calls2.length - 1].slice(0, 2), [3, 9]);
+  assert.deepEqual(calls2.map((c) => [c[0], c[1]]), before.map((r) => [r.start, r.end]));
+});
+
+// ---- R22: the resize redraw path (onSize) is tested directly
+const sizeDesk = () => {
+  const d = new (loadInbox())();
+  d.ui = freshUi();
+  let n = 0;
+  const cx = { notify: () => { n++; } };
+  return { d, cx, count: () => n };
+};
+
+test("R22 resize: the first size redraws; the same 16px step does not; a new step, or crossing 360 / WIDE_MIN, does", () => {
+  const { d, cx, count } = sizeDesk();
+  d.onSize(800, cx);
+  assert.equal(count(), 1, "first report");
+  assert.equal(d.winW, 800);
+  d.onSize(803, cx);
+  assert.equal(count(), 1, "same 16px step: remembered but no redraw");
+  assert.equal(d.winW, 803, "the width is still remembered");
+  d.onSize(840, cx);
+  assert.equal(count(), 2, "moved to another step: the bubble cap follows");
+  d.onSize(700, cx);
+  assert.equal(count(), 3);
+  d.onSize(519, cx);
+  assert.ok(count() >= 4, "crossing WIDE_MIN redraws");
+  assert.equal(d.narrow, true);
+  const c = count();
+  d.onSize(340, cx);
+  assert.ok(count() > c, "crossing 360 redraws");
+  assert.equal(d.compact, true);
+});
+
+test("R22 resize: a redraw held by a selection waits (dirty) and goes out when nothing holds it", () => {
+  const { d, cx, count } = sizeDesk();
+  d.onSize(800, cx);
+  const c = count();
+  d.ui.sel = true; d.ui.selAt = Date.now();
+  d.onSize(900, cx);
+  assert.equal(count(), c, "held while selecting");
+  assert.equal(d.dirty, true);
+  assert.equal(d.winW, 900, "the width is taken at once, so the next redraw uses it");
+});
+
+test("R22 resize: the redraw only comes from a width-step change (without `|| grew` a drag across steps would never redraw)", () => {
+  const body = MAIN.slice(MAIN.indexOf("  onSize(width, cx) {"), MAIN.indexOf("  capOf("));
+  assert.match(body, /n !== this\.narrow \|\| grew\)/);
+});
+
+
+// ---- R22: the selection overlay is gone; the diag lines for a drag-copy stay
+test("R22 diag: a settled selection logs its length, range and bubble id (never the text); a clear logs its age; selection state follows", () => {
+  const d = r20Desk([]);
+  d.onSel("w~abc", { text: "SECRET words", range: { start: 2, end: 9 } }, { notify() {} });
+  assert.equal(d.diagQ.length, 1);
+  assert.match(d.diagQ[0], /^\d{4}-\d\d-\d\dT[\d:.]+Z selection settled in w~[0-9a-f]{8} id=w~abc: 12 chars, range 2-9 \(#1\)$/);
+  assert.doesNotMatch(d.diagQ[0], /SECRET/, "no text content in the log");
+  assert.equal(d.ui.sel, true);
+  assert.ok(d.ui.selAt > 0);
+  d.onSel("w~abc", { text: "x" }, { notify() {} });
+  assert.match(d.diagQ[1], /range missing \(#2\)$/, "a selection without a usable range says so");
+  d.onSel("w~abc", null, { notify() {} });
+  assert.match(d.diagQ[2], /selection cleared in w~[0-9a-f]{8} id=w~abc, \d+ms after the last settle \(#3\)$/);
+  assert.equal(d.ui.sel, false);
+  assert.equal(d.ui.sels.size, 0);
+  const none = r20Desk([]);
+  none.onSel("p~1", null, { notify() {} });
+  assert.match(none.diagQ[0], /selection cleared in p~[0-9a-f]{8} id=p~1 \(#1\)$/, "no earlier settle: no age");
+});
+
+test("R22 diag: a settle or clear paints nothing and never calls notify; only a held redraw goes out once nothing holds it", () => {
+  const calls = [];
+  const d = r20Desk(calls);
+  let n = 0;
+  const cx = { notify: () => { n++; } };
+  d.onSel("w", { text: "abc", range: { start: 0, end: 3 } }, cx);
+  assert.equal(n, 0, "no redraw on a settle (the native selection is left alone)");
+  assert.equal(calls.length, 0, "no TextView highlight call");
+  d.dirty = true; // a redraw was held back
+  d.onSel("w", null, cx);
+  assert.equal(n, 1, "the held redraw goes out after the clear");
+  assert.equal(d.dirty, false);
+});
+
+test("R22: no selection overlay machinery is left in main.js or inbox.cjs; the pointer and list handlers still clear selections", () => {
+  const CJS = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8");
+  for (const [name, src] of [["main.js", MAIN], ["inbox.cjs", CJS]]) {
+    assert.doesNotMatch(src, /hlSkip|dropHl|mdSeen|ui\.hl\b|HL_ECHO_MS/, `${name}: no overlay state`);
+    assert.doesNotMatch(src, /tintHex\([^)]*"sel"\)|tintWarn\([^)]*"sel"\)/, `${name}: no selection tint call`);
+  }
+  assert.equal(I.tintHex(DARK, "sel"), null, "the selection tint kind is gone");
+  assert.ok(I.tintHex(DARK, "bold"), "the bold band stays");
+  assert.match(MAIN, /on_mouse_down_out\(\(_e, c\) => \{ this\.ui\.press = false; if \(this\.ui\.sel\) \{ this\.ui\.sels\.clear\(\); this\.ui\.sel = false; \}/);
 });

@@ -1279,13 +1279,12 @@ const SEL_HOLD_MS = 120000, PRESS_HOLD_MS = 8000;
 // st = {sel: a selection is settled, selAt, press: the pointer is down in the list, pressAt}. While true, background redraws wait.
 const quietNow = (st, now) => Boolean((st?.sel && now - (st.selAt || 0) < SEL_HOLD_MS) || (st?.press && now - (st.pressAt || 0) < PRESS_HOLD_MS));
 
-// ---- highlight colours: the band behind **bold** runs and the overlay on a settled selection, both from the theme's own tokens.
+// ---- highlight colours: the band behind **bold** runs, from the theme's own tokens.
 // A colour is "#rrggbb" + an alpha byte. The alpha starts strong (so the area is clearly visible) and steps down only while the text colour
 // would stop being readable on the blended result (contrast < HL_MIN_CONTRAST), so it holds on a light and a dark theme alike.
 const HL_MIN_CONTRAST = 3.5;
 const HL_KINDS = {
   bold: { alpha: 0x73, floor: 0x40, tokens: ["accent", "ansi4", "foreground"] }, // about 45%
-  sel: { alpha: 0xb8, floor: 0x60, tokens: ["accent", "ansi4", "working"] }, // about 72%: stronger than bold, so a selected area stands out
 };
 const HEX6 = /^#[0-9a-f]{6}$/i;
 // A theme colour as "#rrggbb": "#rgb" is expanded and "#rrggbbaa" loses its alpha (the tint sets its own); anything else -> null.
@@ -1327,16 +1326,21 @@ function selRangeOf(sel, len) {
 
 // ---- bubble width: every message bubble (mine on the right, the PO's and the leaders' on the left) stops at a share of the chat column, so a long
 // text wraps inside it and never reaches the opposite edge. `colW` is the chat column's width in px (null = not known yet).
-const BUBBLE_SHARE = 0.75, BUBBLE_SIDE = 90, BUBBLE_MIN_CAP = 120;
+const BUBBLE_SHARE = 0.75, BUBBLE_SIDE = 90, BUBBLE_MIN_CAP = 40;
 // The chat column: the view's width less the room list beside it (none in a strip).
 const chatColW = (winW, strip, narrow, roomW, slimW) => { const w = Number(winW); return Number.isFinite(w) && w > 0 ? Math.max(0, w - (strip ? 0 : narrow ? slimW : roomW)) : null; };
-// The px a bubble may take: 75% of the column, and always leaving BUBBLE_SIDE px (the copy chip, the time, the gutters) on its other side.
-// `minInner` keeps room for the widest picture in it. null: width unknown, the caller uses a percentage.
+// The px a bubble may take: 75% of the column, and always leaving BUBBLE_SIDE px (the copy chip, the time, the gutters) on its other side, so
+// the bubble and its chip fit the column down to narrow docks (150px column -> 60, 200 -> 110, 260 -> 170); only a column under ~130px gets the
+// BUBBLE_MIN_CAP floor (a few characters), and the cap is never wider than the column itself. `minInner` is the widest picture (with its padding):
+// when it fits beside the chip (minInner <= column - BUBBLE_SIDE) the cap is raised to it, as before; a column narrower than that keeps the cap
+// and the caller scales the pictures down to it. null: width unknown, the caller uses a percentage.
 function bubbleCap(colW, minInner = 0) {
   const w = Number(colW);
   if (!(Number.isFinite(w) && w > 0)) return null;
-  const cap = Math.max(BUBBLE_MIN_CAP, Math.min(Math.floor(w * BUBBLE_SHARE), Math.floor(w - BUBBLE_SIDE)));
-  return Math.max(cap, Math.ceil(Number(minInner) || 0));
+  const room = Math.floor(w - BUBBLE_SIDE);
+  const cap = Math.min(Math.floor(w), Math.max(BUBBLE_MIN_CAP, Math.min(Math.floor(w * BUBBLE_SHARE), room)));
+  const pic = Math.ceil(Number(minInner) || 0);
+  return pic > cap && pic <= room ? pic : cap;
 }
 
 // chat:end
