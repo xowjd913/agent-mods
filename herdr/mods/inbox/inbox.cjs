@@ -32,8 +32,8 @@ function parseLines(text) {
       leader: typeof o.leader === "string" ? o.leader : "",
       terminal: typeof o.terminal === "string" ? o.terminal : "",
       kind: o.kind,
-      title: typeof o.title === "string" ? o.title : "",
-      body: typeof o.body === "string" ? o.body : "",
+      title: typeof o.title === "string" ? unwrapTags(o.title).replace(/\n+/g, " ") : "", // a report that carries the <hc from=...> wrapper shows only its words
+      body: typeof o.body === "string" ? unwrapTags(o.body) : "",
       link: typeof o.link === "string" ? o.link : "",
       po: cleanPoId(o.po), // the PO id the leader reports under (optional; "" when absent or not a valid id)
     });
@@ -201,9 +201,11 @@ const INDENT = "\u00a0\u00a0\u00a0\u00a0";
 // [{t:"prose", html} | {t:"h", html, text} | {t:"code", text, html, depth}]: headings are their own parts (the screen styles them; TextView ignores <strong>), "- " items a real list, numbered items paragraphs that keep their own number.
 function toParts(blocks) {
   const parts = [];
-  let html = "", list = false;
+  let html = "", list = false, md = [];
   const closeList = () => { if (list) { html += "</ul>"; list = false; } };
-  const flush = () => { closeList(); if (html) parts.push({ t: "prose", html }); html = ""; };
+  const flush = () => { closeList(); if (html) parts.push({ t: "prose", html, md: md.join("\n") }); html = ""; md = []; };
+  // the Markdown source of a prose line (the segments keep the writer's ** and _): used by the bubble, which draws it as Markdown
+  const src = (segs) => (segs ?? []).map((x) => x.k === "c" ? "`" + x.v + "`" : x.k === "l" ? x.v : x.v).join("");
   for (const b of blocks ?? []) {
     if (b.t === "code") { flush(); parts.push({ t: "code", text: b.text, html: escapeHtml(b.text), depth: b.depth ?? 0 }); continue; }
     if (b.t === "gap") { closeList(); continue; }
@@ -211,11 +213,14 @@ function toParts(blocks) {
     if (b.t === "li" && b.mark === "•" && !b.depth) {
       if (!list) { html += "<ul>"; list = true; }
       html += `<li>${segsHtml(b.segs)}</li>`;
+      md.push(`- ${src(b.segs)}`);
       continue;
     }
     closeList();
     const pad = INDENT.repeat(Math.min(b.depth ?? 0, 4));
     html += b.t === "li" ? `<p>${pad}${escapeHtml(b.mark)} ${segsHtml(b.segs)}</p>` : `<p>${pad}${segsHtml(b.segs)}</p>`;
+    const mpad = "  ".repeat(Math.min(b.depth ?? 0, 4));
+    md.push(b.t === "li" ? `${mpad}${b.mark === "•" ? "-" : b.mark} ${src(b.segs)}` : `${mpad}${src(b.segs)}`);
   }
   flush();
   return parts;
@@ -295,10 +300,12 @@ function parsePoLines(text) {
       if (ms > 0 && imgs.length) pics.push({ ms, pid: typeof o.pid === "string" ? o.pid : "", imgs });
       continue;
     }
-    if (!o || (o.kind !== "say" && o.kind !== "me") || typeof o.text !== "string" || !o.text.trim()) continue;
+    if (!o || (o.kind !== "say" && o.kind !== "me") || typeof o.text !== "string") continue;
+    const body = unwrapTags(o.text); // no <hc ...> / <pasted_content ...> wrapper tags in what the desk draws or compares
+    if (!body.trim()) continue;
     const ms = Date.parse(o.ts);
     if (!(ms > 0)) continue;
-    out.push({ ts: new Date(ms).toISOString(), ms, text: o.text.trim().slice(0, MAX_PO_TEXT), to: typeof o.to === "string" ? o.to.trim() : "", ...(o.kind === "me" ? { me: true } : {}), pid: typeof o.pid === "string" ? o.pid : "" });
+    out.push({ ts: new Date(ms).toISOString(), ms, text: body.trim().slice(0, MAX_PO_TEXT), to: typeof o.to === "string" ? o.to.trim() : "", ...(o.kind === "me" ? { me: true } : {}), pid: typeof o.pid === "string" ? o.pid : "" });
   }
   // An image line belongs to the prompt with its prompt id, else to the latest prompt within 2 minutes before it.
   for (const g of pics) {
@@ -757,15 +764,18 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
   const sentBy = (mine ?? []).filter((m) => m.po === room && !["failed", "nopane", "gone"].includes(m.status));
   const taken = new Set();
   const tnorm = (v) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 2000);
+  // Compared without wrapper tags (the terminal's paste wrapper must not make a copy look different) and, as a second chance, by words + pictures.
+  const full = (v) => tnorm(unwrapTags(v));
+  const core = (v) => { const sp = splitImgs(v); return `${tnorm(sp.text)}|${sp.imgs.join(",")}`; };
   if (room && room !== PO_OTHER) for (const x of says ?? []) {
     if (x.me) {
-      const t = tnorm(x.text);
-      const i = sentBy.findIndex((m, j) => !taken.has(j) && (x.ms - (Number(m.ms) || 0)) >= -60000 && (x.ms - (Number(m.ms) || 0)) <= 11 * 60000 && (tnorm(m.line) === t || tnorm(m.text) === t));
+      const t = full(x.text), c = core(x.text);
+      const i = sentBy.findIndex((m, j) => !taken.has(j) && (x.ms - (Number(m.ms) || 0)) >= -60000 && (x.ms - (Number(m.ms) || 0)) <= 11 * 60000 && (full(m.line) === t || full(m.text) === t || (c.length > 1 && (core(m.line) === c || core(m.text) === c))));
       if (i >= 0) { taken.add(i); continue; }
-      out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
+      out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
       continue;
     }
-    out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "" });
+    out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: x.to || "" });
   }
   for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
   // Two entries with the same key (the same text at the same ms) would share one element id: the later ones get a #n suffix.
@@ -940,7 +950,7 @@ const atBottom = (y, viewport, content) => (Number(y) || 0) + (Number(viewport) 
 // A message text as HTML for a TextView: escaped, one paragraph per line, http(s) links clickable (trailing punctuation stays outside).
 const escHtml = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 function chatHtml(text) {
-  return String(text ?? "").replace(/\r\n?/g, "\n").split("\n").map((line) => {
+  return unwrapTags(text).replace(/\r\n?/g, "\n").split("\n").map((line) => {
     let out = "", at = 0;
     for (const m of line.matchAll(/https?:\/\/[^\s<>"]+/g)) {
       const url = m[0].replace(/[.,!?:;)\]]+$/, "");
@@ -1036,11 +1046,37 @@ function imgOk(root, p) {
 }
 // The path `image()` loads: relative to the app root ("data/inbox/img/<file>"), or "" when the picture may not be drawn.
 function imgRel(root, p) { return imgOk(root, p) ? IMG_SUB + slashed(p).slice(slashed(root).replace(/\/+$/, "").length + 1 + IMG_SUB.length) : ""; }
+// Wrapper tags that are not part of a message: <hc from="..."> ... </hc> (a message another terminal sent to this one) and
+// <pasted_content id="..."> ... </pasted_content id="..."> (what the terminal puts around a paste), also with the backslash forms
+// (<\pasted_content ...>, <\/pasted_content ...>). Only a tag that opens a line, or a closing tag that ends one, is removed: a text that
+// merely mentions a tag in the middle of a sentence keeps it. Pure.
+const WRAP_OPEN = /^[ \t]*<[\\/]{0,2}(?:hc|pasted_content)\b[^<>\n]*>[ \t]*/gim;
+const WRAP_CLOSE = /[ \t]*<\\?\/(?:hc|pasted_content)\b[^<>\n]*>[ \t]*$/gim;
+function unwrapTags(text) {
+  const t = String(text ?? "");
+  if (!t.includes("<")) return t;
+  return t.replace(/\r\n?/g, "\n").replace(WRAP_OPEN, "").replace(WRAP_CLOSE, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+// A message text as Markdown for a TextView.markdown(...).raw_html(false): wrapper tags removed first (they would print literally), a line that
+// is only 【...】 made bold, images switched off (![x](y) -> a plain link), and single line breaks kept as line breaks (Markdown would join them).
+// Code fences are left as written. Never produces HTML: the view shows tags as text. Pure.
+function mdText(text) {
+  const src = unwrapTags(text).replace(/\r\n?/g, "\n").split("\n");
+  let fence = false;
+  const rows = src.map((ln) => {
+    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; return { s: ln, flow: false }; }
+    if (fence) return { s: ln, flow: false };
+    let s = ln.replace(/!\[/g, "!\\[");
+    if (/^\s*【[^】\n]*】[:：]?\s*$/.test(s)) s = `**${s.trim()}**`;
+    return { s, flow: true };
+  });
+  return rows.map((r, i) => (r.flow && r.s.trim() && rows[i + 1]?.flow && rows[i + 1].s.trim() && !/ {2}$/.test(r.s) ? r.s + "  " : r.s)).join("\n");
+}
 // A message text -> {text without its "[image: ...]" lines, imgs: the paths those lines named}.
 function splitImgs(text) {
   const imgs = [];
   const keep = [];
-  for (const ln of String(text ?? "").split("\n")) {
+  for (const ln of unwrapTags(text).split("\n")) {
     const m = IMG_LINE.exec(ln.trim());
     if (m && imgs.length < MAX_IMGS) imgs.push(m[1]); else keep.push(ln);
   }
@@ -1115,7 +1151,7 @@ function diagAppend(lines, root = appRoot()) {
   try { try { fs.fchmodSync(fd, 0o600); } catch {} fs.writeSync(fd, text); } finally { fs.closeSync(fd); }
   return f;
 }
-module.exports = { IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { unwrapTags, mdText, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)

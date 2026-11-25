@@ -1945,9 +1945,9 @@ test("startWatch·stopWatch·pollStatus: 가짜 런타임으로 감시 한 번, 
   self.stopWatch();
 });
 
-test("typingRow·full: ··· 말풍선은 전체 필터에서만 그리고, 안 읽은 수·따라가기·위치 지도에는 넣지 않는다", () => {
+test("typingRow·full: ··· 말풍선은 모든 필터에서 그리고, 안 읽은 수·따라가기·위치 지도에는 넣지 않는다", () => {
   const src = mainSrc();
-  assert.match(src, /if \(v\.filter === "all"\) for \(const x of typingNow\(v\.terms, v\.pick, namesMemo\(\)\)\) blocks\.push\(this\.typingRow\(t, x\)\);/);
+  assert.match(src, /\n    for \(const x of typingNow\(v\.terms, v\.pick, namesMemo\(\)\)\) blocks\.push\(this\.typingRow\(t, x\)\);/);
   const row = methodOf(src, "  typingRow(t, x) {", "  render(cx)");
   assert.match(row, /"···"/);
   assert.ok(!/on_mouse_down|text_view|TextView|selectable/.test(row)); // 드래그를 가로채지 않는다

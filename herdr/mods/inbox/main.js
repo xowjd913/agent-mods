@@ -250,15 +250,18 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
   const sentBy = (mine ?? []).filter((m) => m.po === room && !["failed", "nopane", "gone"].includes(m.status));
   const taken = new Set();
   const tnorm = (v) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 2000);
+  // Compared without wrapper tags (the terminal's paste wrapper must not make a copy look different) and, as a second chance, by words + pictures.
+  const full = (v) => tnorm(unwrapTags(v));
+  const core = (v) => { const sp = splitImgs(v); return `${tnorm(sp.text)}|${sp.imgs.join(",")}`; };
   if (room && room !== PO_OTHER) for (const x of says ?? []) {
     if (x.me) {
-      const t = tnorm(x.text);
-      const i = sentBy.findIndex((m, j) => !taken.has(j) && (x.ms - (Number(m.ms) || 0)) >= -60000 && (x.ms - (Number(m.ms) || 0)) <= 11 * 60000 && (tnorm(m.line) === t || tnorm(m.text) === t));
+      const t = full(x.text), c = core(x.text);
+      const i = sentBy.findIndex((m, j) => !taken.has(j) && (x.ms - (Number(m.ms) || 0)) >= -60000 && (x.ms - (Number(m.ms) || 0)) <= 11 * 60000 && (full(m.line) === t || full(m.text) === t || (c.length > 1 && (core(m.line) === c || core(m.text) === c))));
       if (i >= 0) { taken.add(i); continue; }
-      out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
+      out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
       continue;
     }
-    out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "" });
+    out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: x.to || "" });
   }
   for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
   // Two entries with the same key (the same text at the same ms) would share one element id: the later ones get a #n suffix.
@@ -433,7 +436,7 @@ const atBottom = (y, viewport, content) => (Number(y) || 0) + (Number(viewport) 
 // A message text as HTML for a TextView: escaped, one paragraph per line, http(s) links clickable (trailing punctuation stays outside).
 const escHtml = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 function chatHtml(text) {
-  return String(text ?? "").replace(/\r\n?/g, "\n").split("\n").map((line) => {
+  return unwrapTags(text).replace(/\r\n?/g, "\n").split("\n").map((line) => {
     let out = "", at = 0;
     for (const m of line.matchAll(/https?:\/\/[^\s<>"]+/g)) {
       const url = m[0].replace(/[.,!?:;)\]]+$/, "");
@@ -529,11 +532,37 @@ function imgOk(root, p) {
 }
 // The path `image()` loads: relative to the app root ("data/inbox/img/<file>"), or "" when the picture may not be drawn.
 function imgRel(root, p) { return imgOk(root, p) ? IMG_SUB + slashed(p).slice(slashed(root).replace(/\/+$/, "").length + 1 + IMG_SUB.length) : ""; }
+// Wrapper tags that are not part of a message: <hc from="..."> ... </hc> (a message another terminal sent to this one) and
+// <pasted_content id="..."> ... </pasted_content id="..."> (what the terminal puts around a paste), also with the backslash forms
+// (<\pasted_content ...>, <\/pasted_content ...>). Only a tag that opens a line, or a closing tag that ends one, is removed: a text that
+// merely mentions a tag in the middle of a sentence keeps it. Pure.
+const WRAP_OPEN = /^[ \t]*<[\\/]{0,2}(?:hc|pasted_content)\b[^<>\n]*>[ \t]*/gim;
+const WRAP_CLOSE = /[ \t]*<\\?\/(?:hc|pasted_content)\b[^<>\n]*>[ \t]*$/gim;
+function unwrapTags(text) {
+  const t = String(text ?? "");
+  if (!t.includes("<")) return t;
+  return t.replace(/\r\n?/g, "\n").replace(WRAP_OPEN, "").replace(WRAP_CLOSE, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+// A message text as Markdown for a TextView.markdown(...).raw_html(false): wrapper tags removed first (they would print literally), a line that
+// is only 【...】 made bold, images switched off (![x](y) -> a plain link), and single line breaks kept as line breaks (Markdown would join them).
+// Code fences are left as written. Never produces HTML: the view shows tags as text. Pure.
+function mdText(text) {
+  const src = unwrapTags(text).replace(/\r\n?/g, "\n").split("\n");
+  let fence = false;
+  const rows = src.map((ln) => {
+    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; return { s: ln, flow: false }; }
+    if (fence) return { s: ln, flow: false };
+    let s = ln.replace(/!\[/g, "!\\[");
+    if (/^\s*【[^】\n]*】[:：]?\s*$/.test(s)) s = `**${s.trim()}**`;
+    return { s, flow: true };
+  });
+  return rows.map((r, i) => (r.flow && r.s.trim() && rows[i + 1]?.flow && rows[i + 1].s.trim() && !/ {2}$/.test(r.s) ? r.s + "  " : r.s)).join("\n");
+}
 // A message text -> {text without its "[image: ...]" lines, imgs: the paths those lines named}.
 function splitImgs(text) {
   const imgs = [];
   const keep = [];
-  for (const ln of String(text ?? "").split("\n")) {
+  for (const ln of unwrapTags(text).split("\n")) {
     const m = IMG_LINE.exec(ln.trim());
     if (m && imgs.length < MAX_IMGS) imgs.push(m[1]); else keep.push(ln);
   }
@@ -1554,7 +1583,7 @@ export default class Inbox extends View {
       .child(div().truncate().text_size(10.5).text_color(t.dim).child(target ? `받는 PO: ${target.label}` : "받는 PO가 없습니다 — PO를 고르세요"))
       .when(this.pics.length > 0 || this.picBusy > 0, (el) => el.child(h_flex().gap(6).items_center().flex_wrap()
         .children(this.pics.map((x, i) => h_flex().id(`pic-${i}`).flex_none().h(44).pl(4).pr(6).gap(6).items_center().rounded(8).bg(t.raised).border(1).border_color(t.border)
-          .child(image(x.path).w(fitImg(x.w, x.h, 52, 36).w).h(fitImg(x.w, x.h, 52, 36).h).rounded(4))
+          .child(this.thumb(t, x))
           .child(div().max_w(110).truncate().text_size(10.5).text_color(t.muted).child(String(x.path).split(/[\\/]/).pop()))
           .child(div().id(`pic-x-${i}`).px(4).rounded(5).text_size(12).text_color(t.dim).cursor_pointer().on_mouse_down("left", stop)
             .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, c) => this.removePic(i, c)).tooltip("이 그림 빼기").child("✕"))))
@@ -1667,6 +1696,23 @@ export default class Inbox extends View {
   mono() { return window()?.platform === "windows" ? "Consolas" : window()?.platform === "macos" ? "Menlo" : "monospace"; }
 
   // Card text you can drag-select and copy with Cmd+C. Links inside open through openUrl. A press here must not drag the window or toggle anything.
+  // The small picture of a pending image in the box (above the input). image() loads only paths under the app folder: the picture was saved by the
+  // helper in data/inbox/img, so it is given as that relative path; one that cannot be drawn stays an empty frame.
+  thumb(t, x) {
+    const f = fitImg(x.w, x.h, 52, 36);
+    const rel = imgRel(this.data?.root ?? "", x.path);
+    return rel
+      ? div().flex_none().w(f.w).h(f.h).rounded(4).overflow_hidden().child(image(rel).w(f.w).h(f.h))
+      : div().flex_none().w(f.w).h(f.h).rounded(4).bg(t.hover);
+  }
+
+  // A message as Markdown (bold, headings, lists, `code`, links; no raw HTML: tags show as text). The wrapper tags are removed first (mdText).
+  // Selectable like text(); a link opens only when it is http(s) (openUrl ignores everything else).
+  md(id, src) {
+    this.tvN = (this.tvN ?? 0) + 1;
+    return TextView.markdown(id, mdText(src)).raw_html(false).selectable(true).on_link_click((url, c) => openUrl(url, c)).on_selection_change((sel, c) => this.onSel(id, sel, c));
+  }
+
   text(id, html) {
     this.tvN = (this.tvN ?? 0) + 1;
     return TextView.html(id, html).selectable(true).on_link_click((url, c) => openUrl(url, c)).on_selection_change((sel, c) => this.onSel(id, sel, c));
@@ -1693,7 +1739,7 @@ export default class Inbox extends View {
       const key = `${id}-${i}`;
       if (p.t === "code") return div().min_w(0).pl(p.depth ? p.depth * 14 + 18 : 0).child(this.codeBlock(t, p.text, p.html, `copy-${key}`));
       if (p.t === "h") return div().min_w(0).pt(4).child(this.heading_text(t, key, p.html, 14.5));
-      return div().min_w(0).text_size(12.5).text_color(t.foreground).child(this.text(key, p.html));
+      return div().min_w(0).text_size(12.5).text_color(t.foreground).child(typeof p.md === "string" && p.md ? this.md(key, p.md) : this.text(key, p.html));
     }));
   }
 
@@ -1796,7 +1842,7 @@ export default class Inbox extends View {
             .when(Boolean(e.to), (x) => x.child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(`→ ${shortName(e.to)}`)))))
           .child(h_flex().min_w(0).gap(6).items_end()
             .child(div().flex_1().min_w(0).px(12).py(9).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(12.5).text_color(t.foreground)
-              .child(this.text(id, chatHtml(e.text))))
+              .child(this.md(id, e.text)))
             .child(when(e.ms))));
     }
     const a = e.waiting ? v.asks.find((x) => x.s.leader === e.leader) : null;
@@ -1858,9 +1904,10 @@ export default class Inbox extends View {
       blocks.push(div().flex_none().p(14).text_size(12).text_color(t.dim)
         .child(!this.data ? "불러오는 중…" : v.pick ? "이 방에는 아직 대화가 없습니다." : "PO가 없습니다."));
     }
-    // The "···" bubbles of whoever is writing now (the room's PO and leaders whose status is working): only in the 전체 filter, after the
-    // last message, and nothing else reads them (not the unread counts, not `seenNext`, not the follow key, not the spot map).
-    if (v.filter === "all") for (const x of typingNow(v.terms, v.pick, namesMemo())) blocks.push(this.typingRow(t, x));
+    // The "···" bubbles of whoever is writing now (the room's PO and leaders whose hc status is working): in EVERY filter (a chip hides
+    // messages, not what is happening), after the last message, and nothing else reads them (not the unread counts, not `seenNext`, not the
+    // follow key, not the spot map).
+    for (const x of typingNow(v.terms, v.pick, namesMemo())) blocks.push(this.typingRow(t, x));
     // Follow the newest: a new message scrolls to the bottom when the room just opened or the person already was at the bottom;
     // a person who scrolled up keeps their place. The handle's numbers are those of the last layout.
     const key = tlKey(`${v.pick}~${v.filter}`, v.shown); // a new filter scrolls to the newest like a new room
