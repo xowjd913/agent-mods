@@ -90,15 +90,16 @@ test("main.js: 요약 칸은 key·keep이 있는 떠 있는 창으로 채팅 보
 // 패널이 PO 터미널에 넣는 길은 하나(deliver): 클립보드 → PO 칸 포커스 → 붙여넣기 → Enter(hc keys). hc send는 쓰지 않는다.
 const mainSrc = () => fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
 const methodOf = (src, head, next) => { const a = src.indexOf(head), b = src.indexOf(next, a + 1); assert.ok(a > 0 && b > a, head); return src.slice(a, b); };
+const deliverOf = (src) => methodOf(src, '  deliver(po, text, c, rec = null, ok = null, id = "", opened = false) {', "  // A send to a PO with no pane");
 
 test("main.js: 답 버튼·답 상자·N안 칩·채팅은 모두 deliver() 한 길로 붙여넣고 Enter까지 보낸다", () => {
   const src = mainSrc();
   assert.ok(!/hc\(\["send"/.test(src) && !/terminal\.send|send_key/i.test(src)); // hc send는 <hc from=...> 꼬리표가 붙어 쓰지 않는다
-  const send = methodOf(src, "  send(a, text, cx) {", "  clearBox(a");
+  const send = methodOf(src, "  send(a, text, cx, kind = \"answer\") {", "  clearBox(a");
   const chat = methodOf(src, "  sendChat(c) {", "  // The chat footer");
-  const del = methodOf(src, "  deliver(po, text, c) {", "  // A panel answer:");
+  const del = deliverOf(src);
   assert.match(send, /this\.deliver\(po, answerLine\(/);
-  assert.match(chat, /this\.deliver\(po, p\.text, c\)/);
+  assert.match(chat, /this\.deliver\(po, p\.text, c, \{/);
   assert.ok(!/run\("terminal\.paste"|submitPo|hc\(/.test(send + chat)); // 붙여넣기·Enter는 deliver 안에서만
   // 순서: 클립보드 → 포커스 → 붙여넣기 → Enter
   const at = (re) => del.search(re);
@@ -109,41 +110,59 @@ test("main.js: 답 버튼·답 상자·N안 칩·채팅은 모두 deliver() 한 
   assert.ok(!/Enter를 눌러 보내세요|PO에서 Enter로 보내면 리더가 받고/.test(src)); // 이제 보내므로 '직접 Enter' 안내는 막힌 경우에만
 });
 
-test("main.js: deliver — 막힌 PO(blocked)는 붙여넣기만, 칸 없는 PO는 열기만 하고 둘 다 Enter를 누르지 않는다", () => {
-  const del = methodOf(mainSrc(), "  deliver(po, text, c) {", "  // A panel answer:");
+test("main.js: deliver — 막힌 PO(blocked)는 붙여넣기만, 칸 없는 PO는 열고 칸이 생기면 한 번만 자동으로 보낸다", () => {
+  const src = mainSrc();
+  const del = deliverOf(src);
   const nopane = del.slice(del.indexOf("if (!(panes()"), del.indexOf("const blocked"));
   assert.match(nopane, /terminal\.keep/);
-  assert.match(nopane, /return "nopane"/);
-  assert.ok(!/submitPo/.test(nopane)); // 칸이 없으면 Enter 없음
-  assert.match(nopane, /보내지는 않았습니다/);
+  assert.match(nopane, /this\.awaitPane\(/);
+  assert.match(nopane, /return "opening"/);
+  assert.match(nopane, /if \(opened\)[^\n]*return "nopane"/); // 한 번 연 뒤에도 칸이 없으면 다시 열지 않고 멈춘다
+  assert.ok(!/submitPo/.test(nopane)); // 칸이 없는 채로는 Enter 없음
+  assert.match(del, /if \(!opened && this\.opening\.has\(po\)\)[^\n]*return "busy"/); // 같은 PO에 둘째 보내기는 시작하지 않는다(이중 전송 없음)
+  assert.ok(del.indexOf("const blocked") < del.indexOf('run("terminal.paste"'));
   const afterPaste = del.slice(del.indexOf('run("terminal.paste"'));
-  assert.ok(afterPaste.indexOf('=== "blocked"') < 0 && del.indexOf('=== "blocked"') < del.indexOf('run("terminal.paste"'));
-  assert.ok(afterPaste.indexOf("if (blocked)") >= 0 && afterPaste.indexOf("return \"held\"") < afterPaste.indexOf("this.submitPo(")); // blocked는 submitPo 앞에서 끝난다
-  assert.match(del, /return "failed"/); // 붙여넣기 실패도 Enter 없음
-  assert.ok(del.indexOf('return "failed"') < del.indexOf("this.submitPo("));
-  // 닫기·지우기는 PO에 닿았을 때(sent·held)만
-  const send = methodOf(mainSrc(), "  send(a, text, cx) {", "  clearBox(a");
+  assert.ok(afterPaste.indexOf("if (blocked)") >= 0 && afterPaste.indexOf('return "held"') < afterPaste.indexOf("this.submitPo(")); // blocked는 submitPo 앞에서 끝난다
+  assert.ok(afterPaste.indexOf('return "failed"') >= 0 && afterPaste.indexOf('return "failed"') < afterPaste.indexOf("this.submitPo(")); // 붙여넣기 실패도 Enter 없음
+  // awaitPane: 300ms마다 6초까지 보고, 칸이 보이면 붙여넣기가 들어갈 틈 뒤에 opened=true로 한 번만 deliver, 끝내 안 열리면 nopane
+  const aw = methodOf(src, "  awaitPane(po, text, c, rec, ok, id) {", "  isBlocked(po)");
+  assert.match(aw, /this\.opening\.add\(po\)/);
+  assert.match(aw, /this\.mark\(id, "opening"\)/);
+  assert.match(aw, /PANE_WAIT_MS/);
+  assert.match(aw, /PANE_POLL_MS/);
+  assert.match(aw, /cx\.timer\.after\(PASTE_SETTLE_MS, go\)/);
+  assert.match(aw, /this\.deliver\(po, text, c2, rec, ok, id, true\)/);
+  assert.match(aw, /this\.mark\(id, "nopane"\)/);
+  assert.equal((aw.match(/this\.opening\.delete\(po\)/g) ?? []).length, 2); // 열렸을 때와 포기했을 때 모두 잠금을 푼다
+  assert.match(src, /const PANE_POLL_MS = 300, PANE_WAIT_MS = 6000/);
+  // 닫기·지우기는 PO에 닿았을 때(sent·held), 칸을 여는 중이면 글이 가는 순간(ok)에
+  const send = methodOf(src, "  send(a, text, cx, kind = \"answer\") {", "  clearBox(a");
   assert.match(send, /r === "sent" \|\| r === "held"/);
   assert.match(send, /this\.clearBox\(a, r\)/);
+  assert.match(send, /\(r2\) => \{ this\.clearBox\(a, r2\); \}/);
 });
 
 test("main.js: 보내도 PO 데스크는 닫히지 않고(Dock·창·페인), 페인이면 Enter 뒤에 키보드를 돌려준다", () => {
   const src = mainSrc();
-  const send = methodOf(src, "  send(a, text, cx) {", "  clearBox(a");
+  const send = methodOf(src, "  send(a, text, cx, kind = \"answer\") {", "  clearBox(a");
   const chat = methodOf(src, "  sendChat(c) {", "  // The chat footer");
   const sub = methodOf(src, "  submitPo(po, c, settle", "  sendChat(c) {");
-  const del = methodOf(src, "  deliver(po, text, c) {", "  // A panel answer:");
+  const del = deliverOf(src);
   for (const part of [send, chat, sub, del]) assert.ok(!/closeOverlay/.test(part));
   // 닫기는 창의 닫기 버튼과 '옆에 열기'(창 → 페인)에만 남는다
   assert.equal((src.match(/closeOverlay\(/g) ?? []).length, 2); // openBeside(창 → 페인)와 닫기 버튼, 두 곳뿐
-  // 키보드를 돌려받는 길: 보내기 전에 포커스가 모드 칸에 있었으면 그 칸 id를 적어 두고 Enter 뒤에 pane.focus
+  // 키보드를 돌려받는 길(모든 모드): 보내기 전에 포커스가 있던 칸(아무 칸) id를 적어 두고 Enter 뒤에 pane.focus
   assert.match(del, /focused\(\)\?\.pane/);
-  assert.match(del, /p\.pane === fp && p\.mod/);
-  assert.match(del, /this\.submitPo\(po, c, [^\n]*, back\)/);
-  assert.match(sub, /run\("pane\.focus", \{ pane: back \}\)/);
-  assert.match(sub, /Promise\.resolve\(r\)[^\n]*\.then\(\(\) => done\(cx\)\)/); // Enter 명령이 끝난 뒤에만 돌려준다(done은 press에서만 불린다)
-  assert.equal((sub.match(/done\(cx\)/g) ?? []).length, 2);
-  assert.match(sub, /this\.chat\.focus\(\)/);
+  assert.ok(!/p\.mod/.test(del)); // 모드 칸만이 아니라 어느 칸이든
+  assert.match(del, /this\.submitPo\(po, c, [^\n]*, back, id\)/);
+  const rs = methodOf(src, "  restore(back, c, id", "  // One line of the person");
+  assert.match(rs, /run\("pane\.focus", \{ pane: back \}\)/);
+  assert.match(rs, /this\.chat\.focus\(\)/);
+  assert.match(sub, /this\.restore\(back, cx, id\)/);
+  assert.equal((sub.match(/this\.restore\(/g) ?? []).length, 2);
+  assert.match(del, /this\.restore\(back, c, id, PASTE_SETTLE_MS\)/); // 막힌 PO에 붙여 넣기만 한 뒤에도 돌려준다
+  assert.match(sub, /this\.mark\(id, "sent"\)/); // 기록은 Enter가 지나간 뒤에야 sent
+  assert.match(sub, /this\.mark\(id, "noenter"\)/);
   // 붙여 넣은 글이 길면 Enter까지 더 기다린다
   assert.match(del, /PASTE_SETTLE_MS \+ Math\.min\(600, /);
 });
@@ -434,7 +453,7 @@ test("main.js: 방 목록과 방 칸이 행의 전체 높이를 채운다(타임
   assert.match(src, /id\("po-rooms"\)\.flex_none\(\)\.w\(SLIM_W\)\.h_full\(\)/);
   // the timeline itself keeps taking the rest of the column above the pinned chat box
   assert.match(src, /id\("inbox-list"\)[^\n]*\.flex_1\(\)\.min_h\(0\)/);
-  assert.match(src, /\.child\(lines\)\s*\n\s*\.child\(this\.chatBox\(t, v\)\)/);
+  assert.match(src, /\.child\(lines\)\s*\n\s*\.when\(Boolean\(panel\), \(el\) => el\.child\(panel\)\)\s*\n\s*\.child\(this\.chatBox\(t, v\)\)/);
 });
 
 test("답함 표시: 실제 lead-sched-acct 순서(결정·답, 확인·답, 결정·답)는 모두 답함이고 열린 것이 없다", () => {
@@ -984,7 +1003,7 @@ test("main.js: 채팅 입력은 Textarea, Enter는 붙여넣고 hc keys enter까
   assert.match(src, /=== "blocked"/);
   assert.match(src, /enterIntent\(e\?\.key, Boolean\(e\?\.modifiers\?\.shift\)\)/);
   assert.match(src, /PO에 보내기/);
-  const body = methodOf(src, "  deliver(po, text, c) {", "  // A panel answer:");
+  const body = deliverOf(src);
   assert.ok(body.indexOf('run("terminal.paste"') > 0 && body.indexOf("this.submitPo(") > body.indexOf('run("terminal.paste"')); // 붙여넣은 뒤에 Enter
   assert.match(src, /import \{[^}]*\bhc\b[^}]*\} from "herdr"/);
 });
@@ -997,7 +1016,7 @@ test("main.js: 창은 고른 PO 하나만 보이고(카드·보고·@ 목록·�
   assert.match(src, /chatTarget\(terms, p\.to, v\.pick\)/);
   assert.match(src, /for \(const x of mine \?\? \[\]\) if \(x\.po === room\)/); // 내 글은 그 방의 것만
   assert.match(src, /this\.data\?\.po\?\.\[id\]/); // PO 답글도 그 방의 것만
-  assert.match(src, /po: v\.pick \}/); // 보낸 글에 PO를 적어 둔다
+  assert.match(src, /po: v\.pick, kind: "chat" \}/); // 보낸 글에 PO를 적어 둔다
   assert.match(src, /setShared\(PICK_KEY, id\)/);
   assert.match(src, /child\("PO 데스크"\)/);
   assert.ok(!/받은편지함/.test(src));
@@ -1078,18 +1097,165 @@ test("main.js: 칩은 대기 중인 결정(decision) 말풍선에만, 같은 sen
   const src = mainSrc();
   const a = src.indexOf("  askActions(t, a, cx) {");
   const body = src.slice(a, src.indexOf("    if (!a.po) box.child", a));
-  assert.match(body, /kind === "decision" \? decisionOptions\(item\?\.body\)\.options\.map/);
+  assert.match(body, /const opts = kind === "decision" \? decisionOptions\(item\?\.body\)/); // 한 번만 계산
+  assert.match(body, /kind === "decision" \? opts\.options\.map/);
   assert.match(body, /`\$\{n\}안 선택`/);
-  assert.match(body, /this\.send\(a, `\$\{n\}안 선택`, c\)/);
-  assert.match(body, /primary: n === decisionOptions\(item\?\.body\)\.recommended/);
+  assert.match(body, /this\.send\(a, `\$\{n\}안 선택`, c, "choice"\)/);
+  assert.match(body, /primary: n === opts\.recommended/);
   assert.match(body, /disabled: a\.po \? "" : NO_PO, tip: CLIP/);
   assert.ok(body.indexOf("opt-") < body.indexOf("`ok-${s.leader}`") && body.indexOf("`ok-${s.leader}`") < body.indexOf("`write-${s.leader}`")); // 칩 → 확인 완료 → 답 쓰기
   // verify에는 칩이 없다(확인 완료만): 칩은 kind === "decision" 안에서만 만든다
-  assert.equal((body.match(/decisionOptions\(/g) ?? []).length, 2);
+  assert.equal((body.match(/decisionOptions\(/g) ?? []).length, 1);
   assert.match(body, /kind === "verify", \(el\)/);
 });
 
 test("decisionOptions: inbox.cjs와 main.js의 chat 블록이 같다", () => {
   const cut = (f) => { const s = fs.readFileSync(path.join(__dirname, f), "utf8"); const a = s.indexOf("function decisionOptions("); return s.slice(a, s.indexOf("\n}\n", a)); };
   assert.equal(cut("../mods/inbox/main.js"), cut("../mods/inbox/inbox.cjs"));
+});
+
+// ---- 내가 보낸 모든 글을 오른쪽 말풍선으로 (deliver 한 곳에서 한 번 기록)
+test("chatRecord: 사람이 쓴 글만 담고(긴 Panel answer 감싸개 없이), 종류·상태는 정해진 값만", () => {
+  const r = I.chatRecord({ text: " 확인 완료 ", to: "lead-a", po: "p1", kind: "verify" }, "held", 1700000000000);
+  assert.deepEqual(r, { id: "1700000000000-", at: 1700000000000, ts: new Date(1700000000000).toISOString(), ms: 1700000000000, text: "확인 완료", line: "확인 완료", to: "lead-a", po: "p1", kind: "verify", status: "held" });
+  const w = I.chatRecord({ text: "확인 완료", line: 'Panel answer (verify) for lead-a: "확인 완료".', po: "p1" }, "sending", 5, "ab3");
+  assert.equal(w.id, "5-ab3"); // 같은 ms에 두 번 보내도 id가 겹치지 않게 seq를 붙인다
+  assert.equal(w.text, "확인 완료"); // 말풍선에는 사람이 쓴 글
+  assert.match(w.line, /^Panel answer/); // 다시 보내기는 실제로 붙여 넣은 줄 그대로
+  assert.equal(I.chatRecord({ text: "  ", po: "p1" }, "sent", 1), null); // 빈 글
+  assert.equal(I.chatRecord({ text: "x", po: "" }, "sent", 1), null); // 방 없음
+  const odd = I.chatRecord({ text: "x", po: "p1", kind: "zzz" }, "weird", 5);
+  assert.equal(odd.kind, "chat");
+  assert.equal(odd.status, "failed"); // 모르는 상태는 '보내지 못함'으로 둔다(보냈다고 거짓 표시 금지)
+  assert.deepEqual(I.CHAT_KINDS, ["answer", "verify", "choice", "chat"]);
+});
+
+test("mineNote: 보낸 것은 비고, 붙여 넣기만 했거나 못 보낸 것은 작은 안내가 붙는다", () => {
+  assert.equal(I.mineNote("sent"), "");
+  assert.match(I.mineNote("held"), /붙여 넣기만/);
+  assert.match(I.mineNote("nopane"), /보내지 못함/);
+  assert.match(I.mineNote("failed"), /보내지 못함/);
+});
+
+test("timeline: 내 글은 그 방(po)에만, 종류·상태·받는 리더를 달고 오른쪽 말풍선 데이터가 된다(옛 기록은 chat·sent)", () => {
+  const mine = [
+    { ts: "a", ms: 10, text: "1안 선택", to: "lead-a", po: "p1", kind: "choice", status: "sent" },
+    { ts: "b", ms: 20, text: "답", to: "lead-a", po: "p1", kind: "answer", status: "nopane" },
+    { ts: "c", ms: 30, text: "다른 방", to: "lead-b", po: "p2", kind: "chat", status: "sent" },
+    { ts: "d", ms: 5, text: "옛 기록", to: "", po: "p1" },
+  ];
+  const t = I.timeline("p1", [], [], mine).filter((e) => e.who === "me");
+  assert.deepEqual(t.map((e) => [e.text, e.kind, e.status, e.to]), [["옛 기록", "chat", "sent", ""], ["1안 선택", "choice", "sent", "lead-a"], ["답", "answer", "nopane", "lead-a"]]);
+  assert.equal(I.unreadCount(t, 0), 0); // 내 글은 안 읽은 글이 아니다
+});
+
+test("main.js: 모든 데스크 보내기는 deliver 한 곳에서 한 번만 기록하고, 말풍선은 오른쪽(내 것)·왼쪽(리더·PO)에 시간을 바깥 아래에 둔다", () => {
+  const src = mainSrc();
+  const del = deliverOf(src);
+  assert.equal((src.match(/setShared\(CHAT_KEY/g) ?? []).length, 2); // 쓰는 곳은 record()(새 글)와 mark()(상태 바꿈) 둘뿐
+  assert.equal((del.match(/this\.record\(/g) ?? []).length, 1); // 새 기록은 deliver 한 곳에서 한 번(다시 보내기는 같은 id로 상태만 바꾼다)
+  assert.match(del, /if \(!id\) id = this\.record\(\{ \.\.\.rec, line: text \}, "sending"\)/);
+  for (const st of ["failed", "held", "nopane"]) assert.match(del, new RegExp(`this\\.mark\\(id, "${st}"\\)`));
+  assert.match(src, /\{ text: body, to: a\.s\.leader, po: a\.owner, kind \}/); // 버튼·칩·답 상자는 사람이 쓴 글(body)을 기록한다
+  assert.match(src, /send\(a, "확인 완료", c, "verify"\)/);
+  assert.match(src, /send\(a, `\$\{n\}안 선택`, c, "choice"\)/);
+  assert.ok(!/answerLine\([^)]*\)[^;]*kind: "chat"/.test(src));
+  // 모양: 내 것은 오른쪽(items_end/justify_end)·강조색 채움, 시간은 말풍선 왼쪽; 남의 것은 말풍선 오른쪽 아래에 시간
+  const row = methodOf(src, "  entryRow(t, e, v, cx) {", "  render(cx)");
+  assert.match(row, /justify_end\(\)/);
+  assert.match(row, /bg\(t\.working \+ "33"\)/);
+  assert.match(row, /\.child\(when\(e\.ms\)\)\s*\n\s*\.child\(div\(\)\.max_w\("80%"\)/); // 내 말풍선: 시간이 말풍선 앞(왼쪽)
+  assert.match(row, /items_end\(\)\s*\n\s*\.child\(div\(\)\.flex_1\(\)\.min_w\(0\)\.px\(10\)/); // PO: 말풍선 뒤(오른쪽)에 시간
+  assert.match(row, /mineNote\(e\.status\)/);
+  assert.ok(!/clock\(it\.ms\)/.test(methodOf(src, "  nameRow(t,", "  // What a waiting leader"))); // 머리줄에서 시간이 빠졌다
+});
+
+test("setChatStatus: 그 id의 기록만 상태와 시각을 바꾸고, 같은 상태·없는 id·모르는 상태는 바꾸지 않는다", () => {
+  const list = [{ id: "1-a", status: "sending", at: 1, text: "x" }, { id: "2-a", status: "sent", at: 2, text: "y" }];
+  const next = I.setChatStatus(list, "1-a", "sent", 99);
+  assert.deepEqual(next.map((x) => [x.id, x.status, x.at]), [["1-a", "sent", 99], ["2-a", "sent", 2]]);
+  assert.equal(list[0].status, "sending"); // 원본은 그대로
+  assert.equal(I.setChatStatus(list, "1-a", "sending", 5), null);
+  assert.equal(I.setChatStatus(list, "9-z", "sent", 5), null);
+  assert.equal(I.setChatStatus(list, "1-a", "weird", 5), null);
+  assert.equal(I.setChatStatus(null, "1-a", "sent", 5), null);
+});
+
+test("mineAct: 아무것도 못 간 것은 다시 보내기, Enter만 빠진 것은 Enter 누르기, 질문 중에 붙여 넣은 것은 버튼 없음", () => {
+  assert.equal(I.mineAct("nopane"), "resend");
+  assert.equal(I.mineAct("failed"), "resend");
+  assert.equal(I.mineAct("noenter"), "enter");
+  for (const st of ["sent", "sending", "opening", "held"]) assert.equal(I.mineAct(st), "", st); // held의 Enter는 PO의 질문에 답하는 것이라 말풍선에는 두지 않는다
+});
+
+test("liveStatus: 20초 넘게 sending/opening에 머문 기록은 각각 noenter/nopane으로 본다(영원히 '보내는 중' 금지)", () => {
+  assert.equal(I.liveStatus("sending", 1000, 1000 + 19000), "sending");
+  assert.equal(I.liveStatus("sending", 1000, 1000 + 21000), "noenter");
+  assert.equal(I.liveStatus("opening", 1000, 1000 + 21000), "nopane");
+  assert.equal(I.liveStatus("opening", 1000, 1000 + 5000), "opening");
+  for (const st of ["sent", "held", "failed", "nopane", "noenter"]) assert.equal(I.liveStatus(st, 1000, 1000 + 999999), st);
+});
+
+test("badgeTurn: 아이콘 배지는 한 번에 한 복사본만 쓴다(주인이거나 주인이 조용해졌을 때만)", () => {
+  assert.equal(I.badgeTurn(null, "a", 1000), "write");
+  assert.equal(I.badgeTurn({ id: "a", ts: 1000 }, "a", 2000), "write");
+  assert.equal(I.badgeTurn({ id: "b", ts: 1000 }, "a", 2000), "skip");
+  assert.equal(I.badgeTurn({ id: "b", ts: 1000 }, "a", 1000 + 91000), "write"); // 주인이 90초 넘게 갱신하지 않음
+});
+
+test("promptTail·promptOptions: PO 화면 끝줄과 1,2,3…으로 이어진 선택지만(강조 표시 포함), 아니면 없음", () => {
+  const screen = "\n  Do you want to proceed?\n  ❯ 1. Yes\n    2. Yes, and don't ask again for this command\n    3. No, and tell Claude what to do differently (esc)\n\n";
+  assert.deepEqual(I.promptTail(screen, 2), ["    2. Yes, and don't ask again for this command", "    3. No, and tell Claude what to do differently (esc)"]);
+  assert.deepEqual(I.promptOptions(screen).map((o) => [o.key, o.on]), [["1", true], ["2", false], ["3", false]]);
+  assert.equal(I.promptOptions(screen)[1].label, "Yes, and don't ask again for this command");
+  assert.deepEqual(I.promptOptions("Proceed?\n 2. a\n 3. b"), []); // 1부터 이어지지 않으면 추측하지 않는다
+  assert.deepEqual(I.promptOptions("Proceed?\n 1. only one"), []);
+  assert.deepEqual(I.promptOptions("Proceed? (y/n)"), []);
+  assert.deepEqual(I.promptOptions(""), []);
+  assert.equal(I.promptTail("a".repeat(300), 1)[0].length, 140);
+});
+
+test("timeline: 내 글은 id와 실시간 상태를 달고, 오래 머문 sending은 noenter로 보인다", () => {
+  const mine = [{ id: "1-a", ts: "t", ms: 1000, at: 1000, text: "x", po: "p1", kind: "chat", status: "sending" }];
+  assert.equal(I.timeline("p1", [], [], mine, [], 1000 + 5000).find((e) => e.who === "me").status, "sending");
+  const late = I.timeline("p1", [], [], mine, [], 1000 + 30000).find((e) => e.who === "me");
+  assert.equal(late.status, "noenter");
+  assert.equal(late.id, "1-a");
+});
+
+test("main.js: 다시 보내기·Enter 누르기·질문 패널은 PO가 지금 질문 중인지로 막고, 배지는 한 곳만 쓴다", () => {
+  const src = mainSrc();
+  const re = methodOf(src, "  resend(id, c) {", "  // The bubble's \"Enter 누르기\"");
+  assert.match(re, /mineAct\(liveStatus\(r\.status, r\.at \?\? r\.ms, Date\.now\(\)\)\) !== "resend"/);
+  assert.match(re, /this\.deliver\(po, r\.line \|\| r\.text, c, r, null, id\)/); // 같은 기록·같은 줄(새 말풍선 없음)
+  const en = methodOf(src, "  enterNow(id, c) {", "  // ---- A blocked PO's screen");
+  assert.match(en, /if \(this\.isBlocked\(po\)\) \{.*return; \}/); // 질문 중이면 Enter를 누르지 않는다
+  assert.ok(en.indexOf("isBlocked") < en.indexOf('hc(["keys", po, "enter"])'));
+  assert.match(en, /this\.mark\(id, o && o\.code === 0 \? "sent" : "noenter"\)/);
+  const pp = methodOf(src, "  pressPrompt(po, key, c) {", "  promptPanel(t, v, cx) {");
+  assert.ok(pp.indexOf("!this.isBlocked(po)") >= 0 && pp.indexOf("!this.isBlocked(po)") < pp.indexOf('hc(["keys", po, key])')); // 질문이 사라졌으면 키를 누르지 않는다
+  const panel = methodOf(src, "  promptPanel(t, v, cx) {", "  // A panel answer:");
+  assert.match(panel, /if \(!po \|\| !this\.isBlocked\(po\)\) \{ this\.prompt = null; return null; \}/); // 질문 중일 때만 보인다
+  assert.match(panel, /promptOptions\(shown\.text\)/);
+  assert.match(panel, /"enter"/);
+  assert.match(panel, /"esc"/);
+  const callers = src.match(/this\.pressPrompt\(/g) ?? [];
+  assert.equal(callers.length, 2); // 옵션 버튼과 Enter/Esc 버튼, 둘 다 클릭 핸들러 안
+  assert.ok(!/readPrompt\([^)]*\)[^;]*pressPrompt/.test(src)); // 화면을 읽은 결과로 스스로 누르지 않는다
+  const rp = methodOf(src, "  readPrompt(po, cx) {", "  pressPrompt(po, key, c) {");
+  assert.match(rp, /hc\(\["read", po, "--lines"/);
+  assert.ok(!/"keys"/.test(rp));
+  const badge = methodOf(src, "  badge(", "\n  }\n");
+  assert.match(badge, /badgeTurn\(/);
+  assert.match(badge, /setShared\(BADGE_KEY/);
+});
+
+test("main.js: 말풍선의 다시 보내기/Enter 누르기 버튼은 mineAct로만 정하고, 막힌 PO가 질문 중일 때 질문 패널이 채팅 상자 위에 붙는다", () => {
+  const src = mainSrc();
+  const row = methodOf(src, "  entryRow(t, e, v, cx) {", "  render(cx)");
+  assert.match(row, /mineAct\(e\.status\)/);
+  assert.match(row, /this\.resend\(e\.id, c\)/);
+  assert.match(row, /this\.enterNow\(e\.id, c\)/);
+  assert.match(row, /다시 보내기/);
+  assert.match(row, /Enter 누르기/);
 });

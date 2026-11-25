@@ -523,8 +523,49 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
     out.push({ key: `w|${w.leader}`, who: `l:${w.leader}`, ms: Number(now) || 0, ts: "", s, leader: w.leader, waiting: w.kind, wait: true });
   }
   if (room && room !== PO_OTHER) for (const x of says ?? []) out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "" });
-  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "" });
+  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now) });
   return out.map((e, i) => ({ e, i })).sort((a, b) => a.e.ms - b.e.ms || a.i - b.i).map((x) => x.e);
+}
+// What the person sent from the desk, one record per send (answer buttons, option chips and the chat box all go through deliver()):
+// {id, ts, ms, text (what the person wrote: "확인 완료", "1안 선택", the answer, the chat line - never the long "Panel answer" wrapper), line (what was
+// pasted: the retry sends exactly this), to (leader), po (the room), kind: answer | verify | choice | chat, status}. Null when there is nothing to record.
+// status follows the real outcome: sending (pasted, Enter on its way) -> sent | noenter (pasted, Enter did not go);
+// opening (no PO pane yet, sent by itself once it opens) -> nopane (it did not open in time); held (PO blocked: pasted only); failed (paste failed).
+const CHAT_KINDS = ["answer", "verify", "choice", "chat"];
+const CHAT_STATUS = ["sending", "opening", "sent", "noenter", "held", "nopane", "failed"];
+function chatRecord(rec, status, now = 0, seq = "") {
+  const text = String(rec?.text ?? "").trim();
+  if (!text || !rec?.po) return null;
+  const ms = Number(now) || 0;
+  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, line: String(rec.line ?? text).slice(0, 4000), to: String(rec.to ?? ""), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", status: CHAT_STATUS.includes(status) ? status : "failed" };
+}
+// The list with record `id` set to `status` at `now` (null when there is no such record or it already has it).
+function setChatStatus(list, id, status, now = 0) {
+  if (!CHAT_STATUS.includes(status) || !Array.isArray(list)) return null;
+  const i = list.findIndex((x) => x && x.id === id);
+  if (i < 0 || list[i].status === status) return null;
+  return list.map((x, j) => (j === i ? { ...x, status, at: Number(now) || 0 } : x));
+}
+// The small dim note under a bubble that is not (fully) sent: "" when it was sent.
+const MINE_NOTE = { sending: "보내는 중…", opening: "PO 칸을 여는 중 — 열리면 자동으로 보냅니다", held: "PO가 질문 중이라 붙여 넣기만 했습니다 — 아래 질문에 먼저 답하세요", noenter: "붙여 넣었지만 Enter가 눌리지 않았습니다", nopane: "보내지 못함 — PO 칸이 열리지 않았습니다", failed: "보내지 못함 — 붙여 넣기 실패" };
+const mineNote = (status) => MINE_NOTE[status] ?? "";
+// The one button a bubble offers: "resend" (nothing reached the PO: send it again), "enter" (it is pasted into a normal prompt: only Enter is
+// missing), or "". A held one has none: Enter there would answer the PO's question, so that is only offered next to the question itself.
+const mineAct = (status) => (status === "nopane" || status === "failed" ? "resend" : status === "noenter" ? "enter" : "");
+// A record that stayed "sending" / "opening" (the desk that was sending it went away) no longer waits: sending -> noenter (maybe pasted, Enter
+// unknown: the Enter button is safe, an empty Enter does nothing), opening -> nopane.
+const SENDING_STALE_MS = 20000;
+const liveStatus = (status, ms, now) => (now - (Number(ms) || 0) <= SENDING_STALE_MS ? status : status === "sending" ? "noenter" : status === "opening" ? "nopane" : status);
+// Who writes the app icon badge: one copy at a time (`lease` {id, ts}, shared). "write" when this copy holds it or its holder went quiet.
+const badgeTurn = (lease, id, now, ttl = 90000) => (!lease || lease.id === id || now - (Number(lease.ts) || 0) > ttl ? "write" : "skip");
+// A PO that waits on a prompt: the last lines of its screen, and the numbered choices on it ("❯ 1. Yes" / "2. No ..."). The desk shows them and the
+// person presses one; nothing is ever pressed by itself. Choices must be one run numbered 1, 2, ... at the end of the screen (else none).
+const promptTail = (text, n = 10) => String(text ?? "").replace(/\r\n?/g, "\n").split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim()).slice(-n).map((l) => (l.length > 140 ? `${l.slice(0, 139)}…` : l));
+function promptOptions(text) {
+  const rows = promptTail(text, 14).map((l) => /^\s*[❯>›]?\s*(\d{1,2})[.)]\s+(\S.*)$/.exec(l));
+  const out = [];
+  for (let i = rows.length - 1; i >= 0 && rows[i]; i--) out.unshift({ key: rows[i][1], label: rows[i][2].trim().slice(0, 80), on: /^\s*[❯›]/.test(promptTail(text, 14)[i]) });
+  return out.length >= 2 && out.every((o, i) => Number(o.key) === i + 1) ? out.slice(0, 6) : [];
 }
 // Slack-style headers: `head` is true for the first entry and whenever the sender changes or the gap to the entry before is over `gap`.
 const groupTimeline = (entries, gap = TL_GAP_MS) => (entries ?? []).map((e, i, a) => ({ ...e, head: i === 0 || a[i - 1].who !== e.who || e.ms - a[i - 1].ms > gap }));
@@ -590,6 +631,6 @@ function decisionOptions(body) {
 }
 // chat:end
 
-module.exports = { PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, tlKey, tlFollow, atBottom, chatHtml, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineAct, liveStatus, badgeTurn, promptTail, promptOptions, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) process.stdout.write(JSON.stringify(collect()));
