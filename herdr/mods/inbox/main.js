@@ -734,12 +734,47 @@ const SEL_HOLD_MS = 120000, PRESS_HOLD_MS = 8000;
 // st = {sel: a selection is settled, selAt, press: the pointer is down in the list, pressAt}. While true, background redraws wait.
 const quietNow = (st, now) => Boolean((st?.sel && now - (st.selAt || 0) < SEL_HOLD_MS) || (st?.press && now - (st.pressAt || 0) < PRESS_HOLD_MS));
 
+// ---- highlight colours: the band behind **bold** runs and the overlay on a settled selection, both from the theme's own tokens.
+// A colour is "#rrggbb" + an alpha byte. The alpha starts strong (so the area is clearly visible) and steps down only while the text colour
+// would stop being readable on the blended result (contrast < HL_MIN_CONTRAST), so it holds on a light and a dark theme alike.
+const HL_MIN_CONTRAST = 3.5;
+const HL_KINDS = {
+  bold: { alpha: 0x73, floor: 0x40, tokens: ["accent", "ansi4", "foreground"] }, // about 45%
+  sel: { alpha: 0xb8, floor: 0x60, tokens: ["accent", "ansi4", "working"] }, // about 72%: stronger than bold, so a selected area stands out
+};
+const HEX6 = /^#[0-9a-f]{6}$/i;
+const rgbOf = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+const lumOf = (h) => {
+  const [r, g, b] = rgbOf(h).map((v) => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+const contrastOf = (a, b) => { const x = lumOf(a), y = lumOf(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+const blendHex = (top, under, a) => { const u = rgbOf(under); return "#" + rgbOf(top).map((v, i) => Math.round(v * a + u[i] * (1 - a)).toString(16).padStart(2, "0")).join(""); };
+// kind -> "#rrggbbaa", or null when the theme has no usable token (the caller then paints nothing).
+function tintHex(t, kind) {
+  const k = HL_KINDS[kind];
+  const base = k && (k.tokens.map((n) => t?.[n]).find((c) => typeof c === "string" && HEX6.test(c)));
+  if (!base) return null;
+  let a = k.alpha;
+  if (HEX6.test(String(t.background)) && HEX6.test(String(t.foreground))) {
+    while (a > k.floor && contrastOf(t.foreground, blendHex(base, t.background, a / 255)) < HL_MIN_CONTRAST) a -= 8;
+  }
+  return base + a.toString(16).padStart(2, "0");
+}
+// A TextView selection event -> {start, end} (UTF-16 offsets into the Markdown source), or null when it carries no usable range.
+// `len` is the length of the string the view was given: a range past it belongs to an older text and is dropped.
+function selRangeOf(sel, len) {
+  const r = sel?.range ?? sel;
+  const a = Number(r?.start), b = Number(r?.end);
+  return Number.isInteger(a) && Number.isInteger(b) && a >= 0 && b > a && b <= len ? { start: a, end: b } : null;
+}
+
 // chat:end
 
 // The pending-question card: the screen lines scroll inside it (all options stay reachable), the buttons stay under them.
 const PROMPT_LINES_H = 240, PROMPT_MAX_H = 340;
 const DIAG_FLUSH_MS = 2000; // the diag queue is written out this often (one timer started in init)
-const BOLD_TINT = "33"; // alpha (hex) of the tint laid behind **bold** runs: the foreground colour at 20%, readable on both themes
+const HL_ECHO_MS = 700; // a "selection cleared" this soon after our own overlay repaint is the rebuilt view's echo, not the user's click
 const PIN_TICK_MS = 250; // how often the timeline checks that it still sits at the newest
 const LOAD_REDRAW_MS = 25000; // an unchanged load still redraws this often (the "5분 전" clocks)
 
@@ -854,7 +889,7 @@ export default class Inbox extends View {
     this.replyPics = new Map(); // leader -> pictures waiting in that leader's answer box (same shape as this.pics)
     this.replyBusy = new Map(); // leader -> pictures being read for that answer box
     this.imgd = new Map(); // path -> [w, h] of pictures added here (the helper's list covers the others)
-    this.ui = { sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0 }; // a drag-select in the list: redraws wait while it is held
+    this.ui = { sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0, hl: null, hlAt: 0 }; // a drag-select in the list: redraws wait while it is held
     this.dirty = false; // a redraw was held back
     this.pin = { pinned: true, ct: 0 }; // the timeline's pin to the newest (see pinStep)
     this.lastIdx = 0; // index of the last child of the list
@@ -924,7 +959,7 @@ export default class Inbox extends View {
   // desk is a press, so redraws and the bottom pin wait until it is released. The press gate used to live on the list's own mouse-down,
   // which a TextView that handles the press itself never lets through - the pin and redraws then ran under a drag and dropped the selection.
   pointer(e, cx) {
-    if (e?.pressed_button === "left") { if (!this.ui.press) this.diag("press (left held, window move)", cx); this.ui.press = true; this.ui.pressAt = Date.now(); return; }
+    if (e?.pressed_button === "left") { if (!this.ui.press) { this.diag("press (left held, window move)", cx); this.ui.hl = null; } this.ui.press = true; this.ui.pressAt = Date.now(); return; }
     if (this.ui.press) { this.diag("release (move without button)", cx); this.ui.press = false; if (this.dirty) this.softNotify(cx); }
   }
   // Diagnostics for the leader (the person does not read consoles): lines are buffered and written by inbox.cjs in one call at most every 2s
@@ -972,10 +1007,21 @@ export default class Inbox extends View {
     this.ui.selEvents = (this.ui.selEvents ?? 0) + 1; // how often a TextView reported a selection at all (see the console line)
     { const did = this.diagId(id); this.diag(`selection ${sel ? `settled in ${did}: ${String(sel.text ?? "").length} chars` : `cleared in ${did}`} (#${this.ui.selEvents})`, cx); }
     try { const did = this.diagId(id); console.log(`[inbox] selection ${sel ? `settled in ${did}: ${String(sel.text ?? "").length} chars` : `cleared in ${did}`} (#${this.ui.selEvents})`); } catch {}
+    const now = Date.now();
+    // The null that our own overlay repaint may cause (the rebuilt view reports no selection) must not wipe the overlay again.
+    if (!sel && this.ui.hl && now - (this.ui.hlAt || 0) < HL_ECHO_MS) return;
     if (sel) this.ui.sels.set(id, true); else this.ui.sels.delete(id);
     this.ui.sel = this.ui.sels.size > 0;
-    if (sel) this.ui.selAt = Date.now();
+    if (sel) this.ui.selAt = now;
     this.ui.press = false;
+    // A settled selection in a Markdown bubble gets a strong overlay on its range (the native highlight is faint); cleared with the selection.
+    const rg = sel && this.mdSeen?.has(id) ? selRangeOf(sel, Infinity) : null;
+    if (sel) this.diag(`selection range ${rg ? "ok" : "missing"}`, cx);
+    if (sel && !rg && this.ui.hl) { this.ui.hl = null; this.dirty = true; }
+    if (rg) {
+      const h = this.ui.hl;
+      if (!h || h.id !== id || h.start !== rg.start || h.end !== rg.end) { this.ui.hl = { id, ...rg }; this.ui.hlAt = now; try { cx.notify(); } catch {} }
+    } else if (!sel && this.ui.hl && this.ui.hl.id === id) { this.ui.hl = null; this.dirty = true; }
     if (!this.ui.sel && this.dirty) this.softNotify(cx);
   }
 
@@ -1898,7 +1944,17 @@ export default class Inbox extends View {
     this.tvN = (this.tvN ?? 0) + 1;
     const m = mdText(src);
     let tv = TextView.markdown(id, m).raw_html(false).selectable(true).on_link_click((url, c) => openUrl(url, c)).on_selection_change((sel, c) => this.onSel(id, sel, c));
-    if (t) { try { for (const r of boldRanges(m)) tv = tv.highlight_range(r.start, r.end, t.foreground + BOLD_TINT); } catch {} }
+    if (t) {
+      try {
+        const bc = tintHex(t, "bold"); // theme accent at ~45% (less when the text would stop being readable), see HL_KINDS
+        if (bc) for (const r of boldRanges(m)) tv = tv.highlight_range(r.start, r.end, bc);
+        // The settled selection of this very bubble, drawn over the bold bands (the later range wins where they meet).
+        const h = this.ui?.hl, sc = h && h.id === id && h.end <= m.length ? tintHex(t, "sel") : null;
+        if (sc) tv = tv.highlight_range(h.start, h.end, sc);
+      } catch {}
+    }
+    (this.mdSeen ??= new Set()).add(id); // ids drawn as Markdown: only their selection ranges mean offsets into the source
+    if (this.mdSeen.size > 600) this.mdSeen = new Set([id]);
     return tv;
   }
 
@@ -2141,9 +2197,9 @@ export default class Inbox extends View {
     const waiting = v.tabs.reduce((n, x) => n + x.n, 0); // leaders waiting on a decision, over every room
     const head = v.pick === PO_OTHER ? OTHER_LABEL : v.tabs.find((x) => x.id === v.pick)?.label ?? "";
     const lines = v_flex().id("inbox-list").flex_1().min_h(0).pb(8).overflow_y_scrollbar().mode("always")
-      .on_mouse_down("left", (_e, c) => { this.ui.press = true; this.ui.pressAt = Date.now(); this.ui.sels.clear(); this.ui.sel = false; c.stop_propagation(); })
+      .on_mouse_down("left", (_e, c) => { this.ui.press = true; this.ui.pressAt = Date.now(); this.ui.sels.clear(); this.ui.sel = false; this.ui.hl = null; c.stop_propagation(); })
       .on_mouse_up("left", () => { this.ui.press = false; })
-      .on_mouse_down_out((_e, c) => { this.ui.press = false; if (this.ui.sel) { this.ui.sels.clear(); this.ui.sel = false; } if (this.dirty) this.softNotify(c); })
+      .on_mouse_down_out((_e, c) => { this.ui.press = false; if (this.ui.sel) { this.ui.sels.clear(); this.ui.sel = false; } if (this.ui.hl) { this.ui.hl = null; this.dirty = true; } if (this.dirty) this.softNotify(c); })
       .when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks);
     const bar = this.filterBar(t, v);
     const panel = this.promptPanel(t, v, cx); // a blocked PO's screen + its keys (null while the room's PO is not waiting on a prompt)

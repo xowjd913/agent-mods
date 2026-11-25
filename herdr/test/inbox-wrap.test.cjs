@@ -360,7 +360,8 @@ test("R17: the mod copy of boldRanges is the same code, and md() paints a tint b
   const md = MAIN.slice(MAIN.indexOf("  md(id, src, t) {"), MAIN.indexOf("  text(id, html) {"));
   assert.match(md, /const m = mdText\(src\);/);
   assert.match(md, /TextView\.markdown\(id, m\)/);
-  assert.match(md, /for \(const r of boldRanges\(m\)\) tv = tv\.highlight_range\(r\.start, r\.end, t\.foreground \+ BOLD_TINT\)/);
+  assert.match(md, /const bc = tintHex\(t, "bold"\)/);
+  assert.match(md, /for \(const r of boldRanges\(m\)\) tv = tv\.highlight_range\(r\.start, r\.end, bc\)/);
   assert.match(MAIN, /this\.md\(key, p\.md, t\)/);
 });
 
@@ -368,10 +369,12 @@ test("R17: md() really calls highlight_range once per bold run (stub TextView)",
   const body = MAIN.slice(MAIN.indexOf("  md(id, src, t) {"), MAIN.indexOf("  text(id, html) {"));
   const calls = [];
   const tv = { raw_html() { return this; }, selectable() { return this; }, on_link_click() { return this; }, on_selection_change() { return this; }, highlight_range(a, b, c) { calls.push([a, b, c]); return this; } };
-  const make = new Function("TextView", "mdText", "boldRanges", "openUrl", "BOLD_TINT", `return class D { ${body} }`);
-  const d = new (make({ markdown: () => tv }, I.mdText, I.boldRanges, () => {}, "2e"))();
-  d.md("x", "a **b** c **d**", { foreground: "#aabbcc" });
-  assert.deepEqual(calls, [[2, 7, "#aabbcc2e"], [10, 15, "#aabbcc2e"]]);
+  const make = new Function("TextView", "mdText", "boldRanges", "openUrl", "tintHex", "selRangeOf", `return class D { ${body} }`);
+  const d = new (make({ markdown: () => tv }, I.mdText, I.boldRanges, () => {}, I.tintHex, I.selRangeOf))();
+  const th = { foreground: "#aabbcc", background: "#101010", accent: "#3366ff" };
+  const bc = I.tintHex(th, "bold");
+  d.md("x", "a **b** c **d**", th);
+  assert.deepEqual(calls, [[2, 7, bc], [10, 15, bc]]);
   calls.length = 0;
   d.md("x", "a **b**"); // no theme: nothing painted
   assert.equal(calls.length, 0);
@@ -483,13 +486,16 @@ test("R18: main.js loads and init() runs to the end: the flush timer is set and 
 
 test("R18: the tint constants are defined as numbers/hex alpha, and md() paints with them (no stub injects them)", () => {
   assert.match(MAIN, /^const DIAG_FLUSH_MS = \d+/m);
-  assert.match(MAIN, /^const BOLD_TINT = "[0-9a-f]{2}"/m);
+  assert.doesNotMatch(MAIN, /BOLD_TINT/, "the fixed 20% foreground tint is gone");
+  assert.match(MAIN, /^const HL_ECHO_MS = \d+/m);
   const calls = [];
   const tv = { raw_html() { return this; }, selectable() { return this; }, on_link_click() { return this; }, on_selection_change() { return this; }, highlight_range(a, b, c) { calls.push([a, b, c]); return this; } };
   const Inbox = loadInbox({ base: { TextView: { markdown: () => tv } } });
   const d = new Inbox();
-  d.md("x", "a **b** c", { foreground: "#112233" });
-  assert.deepEqual(calls, [[2, 7, "#11223333"]], "a ReferenceError inside md() would have been swallowed and painted nothing");
+  d.md("x", "a **b** c", { foreground: "#112233", background: "#ffffff", accent: "#2255cc" });
+  assert.equal(calls.length, 1, "a ReferenceError inside md() would have been swallowed and painted nothing");
+  assert.deepEqual(calls[0].slice(0, 2), [2, 7]);
+  assert.match(calls[0][2], /^#2255cc[0-9a-f]{2}$/);
 });
 
 test("R18: pinTick keeps the pin when a scroll is held back, so the view goes to the bottom after the release", () => {
@@ -661,4 +667,150 @@ test("R19: main.js polls for real: a working team member and the end of the grac
     now += 1500; d.pollStatus({});
     assert.equal(n, 3);
   } finally { Date.now = real; }
+});
+
+// ---- R20: clearly visible bold band and selection overlay
+const DARK = { foreground: "#e6e6e6", background: "#1e1e1e", accent: "#3b82f6", working: "#22c55e" };
+const LIGHT = { foreground: "#1f1f1f", background: "#ffffff", accent: "#2563eb", working: "#16a34a" };
+const alphaOf = (c) => parseInt(c.slice(7, 9), 16);
+function recTv(calls) {
+  const tv = { raw_html() { return this; }, selectable() { return this; }, on_link_click() { return this; }, on_selection_change() { return this; }, highlight_range(a, b, c) { calls.push([a, b, c]); return this; } };
+  return { markdown: () => tv, html: () => tv };
+}
+const freshUi = () => ({ sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0, hl: null, hlAt: 0 });
+const r20Desk = (calls) => { const d = new (loadInbox({ base: { TextView: recTv(calls) } }))(); d.ui = freshUi(); return d; };
+
+test("R20: tintHex takes the theme accent at a strong alpha on a dark and a light theme, and the text stays readable on it", () => {
+  for (const th of [DARK, LIGHT]) {
+    const bold = I.tintHex(th, "bold"), sel = I.tintHex(th, "sel");
+    assert.match(bold, /^#[0-9a-f]{6}[0-9a-f]{2}$/);
+    assert.equal(bold.slice(0, 7), th.accent, "the accent token, no hard-coded colour");
+    assert.equal(sel.slice(0, 7), th.accent);
+    assert.ok(alphaOf(bold) >= 0x40, "not fainter than 25% (the old tint was 20%)");
+    assert.ok(alphaOf(sel) > alphaOf(bold), "the selection is stronger than the bold band");
+    for (const c of [bold, sel]) {
+      const under = (() => { const a = alphaOf(c) / 255; const u = [1, 3, 5].map((i) => parseInt(th.background.slice(i, i + 2), 16)); return "#" + [1, 3, 5].map((i, k) => Math.round(parseInt(c.slice(i, i + 2), 16) * a + u[k] * (1 - a)).toString(16).padStart(2, "0")).join(""); })();
+      const lum = (h) => { const [r, g, b] = [1, 3, 5].map((i) => { const v = parseInt(h.slice(i, i + 2), 16) / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+      const x = lum(th.foreground), y = lum(under);
+      assert.ok((Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05) >= I.HL_MIN_CONTRAST - 0.05, `text readable on ${c}`);
+    }
+  }
+});
+
+test("R20: tintHex lowers the alpha when a bright accent would hide the text, and falls back / gives up cleanly", () => {
+  const bright = { foreground: "#f0f0f0", background: "#202020", accent: "#ffff00" }; // light text on strong yellow would be unreadable
+  assert.ok(alphaOf(I.tintHex(bright, "sel")) < 0xb8, "stepped down");
+  assert.ok(alphaOf(I.tintHex(bright, "sel")) >= 0x60, "but not below the floor");
+  assert.equal(I.tintHex({ foreground: "#e6e6e6", background: "#1e1e1e" }, "bold").slice(0, 7), "#e6e6e6", "no accent: the foreground colour");
+  assert.equal(I.tintHex({ accent: "#3b82f680", foreground: "#e6e6e6" }, "sel"), null, "9-char token is not used, and sel has no foreground fallback");
+  assert.equal(I.tintHex({}, "bold"), null);
+  assert.equal(I.tintHex(undefined, "bold"), null);
+  assert.match(I.tintHex({ accent: "#3b82f6" }, "bold"), /^#3b82f673$/, "no background known: the starting alpha");
+});
+
+test("R20: md() paints the bold bands with the new tint and the selection overlay after them", () => {
+  const calls = [];
+  const d = r20Desk(calls);
+  d.ui.hl = { id: "m1", start: 2, end: 9 };
+  d.md("m1", "a **b** c **d** e", DARK);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls.slice(0, 2).map((c) => [c[0], c[1]]), [[2, 7], [10, 15]]);
+  assert.equal(calls[0][2], I.tintHex(DARK, "bold"));
+  assert.deepEqual(calls[2], [2, 9, I.tintHex(DARK, "sel")], "overlay last, on exactly the selected range");
+  calls.length = 0;
+  d.md("other", "a **b** c", DARK);
+  assert.equal(calls.length, 1, "another bubble gets no overlay");
+  calls.length = 0;
+  d.ui.hl = { id: "m1", start: 2, end: 99 };
+  d.md("m1", "a **b**", DARK);
+  assert.equal(calls.length, 1, "a range past the text is not painted");
+  calls.length = 0;
+  d.ui.hl = null;
+  d.md("m1", "a **b**", DARK);
+  assert.equal(calls.length, 1);
+});
+
+test("R20: the overlay offsets are into the unwrapped string: a message with wrapper tags is painted at the right place", () => {
+  const src = '<hc from="t1 lead">\nfirst **bold** words here\n</hc>';
+  const m = I.mdText(src);
+  assert.ok(!m.includes("<hc"), "tags gone");
+  const start = m.indexOf("words"), end = start + 5;
+  assert.deepEqual(I.selRangeOf({ range: { start, end } }, m.length), { start, end });
+  const calls = [];
+  const d = r20Desk(calls);
+  d.ui.hl = { id: "w", start, end };
+  d.md("w", src, DARK);
+  assert.deepEqual(calls[calls.length - 1].slice(0, 2), [start, end]);
+  assert.equal(m.slice(calls[calls.length - 1][0], calls[calls.length - 1][1]), "words");
+});
+
+test("R20: selRangeOf accepts sel.range or a bare range and refuses nonsense", () => {
+  assert.deepEqual(I.selRangeOf({ range: { start: 1, end: 4 }, text: "x" }, 10), { start: 1, end: 4 });
+  assert.deepEqual(I.selRangeOf({ start: 0, end: 3 }, 10), { start: 0, end: 3 });
+  for (const bad of [null, undefined, {}, { range: null }, { range: { start: 4, end: 4 } }, { range: { start: 5, end: 2 } }, { range: { start: -1, end: 2 } }, { range: { start: 1, end: 11 } }, { range: { start: 1.5, end: 3 } }, { range: { start: "a", end: 3 } }])
+    assert.equal(I.selRangeOf(bad, 10), null, JSON.stringify(bad));
+});
+
+function selDesk() {
+  const calls = [];
+  const d = r20Desk(calls);
+  let notes = 0;
+  const cx = { notify() { notes++; } };
+  d.md("m1", "hello **world** again", DARK); // drawn as Markdown
+  d.text("h1", "<p>plain</p>");
+  return { d, cx, calls, notes: () => notes };
+}
+
+test("R20: a settled selection adds the overlay once and repaints once; the same range again repaints nothing", () => {
+  const { d, cx, notes } = selDesk();
+  d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
+  assert.deepEqual(d.ui.hl && { id: d.ui.hl.id, start: d.ui.hl.start, end: d.ui.hl.end }, { id: "m1", start: 8, end: 13 });
+  assert.equal(notes(), 1);
+  assert.equal(d.ui.sel, true, "the selection hold (quietNow) is on");
+  d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
+  assert.equal(notes(), 1);
+  d.onSel("m1", { text: "orld ag", range: { start: 9, end: 16 } }, cx);
+  assert.equal(notes(), 2, "a changed range repaints");
+});
+
+test("R20: the null right after our own repaint is ignored; a real clear later removes the overlay and redraws", () => {
+  const { d, cx, notes } = selDesk();
+  d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
+  d.onSel("m1", null, cx); // the echo of the repaint
+  assert.ok(d.ui.hl, "overlay kept");
+  assert.equal(d.ui.sel, true);
+  d.ui.hlAt = Date.now() - 5000; // later: the user clicked elsewhere
+  const before = notes();
+  d.onSel("m1", null, cx);
+  assert.equal(d.ui.hl, null);
+  assert.equal(d.ui.sel, false);
+  assert.equal(notes(), before + 1, "redrawn without the overlay");
+});
+
+test("R20: no overlay (and no repaint) for a non-Markdown view or a selection without a range; a new press clears it", () => {
+  const { d, cx, notes } = selDesk();
+  d.onSel("h1", { text: "plain", range: { start: 0, end: 5 } }, cx);
+  assert.equal(d.ui.hl, null);
+  assert.equal(notes(), 0);
+  d.onSel("m1", { text: "world" }, cx); // the app gave no range
+  assert.equal(d.ui.hl, null);
+  assert.equal(notes(), 0);
+  d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
+  assert.ok(d.ui.hl);
+  d.pointer({ pressed_button: "left" }, cx); // a new drag begins
+  assert.equal(d.ui.hl, null);
+});
+
+test("R20: background redraws still wait while the selection overlay is up (softNotify / quietNow unchanged)", () => {
+  const { d, cx, notes } = selDesk();
+  d.onSel("m1", { text: "world", range: { start: 8, end: 13 } }, cx);
+  const n = notes();
+  d.softNotify(cx);
+  assert.equal(notes(), n, "held");
+  assert.equal(d.dirty, true);
+});
+
+test("R20: the list's own press and a press outside also drop the overlay (wiring)", () => {
+  assert.match(MAIN, /this\.ui\.sels\.clear\(\); this\.ui\.sel = false; this\.ui\.hl = null; c\.stop_propagation\(\);/);
+  assert.match(MAIN, /on_mouse_down_out\(\(_e, c\) => \{[^\n]*this\.ui\.hl = null; this\.dirty = true;/);
 });
