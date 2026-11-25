@@ -961,7 +961,7 @@ export default class Inbox extends View {
       try { value = this.chat.value(); } catch {}
       const core = editCore(value); // an edit is a change of the text itself: the widget's own line break for an Enter is not one
       if (core !== this.core) { this.core = core; this.editAt = this.changedAt; }
-      if (this.heldAt && !holdShown(this.editAt, this.heldAt)) { this.heldAt = 0; try { c.notify(); } catch {} }
+      if (this.heldAt && !holdShown(this.editAt, this.heldAt)) { this.heldAt = 0; this.softNotify(c); }
       if (strayBreak(value, this.sentAt, this.changedAt)) { try { this.chat.set_value(""); } catch {} return; } // the Enter that sent left a line break
       if (strayHeld(value, this.heldAt, this.changedAt)) { this.dropBreak(value); return; } // the held Enter left a line break
       this.syncMenu(c);
@@ -1048,8 +1048,17 @@ export default class Inbox extends View {
       Promise.resolve(exec("node", [HELPER(), "diag", JSON.stringify(out)], { timeout: 5000 })).catch(() => {}).then(() => { this.diagBusy = false; });
     } catch { this.diagBusy = false; }
   }
-  pointerUp(cx) {
-    this.diag("release (window mouse up)", cx);
+  // A press the list itself got (one a TextView did not take): counted against a settled selection and logged.
+  listDown(e) {
+    if (this.selMark) this.selMark.downs++;
+    this.diag(`press (list mouse down), click ${e?.click_count ?? "?"}${this.ui.selAt && this.selMark ? `, ${Date.now() - this.ui.selAt}ms after the last settle` : ""}`);
+  }
+  pointerUp(cx, e) {
+    // A release seen after a settled selection is the clue to what cleared it: a press-and-release a moment after the settle is a second click
+    // (the native view clears a selection on any press), not a redraw. Counts and ms only.
+    const m = this.selMark, ago = this.ui.selAt ? Date.now() - this.ui.selAt : -1;
+    if (m) { m.ups++; m.click = e?.click_count ?? 0; }
+    this.diag(`release (window mouse up)${e?.click_count ? `, click ${e.click_count}` : ""}${m && ago >= 0 ? `, ${ago}ms after the last settle` : ""}`, cx);
     this.ui.press = false;
     if (this.dirty && !this.ui.sel) this.softNotify(cx);
   }
@@ -1078,11 +1087,11 @@ export default class Inbox extends View {
     const rg = sel ? selRangeOf(sel, Infinity) : null;
     this.diag(sel
       ? `selection settled in ${did} id=${String(id).slice(0, 40)}: ${String(sel.text ?? "").length} chars, range ${rg ? `${rg.start}-${rg.end}` : "missing"} (#${this.ui.selEvents})`
-      : `selection cleared in ${did} id=${String(id).slice(0, 40)}${held >= 0 ? `, ${held}ms after the last settle` : ""} (#${this.ui.selEvents})`, cx);
+      : `selection cleared in ${did} id=${String(id).slice(0, 40)}${held >= 0 ? `, ${held}ms after the last settle` : ""}${this.selMark ? `; since the settle: ${(this.renderN ?? 0) - this.selMark.renders} redraws, ${this.selMark.ups} mouse ups, ${this.selMark.downs} list presses${this.selMark.click ? `, last click ${this.selMark.click}` : ""}` : ""} (#${this.ui.selEvents})`, cx);
     try { console.log(`[inbox] selection ${sel ? `settled in ${did}: ${String(sel.text ?? "").length} chars` : `cleared in ${did}`} (#${this.ui.selEvents})`); } catch {}
     if (sel) this.ui.sels.set(id, true); else this.ui.sels.delete(id);
     this.ui.sel = this.ui.sels.size > 0;
-    if (sel) this.ui.selAt = now;
+    if (sel) { this.ui.selAt = now; this.selMark = { renders: this.renderN ?? 0, ups: 0, downs: 0, click: 0 }; } else this.selMark = null;
     this.ui.press = false;
     if (this.dirty) this.softNotify(cx); // a redraw held back by the selection or a press goes out once nothing holds it (pinTick too)
   }
@@ -2086,6 +2095,7 @@ export default class Inbox extends View {
     return h_flex().gap(6).items_center().min_w(0)
       .when(!bare, (el) => el.child(div().id(`peek-${s.leader}-${it?.ts ?? ""}`).min_w(0).truncate().text_size(12).font_semibold().text_color(tint(t, s.leader)).cursor_pointer()
         .hover((x) => x.text_color(t.foreground)).on_mouse_down("left", stop).on_click(() => this.peek(s)).tooltip("그 리더 터미널 들여다보기").child(shortName(s.leader))))
+      .when(!bare && Boolean(it?.linkRef), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(it.linkRef)))
       .when(Boolean(it), (el) => el.child(this.kindTag(t, it, it.kind, waiting)))
       .when(!bare, (el) => el.child(div().flex_1()))
       .when(Boolean(extra), (el) => el.child(extra));
@@ -2221,6 +2231,8 @@ export default class Inbox extends View {
   // The messenger view: rooms (one per PO) beside one room's timeline, and the chat box under it. Narrow: the rooms are a strip on top.
   full(cx) {
     this.tvN = 0;
+    this.renderN = (this.renderN ?? 0) + 1;
+    if (this.selMark) this.diag(`redraw #${this.renderN} while a selection is settled (${Date.now() - this.ui.selAt}ms after the settle)`, cx); // would show a redraw under the selection
     Promise.resolve().then(() => { // once per draw (only when the count changed or 10s passed, so a busy desk does not flood the file)
       const now = Date.now();
       if (this.tvLast !== this.tvN || now - (this.tvLogAt ?? 0) > 10000) { this.tvLast = this.tvN; this.tvLogAt = now; this.diag(`draw: ${this.tvN} selectable TextView(s)`, cx); }
@@ -2280,7 +2292,7 @@ export default class Inbox extends View {
     const waiting = v.tabs.reduce((n, x) => n + x.n, 0); // leaders waiting on a decision, over every room
     const head = v.pick === PO_OTHER ? OTHER_LABEL : v.tabs.find((x) => x.id === v.pick)?.label ?? "";
     const lines = v_flex().id("inbox-list").flex_1().min_h(0).pb(8).overflow_y_scrollbar().mode("always")
-      .on_mouse_down("left", (_e, c) => { this.ui.press = true; this.ui.pressAt = Date.now(); this.ui.sels.clear(); this.ui.sel = false; c.stop_propagation(); })
+      .on_mouse_down("left", (e, c) => { this.listDown(e); this.ui.press = true; this.ui.pressAt = Date.now(); this.ui.sels.clear(); this.ui.sel = false; c.stop_propagation(); })
       .on_mouse_up("left", () => { this.ui.press = false; })
       .on_mouse_down_out((_e, c) => { this.ui.press = false; if (this.ui.sel) { this.ui.sels.clear(); this.ui.sel = false; } if (this.dirty) this.softNotify(c); })
       .when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks);
@@ -2296,7 +2308,7 @@ export default class Inbox extends View {
       .child(this.chatBox(t, v));
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .on_window_mouse_move((e, c) => this.pointer(e, c))
-      .on_window_mouse_up("left", (_e, c) => this.pointerUp(c))
+      .on_window_mouse_up("left", (e, c) => this.pointerUp(c, e))
       .on_size_change((size, c) => this.onSize(size.width, c))
       .child(h_flex().h(38).px(this.compact ? 10 : 14).flex_none().items_center().justify_between()
         .child(h_flex().gap(6).items_center()

@@ -389,7 +389,7 @@ test("R17: pruneReply also empties the reply text of a leader that is gone", () 
 });
 
 function diagDesk(exec) {
-  const body = MAIN.slice(MAIN.indexOf("  diag(msg, _cx) {"), MAIN.indexOf("  pointerUp(cx) {"));
+  const body = MAIN.slice(MAIN.indexOf("  diag(msg, _cx) {"), MAIN.indexOf("  // A press the list itself got"));
   const make = new Function("exec", "HELPER", `return class D { ${body} }`);
   return new (make(exec, () => "inbox.cjs"))();
 }
@@ -427,7 +427,7 @@ test("R17: diagBusy cannot stick: a failing or hanging write does not stop later
 test("R17: init starts the flush timer on the view's own cx and logs one init line; callers never need cx.timer", () => {
   assert.match(MAIN, /cx\.timer\.every\(DIAG_FLUSH_MS, \(\) => this\.flushDiag\(\)\);/);
   assert.match(MAIN, /this\.diag\(`init: /);
-  const diag = MAIN.slice(MAIN.indexOf("  diag(msg, _cx) {"), MAIN.indexOf("  pointerUp(cx) {"));
+  const diag = MAIN.slice(MAIN.indexOf("  diag(msg, _cx) {"), MAIN.indexOf("  // A press the list itself got"));
   assert.doesNotMatch(diag, /cx\.timer|cx\?\.timer/);
 });
 
@@ -930,7 +930,7 @@ test("R22 diag: a settled selection logs its length, range and bubble id (never 
   d.onSel("w~abc", { text: "x" }, { notify() {} });
   assert.match(d.diagQ[1], /range missing \(#2\)$/, "a selection without a usable range says so");
   d.onSel("w~abc", null, { notify() {} });
-  assert.match(d.diagQ[2], /selection cleared in w~[0-9a-f]{8} id=w~abc, \d+ms after the last settle \(#3\)$/);
+  assert.match(d.diagQ[2], /selection cleared in w~[0-9a-f]{8} id=w~abc, \d+ms after the last settle; since the settle: 0 redraws, 0 mouse ups, 0 list presses \(#3\)$/);
   assert.equal(d.ui.sel, false);
   assert.equal(d.ui.sels.size, 0);
   const none = r20Desk([]);
@@ -961,4 +961,63 @@ test("R22: no selection overlay machinery is left in main.js or inbox.cjs; the p
   assert.equal(I.tintHex(DARK, "sel"), null, "the selection tint kind is gone");
   assert.ok(I.tintHex(DARK, "bold"), "the bold band stays");
   assert.match(MAIN, /on_mouse_down_out\(\(_e, c\) => \{ this\.ui\.press = false; if \(this\.ui\.sel\) \{ this\.ui\.sels\.clear\(\); this\.ui\.sel = false; \}/);
+});
+
+
+// ---- R23: what cleared a finished selection ~250-370ms after the settle (live diag.log)
+test("R23 diag: a clear says how many redraws, mouse ups and list presses came since the settle, and the release line carries click count and age", () => {
+  const d = r20Desk([]);
+  const cx = { notify() {} };
+  d.onSel("w~abc", { text: "SECRET", range: { start: 0, end: 6 } }, cx);
+  d.pointerUp(cx, { click_count: 2 });
+  d.listDown({ click_count: 2 });
+  d.onSel("w~abc", null, cx);
+  const q = d.diagQ.join("\n");
+  assert.match(q, /release \(window mouse up\), click 2, \d+ms after the last settle/);
+  assert.match(q, /press \(list mouse down\), click 2, \d+ms after the last settle/);
+  assert.match(q, /since the settle: 0 redraws, 1 mouse ups, 1 list presses, last click 2 \(#2\)$/m);
+  assert.doesNotMatch(q, /SECRET/);
+  d.diagQ.length = 0;
+  d.pointerUp(cx, { click_count: 1 });
+  assert.match(d.diagQ[0], /release \(window mouse up\), click 1$/, "no settled selection: no age");
+});
+
+test("R23 diag: a redraw while a selection is settled is counted and logged", () => {
+  const d = r20Desk([]);
+  const cx = { notify() {} };
+  d.renderN = 4;
+  d.onSel("w", { text: "abc", range: { start: 0, end: 3 } }, cx);
+  assert.equal(d.selMark.renders, 4);
+  d.renderN = 6; // two redraws happened under the selection
+  d.diagQ.length = 0;
+  d.onSel("w", null, cx);
+  assert.match(d.diagQ[0], /since the settle: 2 redraws, 0 mouse ups, 0 list presses \(#2\)$/);
+  assert.equal(d.selMark, null, "the mark is gone with the selection");
+  assert.match(MAIN, /redraw #\$\{this\.renderN\} while a selection is settled/, "full() logs a redraw under a settled selection");
+});
+
+test("R23: the held-Enter redraw timer respects the selection hold (it used to call notify directly under a selection)", () => {
+  assert.doesNotMatch(MAIN, /this\.heldAt = 0; try \{ c\.notify\(\); \} catch \{\} \}/);
+  assert.match(MAIN, /!holdShown\(this\.editAt, this\.heldAt\)\) \{ this\.heldAt = 0; this\.softNotify\(c\); \}/);
+  assert.match(MAIN, /on_window_mouse_up\("left", \(e, c\) => this\.pointerUp\(c, e\)\)/);
+});
+
+test("R23: linkRef gives repo#N from a GitHub PR or issue link (owner left out), empty for anything else", () => {
+  assert.equal(I.linkRef("https://github.com/xowjd913/agent-mods/pull/39"), "agent-mods#39");
+  assert.equal(I.linkRef("https://github.com/xowjd913/agent-playbook/issues/380#issuecomment-1"), "agent-playbook#380");
+  assert.equal(I.linkRef("https://github.com/xowjd913/agent-mods/pull/39/files"), "agent-mods#39");
+  assert.equal(I.linkRef("https://github.com/xowjd913/agent-mods"), "");
+  assert.equal(I.linkRef("https://example.com/a/b/pull/3"), "");
+  assert.equal(I.linkRef("not a url"), "");
+  assert.equal(I.linkRef(undefined), "");
+});
+
+test("R23: a report card carries linkRef next to the leader name; the name itself is unchanged", () => {
+  const line = JSON.stringify({ ts: "2026-01-01T00:00:00Z", leader: "lead-x", kind: "verify", title: "[x] PO 보고 정리 방안", body: "본문", link: "https://github.com/xowjd913/agent-mods/pull/39" });
+  const [it] = I.parseLines(line + "\n").map(I.enrich);
+  assert.equal(it.linkRef, "agent-mods#39");
+  const [none] = I.parseLines(JSON.stringify({ ts: "2026-01-01T00:00:01Z", leader: "lead-x", kind: "done", title: "[x] 끝", body: "b" }) + "\n").map(I.enrich);
+  assert.equal(none.linkRef, "");
+  assert.match(MAIN, /\.when\(!bare && Boolean\(it\?\.linkRef\), \(el\) => el\.child\(div\(\)\.flex_none\(\)\.text_size\(10\.5\)\.text_color\(t\.dim\)\.child\(it\.linkRef\)\)\)/);
+  assert.match(MAIN, /\.child\(shortName\(s\.leader\)\)\)\)/, "the leader name still comes from shortName/leaderName");
 });
