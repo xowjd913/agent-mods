@@ -553,9 +553,184 @@ function readPo(dir = inboxDir()) {
   return out;
 }
 
+// ---- What a PO's current session cost. An API-equivalent estimate (tokens x list price), never the subscription bill: the person uses it
+// to judge when a PO has grown expensive enough to restart. The hook records which transcript a PO is on (po-session/<po id>.json, written on
+// every prompt and reply, so a /clear is followed by the next event); the numbers are summed here from the usage of that transcript and of
+// its sub-agent transcripts (<transcript minus .jsonl>/subagents/*.jsonl). Only the `id`, `model` and `usage` fields of a line are used.
+//
+// PRICE TABLE: the one place the prices live. USD per million tokens: [input, 5m cache write, 1h cache write, cache read, output].
+// Source: https://platform.claude.com/docs/en/about-claude/pricing  (checked 2026-11-25). A model id that is not listed is "$?", never a guess:
+// add a row when a model ships. Dated ids (-20250929), "[1m]" and "-latest" suffixes are dropped before the lookup (modelKey).
+const COST_PRICES = {
+  "claude-fable-5-2": [8, 10, 16, 0.2, 40], "claude-mythos-5-2": [8, 10, 16, 0.2, 40],
+  "claude-fable-5-1": [10, 12.5, 20, 0.25, 50], "claude-mythos-5-1": [10, 12.5, 20, 0.25, 50],
+  "claude-fable-5": [10, 12.5, 20, 1, 50], "claude-mythos-5": [10, 12.5, 20, 1, 50],
+  "claude-opus-5-5": [4, 5, 8, 0.2, 20],
+  "claude-opus-5": [5, 6.25, 10, 0.5, 25], "claude-opus-4-8": [5, 6.25, 10, 0.5, 25], "claude-opus-4-7": [5, 6.25, 10, 0.5, 25],
+  "claude-opus-4-6": [5, 6.25, 10, 0.5, 25], "claude-opus-4-5": [5, 6.25, 10, 0.5, 25],
+  "claude-opus-4-1": [15, 18.75, 30, 1.5, 75], "claude-opus-4": [15, 18.75, 30, 1.5, 75],
+  "claude-sonnet-5-5": [2, 2.5, 4, 0.1, 10], "claude-sonnet-5": [2, 2.5, 4, 0.2, 10],
+  "claude-sonnet-4-6": [3, 3.75, 6, 0.3, 15], "claude-sonnet-4-5": [3, 3.75, 6, 0.3, 15], "claude-sonnet-4": [3, 3.75, 6, 0.3, 15],
+  "claude-haiku-5-5": [0.1, 0.125, 0.2, 0.01, 0.5], // prompts up to 100,000 tokens; a longer prompt uses COST_BIG_PROMPT
+  "claude-haiku-4-5": [1, 1.25, 2, 0.1, 5],
+};
+// A request whose prompt (input + cache read + cache write tokens) is over `over` tokens is priced with `p` instead.
+const COST_BIG_PROMPT = { "claude-haiku-5-5": { over: 100000, p: [0.5, 0.625, 1, 0.05, 2.5] } };
+const COST_READ_MAX = 8 << 20; // at most this many new bytes of one transcript are read per call (a bigger backlog is caught up on the next calls)
+const COST_BUDGET = 16 << 20; // ... and at most this many over all the transcripts of one call
+const COST_IDS = 400; // message ids remembered per transcript for the streaming de-duplication (duplicates sit next to each other)
+const COST_FILES = 60; // transcripts (main + sub-agents) summed per PO
+const COST_CACHE = "po-cost-cache.json"; // {files:{<transcript path>:{off, sum, ids, unk}}}: where each transcript was read up to, so a call reads only what is new
+const PO_SESSION_DIR = "po-session"; // ~/.herdr-inbox/po-session/<po id>.json = {sid, path, at}: the transcript a PO's session writes
+
+const modelKey = (m) => String(m ?? "").trim().toLowerCase().replace(/\[[^\]]*\]$/, "").replace(/-latest$/, "").replace(/-\d{8}$/, "");
+const tokenN = (v) => (Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
+// [input, output, cache read, 5m cache write, 1h cache write] tokens of a message.usage, or null when it is not an object. The cache write
+// split comes from usage.cache_creation; what it does not account for (or all of it, when there is no split) is priced as a 5m write.
+function costTokens(u) {
+  if (!u || typeof u !== "object") return null;
+  const cc = u.cache_creation && typeof u.cache_creation === "object" ? u.cache_creation : null;
+  const total = tokenN(u.cache_creation_input_tokens);
+  const w1 = cc ? tokenN(cc.ephemeral_1h_input_tokens) : 0;
+  let w5 = cc ? tokenN(cc.ephemeral_5m_input_tokens) : 0;
+  if (w5 + w1 < total) w5 = total - w1;
+  return [tokenN(u.input_tokens), tokenN(u.output_tokens), tokenN(u.cache_read_input_tokens), w5, w1];
+}
+// USD of one message of `model` with tokens `v` (costTokens), or null when the model is not in the price table.
+function costUsd(model, v) {
+  const k = modelKey(model);
+  const base = COST_PRICES[k];
+  if (!base) return null;
+  const big = COST_BIG_PROMPT[k];
+  const p = big && v[0] + v[2] + v[3] + v[4] > big.over ? big.p : base;
+  return (v[0] * p[0] + v[3] * p[1] + v[4] * p[2] + v[2] * p[3] + v[1] * p[4]) / 1e6;
+}
+// Folds the lines of a transcript text into `st` ({sum, ids, unk}). A streamed reply is written as several lines with the same message.id
+// whose usage can grow, so each id counts once with the largest value seen per field. Lines without usage (or with all-zero usage, like
+// the harness's own messages) cost nothing; a model that is not in the table adds nothing to the sum and is listed in `unk`.
+function costFold(st, text) {
+  for (const line of String(text ?? "").split("\n")) {
+    if (!line.includes('"usage"')) continue;
+    let o;
+    try { o = JSON.parse(line); } catch { continue; }
+    const m = o?.message;
+    if (!m || typeof m !== "object") continue;
+    const v = costTokens(m.usage);
+    if (!v || !v.some((x) => x > 0)) continue;
+    const id = typeof m.id === "string" ? m.id.slice(0, 80) : "";
+    const prev = id ? st.ids[id] : null;
+    const model = (typeof m.model === "string" && m.model) || prev?.m || "";
+    const merged = prev ? v.map((x, i) => Math.max(x, prev.v[i])) : v;
+    const before = prev ? costUsd(prev.m, prev.v) ?? 0 : 0;
+    const now = costUsd(model, merged);
+    if (now === null) { const k = modelKey(model) || "?"; if (!st.unk.includes(k) && st.unk.length < 5) st.unk.push(k); }
+    st.sum += (now ?? 0) - before;
+    if (id) { delete st.ids[id]; st.ids[id] = { m: model, v: merged }; } // re-added last: the oldest ids are the ones dropped by the cap
+  }
+  const keys = Object.keys(st.ids);
+  for (const k of keys.slice(0, Math.max(0, keys.length - COST_IDS))) delete st.ids[k];
+  return st;
+}
+const costFresh = () => ({ off: 0, sum: 0, ids: {}, unk: [] });
+// Reads what is new in `file` since `ent.off` (a file that shrank starts over) and folds it into `ent`, within `budget` bytes. Only whole
+// lines are consumed: a half-written last line waits for the next call. Returns {ent, used, partial} (partial: more is left to read), or
+// null when the file cannot be read.
+function costRead(file, ent, budget = COST_READ_MAX) {
+  let fd;
+  try { fd = fs.openSync(file, "r"); } catch { return null; }
+  try {
+    const size = fs.fstatSync(fd).size;
+    const st = ent && Number.isFinite(ent.off) && ent.off <= size && ent.ids && Array.isArray(ent.unk) ? ent : costFresh();
+    const cap = Math.max(0, Math.min(COST_READ_MAX, budget));
+    const left = size - st.off;
+    const want = Math.min(left, cap);
+    let used = 0;
+    if (want > 0) {
+      const buf = Buffer.alloc(want);
+      const got = fs.readSync(fd, buf, 0, want, st.off);
+      used = got;
+      const end = buf.subarray(0, got).lastIndexOf(10);
+      if (end >= 0) { costFold(st, buf.toString("utf8", 0, end + 1)); st.off += end + 1; }
+      else if (got >= COST_READ_MAX) st.off += got; // one line longer than the whole window: skipped, never re-read
+    }
+    return { ent: st, used, partial: left > cap };
+  } catch { return null; } finally { try { fs.closeSync(fd); } catch {} }
+}
+// The sub-agent transcripts of a main transcript path: <path minus .jsonl>/subagents/*.jsonl (sorted, at most COST_FILES - 1).
+function subagentFiles(main) {
+  const dir = String(main).replace(/\.jsonl$/, "") + path.sep + "subagents";
+  try { return fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl")).sort().slice(0, COST_FILES - 1).map((n) => path.join(dir, n)); } catch { return []; }
+}
+const poSessionFile = (dir, id) => (cleanPoId(id) ? path.join(dir, PO_SESSION_DIR, `${cleanPoId(id)}.json`) : null);
+// What the hook knows of a PO's session: {sid, path} from a hook payload, or null (no usable transcript path -> nothing is recorded).
+function sessionRecord(payload) {
+  const p = typeof payload?.transcript_path === "string" ? payload.transcript_path : "";
+  if (!p || p.length > 1024 || p.includes("\0") || !path.isAbsolute(p) || !p.endsWith(".jsonl")) return null;
+  return { sid: typeof payload.session_id === "string" ? payload.session_id.slice(0, 80) : "", path: p };
+}
+// Writes the session record of PO `id` unless it is already the same (the hook runs on every prompt and reply). Returns true when written.
+function writePoSession(dir, id, payload, now = Date.now()) {
+  const file = poSessionFile(dir, id);
+  const rec = sessionRecord(payload);
+  if (!file || !rec) return false;
+  try { const old = JSON.parse(fs.readFileSync(file, "utf8")); if (old?.path === rec.path && old?.sid === rec.sid) return false; } catch {}
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify({ ...rec, at: new Date(Number(now) || Date.now()).toISOString() }), { mode: 0o600 });
+  fs.renameSync(tmp, file);
+  return true;
+}
+function readPoSession(dir, id) {
+  const file = poSessionFile(dir, id);
+  if (!file) return null;
+  try { const o = JSON.parse(fs.readFileSync(file, "utf8")); return sessionRecord({ transcript_path: o?.path, session_id: o?.sid }); } catch { return null; }
+}
+// {<po id>: {usd, unknown:[model ids not in the table], sub:<sub-agent transcripts counted>, partial}} for every PO that has a session record
+// whose transcript can be read. A PO without a record (it started before the hook recorded sessions) is simply absent: nothing is shown.
+function poCosts(dir = inboxDir()) {
+  const out = {};
+  let names = [];
+  try { names = fs.readdirSync(path.join(dir, PO_SESSION_DIR)); } catch { return out; }
+  let cache = { files: {} };
+  try { const c = JSON.parse(fs.readFileSync(path.join(dir, COST_CACHE), "utf8")); if (c && typeof c.files === "object" && c.files) cache = { files: c.files }; } catch {}
+  const next = { files: {} };
+  let dirty = false;
+  let budget = COST_BUDGET;
+  for (const n of names) {
+    const id = n.endsWith(".json") ? n.slice(0, -5) : "";
+    const rec = readPoSession(dir, id);
+    if (!rec) continue;
+    let usd = 0, sub = 0, any = false, partial = false;
+    const unknown = [];
+    for (const [i, f] of [rec.path, ...subagentFiles(rec.path)].entries()) {
+      const r = costRead(f, cache.files[f], budget);
+      if (!r) { if (i === 0) break; continue; }
+      budget -= r.used;
+      if (r.used > 0 || !cache.files[f]) dirty = true;
+      next.files[f] = r.ent;
+      if (i === 0) any = true; else sub++;
+      usd += r.ent.sum;
+      partial = partial || r.partial;
+      for (const k of r.ent.unk) if (!unknown.includes(k)) unknown.push(k);
+    }
+    if (any) out[id] = { usd: Math.max(0, usd), unknown, sub, partial };
+  }
+  if (Object.keys(next.files).length !== Object.keys(cache.files).length) dirty = true; // a transcript no PO is on any more is dropped
+  if (dirty) {
+    try {
+      const file = path.join(dir, COST_CACHE);
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const tmp = `${file}.tmp-${process.pid}`;
+      fs.writeFileSync(tmp, JSON.stringify(next), { mode: 0o600 });
+      fs.renameSync(tmp, file);
+    } catch {}
+  }
+  return out;
+}
+
 function collect(dir = inboxDir()) {
   let names = [];
-  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== OLD_PO_FILE); } catch { return { at: new Date().toISOString(), dir, leaders: [], po: {}, imgd: {}, root: appRoot() }; }
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== OLD_PO_FILE); } catch { return { at: new Date().toISOString(), dir, leaders: [], po: {}, imgd: {}, cost: {}, root: appRoot() }; }
   const leaders = [];
   for (const n of names) {
     try {
@@ -564,7 +739,9 @@ function collect(dir = inboxDir()) {
     } catch {}
   }
   leaders.sort((a, b) => (b.last?.ms ?? 0) - (a.last?.ms ?? 0));
-  return { at: new Date().toISOString(), dir, root: appRoot(), leaders, po: readPo(dir), imgd: imageDims() };
+  let cost = {};
+  try { cost = poCosts(dir); } catch {} // a failed cost read never takes the desk's data down
+  return { at: new Date().toISOString(), dir, root: appRoot(), leaders, po: readPo(dir), imgd: imageDims(), cost };
 }
 
 // Which terminal is a waiting leader: a terminal named lead-* with the wait label decision|verify; returns that kind or "".
@@ -639,6 +816,29 @@ function usageTip(rows, now) {
   return parts.length ? parts.join(" · ") : "초기화 시각 정보가 없습니다";
 }
 // usageLine:end
+
+// costLine:begin
+// One PO's current-session cost, shown after the usage line: "이 세션 $3.20". The numbers come from inbox.cjs (poCosts: the usage fields of the
+// session transcript x the price table there) as {usd, unknown, sub, partial}; this block only words them. It is an API-equivalent estimate, not
+// the subscription bill. `unknown` lists the model ids that are not in the price table: the label is then "$?" (no guess). Copied between the
+// markers into inbox/main.js and inbox.cjs (a test keeps them identical).
+function costLabel(c) {
+  if (!c || !Number.isFinite(c.usd)) return "";
+  if (Array.isArray(c.unknown) && c.unknown.length) return "$?";
+  return c.usd >= 1000 ? `$${Math.round(c.usd).toLocaleString("en-US")}` : `$${c.usd.toFixed(2)}`;
+}
+function costTip(c) {
+  if (!c || !Number.isFinite(c.usd)) return "";
+  const unk = Array.isArray(c.unknown) && c.unknown.length;
+  return [
+    "이 PO의 현재 세션에서 쓴 금액: API 기준 추정 금액, 구독 청구액 아님",
+    c.sub > 0 ? "서브에이전트 포함" : "메인 세션만",
+    unk ? `가격표에 없는 모델이라 합계를 내지 않았습니다: ${c.unknown.slice(0, 3).join(", ")}` : "",
+    c.partial ? "아직 다 읽지 못해 더 늘 수 있습니다" : "",
+    "/clear 하면 0부터 다시 셉니다",
+  ].filter(Boolean).join(" · ");
+}
+// costLine:end
 
 // The PO of a leader: that leader's terminal's parent, accepted only when the parent carries the label role=po. No guessing from
 // sibling lead-* terminals: a wrong guess would put an answer into some other agent's prompt. null when there is none.
@@ -1448,7 +1648,7 @@ function diagAppend(lines, root = appRoot()) {
   try { try { fs.fchmodSync(fd, 0o600); } catch {} fs.writeSync(fd, text); } finally { fs.closeSync(fd); }
   return f;
 }
-module.exports = { USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, parseUsage, usageLeft, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, parseUsage, usageLeft, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)

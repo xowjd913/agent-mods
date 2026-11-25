@@ -843,7 +843,7 @@ test("collect: po/<id>.jsonl을 PO별로 읽고, 옛 po.jsonl과 잘못된 파�
   assert.deepEqual(d.po.devnotes.map((x) => [x.text, x.to]), [["안녕하세요", "here"]]);
   assert.deepEqual(d.po.mascoz.map((x) => x.text), ["마스코즈"]);
   assert.deepEqual(I.readPo(dir), d.po);
-  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, dir: path.join(dir, "none"), root: I.appRoot(), leaders: [], po: {}, imgd: {} });
+  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, dir: path.join(dir, "none"), root: I.appRoot(), leaders: [], po: {}, imgd: {}, cost: {} });
 });
 
 test("chat 블록: main.js가 inbox.cjs와 한 글자도 다르지 않은 같은 블록을 쓴다", () => {
@@ -2074,13 +2074,13 @@ test("usageLine: main.js와 inbox.cjs가 같은 블록을 쓴다", () => {
 
 test("usageLine: main.js 배선 — 파일만 읽고(exec·네트워크 없음), 1분 주기, 80% 경고색, 툴팁, 방 제목 아래, 바뀔 때만 다시 그린다", () => {
   const src = mainSrc();
-  const fn = src.slice(src.indexOf("  loadUsage(cx) {"), src.indexOf("  usageLine(t) {"));
+  const fn = src.slice(src.indexOf("  loadUsage(cx) {"), src.indexOf('  usageLine(t, pick = "") {'));
   assert.match(fn, /readTextFile\(`\$\{home\(\)\}\/\$\{USAGE_FILE\}`\)/);
   assert.doesNotMatch(fn, /exec\(|fetch\(/);
   assert.match(fn, /JSON\.stringify\(\[rows, usageTip\(rows, Date\.now\(\)\)\]\)/);
   assert.match(src, /cx\.timer\.every\(USAGE_REFRESH_MS, \(cx\) => this\.loadUsage\(cx\)\)/);
   assert.match(fn, /if \(sig === this\.usageSig\) return;/);
-  const line = src.slice(src.indexOf("  usageLine(t) {"), src.indexOf("  // ---- redraw gating"));
+  const line = src.slice(src.indexOf('  usageLine(t, pick = "") {'), src.indexOf("  // ---- redraw gating"));
   assert.match(line, /u\.percent >= USAGE_WARN/);
   assert.match(line, /\.tooltip\(usageTip\(rows, Date\.now\(\)\)\)/);
   assert.match(line, /"Unknown"/);
