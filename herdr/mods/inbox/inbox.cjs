@@ -470,6 +470,20 @@ function clipImage(root = appRoot()) {
   } catch {}
   return null;
 }
+// The TEXT on the system clipboard, or null when it holds none (a picture only) or no tool can read it. macOS: pbpaste; Windows: PowerShell Get-Clipboard;
+// Linux: wl-paste or xclip. Capped, never throws. Used to give the clipboard back after the desk pastes a '!' line.
+// The most characters of clipboard text the `cliptext` command hands back (longer text is not restored: a cut copy would be worse than none).
+const CLIP_TEXT_MAX = 200000;
+function clipText() {
+  const { execFileSync } = require("child_process");
+  const run = (cmd, args) => execFileSync(cmd, args, { timeout: 3000, stdio: ["ignore", "pipe", "ignore"], windowsHide: true, maxBuffer: 1 << 20 }).toString("utf8");
+  try {
+    if (process.platform === "darwin") return run("pbpaste", []);
+    if (process.platform === "win32") return run("powershell", ["-NoProfile", "-NonInteractive", "-Command", "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Clipboard -Raw"]).replace(/\r?\n$/, "");
+    for (const [cmd, args] of [["wl-paste", ["--no-newline"]], ["xclip", ["-selection", "clipboard", "-o"]]]) { try { return run(cmd, args); } catch {} }
+  } catch {}
+  return null;
+}
 // The pictures of one prompt in a Claude Code transcript (jsonl): the user entry whose promptId is `promptId` (else the newest user entry that
 // carries a picture and whose text starts like `promptText`) holds {type:"image", source:{type:"base64", media_type, data}} blocks next to its
 // "[Image #N]" text. Each is saved (capped) and the paths come back. Only the last 32 MiB of the transcript are read.
@@ -983,7 +997,7 @@ function parseMention(raw, known = []) {
     else if (known.includes(name)) { if (!to.includes(name)) to.push(name); } else return m;
     return pre;
   }).trim() === "";
-  const text = flat.replace(/(^|\n)@here[.,!?:;)]+ ?/g, "$1").replace(HERE_PUNCT, "").replace(HERE, "$1").replace(/[ \t]+/g, " ").replace(/ ?\n ?/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/^[\s,.:;!?)]+/, "").trim();
+  const text = flat.replace(/(^|\n)@here[.,!?:;)]+ ?/g, "$1").replace(HERE_PUNCT, "").replace(HERE, "$1").replace(/[ \t]+/g, " ").replace(/ ?\n ?/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/^[\s,.:;!?)]+/, (m) => (flat.startsWith("!") ? m : "")).trim(); // a "!" the person started with is theirs (a "!cmd" line, #93); only punctuation left by a removed mention goes
   return { text, to, here, empty };
 }
 // What an Enter does in the box: Shift+Enter is a line break, a plain Enter (or Cmd/Ctrl+Enter) sends, any other key nothing.
@@ -997,10 +1011,10 @@ const strayBreak = (value, sentAt, now) => String(value ?? "").length > 0 && Str
 // commit's own 100 ms edit) sends. `heldAt`: when an Enter was last held (0 = never); `changedAt`, `now`: ms.
 const IME_MS = 500;
 const IME_TAIL = /[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\u3040-\u30FF\u3400-\u9FFF]$/;
-const imeHold = (value, changedAt, heldAt, now) => {
+const imeHold = (value, changedAt, heldAt, now, atEnd = true) => {
   if (Number(heldAt) > 0 && Number(changedAt) <= Number(heldAt) + 100) return false;
   if (Number(now) - Number(changedAt) < IME_MS) return true;
-  return IME_TAIL.test(String(value ?? "").trimEnd());
+  return atEnd !== false && IME_TAIL.test(String(value ?? "").trimEnd()); // a syllable still being composed sits at the cursor: with the cursor inside the text the tail is settled
 };
 // The line break the widget itself puts in the box for a held Enter (it may add it before or after the key handler runs): the held Enter
 // must not leave it there, or the person sees a blank line appear before the second Enter. `heldAt`, `now`: ms; HELD_BREAK_MS covers both orders.
@@ -1008,6 +1022,30 @@ const HELD_BREAK_MS = 150;
 const strayHeld = (value, heldAt, now) => Number(heldAt) > 0 && Number(now) - Number(heldAt) < HELD_BREAK_MS && /\n$/.test(String(value ?? ""));
 // The text with its trailing line breaks cut: what "an edit" is measured on (the widget's own line break for an Enter is not an edit).
 const editCore = (value) => String(value ?? "").replace(/\n+$/, "");
+// #83: Enter sends from any cursor position. The widget may also put its own line break at the cursor (anywhere in the text, not only at the end):
+// `strayAt(prev, value)` is where exactly one "\n" was inserted into `prev` (-1 if the change is anything else), `withoutAt` takes it out again,
+// `enterPending(enterAt, now)` says an Enter was pressed just before (or up to 25 ms after) `now`, and `atTextEnd(value, cursor)` is whether the
+// cursor is at the end of the text (an unknown cursor counts as the end, the careful side for the IME hold).
+const strayAt = (prev, value) => {
+  const a = String(prev ?? ""), b = String(value ?? "");
+  if (b.length !== a.length + 1) return -1;
+  let i = 0;
+  while (i < a.length && a[i] === b[i]) i++;
+  return b[i] === "\n" && b.slice(0, i) + b.slice(i + 1) === a ? i : -1;
+};
+const withoutAt = (value, i) => String(value ?? "").slice(0, i) + String(value ?? "").slice(i + 1);
+// An Enter pressed with text selected makes the widget REPLACE the selection by "\n" (not insert one): `replacedAt(prev, value)` is {idx, end} when
+// `value` is `prev` with the span [idx, end) (at least one character) swapped for one "\n", else null. The span is the selected text to put back.
+const replacedAt = (prev, value) => {
+  const a = String(prev ?? ""), b = String(value ?? "");
+  for (let i = b.indexOf("\n"); i >= 0; i = b.indexOf("\n", i + 1)) {
+    const end = a.length - (b.length - i - 1);
+    if (end > i && b.slice(0, i) === a.slice(0, i) && b.slice(i + 1) === a.slice(end)) return { idx: i, end };
+  }
+  return null;
+};
+const enterPending = (enterAt, now) => Number(enterAt) > 0 && Number(now) - Number(enterAt) >= -25 && Number(now) - Number(enterAt) < HELD_BREAK_MS;
+const atTextEnd = (value, cursor) => cursor == null || !Number.isFinite(Number(cursor)) || Number(cursor) >= editCore(value).length;
 const holdShown = (changedAt, heldAt) => Number(heldAt) > 0 && Number(changedAt) <= Number(heldAt) + 100; // a held Enter is still waiting for its second one
 // The "@query" being typed right before `cursor` (offsets into the box text), or null. Not inside a chip, not in the middle of a word.
 function mentionQuery(text, cursor, tokens = []) {
@@ -1074,6 +1112,25 @@ function settlePick(pos, last, hasOther, liveAt, now) {
 const DRAFT_GRACE_MS = 60000;
 function staleDrafts(keys, live, seen, now) {
   return [...keys].filter((k) => !live.has(k) && !(now - (seen.get(k) ?? 0) < DRAFT_GRACE_MS));
+}
+// #74: a draft mirror. Every change of a text box is copied (`mirror`: {text, content, range}); when the box comes back empty without the
+// person's own key press (`keyAt`, within DRAFT_KEY_MS) and without a clear of ours (which empties the mirror first), the text is put back.
+const DRAFT_KEY_MS = 1000;
+const draftWiped = (mirror, value, keyAt, now) => Boolean(mirror) && String(mirror.text ?? "") !== "" && String(value ?? "") === "" && !(Number(now) - Number(keyAt) < DRAFT_KEY_MS);
+// #66 (draft per room): the unsent chat text each room holds while another room is shown. `cur` = what the box holds now {text, content, range, pics};
+// leaving `from` stores it there (nothing to keep = the room's entry goes), arriving at `to` takes that room's entry out (it is the box again) and
+// returns it as `load` (null = an empty box). A room that was left empty keeps no entry; the map is capped (oldest dropped). Pure (no mutation of `map`).
+const ROOM_DRAFTS_MAX = 24;
+function swapDraft(map, from, to, cur) {
+  const out = new Map(map);
+  if (from != null) {
+    out.delete(from);
+    if (cur && (String(cur.text ?? "") !== "" || (cur.pics ?? []).length > 0)) out.set(from, cur);
+  }
+  const load = to != null && to !== from ? out.get(to) ?? null : null;
+  if (to != null && to !== from) out.delete(to);
+  while (out.size > ROOM_DRAFTS_MAX) out.delete(out.keys().next().value);
+  return { map: out, load };
 }
 // The "@" menu: "@here" first, then the live leaders of the picked PO (`pick`, a PO id; none for PO_OTHER), by shown name. `query`
 // filters by hc name or shown name.
@@ -1244,18 +1301,44 @@ const PROMPT_TIMER = /^[\s│┃|]*[^\p{L}\p{N}\s]?\s*\p{L}[\p{L}\s'-]{0,30}[…
 const promptTail = (text, n = 10) => cleanText(text).split("\n").map((l) => l.trimEnd()).filter((l) => l.trim() && !PROMPT_TIMER.test(l)).slice(-n).map((l) => (l.length > 140 ? `${l.slice(0, 139)}…` : l));
 const PROMPT_NUM = /^[\s│┃|]*([❯>›])?\s*(\d{1,2})[.)]\s+(\S.*?)[\s│┃|]*$/;
 const promptFooter = (l) => /^[^\p{L}\p{N}]*$/u.test(l) || (l.length <= 140 && /\b(esc|enter|tab|ctrl|shift|alt)\b|^\s*[↑↓←→]|\? for shortcuts/i.test(l));
-// {options: [{key, label, on}], head: the up to 2 lines right above the choices}. Options only when they are 1..N (2 or more).
+// {options: [{key, label, on}], head: the up to 2 lines right above the choices, tabs: the tab bar line of a multi-question prompt or ""}.
+// Options only when they are 1..N (2 or more). A choice may carry description lines under it (AskUserQuestion: the row is indented deeper than the
+// number): those belong to the choice above and do not break the run. The tab bar ("← ☐ Scope  ☐ Priority  ✔ Submit →") is the line with arrows and
+// checkbox marks somewhere above the choices; it is kept so the desk can offer the tab keys.
+const promptCol = (l) => l.length - l.replace(/^[\s│┃|]*/, "").length;
+const PROMPT_TABS = /←.*→|→.*←/; // the bar has both arrows (and a checkbox mark, below)
+const PROMPT_MARK = /[☐☒☑✔✓□■]/;
 function promptParse(text) {
   const lines = promptTail(text, 24);
   const num = lines.map((l) => PROMPT_NUM.exec(l));
+  const none = { options: [], head: [], tabs: "" };
+  // the numbered row that owns line i: itself, or the one up to 4 lines above it when every line between is a description (indented deeper than its number)
+  const owner = (i) => {
+    for (let j = i; j >= 0 && i - j <= 4; j--) {
+      if (!num[j]) continue;
+      const col = lines[j].search(/\d/);
+      for (let k = j + 1; k <= i; k++) if (promptCol(lines[k]) <= col && !/^[^\p{L}\p{N}]*$/u.test(lines[k])) return -1; // a rule line (no letters or digits) between choices is skipped
+      return j;
+    }
+    return -1;
+  };
   let end = lines.length - 1;
   for (let skip = 0; end >= 0 && !num[end] && skip < 6 && promptFooter(lines[end]); skip++) end--;
-  if (end < 0 || !num[end]) return { options: [], head: [] };
-  let start = end;
-  while (start > 0 && num[start - 1]) start--;
-  const options = num.slice(start, end + 1).map((m) => ({ key: m[2], label: m[3].trim().slice(0, 80), on: m[1] === "❯" || m[1] === "›" }));
-  if (options.length < 2 || !options.every((o, i) => Number(o.key) === i + 1)) return { options: [], head: [] };
-  return { options: options.slice(0, 6), head: lines.slice(Math.max(0, start - 2), start) };
+  if (end < 0) return none;
+  end = owner(end);
+  if (end < 0) return none;
+  const rows = [end];
+  while (Number(num[rows[rows.length - 1]][2]) > 1) {
+    const prev = owner(rows[rows.length - 1] - 1);
+    if (prev < 0) break;
+    rows.push(prev);
+  }
+  rows.reverse();
+  const options = rows.map((j) => { const m = num[j]; return { key: m[2], label: m[3].trim().slice(0, 80), on: m[1] === "❯" || m[1] === "›" }; });
+  if (options.length < 2 || !options.every((o, i) => Number(o.key) === i + 1)) return none;
+  const start = rows[0];
+  const tabs = lines.slice(Math.max(0, start - 5), start).reverse().find((l) => PROMPT_TABS.test(l) && PROMPT_MARK.test(l)) ?? ""; // only near the question: an arrow line far up is output
+  return { options: options.slice(0, 8), head: lines.slice(Math.max(0, start - 2), start), tabs: tabs.replace(/[│┃|]/g, " ").replace(/\s+/g, " ").trim() };
 }
 const promptOptions = (text) => promptParse(text).options;
 // What identifies the question on screen: the choices (without which one is highlighted) and the lines above them, whitespace squeezed; when
@@ -1271,11 +1354,24 @@ const promptSame = (a, b) => promptTail(a, 40).map((l) => l.replace(/\s+/g, " ")
 // whitespace ignored), or, for a long / multi-line paste the PO folds into "[Pasted text …]", that marker is.
 function inputHas(screen, line) {
   const squeeze = (s) => s.replace(/[│┃|]/g, " ").replace(/\s+/g, " ").trim();
-  const want = squeeze(cleanText(line));
+  const want = squeeze(cleanText(line)).replace(/^!\s*/, ""); // bash mode draws the "!" apart from the command
   if (!want) return false;
   const hay = squeeze(cleanText(screen).split("\n").filter((l) => l.trim()).slice(-14).join("\n"));
   if (/\n/.test(cleanText(line).trim()) || want.length > 200) return /\[Pasted text/i.test(hay) || hay.includes(want.slice(0, 24)) || hay.includes(want.slice(-24));
   return hay.includes(want.slice(0, 24)) || hay.includes(want.slice(-24));
+}
+// A desk line that is a shell command for the PO's own prompt ("!ls": Claude Code's bash mode starts with "!"). null for any other text,
+// "" for a bare "!"; "!!" is not one. The command is the rest of the line, trimmed.
+const bangCommand = (text) => { const m = /^\s*!(?!!)([\s\S]*)$/.exec(String(text ?? "")); return m ? m[1].trim() : null; };
+// What stands in the PO's input box on its screen: the text after the last prompt mark (❯ > ›) among the last 14 lines (box borders ignored), "" for an empty
+// box, null when no prompt line is there. A dim placeholder hint reads as text (colors are not on the screen), so the desk then refuses: it never types over text.
+function promptInput(screen) {
+  const lines = cleanText(screen).split("\n").filter((l) => l.trim()).slice(-14);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = /^[\s│┃|]*([❯>›])(?:\s+(.*?))?[\s│┃|]*$/.exec(lines[i]);
+    if (m) return (m[2] ?? "").trim();
+  }
+  return null;
 }
 // Slack-style headers: `head` is true for the first entry and whenever the sender changes or the gap to the entry before is over `gap`.
 const groupTimeline = (entries, gap = TL_GAP_MS) => (entries ?? []).map((e, i, a) => ({ ...e, head: i === 0 || a[i - 1].who !== e.who || e.ms - a[i - 1].ms > gap }));
@@ -1322,7 +1418,7 @@ function roomLeaders(entries, label = (id) => id) {
   return out.sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
 }
 // The leader to filter by: `leader` while the room still has it, else "" (= everyone; a leader that left the room goes back to 전체).
-const settleLeader = (choices, leader) => (leader && (choices ?? []).length >= 2 && (choices ?? []).some((x) => x.id === leader) ? String(leader) : "");
+const settleLeader = (choices, leader) => (leader && (choices ?? []).length >= 1 && (choices ?? []).some((x) => x.id === leader) ? String(leader) : "");
 // Only the leaders whose terminal is open now stay as choices (a closed leader's session is gone: its history stays under "전체"). A leader is live when a
 // terminal carries its hc name, or sits at the address its summary recorded. `sums` = [{leader, terminal}].
 const aliveLeaders = (choices, terms, sums) => (choices ?? []).filter((c) => (terms ?? []).some((t) => t.name === c.id || (t.address && (sums ?? []).some((s) => s.leader === c.id && s.terminal === t.address))));
@@ -1397,12 +1493,24 @@ function dockTarget(here, f, terms) {
 // The options of a decision report, read strictly from its body (the leader report rule: one "N안: ..." line per option, N = 1..3, and
 // optionally a "추천: N안" line). At least two distinct numbers, otherwise none (nothing is guessed: "A:", "1)", "①", "1. step" are not options).
 // -> { options: [1, 2], recommended: 2 | 0 }
+// "추천"/"권장"/"recommend" mark a recommended option, but not when negated: "비추천", "비권장", "추천하지 않", "권장하지 않", "not recommended",
+// "don't recommend" (a negated option is one the report says NOT to pick, so it never gets the "(추천)" mark).
+const REC_MARK = /추천|권장|recommend/i;
+const REC_NEG = /비\s*추천|비\s*권장|(?:추천|권장)\s*(?:하지\s*(?:않|말)|안\s*함|드리지\s*않|할\s*수\s*없)|(?:not|n['’]t|never)\s+(?:be\s+)?recommend|un-?recommend/i;
+const recMarked = (txt) => REC_MARK.test(String(txt ?? "")) && !REC_NEG.test(String(txt ?? ""));
 function decisionOptions(body) {
   const nums = new Set();
   let rec = 0;
   for (const line of String(body ?? "").split(/\r?\n/)) {
-    let m = line.match(/^\s*(?:[-*]\s*)?([1-3])안\s*[:：)]\s*\S/);
-    if (m) { nums.add(Number(m[1])); continue; }
+    // "1안: …", "1안) …", and with a marker between the number and the colon: "1안(추천): …", "1안 (추천): …", "**1안** [권장]: …"
+    let m = line.match(/^\s*(?:[-*]\s*)?(?:\*\*)?([1-3])안(?:\*\*)?\s*(?:[(（\[［]([^)）\]］\n]{0,24})[)）\]］])?\s*(?:\*\*)?\s*[:：)]\s*\S/);
+    if (m) {
+      const n = Number(m[1]);
+      nums.add(n);
+      // the recommendation marked on the option itself: "1안(추천):" or "… (추천)" / "★" at the end of its line
+      if (!rec && (recMarked(m[2]) || recMarked(line.match(/[(（\[［]([^)）\]］\n]{0,24})[)）\]］]\s*$/)?.[1]) || /[★⭐]\s*$/.test(line))) rec = n;
+      continue;
+    }
     m = line.match(/^\s*(?:[-*]\s*)?추천\s*[:：]\s*([1-3])안/);
     if (m && !rec) rec = Number(m[1]);
   }
@@ -1632,62 +1740,75 @@ function clipLong(text) {
   return { text: s.slice(0, end).trimEnd(), cut: true, more: s.length - end };
 }
 const moreLabel = (more) => `더 보기 · ${String(Math.max(0, Number(more) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}자 더`;
-// Where the **bold** runs of a Markdown text (the string given to TextView.markdown) sit, as [{start,end}] UTF-16 offsets into that same string,
-// markers included. The TextView draws no heavier weight for them (it ignores bold), so main.js paints a tint behind these ranges instead.
-// Fenced blocks and `code spans` are skipped, a \\* is not a marker, an opening ** must be followed and a closing ** preceded by a non-blank.
-// Bounded: a line over 2000 chars, work past 20000 chars or more than 100 ranges is left plain. Pure.
-function boldRanges(md) {
-  const out = [];
-  let fence = false, pos = 0, work = 0;
-  for (const ln of String(md ?? "").split("\n")) {
-    const at = pos;
-    pos += ln.length + 1;
-    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; continue; }
-    if (fence || ln.length > 2000 || !ln.includes("**")) continue;
-    work += ln.length;
-    if (work > 20000 || out.length >= 100) break;
-    let m = ln, i = 0;
-    while (i < m.length) { // blank out the code spans (same length, so the offsets stay)
-      if (m[i] === "\\") { i += 2; continue; }
-      if (m[i] !== "`") { i++; continue; }
-      let n = 1;
-      while (m[i + n] === "`") n++;
-      const run = "`".repeat(n);
-      let j = m.indexOf(run, i + n);
-      while (j !== -1 && m[j + n] === "`") j = m.indexOf(run, j + n + 1);
-      if (j === -1) { i += n; continue; }
-      m = m.slice(0, i) + " ".repeat(j + n - i) + m.slice(j + n);
-      i = j + n;
-    }
-    i = 0;
-    while (i < m.length - 1 && out.length < 100) {
-      if (m[i] === "\\") { i += 2; continue; }
-      if (m[i] === "*" && m[i + 1] === "*" && i + 2 < m.length && !/[\s*]/.test(m[i + 2])) {
-        let j = m.indexOf("**", i + 2);
-        while (j !== -1 && (/\s/.test(m[j - 1]) || m[j - 1] === "\\" || m[j + 2] === "*")) j = m.indexOf("**", j + 1);
-        if (j !== -1) { out.push({ start: at + i, end: at + j + 2 }); i = j + 2; continue; }
-        i += 2; continue;
-      }
-      i++;
-    }
-  }
-  return out;
-}
+// A list item line of a Markdown source: "-", "*" or "+", or "1." / "1)", then a blank and some text.
+const MD_ITEM = /^\s*(?:[-*+]|(\d{1,9})[.)])\s+\S/;
+// A first line like "[lead-po-inbox] 최종 확인 요청": a [tag], a blank, a short title.
+const MD_HEAD = /^\s*\[(?![ xX✓✔]?\])[^\]\n]{1,60}\][ \t]+\S[^\n]{0,60}$/; // not a checkbox line: "[ ] 할 일", "[x] 끝"
 // A message text as Markdown for a TextView.markdown(...).raw_html(false): wrapper tags removed first (they would print literally), a line that
-// is only 【...】 made bold, images switched off (![x](y) -> a plain link), and single line breaks kept as line breaks (Markdown would join them).
-// Code fences are left as written. Never produces HTML: the view shows tags as text. Pure.
+// is only 【...】 made bold, images switched off (![x](y) -> a plain link), single line breaks kept as line breaks (Markdown would join them), and
+// the list marks people type ("•", "1)") written as real Markdown items with a blank line before the list and after it (#66), so the view draws
+// them as a list whose wrapped lines sit under the item text. The words themselves are never changed. Code fences are left as written.
+// Never produces HTML: the view shows tags as text. Pure.
+// A single "~" is written "\~" so the view does not strike text through between two of them ("3~4.5일 ... 1.5~2일" is a range, not a
+// strikethrough); "~~text~~" stays a strikethrough. `code` spans and links/URLs are left as they are (an escape would show inside them). Pure.
+const TILDE_KEEP = /(`+[^`\n]*`+|\]\([^)\n]*\)|<?(?:https?:\/\/|www\.)[^\s<>)]*>?)/;
+function escTilde(ln) {
+  if (!ln.includes("~")) return ln;
+  return ln.split(TILDE_KEEP).map((seg, i) => (i % 2 ? seg : seg.replace(/(?<![~\\])~(?!~)/g, "\\~"))).join("");
+}
 function mdText(text) { return tlMemoGet("m", text, mdTextRaw); }
 function mdTextRaw(text) {
+  const norm = (ln) => ln.replace(/!\[/g, "!\\[").replace(/^(\s*)[•‣▪◦●・]\s+/, "$1- ").replace(/^(\s*)(\d{1,3})[)）]\s+/, "$1$2. ");
   const src = unwrapTags(text).replace(/\r\n?/g, "\n").split("\n");
-  let fence = false;
-  const rows = src.map((ln) => {
-    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; return { s: ln, flow: false }; }
-    if (fence) return { s: ln, flow: false };
-    let s = ln.replace(/!\[/g, "!\\[");
-    if (/^\s*【[^】\n]*】[:：]?\s*$/.test(s)) s = `**${s.trim()}**`;
-    return { s, flow: true };
-  });
-  return rows.map((r, i) => (r.flow && r.s.trim() && rows[i + 1]?.flow && rows[i + 1].s.trim() && !/ {2}$/.test(r.s) ? r.s + "  " : r.s)).join("\n");
+  // a first line like "[이름] 종류" over more text is the header of the message: shown bold, as a line of its own
+  const first = src.findIndex((l) => l.trim());
+  const head = first >= 0 && src.length > first + 1 && src.slice(first + 1).some((l) => l.trim()) && MD_HEAD.test(src[first]) && !src[first].includes("**") && !MD_ITEM.test(norm(src[first]));
+  let fence = false, inList = false;
+  const rows = [];
+  for (let i = 0; i < src.length; i++) {
+    const ln = src[i];
+    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; inList = false; rows.push({ s: ln, flow: false }); continue; }
+    if (fence) { rows.push({ s: ln, flow: false }); continue; }
+    let s = escTilde(norm(ln));
+    if (head && i === first) s = `**${s.trim()}**`;
+    else if (/^\s*【[^】\n]*】[:：]?\s*$/.test(s)) s = `**${s.trim()}**`;
+    const m = MD_ITEM.exec(s);
+    const item = Boolean(m) && (inList || m[1] === undefined || m[1] === "1"); // a "2025. 11" line is text, not a list that starts at 2025
+    const prev = rows[rows.length - 1];
+    const blank = !s.trim();
+    // blank lines between two items of one list are dropped: a list with a gap between its items is drawn as paragraphs, and a numbered
+    // list people write as "1. a", blank, "2. b" must look like the "-" list (compact); a gap only separates real paragraphs
+    if (blank && inList) {
+      let j = i + 1;
+      while (j < src.length && !src[j].trim()) j++;
+      if (j < src.length && !/^\s*(?:```|~~~)/.test(src[j]) && MD_ITEM.test(norm(src[j]))) continue;
+    }
+    // a list needs a blank line before it to be one, and the line after it a blank line to be out of it again
+    if (prev?.flow && prev.s.trim() && ((item && !inList) || (!item && !blank && inList && !/^\s/.test(s)))) rows.push({ s: "", flow: true });
+    if (blank) inList = false;
+    else if (item) inList = true;
+    else if (!/^\s{2,}/.test(s)) inList = false;
+    rows.push({ s, flow: true, item });
+  }
+  return rows.map((r, i) => (r.flow && r.s.trim() && rows[i + 1]?.flow && rows[i + 1].s.trim() && !rows[i + 1].item && !/ {2}$/.test(r.s) ? r.s + "  " : r.s)).join("\n");
+}
+// A whole line that is only **bold** text.
+const BOLD_LINE = /^\*\*(\S(?:(?:(?!\*\*).)*?\S)?)\*\*[ \t]*$/;
+// The mdText source cut into what is drawn as its own TextView: [{s, bold}]. A line that is only **bold** text is its own block (bold: true, the
+// ** removed), because the TextView draws no heavier weight inside a text but the whole view can be given one. Everything between stays
+// Markdown as one block. A **bold** run inside a sentence is shown at the normal weight, without markers. Fences are skipped. Pure.
+function mdBlocks(md) {
+  const out = [];
+  let cur = [], fence = false;
+  const flush = () => { const s = cur.join("\n").replace(/^\n+|\n+$/g, ""); if (s.trim()) out.push({ s, bold: false }); cur = []; };
+  for (const ln of String(md ?? "").split("\n")) {
+    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; cur.push(ln); continue; }
+    const m = fence ? null : BOLD_LINE.exec(ln);
+    if (m) { flush(); out.push({ s: m[1], bold: true }); continue; }
+    cur.push(ln);
+  }
+  flush();
+  return out;
 }
 // A message text -> {text without its "[image: ...]" lines, imgs: the paths those lines named}.
 function splitImgs(text) { return tlMemoGet("s", unwrapTags(text), splitImgsRaw); }
@@ -1746,10 +1867,21 @@ function pinStep(st, o) {
   // The growth only counts for a view that was at the END OF WHAT IT SHOWED before it (the handle's y is still the old layout's): a person
   // reading higher up (an expanded long bubble) is not dragged down by a new row, however often the content grows (#54).
   const nearPrev = prev > 0 ? y + vh >= prev - PIN_SLACK : true;
-  if (near) return { pinned: true, ct: ch, go: was && grew && y + vh < ch - 1 };
-  if (was && grew && nearPrev) return { pinned: true, ct: ch, go: true };
-  return { pinned: false, ct: ch, go: false };
+  // #67: the viewport got shorter (the input box grew under the list) while the view sat at the end of its old size: the end must stay on screen,
+  // so it goes to the end again. A view reading higher up (not pinned, or not near the old end) keeps its place.
+  const pvh = Number(st?.vh) || 0;
+  const shrunk = pvh > 0 && vh < pvh - 1 && y + pvh >= (prev > 0 ? prev : ch) - PIN_SLACK;
+  if (near) return { pinned: true, ct: ch, vh, go: was && (grew || shrunk) && y + vh < ch - 1 };
+  if (was && grew && nearPrev) return { pinned: true, ct: ch, vh, go: true };
+  if (was && shrunk) return { pinned: true, ct: ch, vh, go: true };
+  return { pinned: false, ct: ch, vh, go: false };
 }
+// #72: the "jump to the newest" button shows while the view is scrolled up by more than JUMP_MIN px from the end (more than PIN_SLACK, so it is never
+// there while the view follows), and a list that fits its viewport never shows it.
+const JUMP_MIN = 80;
+const jumpShown = (y, vh, ch) => (Number(ch) || 0) > (Number(vh) || 0) + 1 && (Number(y) || 0) + (Number(vh) || 0) < (Number(ch) || 0) - JUMP_MIN;
+// #67: the box grows to this many rows, then scrolls inside itself (the list above keeps the rest of the height).
+const INPUT_MAX_LINES = 4;
 // A message the person just sent follows to the newest even from higher up: the first draw that shows a new last entry within SEND_FOLLOW_MS of the
 // send (`at` = when it was sent, 0 = none) goes to the end once.
 const SEND_FOLLOW_MS = 5000;
@@ -1764,43 +1896,6 @@ const SEL_HOLD_MS = 120000, PRESS_HOLD_MS = 8000;
 // st = {sel: a selection is settled, selAt, press: the pointer is down in the list, pressAt}. While true, background redraws wait.
 const quietNow = (st, now) => Boolean((st?.sel && now - (st.selAt || 0) < SEL_HOLD_MS) || (st?.press && now - (st.pressAt || 0) < PRESS_HOLD_MS));
 
-// ---- highlight colours: the band behind **bold** runs, from the theme's own tokens.
-// A colour is "#rrggbb" + an alpha byte. The alpha starts strong (so the area is clearly visible) and steps down only while the text colour
-// would stop being readable on the blended result (contrast < HL_MIN_CONTRAST), so it holds on a light and a dark theme alike.
-const HL_MIN_CONTRAST = 3.5;
-const HL_KINDS = {
-  bold: { alpha: 0x73, floor: 0x40, tokens: ["accent", "ansi4", "foreground"] }, // about 45%
-};
-const HEX6 = /^#[0-9a-f]{6}$/i;
-// A theme colour as "#rrggbb": "#rgb" is expanded and "#rrggbbaa" loses its alpha (the tint sets its own); anything else -> null.
-const hex6 = (c) => {
-  if (typeof c !== "string") return null;
-  if (HEX6.test(c)) return c.toLowerCase();
-  if (/^#[0-9a-f]{3}$/i.test(c)) return "#" + [...c.slice(1)].map((x) => x + x).join("").toLowerCase();
-  if (/^#[0-9a-f]{8}$/i.test(c)) return c.slice(0, 7).toLowerCase();
-  return null;
-};
-const rgbOf = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
-const lumOf = (h) => {
-  const [r, g, b] = rgbOf(h).map((v) => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-};
-const contrastOf = (a, b) => { const x = lumOf(a), y = lumOf(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
-const blendHex = (top, under, a) => { const u = rgbOf(under); return "#" + rgbOf(top).map((v, i) => Math.round(v * a + u[i] * (1 - a)).toString(16).padStart(2, "0")).join(""); };
-// kind -> "#rrggbbaa", or null when the theme has no usable token (the caller then paints nothing and logs it once, see tintMiss).
-function tintHex(t, kind) {
-  const k = HL_KINDS[kind];
-  const base = k && k.tokens.map((n) => hex6(t?.[n])).find(Boolean);
-  if (!base) return null;
-  let a = k.alpha;
-  const bg = hex6(t.background), fg = hex6(t.foreground);
-  if (bg && fg) {
-    while (a > k.floor && contrastOf(fg, blendHex(base, bg, a / 255)) < HL_MIN_CONTRAST) a = Math.max(k.floor, a - 8);
-  }
-  return base + a.toString(16).padStart(2, "0");
-}
-// Why tintHex gave nothing: the tokens it looked at and what they held (colours only), for one diag line.
-const tintMiss = (t, kind) => `highlight ${kind}: no usable theme token (${(HL_KINDS[kind]?.tokens ?? []).map((n) => `${n}=${JSON.stringify(t?.[n] ?? null)}`).join(" ")}); nothing painted`;
 // A TextView selection event -> {start, end} (UTF-16 offsets into the Markdown source), or null when it carries no usable range.
 // `len` is the length of the string the view was given: a range past it belongs to an older text and is dropped.
 function selRangeOf(sel, len) {
@@ -1844,6 +1939,40 @@ function restartBlock({ po = "", status = "", running = false } = {}) {
   if (s === "working") return "PO가 작업 중입니다 — 끝난 뒤에 누르세요";
   return "";
 }
+// ---- "원격 연결 켜기" (#79): one click sends `/remote-control` to the room's terminal through the same `hc send` path as 새로 시작 (sendLine). The desk cannot
+// press it for the person any other way (a skill cannot run the command). Pure part: why it cannot be pressed now ("" when it can).
+const REMOTE_CMD = "/remote-control";
+function remoteBlock({ po = "", status = "", running = false, sending = false } = {}) {
+  if (sending) return "원격 연결 명령을 보내는 중입니다";
+  return restartBlock({ po, status, running });
+}
+const REMOTE_POLLS = 5, REMOTE_POLL_MS = 1000; // after the send: this many screen reads, this far apart (~5 s)
+const REMOTE_URL = /https:\/\/claude\.ai\/code\/[^\s)\]>"'`]+/g;
+// What the PO's screen says about Remote Control. `menu` = Claude Code's "already connected" menu (Disconnect this session / Show QR code / Continue), `active` = the
+// footer says it is on, `url` = the last session link on screen. Text copied from Claude Code's UI and NOT verified against a real terminal (UNVERIFIED).
+function remoteScreen(text) {
+  const clean = cleanText(text);
+  const lines = clean.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim());
+  const tail = lines.slice(-14).join("\n");
+  // Only the three numbered option lines together count (prose that merely mentions these words is not the menu).
+  const opt = (n, re) => new RegExp(`^\\s*(?:[❯>›▶]\\s*)?${n}[.)]\\s*${re}\\s*$`, "im").test(tail);
+  const menu = opt(1, "Disconnect this session") && opt(2, "Show QR code") && opt(3, "Continue");
+  const active = menu || /Remote Control (is )?(active|connected)/i.test(lines.slice(-8).join("\n"));
+  // `seen` = the transcript line Claude Code prints when it turned on ("/remote-control is active · Continue here, on your phone, or at <url>", copied from a real
+  // screen) is on screen and no later line says it was turned off. Weaker than `active`: that line scrolls away, and a disconnect line's wording is UNVERIFIED.
+  let on = -1, off = -1;
+  lines.forEach((l, i) => { if (/\/?remote[- ]control (is )?(active|connected)/i.test(l)) on = i; if (/remote[- ]control (is )?(disconnected|off|stopped|inactive)|disconnected (this )?session/i.test(l)) off = i; });
+  const urls = clean.match(REMOTE_URL) ?? [];
+  return { menu, active, seen: active || (on >= 0 && on > off), url: urls.length ? urls[urls.length - 1].replace(/[.,;:]+$/, "") : "" };
+}
+// The one-line system note for the room's chat. kind: on | already | fail | unknown.
+function remoteNote(kind, { url = "", why = "" } = {}) {
+  const u = url ? ` — ${url}` : "";
+  if (kind === "on") return `원격 연결 켜짐${u}`;
+  if (kind === "already") return `이미 켜져 있음${u}`;
+  if (kind === "unknown") return "원격 연결 명령을 보냈지만 5초 안에 화면에서 결과를 확인하지 못했습니다. 터미널에서 확인하세요";
+  return `켜지 못함: ${why || "알 수 없는 이유"}`;
+}
 // The line pasted into the PO (English: it is read by an agent). `file` is where the note goes (shown with ~).
 function handoffAsk(file) {
   return `${RESTART_MARK} The user will restart you with /clear. Before that, write a handoff note to ${file} (overwrite it; create the folder if needed) so that the next session can continue seamlessly: (1) decisions and final checks the user still has to answer, (2) each running leader with its task, issue/PR and state, (3) what you were doing and the next steps, (4) anything that is only in this conversation. Keep it short and in the user's language. Do nothing else; reply "handoff written" when the file is saved.`;
@@ -1886,6 +2015,8 @@ function restartSendResult(r) {
     return { ok: true, turn: Number.isFinite(turn) ? turn : null, status: String(j.status ?? ""), why: "", detail };
   }
   const kind = String(j?.error?.kind ?? "");
+  // exit 0 and started:false with no error: `hc send` waited and gave up (a person's unfinished draft in the PO's input) — the text may or may not be in the box
+  if (code === 0 && j && j.started === false && !j.error) return { ok: false, notStarted: true, turn: null, status: "", why: "PO가 받아 시작하지 않았습니다(입력창에 쓰던 글이 있는지 확인하세요)", detail };
   const why = kind === "blocked" ? "PO가 질문 중이라 받지 않았습니다"
     : kind === "status_mismatch" ? "PO가 일하는 중이라 받지 않았습니다"
     : j?.error?.message ? `PO가 받지 않았습니다(${String(j.error.message).slice(0, 80)})`
@@ -1975,7 +2106,7 @@ function readHandoff(dir = inboxDir(), id = "") {
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, roomWorking, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, SOLO_DIR, SOLO_FLAG, soloFile, soloEnabled, setSolo, readSolo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries};
+module.exports = { CLIP_TEXT_MAX, clipText, bangCommand, promptInput, promptParse, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, roomWorking, REMOTE_CMD, REMOTE_POLLS, REMOTE_POLL_MS, remoteBlock, remoteScreen, remoteNote, SOLO_DIR, soloEnabled, readSolo, setSolo, SOLO_FLAG, soloFile };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)
@@ -1986,6 +2117,7 @@ if (require.main === module) {
   loadNames(); // every subcommand reads the profile (hub folder, id pattern); a broken one is reported in the data (`profileError`)
   const shown = (p) => { let d = null; try { const buf = fs.readFileSync(p).subarray(0, 65536); d = imgSize(buf); } catch {} return { path: p || null, ...(d ? { w: d[0], h: d[1] } : {}) }; };
   if (cmd === "clipimg") process.stdout.write(JSON.stringify(shown(clipImage())));
+  else if (cmd === "cliptext") { const x = clipText(); process.stdout.write(JSON.stringify({ text: typeof x === "string" && x.length <= CLIP_TEXT_MAX ? x : null })); }
   else if (cmd === "diag") { try { diagAppend(JSON.parse(arg)); } catch {} process.stdout.write("{}"); }
   else if (cmd === "po-me") { let me = []; try { const f = poFile(inboxDir(), arg); if (f) me = parsePoLines(readTail(f)).filter((x) => x.me).slice(-20).map((x) => ({ ms: x.ms, text: x.text })); } catch {} process.stdout.write(JSON.stringify(me)); }
   else if (cmd === "handoff") process.stdout.write(JSON.stringify(readHandoff(inboxDir(), arg)));
