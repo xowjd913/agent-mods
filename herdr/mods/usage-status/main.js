@@ -19,27 +19,44 @@ export function fillWidth(percent, track = TRACK_W) {
   return Math.min(track, Math.max(MIN_FILL, Math.round((p / 100) * track)));
 }
 
-// usage-limits.json 내용을 [{label, percent}] 또는 null(Unknown)로 바꾼다.
-export function parseUsage(raw, now) {
-  if (!raw) return null;
+// usage-limits.json 내용을 { rows } 또는 { state }로 바꾼다. state는 Unknown일 때 이유다.
+//   missing: 파일이 없음(기록기를 켜지 않았거나 아직 한 번도 기록하지 못함), invalid: 깨졌거나 쓸 수 있는 한도가 없음, stale: 10분 넘게 갱신되지 않음(staleMin은 지난 분).
+export function usageState(raw, now) {
+  if (!raw) return { state: "missing" };
   let data;
-  try { data = JSON.parse(raw); } catch { return null; }
+  try { data = JSON.parse(raw); } catch { return { state: "invalid" }; }
   const updated = Date.parse(data?.updatedAt ?? "");
-  if (!Number.isFinite(updated) || now - updated > STALE_MS) return null;
+  if (!Number.isFinite(updated)) return { state: "invalid" };
+  if (now - updated > STALE_MS) return { state: "stale", staleMin: Math.floor((now - updated) / 60000) };
   const rows = (Array.isArray(data.limits) ? data.limits : [])
     .filter((l) => LABEL[l?.kind] && Number.isFinite(l.percentUsed))
     .map((l) => ({ label: LABEL[l.kind], percent: Math.round(l.percentUsed) }));
-  return rows.length ? rows : null;
+  return rows.length ? { rows } : { state: "invalid" };
+}
+
+// Unknown 옆에 붙이는 짧은 안내. 파일이 없을 때만 기록기를 켜는 방법을 알려 준다.
+export function unknownHint(s) {
+  if (s?.state === "missing") return "no usage file · install --statusline";
+  if (s?.state === "stale") return `stale ${s.staleMin}m`;
+  return "";
+}
+
+// usage-limits.json 내용을 [{label, percent}] 또는 null(Unknown)로 바꾼다.
+export function parseUsage(raw, now) {
+  return usageState(raw, now).rows ?? null;
 }
 
 export default class UsageStatus extends View {
   init(_props, cx) {
     this.usage = null;
+    this.why = { state: "missing" };
     cx.spawn(async (cx) => {
       for (;;) {
         let raw = null;
         try { raw = await readTextFile(`${home()}/.claude/usage-limits.json`); } catch {}
-        this.usage = parseUsage(raw, Date.now());
+        const u = usageState(raw, Date.now());
+        this.usage = u.rows ?? null;
+        this.why = u;
         cx.notify();
         await cx.sleep(REFRESH_MS);
       }
@@ -59,7 +76,10 @@ export default class UsageStatus extends View {
 
   usageView(t) {
     const row = h_flex().gap(8).items_center().child(div().text_color(t.dim).child("Claude"));
-    if (!this.usage) return row.child("Unknown");
+    if (!this.usage) {
+      const hint = unknownHint(this.why);
+      return row.child("Unknown").when(Boolean(hint), (el) => el.child(div().text_color(t.dim).child(`· ${hint}`)));
+    }
     return this.usage.reduce((el, u) => {
       const warn = u.percent >= WARN;
       const color = warn ? t.blocked : t.muted; // 라벨·퍼센트 색

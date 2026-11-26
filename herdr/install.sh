@@ -4,6 +4,8 @@
 #   추가 모드(--extras): usage-status, agent-groups, leader-tabs, path-menu, gh-accounts, inbox
 #   인자 없이 실행하면 설치된 모드만 갱신한다(처음이면 기본 모드를 설치한다).
 #   --only work,prs / --add usage-status / --remove leader-tabs / --list 로 모드를 고를 수 있다.
+#   --statusline / --statusline-wrap 은 usage-status 의 사용률 기록기(usage-writer)를 Claude Code 상태 줄(statusLine)에 등록한다(켜겠다고 한 때만, 다른 상태 줄은 --wrap 없이는 바꾸지 않는다).
+#     --only usage-status 처럼 모드 옵션과 함께 쓰거나 혼자 쓸 수 있고, --statusline-remove 는 등록을 뺀다.
 #   --gh-account / --gh-account-uninstall 은 모드가 아니라 저장소별 GitHub 계정 도구(gh-account)를 설치·제거한다.
 # 저장소를 받지 않고 바로 실행할 수도 있다.
 #   curl -fsSL <저장소 raw 주소>/main/herdr/install.sh | sh
@@ -16,6 +18,7 @@ BRANCH="main"
 HOME_DIR="${HERDR_APP_HOME:-$HOME/.config/herdr-app}"
 OPT=""
 VAL=""
+SL=""
 
 # 고르는 옵션은 하나만 받는다.
 pick() {
@@ -25,14 +28,15 @@ pick() {
 }
 while [ $# -gt 0 ]; do
   case "$1" in
-    --extras|--list|--gh-account|--gh-account-uninstall) pick "$1" "" ;;
+    --extras|--list|--gh-account|--gh-account-uninstall|--statusline-remove) pick "$1" "" ;;
+    --statusline|--statusline-wrap) SL="$1" ;;
     --only|--add|--remove)
       if [ $# -lt 2 ]; then echo "$1 뒤에 모드 이름이 필요합니다(예: $1 work,prs)."; exit 2; fi
       pick "$1" "$2"
       shift ;;
     --only=*|--add=*|--remove=*) pick "${1%%=*}" "${1#*=}" ;;
     -h|--help)
-      echo "사용법: sh install.sh [--extras | --only 모드,.. | --add 모드,.. | --remove 모드,.. | --list | --gh-account | --gh-account-uninstall]"
+      echo "사용법: sh install.sh [--extras | --only 모드,.. | --add 모드,.. | --remove 모드,.. | --list | --gh-account | --gh-account-uninstall] [--statusline | --statusline-wrap | --statusline-remove]"
       echo "  (인자 없음)  설치된 모드만 갱신한다. 처음이면 기본 모드를 설치한다."
       echo "  --extras     모든 모드(추가 모드 usage-status, agent-groups, leader-tabs, path-menu, gh-accounts, inbox 포함)를 설치한다."
       echo "  --only       고른 모드만 설치·갱신한다. 다른 설치된 모드는 그대로 둔다."
@@ -40,6 +44,8 @@ while [ $# -gt 0 ]; do
       echo "  --remove     고른 모드를 지우고 그 모드가 바꾼 레이아웃 블록을 되돌린다."
       echo "  --list       모드마다 설명과 설치 상태를 보여 준다."
       echo "  필요한 모드(예: prs에는 work)는 함께 설치한다."
+      echo "  --statusline       usage-status 의 사용률 기록기를 Claude Code 상태 줄에 등록한다(없을 때만. 다른 상태 줄이 있으면 안내만 하고 바꾸지 않는다)."
+      echo "  --statusline-wrap  있던 상태 줄 명령도 이어서 실행하도록 감싸서 등록한다. --statusline-remove 는 등록을 빼고 감싼 상태 줄을 되돌린다."
       echo "  --gh-account            저장소별 GitHub 계정 도구를 ~/.local/bin 에 설치한다(gh 래퍼, git 자격 증명 도우미, 커밋 신원)."
       echo "  --gh-account-uninstall  그 도구를 지우고 git 전역 설정의 gh-account 블록을 되돌린다. 매핑 파일은 남긴다."
       exit 0 ;;
@@ -100,6 +106,21 @@ if [ "$OPT" = "--remove" ]; then
   case ",$VAL," in
     *,inbox,*) node "$DIR/install.cjs" hook --home "$HOME_DIR" --remove || echo "PO 훅을 설정에서 빼지 못했습니다." ;;
   esac
+  case ",$VAL," in
+    *,usage-status,*) node "$DIR/install.cjs" statusline --home "$HOME_DIR" --remove || echo "상태 줄 기록기를 설정에서 빼지 못했습니다." ;;
+  esac
+  exit 0
+fi
+
+# 상태 줄 기록기 등록만 하거나 빼는 경우는 모드 복사 없이 여기서 끝난다.
+if [ "$OPT" = "--statusline-remove" ]; then
+  node "$DIR/install.cjs" statusline --home "$HOME_DIR" --remove || echo "상태 줄 기록기를 설정에서 빼지 못했습니다."
+  exit 0
+fi
+if [ -n "$SL" ] && [ -z "$OPT" ]; then
+  set -- statusline --home "$HOME_DIR"
+  [ "$SL" = "--statusline-wrap" ] && set -- "$@" --wrap
+  node "$DIR/install.cjs" "$@" || echo "상태 줄 기록기를 설정에 넣지 못했습니다."
   exit 0
 fi
 
@@ -108,6 +129,11 @@ set -- mods --home "$HOME_DIR"
 case "$OPT" in
   --extras) set -- "$@" --extras ;;
   --only|--add) set -- "$@" "$OPT" "$VAL" ;;
+esac
+# 사용률 기록기 등록은 usage-status 를 복사한 뒤 같은 도우미가 한다(켜겠다고 한 때만).
+case "$SL" in
+  --statusline) set -- "$@" --statusline ;;
+  --statusline-wrap) set -- "$@" --statusline --wrap ;;
 esac
 node "$DIR/install.cjs" "$@" || {
   CODE=$?

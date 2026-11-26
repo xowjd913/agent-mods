@@ -17,6 +17,11 @@
 //     Stop·UserPromptSubmit에 넣는다. 다른 훅은 그대로 두고, 이미 있으면 바꾸지 않으며, 쓰기 전에 백업하고, JSON을 읽지 못하면 쓰지 않는다.
 //     --solo를 붙이면 혼자 모드 기록(UI 모드가 PO 없는 Claude 터미널의 말을 ~/.herdr-inbox/solo/에 저장)도 켠다(--remove --solo는 PO 훅은 그대로 두고 기록 표시만 끈다). 기본은 꺼짐이다.
 //     --remove는 우리 줄만 뺀다. 이 명령만 설정 파일을 건드린다(mods·remove는 건드리지 않는다).
+//   node install.cjs statusline --home <home> [--settings <settings.json>] [--wrap | --remove]
+//     usage-status의 기록기(mods/usage-status/usage-writer.cjs)를 Claude Code 설정의 statusLine에 등록한다(켜겠다고 한 때만 실행한다).
+//     statusLine이 없으면 넣고, 이미 우리 것이면 그대로 두며, 다른 상태 줄이 있으면 바꾸지 않고 안내만 한다.
+//     --wrap을 주면 있던 상태 줄 명령을 설정 옆 usage-writer-chain.json에 보관하고 기록기가 그 명령도 이어서 실행하게 한다.
+//     --remove는 우리 줄만 빼고, 감싸 둔 상태 줄은 원래대로 돌려놓는다. 쓰기 전에 백업하고 JSON을 읽지 못하면 쓰지 않는다.
 // 레이아웃 단계마다 기록 파일을 두어, 사용자가 되돌린 블록은 다시 바꾸지 않는다.
 "use strict";
 const fs = require("node:fs");
@@ -66,7 +71,7 @@ function parseNames(value, flag) {
 }
 
 function parseArgs(argv) {
-  const out = { cmd: argv[0], home: null, extras: false, only: null, add: null, mods: null, created: false, settings: null, remove: false, solo: false };
+  const out = { cmd: argv[0], home: null, extras: false, only: null, add: null, mods: null, created: false, settings: null, remove: false, solo: false, wrap: false, statusline: false };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--home") out.home = argv[++i];
@@ -78,10 +83,13 @@ function parseArgs(argv) {
     else if (a === "--settings") { out.settings = argv[++i]; if (!out.settings) throw new Error("--settings 뒤에 파일 경로가 필요합니다."); }
     else if (a === "--remove") out.remove = true;
     else if (a === "--solo") out.solo = true;
+    else if (a === "--wrap") out.wrap = true;
+    else if (a === "--statusline") out.statusline = true;
     else throw new Error(`알 수 없는 인자: ${a}`);
   }
   if (!out.home) throw new Error("--home이 필요합니다.");
   if ([out.extras, out.only, out.add].filter(Boolean).length > 1) throw new Error("--extras, --only, --add 중 하나만 쓸 수 있습니다.");
+  if (out.wrap && out.remove) throw new Error("--wrap과 --remove는 함께 쓸 수 없습니다.");
   if (out.cmd === "remove" && !out.mods) throw new Error(`remove에는 --mods가 필요합니다. 쓸 수 있는 이름: ${ALL.join(", ")}`);
   return out;
 }
@@ -607,6 +615,100 @@ function hookSettings(home, file, remove = false, now = Date.now()) {
   return { status: remove ? "removed" : "installed", file, ...(backup ? { backup } : {}) };
 }
 
+// ---- statusLine: one `statusLine` entry in Claude Code's settings.json that runs usage-status/usage-writer.cjs (writes ~/.claude/usage-limits.json).
+// Opt-in only. Our entry is told apart by its command shape: node "<home>/mods/usage-status/usage-writer.cjs" [--chain "<settings dir>/usage-writer-chain.json"].
+// An existing status line of the user is never replaced silently: without --wrap it is left alone and the user gets instructions; with --wrap
+// the old object is kept in the chain file and the writer runs its command after recording, so the user's status line keeps working.
+const WRITER_SCRIPT = "usage-writer.cjs";
+const CHAIN_FILE = "usage-writer-chain.json";
+const isOurStatusLine = (sl) => sl && typeof sl === "object" && typeof sl.command === "string" && /^node "[^"\n\r]*[\\/]mods[\\/]usage-status[\\/]usage-writer\.cjs"(?: --chain "[^"\n\r]*")?$/.test(sl.command);
+const writerScript = (home) => path.join(modDir(home, "usage-status"), WRITER_SCRIPT);
+function writerCommand(script, chain) {
+  for (const p of [script, chain || ""]) if (/["\n\r]/.test(p)) throw new Error(`경로에 쓸 수 없는 글자가 있습니다: ${p}`);
+  const fwd = (p) => p.replace(/\\/g, "/"); // forward slashes run the same in sh, cmd and PowerShell, and node accepts them on Windows
+  return `node "${fwd(script)}"${chain ? ` --chain "${fwd(chain)}"` : ""}`;
+}
+// Read the settings file: {real, text, settings} (text null when the file does not exist) or {error}. Never throws.
+function readSettings(file) {
+  let real = file;
+  try { real = fs.realpathSync(file); } catch {}
+  let text = null;
+  try { text = fs.readFileSync(real, "utf8"); } catch (e) { if (e.code !== "ENOENT") return { error: `설정 파일을 읽지 못했습니다: ${e.message}` }; }
+  let settings = {};
+  if (text !== null) {
+    try { settings = JSON.parse(text.replace(/^﻿/, "")); } catch (e) { return { error: `설정 파일이 올바른 JSON이 아니라 건드리지 않았습니다: ${e.message}` }; }
+    if (!settings || typeof settings !== "object" || Array.isArray(settings)) return { error: "설정 파일의 최상위가 객체가 아니라 건드리지 않았습니다." };
+  }
+  return { real, text, settings };
+}
+// Back the file up (<file>.bak-herdr-<time>) and replace it atomically. Returns the backup path or undefined.
+function writeSettings({ real, text }, settings, now) {
+  const body = JSON.stringify(settings, null, text === null ? 2 : indentOf(text)) + (text === null || text.endsWith("\n") ? "\n" : "");
+  fs.mkdirSync(path.dirname(real), { recursive: true });
+  let backup;
+  if (text !== null) {
+    backup = `${real}.bak-herdr-${new Date(now).toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}`;
+    fs.copyFileSync(real, backup);
+  }
+  const tmp = `${real}.tmp-herdr-${process.pid}`;
+  let mode = 0o600;
+  try { mode = fs.statSync(real).mode & 0o777; } catch {}
+  fs.writeFileSync(tmp, body, { mode });
+  fs.renameSync(tmp, real);
+  return backup;
+}
+// Register or (remove) unregister the usage writer in the settings file `file`. Returns {status, file, backup?, chain?, error?, instructions?}:
+//   "installed" (we added it, or fixed our command), "wrapped" (--wrap: the old status line is kept in `chain` and still runs), "present" (already ours),
+//   "foreign" (another status line exists and was not changed; `instructions` says how), "skipped" (writer script not installed),
+//   "invalid" (file unusable: nothing written), "removed" (ours taken out; the wrapped status line is restored when there was one), "absent" (nothing to remove).
+function statusLineSettings(home, file, opts = {}, now = Date.now()) {
+  const { wrap = false, remove = false } = opts;
+  const script = writerScript(home);
+  if (!remove && !fs.existsSync(script)) return { status: "skipped", file, error: `${script} 이(가) 없습니다. usage-status 모드를 먼저 설치하세요.` };
+  const read = readSettings(file);
+  if (read.error) return { status: "invalid", file, error: read.error };
+  const cur = JSON.parse(JSON.stringify(read.settings));
+  const sl = cur.statusLine;
+  const chain = path.join(path.dirname(read.real), CHAIN_FILE);
+  if (remove) {
+    if (!isOurStatusLine(sl)) return { status: "absent", file };
+    let restored = null;
+    try { restored = JSON.parse(fs.readFileSync(chain, "utf8"))?.original; } catch {}
+    if (restored && typeof restored === "object" && !Array.isArray(restored) && !isOurStatusLine(restored)) cur.statusLine = restored;
+    else delete cur.statusLine;
+    const backup = writeSettings(read, cur, now);
+    try { fs.rmSync(chain, { force: true }); } catch {}
+    return { status: "removed", file, restored: cur.statusLine !== undefined, wasWrapped: / --chain /.test(sl.command), ...(backup ? { backup } : {}) };
+  }
+  if (isOurStatusLine(sl)) {
+    const want = writerCommand(script, / --chain "/.test(sl.command) ? chain : null);
+    if (sl.command === want) return { status: "present", file };
+    cur.statusLine = { ...sl, command: want };
+    const backup = writeSettings(read, cur, now);
+    return { status: "installed", file, ...(backup ? { backup } : {}) };
+  }
+  if (sl === undefined || sl === null) {
+    delete cur.statusLine;
+    cur.statusLine = { type: "command", command: writerCommand(script, null) };
+    const backup = writeSettings(read, cur, now);
+    return { status: "installed", file, ...(backup ? { backup } : {}) };
+  }
+  const wrappable = typeof sl === "object" && !Array.isArray(sl) && sl.type === "command" && typeof sl.command === "string" && sl.command.trim();
+  if (!wrap || !wrappable) {
+    const why = wrappable ? "" : " (command 형식이 아니라 자동으로 감쌀 수 없습니다)";
+    return { status: "foreign", file, instructions: [
+      `이미 다른 상태 줄이 설정돼 있어 바꾸지 않았습니다${why}: ${typeof sl === "object" && sl.command ? sl.command : JSON.stringify(sl)}`,
+      ...(wrappable ? [`- 있던 상태 줄을 그대로 쓰면서 사용률도 기록하려면 --wrap을 붙여 다시 실행하세요(설치기: --statusline-wrap, Windows: -StatusLineWrap).`] : []),
+      `- 직접 하려면 상태 줄 스크립트가 받은 JSON(표준 입력)을 이 명령에도 넘기세요: ${writerCommand(script, null)}`,
+    ] };
+  }
+  fs.mkdirSync(path.dirname(chain), { recursive: true });
+  fs.writeFileSync(chain, JSON.stringify({ original: sl }, null, 2) + "\n");
+  cur.statusLine = { ...sl, command: writerCommand(script, chain) };
+  const backup = writeSettings(read, cur, now);
+  return { status: "wrapped", file, chain, ...(backup ? { backup } : {}) };
+}
+
 // 혼자 모드 기록 표시(inbox 폴더의 solo.on)를 켜거나 끈다. 방 목록의 "혼자 모드 켜기" 버튼과 같은 표시다. 켜진 상태를 돌려준다.
 function soloSetting(on, dir) {
   const I = require("./mods/inbox/inbox.cjs");
@@ -617,7 +719,23 @@ module.exports = {
   CORE, EXTRAS, ALL, MODS, MARK, LEGACY_MARK, LAYOUT_NAME,
   parseArgs, installMods, applyLayout, deriveUiLayout, pendingLayout, removeMods, listMods,
   HOOK_EVENTS, HOOK_SCRIPT, isOurHook, settingsPath, hookScript, hookCommand, mergeHook, hookSettings, soloSetting,
+  isOurStatusLine, writerScript, writerCommand, statusLineSettings, CHAIN_FILE,
 };
+
+function runStatusLine(args) {
+  const r = statusLineSettings(args.home, args.settings || settingsPath(), { wrap: args.wrap, remove: args.remove });
+  const say = {
+    installed: `상태 줄 기록기를 넣었습니다: ${r.file}${r.backup ? ` (백업: ${r.backup})` : ""}. 이미 켜진 Claude Code 세션은 다시 시작해야 적용됩니다.`,
+    wrapped: `있던 상태 줄을 감싸 기록기를 넣었습니다: ${r.file}${r.backup ? ` (백업: ${r.backup})` : ""}. 원래 명령은 ${r.chain}에 있고 그대로 실행됩니다. 이미 켜진 세션은 다시 시작해야 적용됩니다.`,
+    present: `상태 줄 기록기가 이미 들어 있습니다: ${r.file}`,
+    removed: `상태 줄 기록기를 뺐습니다: ${r.file}${r.backup ? ` (백업: ${r.backup})` : ""}${r.wasWrapped ? (r.restored ? " 감싸 둔 원래 상태 줄을 되돌렸습니다." : " 감싸 둔 원래 상태 줄을 찾지 못해 상태 줄 설정을 지웠습니다.") : ""}`,
+    absent: `뺄 상태 줄 기록기가 없습니다: ${r.file}`,
+    skipped: `상태 줄 기록기는 넣지 않았습니다. ${r.error}`,
+    invalid: `상태 줄 기록기를 넣지 못했습니다. ${r.error}`,
+  };
+  if (r.status === "foreign") r.instructions.forEach(log); else log(say[r.status]);
+  return r;
+}
 
 if (require.main === module) {
   let args;
@@ -625,7 +743,14 @@ if (require.main === module) {
     log(e.message);
     process.exit(2);
   }
-  if (args.cmd === "mods") installMods(args.home, args);
+  if (args.cmd === "mods") {
+    const r = installMods(args.home, args);
+    if (args.statusline) runStatusLine(args);
+    else if (r.installed.includes("usage-status")) {
+      const cur = readSettings(args.settings || settingsPath());
+      if (!cur.error && !isOurStatusLine(cur.settings.statusLine)) log("usage-status는 ~/.claude/usage-limits.json을 읽기만 합니다. 이 파일을 쓰는 다른 도구가 없다면 기록기를 켜세요: --statusline (Windows: -StatusLine). 설정 파일은 이 옵션을 줄 때만 바꿉니다.");
+    }
+  }
   else if (args.cmd === "remove") { if (removeMods(args.home, args.mods).blocked.length) process.exit(2); }
   else if (args.cmd === "list") listMods(args.home);
   else if (args.cmd === "pending-layout") { const name = pendingLayout(args.home); if (name) log(name); }
@@ -643,5 +768,6 @@ if (require.main === module) {
       try { log(soloSetting(true) ? "혼자 모드 기록을 켰습니다(모든 Claude 터미널의 프롬프트가 이 컴퓨터에 저장됩니다)." : "혼자 모드 기록을 켜지 못했습니다."); } catch (e) { log(`혼자 모드 기록 표시를 바꾸지 못했습니다: ${e.message}`); process.exit(1); }
     }
   }
+  else if (args.cmd === "statusline") { if (runStatusLine(args).status === "invalid") process.exit(1); }
   else { log(`알 수 없는 명령: ${args.cmd}`); process.exit(2); }
 }

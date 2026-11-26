@@ -116,6 +116,9 @@ sh agent-mods/herdr/install.sh --extras   # Windows: .\agent-mods\herdr\install.
 | `--add <모드>` | `-Add <모드>` | 설치된 모드에 고른 모드를 더합니다. |
 | `--remove <모드>` | `-Remove <모드>` | 고른 모드를 지우고, 그 모드가 바꾼 레이아웃 블록을 되돌립니다. |
 | `--list` | `-List` | 모드마다 설명과 설치 상태를 보여 줍니다. |
+| `--statusline` | `-StatusLine` | usage-status의 사용률 기록기를 Claude Code 상태 줄에 등록합니다(켜겠다고 한 때만). 위 옵션과 함께 쓰거나 혼자 쓸 수 있습니다. 다른 상태 줄이 있으면 바꾸지 않고 안내만 합니다. |
+| `--statusline-wrap` | `-StatusLineWrap` | 있던 상태 줄 명령도 이어서 실행하도록 감싸서 등록합니다. |
+| `--statusline-remove` | `-StatusLineRemove` | 기록기 등록을 빼고, 감싼 상태 줄은 되돌립니다. |
 
 - `<모드>`는 [모드 표](#모드)의 괄호 안 이름입니다(`work`, `usage-status` 등).
 - 여러 개는 쉼표로 잇습니다(`--only work,prs`).
@@ -151,7 +154,7 @@ Windows는 `.\agent-mods\herdr\install.ps1 -Only usage-status`입니다.
 
 알아 둘 점:
 
-- 옵션은 한 번에 하나만 씁니다. 둘을 함께 주면 아무것도 하지 않고 안내만 출력합니다.
+- 옵션은 한 번에 하나만 씁니다. 둘을 함께 주면 아무것도 하지 않고 안내만 출력합니다. `--statusline`·`--statusline-wrap`은 모드 옵션에 덧붙이는 것이라 예외입니다.
 - 모르는 모드 이름을 주면 쓸 수 있는 이름을 보여 주고 끝납니다.
 - 필요한 모드는 자동으로 함께 설치합니다.
   - `work`: `tabs-mine`, `wt-menu`
@@ -258,7 +261,7 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
    - `tabs-mine`: 탭 줄 `tabs`를 `tabs-mine`으로 바꿉니다.
    - `work`·`prs`·`schedules`·`gh-accounts`·`inbox`: 오른쪽 패널에 `work-board`, `pr-board`, `schedules-board`, `accounts-board`, `inbox-board`를 더합니다.
    - `agent-groups`: `agents`를 `agent-groups`로 바꿉니다.
-   - `usage-status`: `workspace-status`를 `usage-status`로 바꿉니다.
+   - `usage-status`: `workspace-status`를 `usage-status`로 바꿉니다. `--statusline`을 줬을 때만 Claude Code 설정의 `statusLine`에 사용률 기록기도 등록합니다(이미 쓰는 상태 줄은 덮어쓰지 않고, 쓰기 전에 백업합니다).
    - `leader-tabs`: 칸 머리줄 `pane`을 `leader-tabs`로 바꿉니다.
    - `path-menu`: 레이아웃 맨 위 `link_handlers`에 `path-menu`를 더합니다.
 4. **기록 남기기**: 단계마다 모드 폴더 안에 기록 파일을 남깁니다.
@@ -292,7 +295,8 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
 | `~/.claude/settings.json` (또는 `$CLAUDE_CONFIG_DIR/settings.json`) | `inbox` 설치 때 `hook` 명령이 `Stop`·`UserPromptSubmit` 두 이벤트에 더하는 PO 답 훅 명령 하나(`po-hook.cjs`) | 설치기가 쓰기 전에 `settings.json.bak-herdr-<시각>`으로 백업합니다. `--remove inbox`나 `node install.cjs hook --remove`가 우리 줄만 뺍니다 |
 | `<설정 폴더>/gh-accounts.json` | gh-account 저장소별 계정 매핑 | 지우면 매핑이 사라집니다. 제거해도 남습니다 |
 | `<설정 폴더>/gh-account/` | gh-account 프로그램, 설치 상태, 계정별 커밋 신원 파일 | gh-account 제거할 때 지웁니다 |
-| `~/.claude/usage-limits.json` | usage-status가 읽는 파일(다른 도구가 씀) | 이 저장소가 만들지 않습니다 |
+| `~/.claude/usage-limits.json` | usage-status가 읽는 파일. 기록기(`usage-writer.cjs`)를 켰으면 Claude Code 상태 줄이 쓰고, 아니면 다른 도구가 씁니다 | 언제든. 기록기가 다시 만듭니다 |
+| `~/.claude/settings.json`의 `statusLine` (또는 `$CLAUDE_CONFIG_DIR/settings.json`) | `--statusline`을 줬을 때만 `statusline` 명령이 usage-writer 한 줄을 넣습니다. `--statusline-wrap`이면 있던 상태 줄은 같은 폴더의 `usage-writer-chain.json`에 보관합니다 | 설치기가 쓰기 전에 `settings.json.bak-herdr-<시각>`으로 백업합니다. `--statusline-remove`나 `--remove usage-status`가 우리 줄만 빼고 보관해 둔 상태 줄을 되돌립니다 |
 | `~/.herdr-inbox/<리더>.jsonl` | inbox가 읽는 리더 보고 기록(`report`가 씀, 규칙은 [인박스 계약](../docs/inbox-contract.md)) | 이 저장소의 `tools/inbox-write.cjs`로 쓸 수 있습니다(설치기는 만들지 않음). 지우면 그 리더의 보고가 사라집니다 |
 | `~/.herdr-inbox/po/<po id>.jsonl` | UI 모드가 읽는 그 PO의 말 기록(PO 답 훅이나 쓰기 도구의 `say`가 씀. 프롬프트 글이 들어가므로 `0600`). UI 모드가 붙인 그림은 앱 폴더 `data/inbox/img/`에 저장됩니다 | 이 저장소가 만들지 않습니다. 없으면 PO의 말이 없는 것으로 봅니다. 규칙은 [인박스 계약](../docs/inbox-contract.md), 훅은 [inbox](../docs/mods/inbox.md#po-답-훅) |
 

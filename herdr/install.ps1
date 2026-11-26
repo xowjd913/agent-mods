@@ -3,20 +3,22 @@
 #   추가 모드(-Extras): usage-status, agent-groups, leader-tabs, path-menu, gh-accounts, inbox
 #   인자 없이 실행하면 설치된 모드만 갱신한다(처음이면 기본 모드를 설치한다).
 #   -Only work,prs / -Add usage-status / -Remove leader-tabs / -List 로 모드를 고를 수 있다.
+#   -StatusLine / -StatusLineWrap 은 usage-status 의 사용률 기록기(usage-writer)를 Claude Code 상태 줄(statusLine)에 등록한다(켜겠다고 한 때만, 다른 상태 줄은 -StatusLineWrap 없이는 바꾸지 않는다).
+#     -Only usage-status 처럼 모드 옵션과 함께 쓰거나 혼자 쓸 수 있고, -StatusLineRemove 는 등록을 뺀다.
 # 저장소를 받지 않고 바로 실행할 수도 있다.
 #   & ([scriptblock]::Create((irm <저장소 raw 주소>/main/herdr/install.ps1)))
 #   & ([scriptblock]::Create((irm <저장소 raw 주소>/main/herdr/install.ps1))) -Extras
 # Herdr 설정 폴더는 HERDR_APP_HOME, 없으면 ~\.config\herdr-app 이다(Windows 경로는 실기 미확인: 다르면 HERDR_APP_HOME을 지정한다).
 # Herdr가 없거나 실행 중이 아니거나 레이아웃 단계가 실패해도 안내만 출력하고 끝난다.
 # irm으로 실행해도 창이 닫히지 않도록 exit 대신 return을 쓴다.
-param([switch]$Extras, [string[]]$Only, [string[]]$Add, [string[]]$Remove, [switch]$List)
+param([switch]$Extras, [string[]]$Only, [string[]]$Add, [string[]]$Remove, [switch]$List, [switch]$StatusLine, [switch]$StatusLineWrap, [switch]$StatusLineRemove)
 $ErrorActionPreference = 'Stop'
 $RepoUrl = 'https://github.com/xowjd913/agent-mods'
 $Branch = 'main'
 $AppHome = if ($env:HERDR_APP_HOME) { $env:HERDR_APP_HOME } else { Join-Path $HOME '.config\herdr-app' }
 
 # 고르는 옵션은 하나만 받는다.
-$Picked = @(@{ n = '-Extras'; v = $Extras.IsPresent }, @{ n = '-Only'; v = [bool]$Only }, @{ n = '-Add'; v = [bool]$Add }, @{ n = '-Remove'; v = [bool]$Remove }, @{ n = '-List'; v = $List.IsPresent }) | Where-Object { $_.v }
+$Picked = @(@{ n = '-Extras'; v = $Extras.IsPresent }, @{ n = '-Only'; v = [bool]$Only }, @{ n = '-Add'; v = [bool]$Add }, @{ n = '-Remove'; v = [bool]$Remove }, @{ n = '-List'; v = $List.IsPresent }, @{ n = '-StatusLineRemove'; v = $StatusLineRemove.IsPresent }) | Where-Object { $_.v }
 if (@($Picked).Count -gt 1) {
   Write-Host "$((@($Picked) | ForEach-Object { $_.n }) -join ', ') 은(는) 함께 쓸 수 없습니다. 하나만 주세요."
   return
@@ -79,6 +81,27 @@ try {
       $R = Invoke-Helper @('hook', '--home', $AppHome, '--remove')
       Write-Host -NoNewline $R.Out
     }
+    # 사용률 기록기(usage-status): 상태 줄 등록을 빼고 감싼 상태 줄을 되돌린다.
+    if ($Remove -contains 'usage-status') {
+      $R = Invoke-Helper @('statusline', '--home', $AppHome, '--remove')
+      Write-Host -NoNewline $R.Out
+    }
+    return
+  }
+
+  # 상태 줄 기록기 등록만 하거나 빼는 경우는 모드 복사 없이 여기서 끝난다.
+  if ($StatusLineRemove) {
+    $R = Invoke-Helper @('statusline', '--home', $AppHome, '--remove')
+    Write-Host -NoNewline $R.Out
+    if ($R.Code -ne 0) { Write-Host '상태 줄 기록기를 설정에서 빼지 못했습니다.' }
+    return
+  }
+  if (($StatusLine -or $StatusLineWrap) -and -not ($Extras -or $Only -or $Add)) {
+    $SlArgs = @('statusline', '--home', $AppHome)
+    if ($StatusLineWrap) { $SlArgs += '--wrap' }
+    $R = Invoke-Helper $SlArgs
+    Write-Host -NoNewline $R.Out
+    if ($R.Code -ne 0) { Write-Host '상태 줄 기록기를 설정에 넣지 못했습니다.' }
     return
   }
 
@@ -87,6 +110,9 @@ try {
   if ($Extras) { $ModArgs += '--extras' }
   elseif ($Only) { $ModArgs += @('--only', ($Only -join ',')) }
   elseif ($Add) { $ModArgs += @('--add', ($Add -join ',')) }
+  # 사용률 기록기 등록은 usage-status 를 복사한 뒤 같은 도우미가 한다(켜겠다고 한 때만).
+  if ($StatusLine -or $StatusLineWrap) { $ModArgs += '--statusline' }
+  if ($StatusLineWrap) { $ModArgs += '--wrap' }
   $R = Invoke-Helper $ModArgs
   Write-Host -NoNewline $R.Out
   if ($R.Code -eq 2) { return }

@@ -76,8 +76,8 @@ Windows는 설치기가 있지만 실제 PC에서는 아직 확인하지 않았�
 위 설치 명령 뒤에 옵션을 붙입니다.
 
 ```sh
-# Claude 사용률(usage-status)만 설치
-curl -fsSL https://raw.githubusercontent.com/xowjd913/agent-mods/main/herdr/install.sh | sh -s -- --only usage-status
+# Claude 사용률(usage-status)만 설치(--statusline을 붙이면 사용률 기록기도 Claude Code 상태 줄에 켭니다)
+curl -fsSL https://raw.githubusercontent.com/xowjd913/agent-mods/main/herdr/install.sh | sh -s -- --only usage-status --statusline
 
 # 설치된 모드에 작업별 묶음(agent-groups) 더하기
 curl -fsSL https://raw.githubusercontent.com/xowjd913/agent-mods/main/herdr/install.sh | sh -s -- --add agent-groups
