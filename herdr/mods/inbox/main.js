@@ -792,10 +792,17 @@ function pinStep(st, o) {
   const prev = Number(st?.ct) || 0;
   const grew = ch > prev + 1;
   const near = y + vh >= ch - PIN_SLACK;
+  // The growth only counts for a view that was at the END OF WHAT IT SHOWED before it (the handle's y is still the old layout's): a person
+  // reading higher up (an expanded long bubble) is not dragged down by a new row, however often the content grows (#54).
+  const nearPrev = prev > 0 ? y + vh >= prev - PIN_SLACK : true;
   if (near) return { pinned: true, ct: ch, go: was && grew && y + vh < ch - 1 };
-  if (was && grew) return { pinned: true, ct: ch, go: true };
+  if (was && grew && nearPrev) return { pinned: true, ct: ch, go: true };
   return { pinned: false, ct: ch, go: false };
 }
+// A message the person just sent follows to the newest even from higher up: the first draw that shows a new last entry within SEND_FOLLOW_MS of the
+// send (`at` = when it was sent, 0 = none) goes to the end once.
+const SEND_FOLLOW_MS = 5000;
+const sendFollow = (at, now, key, seen) => Number(at) > 0 && now - Number(at) < SEND_FOLLOW_MS && key !== (seen ?? "");
 // ScrollHandle.scroll_to_item(i) reveals that row with the smallest scroll, so on a row TALLER than the viewport (an expanded long bubble, #54)
 // it lands on the row's top, then on its bottom, then on its top again: every call flips the view. A re-pin call is therefore made only while the
 // view is not at its end AND the content grew since the last call (`seen` = the content height at that call): within PIN_SLACK of the end, with
@@ -1035,7 +1042,8 @@ export default class Inbox extends View {
     this.dirty = false; // a redraw was held back
     this.pin = { pinned: true, ct: 0 }; // the timeline's pin to the newest (see pinStep)
     this.pinCh = 0; // the content height at the last re-pin look/call (see pinCall)
-    this.reading = false; // a 더 보기 / 접기 click is waiting for its draw: the 250ms poll must not restore the pin from the old layout
+    this.reading = null; // {ch, at}: a 더 보기 / 접기 click is waiting for its new layout to land: the 250ms poll must not restore the pin from the old one
+    this.sentAt2 = 0; // when the person last sent a chat (the first draw with a new last entry after it goes to the end once, see sendFollow)
     this.lastIdx = 0; // index of the last child of the list
     this.sigData = ""; // what the last load drew (without its clock)
     this.errSig = "";
@@ -1129,7 +1137,14 @@ export default class Inbox extends View {
     try {
       const o = this.scroll.offset(), vp = this.scroll.viewport_size(), ct = this.scroll.content_size();
       // Just after a 더 보기 / 접기 click the draw has not happened yet: the numbers are the old layout's, so the pin is not restored from them (#54).
-      if (this.reading) return;
+      // It holds until the handle shows a different content height (the new layout has landed) or 1.5s passed; then the pin is read afresh from where
+      // the view really is, without a go.
+      if (this.reading) {
+        if (Math.abs(ct.height - this.reading.ch) <= 1 && Date.now() - this.reading.at < 1500) return;
+        this.reading = null;
+        this.pin = { pinned: o.y + vp.height >= ct.height - PIN_SLACK, ct: ct.height };
+        return;
+      }
       const r = pinStep(this.pin, { y: o.y, vh: vp.height, ch: ct.height });
       // A scroll that is held back (drag / selection) leaves the pin as it was: pinned and the old content height stay, so the next tick after the
       // release still sees the growth and goes to the bottom (storing r.ct now would turn it into "pinned: false").
@@ -2018,6 +2033,7 @@ export default class Inbox extends View {
       const line = [p.text, ...pics.map((x) => imgLine(x.path))].filter(Boolean).join("\n");
       const r = this.deliver(po, line, c, { text: p.text, imgs: pics.map((x) => x.path), to: p.to[0] ?? "", po: v.pick, kind: "chat" });
       if (r === "sent" || r === "held" || r === "opening") { // opening: the bubble holds the text and sends it by itself once the pane opens
+        this.sentAt2 = Date.now(); // the draw that shows the new bubble goes to the end once (sendFollow)
         this.chat.set_value("");
         this.pics = [];
         this.menu = null;
@@ -2198,7 +2214,7 @@ export default class Inbox extends View {
         if (this.more.has(id)) this.more.delete(id); else this.more.add(id);
         // The person is reading this bubble now: let go of the bottom pin so the draw does not drag the view to the end of what just grew (#54).
         this.pin = { pinned: false, ct: Number(this.pin?.ct) || 0 };
-        this.reading = true; // cleared by the next draw
+        try { const ct = this.scroll?.content_size(); this.reading = { ch: Number(ct?.height) || 0, at: Date.now() }; } catch { this.reading = { ch: 0, at: Date.now() }; }
         try { cx.notify(); } catch {}
       })
       .tooltip(open ? "다시 접습니다" : "이 메시지 전체를 펼칩니다").child(open ? "접기" : moreLabel(lc.more));
@@ -2444,6 +2460,10 @@ export default class Inbox extends View {
     // messages, not what is happening), after the last message, and nothing else reads them (not the unread counts, not `seenNext`, not the
     // follow key, not the spot map).
     for (const x of this.typing(v)) blocks.push(this.typingRow(t, x));
+    // The END SENTINEL: an 8px row (the list's bottom padding) as the LAST direct child. Every "go to the newest" is scroll_to_item(this sentinel):
+    // the smallest scroll that reveals a thin row at the very end is the exact bottom, whatever the height of the last bubble. scroll_to_item on
+    // the last bubble itself landed on its top when it was taller than the viewport (#54).
+    blocks.push(div().id("inbox-end").flex_none().h(8));
     // Follow the newest: a new message scrolls to the bottom when the room just opened or the person already was at the bottom;
     // a person who scrolled up keeps their place. The handle's numbers are those of the last layout.
     const key = tlKey(`${v.pick}~${v.filter}`, v.shown); // a new filter scrolls to the newest like a new room
@@ -2454,8 +2474,11 @@ export default class Inbox extends View {
         const o = this.scroll.offset(), vp = this.scroll.viewport_size(), ct = this.scroll.content_size();
         atEnd = atBottom(o.y, vp.height, ct.height);
       } catch {}
-      if (tlFollow(this.tlSeen, key, atEnd)) {
-        const last = blocks.length - 1;
+      // A message the person just sent follows too (once), from wherever they were reading; a new bubble of someone else does not (only at the end).
+      const mine = sendFollow(this.sentAt2, Date.now(), key, this.tlSeen);
+      if (mine) { this.sentAt2 = 0; this.reading = null; this.pin = { pinned: true, ct: Number(this.pin?.ct) || 0 }; }
+      if (mine || tlFollow(this.tlSeen, key, atEnd)) {
+        const last = blocks.length - 1; // the end sentinel
         this.pinCh = 0; // a new room: the retry below is a fresh catch-up
         try { this.scroll?.scroll_to_item(last); } catch {}
         try { cx.timer.after(80, () => { if (!quietNow(this.ui, Date.now())) this.pinGo(last, "follow"); }); } catch {}
@@ -2464,7 +2487,6 @@ export default class Inbox extends View {
     this.tlSeen = key;
     // Re-pin after this draw: the person was at the bottom (within PIN_SLACK) and the content may have changed height (a row, the dots, a
     // picture); the handle still holds the last layout, so go to the end now and again once the new layout exists.
-    this.reading = false; // the draw the 더 보기 click asked for has come
     if (this.scroll && this.pin.pinned && !quietNow(this.ui, Date.now())) {
       const last = blocks.length - 1;
       const go = () => { if (!quietNow(this.ui, Date.now())) this.pinGo(last, "draw"); };
@@ -2472,7 +2494,7 @@ export default class Inbox extends View {
     }
     const waiting = v.tabs.reduce((n, x) => n + x.n, 0); // leaders waiting on a decision, over every room
     const head = v.pick === PO_OTHER ? OTHER_LABEL : v.tabs.find((x) => x.id === v.pick)?.label ?? "";
-    const lines = v_flex().id("inbox-list").flex_1().min_h(0).pb(8).overflow_y_scrollbar().mode("always")
+    const lines = v_flex().id("inbox-list").flex_1().min_h(0).overflow_y_scrollbar().mode("always")
       .on_mouse_down("left", (e, c) => { this.listDown(e); this.ui.press = true; this.ui.pressAt = Date.now(); this.dropSel(); c.stop_propagation(); })
       .on_mouse_up("left", () => { this.ui.press = false; })
       .on_mouse_down_out((_e, c) => { this.ui.press = false; if (this.ui.sel) this.dropSel(); if (this.dirty) this.softNotify(c); })

@@ -161,9 +161,9 @@ test("main.js (#54): the draw-time re-pin goes through pinGo/pinCall, and 더 �
   assert.match(MAIN, /pinGo\(last, "draw"\)/);
   assert.match(MAIN, /pinGo\(last, "follow"\)/);
   assert.match(MAIN, /pinCall\(m, this\.pinCh\)/);
-  assert.match(MAIN, /if \(this\.reading\) return;/); // the poll right after a 더 보기 click does not restore the pin from the old layout
-  assert.match(MAIN, /this\.reading = true;/);
-  assert.match(MAIN, /this\.reading = false; \/\/ the draw/);
+  assert.match(MAIN, /if \(this\.reading\) \{/); // the poll right after a 더 보기 click does not restore the pin from the old layout...
+  assert.match(MAIN, /Math\.abs\(ct\.height - this\.reading\.ch\) <= 1/); // ...until the new layout has landed (a different content height)
+  assert.match(MAIN, /this\.reading = \{ ch:/);
   // no bare scroll_to_item(last) left in a timer
   assert.equal(/cx\.timer\.after\([^\n]*scroll_to_item/.test(MAIN), false);
   const more = MAIN.slice(MAIN.indexOf("moreToggle(t, id, lc, open) {"));
@@ -493,4 +493,37 @@ test("saveImage never writes through a link, and the picture folder is capped (o
 test("diag never logs a view id (a timeline id holds the message text): kind + hash only", () => {
   assert.match(MAIN, /diagId\(id\)/);
   assert.doesNotMatch(MAIN, /settled in \$\{id\}|cleared in \$\{id\}/);
+});
+
+test("#54 re-fix: a view reading higher up is never dragged by growth; the end sentinel is the last child and the target of every go", () => {
+  // (a) an expanded tall bubble: the view sits ~4000px above the bottom and a new bubble arrives (content grows): no go, however often it grows
+  let st = { pinned: false, ct: 17130 }; // 더 보기 released the pin
+  for (const ch of [17508, 17567, 17700, 18000]) { const r = I.pinStep(st, { y: 11411, vh: 2127, ch }); assert.equal(r.go, false); assert.equal(r.pinned, false); st = { pinned: r.pinned, ct: r.ct }; }
+  // even a pin that is still "engaged" (a stale true) does not go when the view was far from the end of what it showed
+  const stale = I.pinStep({ pinned: true, ct: 17130 }, { y: 11157, vh: 2003, ch: 17508 }); // 3970px above the old end
+  assert.deepEqual(stale, { pinned: false, ct: 17508, go: false });
+  // (c) at the true bottom + growth: go (and keep following a stream of growth while each go lands)
+  let at = I.pinStep({ pinned: true, ct: 17130 }, { y: 17130 - 2127, vh: 2127, ch: 17508 });
+  assert.equal(at.go, true);
+  at = I.pinStep({ pinned: at.pinned, ct: at.ct }, { y: 17508 - 2127, vh: 2127, ch: 17900 }); // the first go landed at 17508, more came
+  assert.equal(at.go, true);
+  // (b) the person's own send follows once, from wherever they read, only for the first draw with a new last entry, and only shortly after the send
+  const k1 = I.tlKey("r~all", [{ ms: 1, key: "a" }]), k2 = I.tlKey("r~all", [{ ms: 1, key: "a" }, { ms: 2, key: "b" }]);
+  assert.equal(I.sendFollow(1000, 2000, k2, k1), true);
+  assert.equal(I.sendFollow(1000, 2000, k1, k1), false); // nothing new drawn
+  assert.equal(I.sendFollow(0, 2000, k2, k1), false); // no send
+  assert.equal(I.sendFollow(1000, 1000 + I.SEND_FOLLOW_MS + 1, k2, k1), false); // too late: someone else's bubble
+  assert.equal(I.tlFollow(k1, k2, false), false); // a bubble of someone else, reading higher up: no follow
+  assert.equal(I.tlFollow(k1, k2, true), true); // at the end: follows
+  // (d) wiring: the sentinel is pushed after the typing rows, lastIdx points at it, every go targets it, own send arms sendFollow once
+  const iTyping = MAIN.indexOf("for (const x of this.typing(v)) blocks.push(this.typingRow(t, x));");
+  const iEnd = MAIN.indexOf('blocks.push(div().id("inbox-end").flex_none().h(8));');
+  const iLast = MAIN.indexOf("this.lastIdx = Math.max(0, blocks.length - 1);");
+  assert.ok(iTyping > 0 && iEnd > iTyping && iLast > iEnd, "sentinel after the typing rows, before lastIdx");
+  assert.equal(/\.pb\(8\)\.overflow_y_scrollbar\(\)/.test(MAIN), false); // the 8px moved into the sentinel
+  assert.match(MAIN, /const last = blocks\.length - 1; \/\/ the end sentinel/);
+  assert.match(MAIN, /scroll_to_item\(this\.lastIdx\)/);
+  assert.equal((MAIN.match(/scroll_to_item\(/g) ?? []).length, 6); // 2 doc comments, pinTick, pinGo, follow, reveal(): none aimed at a bubble
+  assert.match(MAIN, /this\.sentAt2 = Date\.now\(\);/);
+  assert.match(MAIN, /if \(mine\) \{ this\.sentAt2 = 0;/); // once
 });
