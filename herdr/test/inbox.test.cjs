@@ -95,7 +95,7 @@ const deliverOf = (src) => methodOf(src, '  deliver(po, text, c, rec = null, ok 
 
 test("main.js: 답 버튼·답 상자·N안 칩·채팅은 모두 deliver() 한 길로 붙여넣고 Enter까지 보낸다", () => {
   const src = mainSrc();
-  assert.ok(!/hc\(\["send"/.test(src) && !/terminal\.send|send_key/i.test(src)); // hc send는 <hc from=...> 꼬리표가 붙어 쓰지 않는다
+  assert.ok(!/hc\(\["send"/.test(src.replace('hc(["send", po, text, "--json"])', "")) && !/terminal\.send|send_key/i.test(src)); // chat/answers: no hc send (it adds a <hc from=...> tag); only the restart sendLine uses it (a /clear must run as a command)
   const send = methodOf(src, "  send(a, text, cx, kind = \"answer\") {", "  clearBox(a");
   const chat = methodOf(src, "  sendChat(c) {", "  // The chat footer");
   const del = deliverOf(src);
@@ -334,7 +334,7 @@ test("main.js: 카드는 접힌 채 시작하고, 펼침은 공유 상태에 두
   // 링크: 앱의 open_url 먼저, http(s)만
   assert.match(src, /cx\.open_url\(url\)/);
   assert.match(src, /if \(!\/\^https\?:\\\/\\\/\/i\.test\(url\)\) return;/);
-  assert.ok(!/hc send|hc\(\["send"/.test(src)); // hc send 없이 클립보드로만(채팅의 Enter는 hc keys)
+  assert.ok(!/hc\(\["send"/.test(src.replace('hc(["send", po, text, "--json"])', ""))); // 클립보드로만(채팅의 Enter는 hc keys); 재시작의 sendLine만 hc send
 });
 
 test("toParts·escapeHtml: 글자는 이스케이프하고, 목록은 <ul>로 묶고, 명령은 코드 조각으로 뺀다", () => {
@@ -455,7 +455,7 @@ test("main.js: 방 목록과 방 칸이 행의 전체 높이를 채운다(타임
   assert.match(src, /id\("po-rooms"\)\.flex_none\(\)\.w\(SLIM_W\)\.h_full\(\)/);
   // the timeline itself keeps taking the rest of the column above the pinned chat box
   assert.match(src, /id\("inbox-list"\)[^\n]*\.flex_1\(\)\.min_h\(0\)/);
-  assert.match(src, /\.child\(lines\)\s*\n\s*\.when\(Boolean\(panel\), \(el\) => el\.child\(panel\)\)\s*\n\s*\.child\(this\.chatBox\(t, v\)\)/);
+  assert.match(src, /\.child\(lines\)\s*\n\s*\.when\(Boolean\(panel\), \(el\) => el\.child\(panel\)\)\s*\n\s*\.when\(Boolean\(rrow\), \(el\) => el\.child\(rrow\)\)\s*\n\s*\.child\(this\.chatBox\(t, v\)\)/);
 });
 
 test("답함 표시: 실제 lead-sched-acct 순서(결정·답, 확인·답, 결정·답)는 모두 답함이고 열린 것이 없다", () => {
@@ -879,7 +879,7 @@ test("collect: po/<id>.jsonl을 PO별로 읽고, 옛 po.jsonl과 잘못된 파�
   assert.deepEqual(d.po.devnotes.map((x) => [x.text, x.to]), [["안녕하세요", "here"]]);
   assert.deepEqual(d.po.mascoz.map((x) => x.text), ["마스코즈"]);
   assert.deepEqual(I.readPo(dir), d.po);
-  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, dir: path.join(dir, "none"), root: I.appRoot(), leaders: [], po: {}, imgd: {} });
+  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, dir: path.join(dir, "none"), root: I.appRoot(), leaders: [], po: {}, imgd: {}, cost: {} });
 });
 
 test("chat 블록: main.js가 inbox.cjs와 한 글자도 다르지 않은 같은 블록을 쓴다", () => {
@@ -1037,7 +1037,7 @@ test("main.js: 채팅 입력은 Textarea, Enter는 붙여넣고 hc keys enter까
   assert.match(src, /TextareaState\.new\(/);
   assert.match(src, /Textarea\.new\(this\.chat\)/);
   assert.match(src, /hc\(\["keys", po, "enter"\]\)/);
-  assert.ok(!/hc\(\["send"/.test(src));
+  assert.ok(!/hc\(\["send"/.test(src.replace('hc(["send", po, text, "--json"])', "")));
   assert.match(src, /=== "blocked"/);
   assert.match(src, /enterIntent\(e\?\.key, Boolean\(e\?\.modifiers\?\.shift\)\)/);
   assert.match(src, /PO에 보내기/);
@@ -2103,6 +2103,89 @@ test("Enter 흐름: 위젯이 넣은 줄바꿈은 IME 붙들기를 매번 켜지
   assert.match(src, /needsNewline\(this\.changedAt, now\)/); // Shift+Enter의 줄바꿈 보충은 원래 시각(changedAt) 그대로
 });
 
+// ---- PO 새로 시작 (#41) ----
+test("restartBlock: PO 없음/작업 중/질문 중/진행 중이면 이유를, 쉬는 PO면 빈 글을 준다", () => {
+  assert.match(I.restartBlock({}), /찾지 못/);
+  assert.match(I.restartBlock({ po: "p", status: "working" }), /작업 중/);
+  assert.match(I.restartBlock({ po: "p", status: "blocked" }), /질문 중/);
+  assert.match(I.restartBlock({ po: "p", status: "idle", running: true }), /새로 시작하는 중/);
+  assert.equal(I.restartBlock({ po: "p", status: "idle" }), "");
+  assert.equal(I.restartBlock({ po: "p", status: "" }), "");
+});
+test("handoffAsk: 표식으로 시작하고 노트 경로를 담는다(영어 한 덩어리)", () => {
+  const a = I.handoffAsk("~/.herdr-inbox/po/x.handoff.md");
+  assert.ok(a.startsWith(I.RESTART_MARK));
+  assert.ok(a.includes("~/.herdr-inbox/po/x.handoff.md"));
+  assert.ok(!a.includes("\n"));
+});
+test("restartConfirm: 무엇이 일어나는지와 결정·확인 대기 수를 함께 보여 준다", () => {
+  const c = I.restartConfirm(2, 1);
+  assert.match(c, /\/clear/);
+  assert.match(c, /\/PO/);
+  assert.match(c, /결정 대기 2건/);
+  assert.match(c, /확인 대기 1건/);
+  assert.doesNotMatch(I.restartConfirm(0, 0), /대기 0건/);
+});
+test("restartSteps: 네 단계의 done/active/fail/todo", () => {
+  assert.deepEqual(I.restartSteps(0).map((s) => s.state), ["active", "todo", "todo", "todo"]);
+  assert.deepEqual(I.restartSteps(2).map((s) => s.state), ["done", "done", "active", "todo"]);
+  assert.deepEqual(I.restartSteps(4).map((s) => s.state), ["done", "done", "done", "done"]);
+  assert.deepEqual(I.restartSteps(1, true).map((s) => s.state), ["done", "fail", "todo", "todo"]);
+  assert.deepEqual(I.restartSteps(2).map((s) => s.label), I.RESTART_STEPS);
+});
+test("restartNoteFresh/restartPoll: 요청 전에 있던 노트는 새 것이 아니다, 새 노트 + 쉬는 PO만 go, 5분이면 timeout", () => {
+  const since = 1_000_000;
+  const old = { exists: true, size: 9, ms: since - 60_000 };
+  const fresh = { exists: true, size: 9, ms: since + 5_000 };
+  assert.equal(I.restartNoteFresh(old, since), false);
+  assert.equal(I.restartNoteFresh(fresh, since), true);
+  assert.equal(I.restartNoteFresh({ exists: true, size: 0, ms: since + 5 }, since), false);
+  assert.equal(I.restartNoteFresh({ exists: false, size: 0, ms: 0 }, since), false);
+  const now = since + 10_000;
+  assert.equal(I.restartPoll({ note: old, since, now, status: "idle", quiet: 5 }), "wait");
+  assert.equal(I.restartPoll({ note: fresh, since, now, status: "working", quiet: 5 }), "idle-wait");
+  assert.equal(I.restartPoll({ note: fresh, since, now, status: "idle", quiet: 0 }), "idle-wait");
+  assert.equal(I.restartPoll({ note: fresh, since, now, status: "idle", quiet: 1 }), "go");
+  assert.equal(I.restartPoll({ note: old, since, now: since + I.RESTART_WAIT_MS + 1, status: "idle" }), "timeout");
+});
+test("readHandoff: 노트 파일을 읽고(없으면 exists=false), 이상한 id는 받지 않는다", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "handoff-"));
+  try {
+    assert.equal(I.readHandoff(dir, "p1").exists, false);
+    fs.mkdirSync(path.join(dir, "po"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "po", "p1.handoff.md"), "# note\nhello");
+    const h = I.readHandoff(dir, "p1");
+    assert.equal(h.exists, true);
+    assert.equal(h.text, "# note\nhello");
+    assert.ok(h.ms > 0 && h.size > 0);
+    assert.equal(I.readHandoff(dir, "../x").exists, false);
+    assert.equal(I.handoffFile(dir, "../x"), null);
+    assert.ok(I.handoffFile(dir, "p1").endsWith("p1.handoff.md"));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+test("main.js: PO 새로 시작 배선 — 방별 상태, 버튼은 막힌 이유와 함께, 확인 줄, 단계 줄, 노트 말풍선, 지우기 전 확인", () => {
+  const src = mainSrc();
+  assert.match(src, /this\.rs = new Map\(\)/);
+  assert.match(src, /restartRow\(t, v, cx\) \{/);
+  assert.match(src, /"PO 새로 시작", \(c\) => this\.restartOpen\(room, c\), \{ disabled: why/);
+  assert.match(src, /restartConfirm\(waiting\("decision"\), waiting\("verify"\)\)/);
+  assert.match(src, /"새로 시작", \(c\) => this\.restartRun\(room, po, room, c\)/);
+  assert.match(src, /"다시", \(c\) => this\.restartRun\(/);
+  assert.match(src, /restartSteps\(r\.n, failed\)/);
+  assert.match(src, /who: "po", head: true, ms: hn\.ms/);
+  // sendLine never records a chat bubble; /PO only after the /clear signal; a timeout/failure clears nothing
+  const tl = src.slice(src.indexOf("  async sendLine("), src.indexOf("  // 새로 시작 / 다시"));
+  assert.doesNotMatch(tl, /setShared|record\(/);
+  const fl = src.slice(src.indexOf("  async restartFlow("), src.indexOf("  // The strip above the chat box"));
+  assert.ok(fl.indexOf("restartClearState(") < fl.indexOf('"/PO"'));
+  assert.match(fl, /\/PO를 보내지 않았습니다/);
+  assert.match(fl, /act === "timeout"/);
+  // no callback chain after an await: no .then(, and the click's c is only used by restartRun before its spawn
+  const rr = src.slice(src.indexOf("  sleepOn("), src.indexOf("  // The strip above the chat box"));
+  assert.doesNotMatch(rr, /\.then\(/);
+  assert.match(rr, /c\.spawn\(async \(cx\) =>/);
+});
+
 // ---- Claude 사용률 한 줄 (#42)
 const usageFile = (limits, updatedAt = "2026-11-25T05:05:00Z") => JSON.stringify({ updatedAt, limits });
 const USAGE_NOW = Date.parse("2026-11-25T05:10:00Z");
@@ -2169,17 +2252,300 @@ test("usageLine: main.js와 inbox.cjs가 같은 블록을 쓴다", () => {
 
 test("usageLine: main.js 배선 — 파일만 읽고(exec·네트워크 없음), 1분 주기, 80% 경고색, 툴팁, 방 제목 아래, 바뀔 때만 다시 그린다", () => {
   const src = mainSrc();
-  const fn = src.slice(src.indexOf("  loadUsage(cx) {"), src.indexOf("  usageLine(t) {"));
+  const fn = src.slice(src.indexOf("  loadUsage(cx) {"), src.indexOf('  usageLine(t, pick = "") {'));
   assert.match(fn, /readTextFile\(`\$\{home\(\)\}\/\$\{USAGE_FILE\}`\)/);
   assert.doesNotMatch(fn, /exec\(|fetch\(/);
   assert.match(fn, /JSON\.stringify\(\[rows, usageTip\(rows, Date\.now\(\)\)\]\)/);
   assert.match(src, /cx\.timer\.every\(USAGE_REFRESH_MS, \(cx\) => this\.loadUsage\(cx\)\)/);
   assert.match(fn, /if \(sig === this\.usageSig\) return;/);
-  const line = src.slice(src.indexOf("  usageLine(t) {"), src.indexOf("  // ---- redraw gating"));
+  const line = src.slice(src.indexOf('  usageLine(t, pick = "") {'), src.indexOf("  // ---- redraw gating"));
   assert.match(line, /u\.percent >= USAGE_WARN/);
   assert.match(line, /\.tooltip\(usageTip\(rows, Date\.now\(\)\)\)/);
   assert.match(line, /"Unknown"/);
   // 방 제목 줄 다음, 걸러내기 줄 앞
   const room = src.slice(src.indexOf("const room = v_flex()"));
   assert.ok(room.indexOf("child(head)") < room.indexOf("el.child(usage)") && room.indexOf("el.child(usage)") < room.indexOf("el.child(bar)"));
+});
+
+// ---- PO 새로 시작: hc send로 보낸다 — 화면(칸 너비)에 기대지 않는다 (#41, 3차 사용자 확인 실패: PO 칸 2열) ----
+const sendOk = (extra = {}) => ({ code: 0, stdout: JSON.stringify({ started: true, status: "idle", turn: 6, ...extra }), stderr: "" });
+test("restartSendResult: 종료 코드 0과 started === true일 때만 성공이고, 그 밖에는 한국어 이유와 diag용 요약을 준다", () => {
+  const ok = I.restartSendResult(sendOk({ status: "done", turn: 12 }));
+  assert.deepEqual({ ok: ok.ok, turn: ok.turn, status: ok.status, why: ok.why }, { ok: true, turn: 12, status: "done", why: "" });
+  assert.equal(I.restartSendResult(sendOk({ started: false })).ok, false);
+  assert.equal(I.restartSendResult({ code: 1, stdout: JSON.stringify({ started: true }), stderr: "" }).ok, false, "exit code wins");
+  assert.equal(I.restartSendResult({ code: 0, stdout: "not json", stderr: "" }).ok, false);
+  assert.equal(I.restartSendResult({ code: 0, stdout: "", stderr: "" }).ok, false);
+  assert.equal(I.restartSendResult(null).ok, false);
+  const blocked = I.restartSendResult({ code: 1, stdout: JSON.stringify({ error: { kind: "blocked", message: "t9 is blocked" } }), stderr: "" });
+  assert.equal(blocked.ok, false); assert.match(blocked.why, /질문 중/);
+  const mism = I.restartSendResult({ code: 1, stdout: JSON.stringify({ error: { kind: "status_mismatch", message: "t9 is done, not idle" } }), stderr: "" });
+  assert.match(mism.why, /일하는 중/);
+  const other = I.restartSendResult({ code: 1, stdout: JSON.stringify({ error: { kind: "x", message: "boom" } }), stderr: "" });
+  assert.match(other.why, /boom/);
+  const crash = I.restartSendResult({ code: 2, stdout: "", stderr: "e".repeat(500) });
+  assert.match(crash.why, /종료 코드 2/);
+  assert.ok(crash.detail.length < 400 && /code 2/.test(crash.detail), "detail is trimmed: " + crash.detail.length);
+  assert.equal(I.restartSendResult({ code: 0, stdout: JSON.stringify({ started: true, status: "idle" }) }).turn, null, "no turn: null, not NaN");
+});
+test("restartTerm/restartSendBlock: hc get의 상태·turn을 읽고, 실행 중이고 질문·작업 중이 아닐 때만 보낸다(idle과 done 모두 허용)", () => {
+  const get = (o) => ({ code: 0, stdout: JSON.stringify({ state: "live", exit_code: null, status: { state: "idle" }, turn: 3, cols: 2, rows: 115, ...o }), stderr: "" });
+  assert.deepEqual(I.restartTerm(get()), { live: true, status: "idle", turn: 3 });
+  assert.deepEqual(I.restartTerm(get({ status: { state: "DONE" } })), { live: true, status: "done", turn: 3 });
+  assert.equal(I.restartTerm(get({ state: "exited", exit_code: 0 })).live, false);
+  assert.equal(I.restartTerm(get({ turn: undefined })).turn, null);
+  assert.equal(I.restartTerm({ code: 1, stdout: "" }), null);
+  assert.equal(I.restartTerm({ code: 0, stdout: "x" }), null);
+  assert.equal(I.restartTerm(null), null);
+  const T = (o) => ({ live: true, status: "idle", turn: 3, ...o });
+  assert.equal(I.restartSendBlock(T()), "");
+  assert.equal(I.restartSendBlock(T({ status: "done" })), "");
+  assert.match(I.restartSendBlock(T({ status: "blocked" })), /질문 중/);
+  assert.match(I.restartSendBlock(T({ status: "working" })), /일하는 중/);
+  assert.match(I.restartSendBlock(T({ live: false })), /실행 중이 아닙니다/);
+  assert.match(I.restartSendBlock(null), /읽지 못했습니다/);
+});
+test("restartClearState: /clear 뒤에는 working·blocked가 아니면서 turn이 보낼 때보다 커졌을 때만 done — 칸 너비와 무관한 신호", () => {
+  const T = (o) => ({ live: true, status: "idle", turn: 6, ...o });
+  assert.equal(I.restartClearState(6, T({ status: "idle", turn: 6 })), "wait", "turn not up yet");
+  assert.equal(I.restartClearState(6, T({ status: "working", turn: 6 })), "wait");
+  assert.equal(I.restartClearState(6, T({ status: "working", turn: 7 })), "wait", "counter up but still working");
+  assert.equal(I.restartClearState(6, T({ status: "blocked", turn: 7 })), "wait");
+  assert.equal(I.restartClearState(6, T({ status: "idle", turn: 7 })), "done");
+  assert.equal(I.restartClearState(6, T({ status: "done", turn: 7 })), "done", "herdr turns done into idle only once someone looks at the pane: done counts (the hook record check proves /clear itself)");
+  assert.equal(I.restartClearState(6, T({ turn: null })), "wait");
+  assert.equal(I.restartClearState(null, T({ turn: 7 })), "wait", "no base turn: never done");
+  assert.equal(I.restartClearState(6, T({ live: false })), "gone");
+  assert.equal(I.restartClearState(6, null), "gone");
+});
+// ---- 새로 시작 전체 흐름: 낡은 cx를 쓰면 던지는 가짜 cx로 4단계를 끝까지 돌린다 ----
+// A click's or a timer's cx is good only during its own call (the host throws "cx is no longer valid" later); the cx a spawn passes in stays good.
+const strictCx = (log, kind = "sync") => {
+  const cx = { valid: true, kind };
+  const need = (what) => { if (!cx.valid) { const e = new Error(`cx is no longer valid: ${what}`); log.stale.push(what); throw e; } };
+  cx.notify = () => { need("notify"); };
+  cx.timer = { after: (ms, f) => { need("timer.after"); setImmediate(() => { const c2 = strictCx(log, "timer"); try { f(c2); } finally { c2.valid = false; } }); } };
+  cx.spawn = (f) => { need("spawn"); const sc = strictCx(log, "spawn"); log.spawnCx = sc; log.spawned++; Promise.resolve().then(() => f(sc)).catch(() => {}); };
+  return cx;
+};
+// A fake `hc` that knows only `get` and `send` (a PO pane of any width, even 2 columns: there is no screen at all). Any other hc call is recorded in
+// log.other; the flow must never make one. `poll` counts the status reads after /clear: the counter goes up on the 3rd.
+const restartWorld = ({ clearWorks = true, cols = 2, glue = "", noRecs = false, clearAsText = false, held = [] } = {}) => {
+  const src = mainSrc();
+  const log = { stale: [], spawned: 0, sends: [], other: [], says: [], diag: [] };
+  const po = { status: "idle", turn: 6, noteMs: 0, live: true, sendFail: null, clearPoll: -1, recs: [] }; // recs: the PO hook's "me" lines
+  const g = mkGlobals({
+    RESTART_POLL_MS: 2000, RESTART_CLEAR_MS: 300, RESTART_REC_MS: 300, CHAT_KEY: "chat", shared: () => held,
+    restartDraft: I.restartDraft, restartSubmitCheck: I.restartSubmitCheck, restartClearCheck: I.restartClearCheck, RESTART_MARK: I.RESTART_MARK,
+    restartBlock: I.restartBlock, restartPoll: I.restartPoll, restartNoteFresh: I.restartNoteFresh,
+    restartSendResult: I.restartSendResult, restartTerm: I.restartTerm, restartSendBlock: I.restartSendBlock, restartClearState: I.restartClearState,
+    handoffAsk: I.handoffAsk, HELPER: () => "h.cjs",
+    exec: async (c, a) => a[1] === "po-me" ? { code: 0, stdout: JSON.stringify(po.recs) } : ({ code: 0, stdout: JSON.stringify({ path: "/n.md", exists: po.noteMs > 0, ms: po.noteMs, size: po.noteMs ? 20 : 0, text: po.noteMs ? "note" : "" }) }),
+    hc: async (a) => {
+      if (a[0] === "get") {
+        if (po.clearPoll >= 0 && ++po.clearPoll >= 3 && clearWorks) { po.status = "idle"; po.turn++; po.clearPoll = -1; }
+        return { code: 0, stdout: JSON.stringify({ address: a[1], state: po.live ? "live" : "exited", exit_code: po.live ? null : 0, status: { state: po.status }, turn: po.turn, cols, rows: 115 }), stderr: "" };
+      }
+      if (a[0] === "send") {
+        assert.equal(a[3], "--json"); assert.ok(!a.includes("--if"), "no --if: it refuses a PO that is 'done'");
+        const text = a[2];
+        if (po.sendFail) return po.sendFail;
+        log.sends.push(text);
+        // the hook records what was submitted: a glued draft comes in front; the built-in /clear records nothing (unless the test makes it go as text)
+        if (!noRecs && (text !== "/clear" || clearAsText)) po.recs.push({ ms: Date.now(), text: (text === "/clear" ? "" : glue) + text });
+        const before = { status: po.status, turn: po.turn };
+        if (text.startsWith(I.RESTART_MARK)) { po.noteMs = Date.now() + 5; po.turn++; }
+        else if (text === "/clear") { po.status = "working"; po.clearPoll = 0; }
+        else if (text === "/PO") po.turn++;
+        return { code: 0, stdout: JSON.stringify({ started: true, ...before }), stderr: "" };
+      }
+      log.other.push(a.join(" "));
+      return { code: 0, stdout: "" };
+    },
+  });
+  const self = {
+    rs: new Map(), rgen: 0,
+    liveTerms: () => [{ address: "t9", status: po.status }], isBlocked: () => po.status === "blocked",
+    say: (m) => log.says.push(m), diag: (m) => log.diag.push(m),
+  };
+  const grab = (head, next) => Object.assign(self, runMethod(src, head, next, g));
+  grab("  restartAlive(room, g)", "  restartSet(");
+  grab("  restartSet(room, g, patch, c) {", "  restartFail(");
+  grab("  restartFail(", "  restartOpen(");
+  grab("  restartClose(", "  // The helper reads");
+  grab("  async handoffRead(id) {", "  // The whole run is ONE");
+  grab("  sleepOn(cx, ms) {", "  // The PO's \"me\" records");
+  grab("  async poMe(id) {", "  // Waits (bounded)");
+  grab("  async poProof(", "  // The PO's {live, status, turn}");
+  grab("  async poTerm(po) {", "  // One line to the PO through");
+  grab("  async sendLine(po, text, still", "  // 새로 시작 / 다시");
+  grab("  restartRun(room, po, id, c) {", "  // Steps 1-4.");
+  grab("  async restartFlow(", "  // The strip above the chat box");
+  const click = () => { const c = strictCx(log); try { self.restartRun("r", "t9", "r", c); } finally { c.valid = false; } };
+  const settle = async (ms = 4000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { await tick(); const r = self.rs.get("r"); if (r && (r.phase === "done" || r.phase === "fail" || r.phase === "timeout")) break; } };
+  return { self, po, log, click, settle };
+};
+test("새로 시작 전체 흐름(PO 칸 2열): 노트 요청 → 노트 → /clear → /PO가 hc send로만 끝까지 가고, 화면·붙여넣기·키 입력은 한 번도 쓰이지 않는다", async () => {
+  const w = restartWorld({ cols: 2 });
+  w.click();
+  await w.settle(20000);
+  const r = w.self.rs.get("r");
+  assert.deepEqual(w.log.stale, [], "stale cx used");
+  assert.equal(r.phase, "done", JSON.stringify(r) + w.log.says.join("|") + w.log.diag.join("|"));
+  assert.equal(r.n, 4);
+  assert.equal(w.log.sends.length, 3);
+  assert.ok(w.log.sends[0].startsWith(I.RESTART_MARK));
+  assert.deepEqual(w.log.sends.slice(1), ["/clear", "/PO"]);
+  assert.deepEqual(w.log.other, [], "only hc get / hc send: no read, no keys");
+  assert.equal(w.log.spawned, 1);
+});
+test("새로 시작: /clear가 끝났다는 신호(turn 증가)가 없으면 /PO를 보내지 않고 멈추며, 이유를 diag에 남긴다", async () => {
+  const w = restartWorld({ clearWorks: false });
+  w.click();
+  await w.settle(20000);
+  const r = w.self.rs.get("r");
+  assert.deepEqual(w.log.stale, []);
+  assert.equal(r.phase, "fail");
+  assert.match(r.why, /\/clear가 끝났는지 확인하지 못해/);
+  assert.deepEqual(w.log.sends.slice(1), ["/clear"]);
+  assert.ok(w.log.diag.some((d) => /not confirmed: sent turn 7/.test(d)), w.log.diag.join("|"));
+});
+test("새로 시작: PO 입력칸에 남은 글이 요청 앞에 붙어 보내졌다면(훅 기록이 요청과 다름) /clear 전에 멈춘다", async () => {
+  const w = restartWorld({ glue: "남은 초안 " });
+  w.click();
+  await w.settle(20000);
+  const r = w.self.rs.get("r");
+  assert.equal(r.phase, "fail");
+  assert.match(r.why, /입력칸에 남아 있던 글이 요청과 함께 보내졌습니다\. 입력칸을 비운 뒤 다시 눌러 주세요/);
+  assert.equal(w.log.sends.length, 1, "no /clear");
+});
+test("새로 시작: 요청의 훅 기록이 제때 오지 않으면 보수적으로 /clear 전에 멈춘다", async () => {
+  const w = restartWorld({ noRecs: true });
+  w.click();
+  await w.settle(20000);
+  const r = w.self.rs.get("r");
+  assert.equal(r.phase, "fail");
+  assert.match(r.why, /PO 기록으로 확인하지 못해 \/clear를 보내지 않았습니다/);
+  assert.equal(w.log.sends.length, 1);
+});
+test("새로 시작: /clear 뒤에 PO의 새 'me' 기록이 생기면(글로 들어감) turn이 올라도 /PO를 보내지 않는다", async () => {
+  const w = restartWorld({ clearAsText: true });
+  w.click();
+  await w.settle(20000);
+  const r = w.self.rs.get("r");
+  assert.equal(r.phase, "fail");
+  assert.match(r.why, /\/clear가 명령이 아니라 글로/);
+  assert.deepEqual(w.log.sends.slice(1), ["/clear"]);
+});
+test("새로 시작: 데스크가 붙여 넣기만 한 글(held)이 이 방에 있으면 어떤 send도 하지 않는다", async () => {
+  const w = restartWorld({ held: [{ po: "r", status: "held", at: Date.now() - 1000 }] });
+  const res = await w.self.sendLine("t9", "x", () => true, "r");
+  assert.equal(res.ok, false); assert.match(res.why, /입력칸에 남은 글.*아무것도 보내지 않았습니다/);
+  assert.deepEqual(w.log.sends, []);
+  w.click(); await w.settle(3000);
+  assert.deepEqual(w.log.sends, [], "the run stops before its first send too");
+  assert.equal(w.self.rs.get("r").phase, "fail");
+});
+test("restartSubmitCheck/restartClearCheck: 요청과 똑같이 기록되면 ok, 앞에 글이 붙으면 mismatch, 기록이 없으면 wait; /clear 뒤 기록이 있으면 text", () => {
+  const ask = "[desk:handoff] write the note\n  to /x.md";
+  const rec = (text, ms = 100) => ({ ms, text });
+  assert.equal(I.restartSubmitCheck([rec("[desk:handoff] write the note to /x.md")], 50, ask), "ok", "whitespace-insensitive exact match");
+  assert.equal(I.restartSubmitCheck([rec("draft [desk:handoff] write the note to /x.md")], 50, ask), "mismatch");
+  assert.equal(I.restartSubmitCheck([rec("[desk:handoff] write the note to /x.md and more")], 50, ask), "mismatch");
+  assert.equal(I.restartSubmitCheck([], 50, ask), "wait");
+  assert.equal(I.restartSubmitCheck([rec("old", 10)], 50, ask), "wait", "records from before the send do not count");
+  assert.equal(I.restartSubmitCheck([rec("[desk:handoff] write the…")], 50, ask), "ok", "a record cut at the hook's limit still matches as a prefix");
+  assert.equal(I.restartSubmitCheck([rec("x [desk:handoff] write the…")], 50, ask), "mismatch");
+  assert.equal(I.restartClearCheck([], 50), "clean");
+  assert.equal(I.restartClearCheck([rec("old", 10)], 50), "clean");
+  assert.equal(I.restartClearCheck([rec("/clear")], 50), "text");
+  assert.equal(I.restartClearCheck([rec("draft/clear")], 50), "text");
+});
+test("새로 시작: 노트 요청 send가 실패하면 아무것도 더 보내지 않고 멈추며, hc 출력을 짧게 diag에 남긴다(화면은 남기지 않는다)", async () => {
+  const w = restartWorld();
+  w.po.sendFail = { code: 1, stdout: JSON.stringify({ error: { kind: "blocked", message: "t9 is blocked" } }), stderr: "" };
+  w.click();
+  await w.settle(5000);
+  const r = w.self.rs.get("r");
+  assert.equal(r.phase, "fail"); assert.equal(r.n, 0);
+  assert.match(r.why, /노트를 요청하지 못했습니다\(PO가 질문 중이라 받지 않았습니다\)/);
+  assert.deepEqual(w.log.sends, []);
+  assert.ok(w.log.diag.some((d) => /restart send failed: code 1; stdout .*blocked/.test(d)), w.log.diag.join("|"));
+  assert.ok(!w.log.diag.some((d) => /row \d+:/.test(d)), "no screen dump");
+});
+test("새로 시작: 보내기 전에 PO가 질문 중·작업 중·꺼져 있으면 send를 부르지 않는다", async () => {
+  for (const [patch, re] of [[{ status: "blocked" }, /질문 중/], [{ status: "working" }, /일하는 중/], [{ live: false }, /실행 중이 아닙니다/]]) {
+    const w = restartWorld();
+    const c = strictCx(w.log);
+    const res = await w.self.sendLine("t9", "/clear", () => true).catch((e) => e);
+    assert.equal(res.ok, true, "idle PO takes it");
+    w.log.sends.length = 0; Object.assign(w.po, patch);
+    const res2 = await w.self.sendLine("t9", "/clear", () => true);
+    assert.equal(res2.ok, false); assert.match(res2.why, re); assert.match(res2.why, /아무것도 보내지 않았습니다/);
+    assert.deepEqual(w.log.sends, []); c.valid = false;
+  }
+  const w = restartWorld(); w.po.status = "done"; // a PO that just finished is "done": accepted
+  assert.equal((await w.self.sendLine("t9", "x", () => true)).ok, true);
+  const w2 = restartWorld(); // cancelled: nothing is sent
+  assert.equal((await w2.self.sendLine("t9", "x", () => false)).ok, false); assert.deepEqual(w2.log.sends, []);
+});
+test("새로 시작: 클릭의 c는 낡으면 던지는 것으로 확인 — 클릭 뒤에 c를 쓰면 시험이 실패한다(시험의 감시 장치)", () => {
+  const log = { stale: [], spawned: 0 };
+  const c = strictCx(log);
+  c.valid = false;
+  assert.throws(() => c.notify(), /no longer valid/);
+  assert.throws(() => c.timer.after(1, () => {}), /no longer valid/);
+});
+test("새로 시작: 흐름 도중 spawn cx가 낡으면(모드 다시 읽힘) 더 확인하지 않고 끝난다", async () => {
+  const w = restartWorld();
+  let reads = 0;
+  const orig = w.self.handoffRead;
+  w.self.handoffRead = async (id) => { reads++; return orig.call(w.self, id); };
+  w.po.noteMs = 0;
+  w.click();
+  while (reads < 2) await tick();
+  w.log.spawnCx.valid = false;
+  w.po.noteMs = 0; // no fresh note can show up: only a stopped flow ends here
+  const at = reads;
+  for (let i = 0; i < 50; i++) await tick();
+  assert.ok(reads <= at + 1, `handoffRead kept running: ${reads} after ${at}`);
+  assert.equal(w.self.rs.get("r").phase, "fail");
+});
+test("새로 시작: 사람이 닫으면(restartClose) 지켜보기를 끝내고 더 보내지 않는다", async () => {
+  const w = restartWorld();
+  const orig = w.self.handoffRead; let reads = 0;
+  w.self.handoffRead = async (id) => { reads++; const r = await orig.call(w.self, id); return { ...r, exists: false, size: 0, ms: 0 }; }; // the note never shows
+  w.click();
+  while (reads < 2) await tick();
+  const c = strictCx(w.log); w.self.restartClose("r", c); c.valid = false;
+  const at = reads;
+  for (let i = 0; i < 30; i++) await tick();
+  assert.ok(reads <= at + 1, "stopped after the close: " + (reads - at));
+  assert.equal(w.log.sends.length, 1, "only the note request went out");
+  assert.deepEqual(w.log.stale, []);
+});
+test("새로 시작: 재시작 길(sendLine·restartFlow)은 화면 읽기·클립보드·붙여넣기·포커스·hc keys를 쓰지 않고, 화면 모양을 보는 도우미도 없다", () => {
+  const src = mainSrc();
+  const flow = src.slice(src.indexOf("  async poTerm("), src.indexOf("  // The strip above the chat box"));
+  assert.ok(flow.includes("async sendLine(") && flow.includes("async restartFlow("));
+  for (const bad of ["readScreen", "terminal.paste", "write_to_clipboard", "pane.focus", "typeLine", '"keys"', '"read"', "hc keys", "focused(", "panes("]) assert.ok(!flow.includes(bad), `restart path uses ${bad}`);
+  for (const gone of ["restartInputText", "restartInputEmpty", "restartInputOnly", "restartShot", "RESTART_RULE", "squeezeRow", "RESTART_READ_LINES", "restartHasMark", "restartCleared", "diagShot", "readScreen"]) {
+    assert.ok(!src.includes(gone), `${gone} is deleted from main.js`);
+    assert.ok(!(gone in I), `${gone} is not exported`);
+  }
+  assert.match(flow, /hc\(\["send", po, text, "--json"\]\)/);
+  assert.ok(!/"--if"/.test(flow), "no --if: it refuses a PO that is 'done'");
+  assert.ok(flow.indexOf("restartClearState(clr.turn") < flow.indexOf('sendLine(po, "/PO"'), "/PO only after the clear signal");
+});
+
+test("restartDraft: 이 방에 데스크가 붙여 넣기만 한 글(held/noenter)이 10분 안에 있으면 새로 시작을 막는다(hc send는 입력칸을 비우지 않는다)", () => {
+  const now = 10_000_000;
+  const m = (o) => ({ po: "r", status: "held", at: now - 1000, ...o });
+  assert.match(I.restartDraft([m()], "r", now), /입력칸에 남은 글/);
+  assert.match(I.restartDraft([m({ status: "noenter" })], "r", now), /입력칸에 남은 글/);
+  assert.equal(I.restartDraft([m({ status: "sent" })], "r", now), "");
+  assert.equal(I.restartDraft([m({ po: "x" })], "r", now), "");
+  assert.equal(I.restartDraft([m({ at: now - I.RESTART_DRAFT_MS - 1 })], "r", now), "");
+  assert.equal(I.restartDraft(null, "r", now), "");
+  assert.match(I.restartConfirm(0, 0), /입력칸은 비어 있어야/);
 });

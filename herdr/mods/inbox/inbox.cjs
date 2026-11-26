@@ -553,9 +553,193 @@ function readPo(dir = inboxDir()) {
   return out;
 }
 
+// ---- What a PO's current session cost. An API-equivalent estimate (tokens x list price), never the subscription bill: the person uses it
+// to judge when a PO has grown expensive enough to restart. The hook records which transcript a PO is on (po-session/<po id>.json, written on
+// every prompt and reply, so a /clear is followed by the next event); the numbers are summed here from the usage of that transcript and of
+// its sub-agent transcripts (<transcript minus .jsonl>/subagents/*.jsonl). Only the `id`, `model` and `usage` fields of a line are used.
+//
+// PRICE TABLE: the one place the prices live. USD per million tokens: [input, 5m cache write, 1h cache write, cache read, output].
+// Source: https://platform.claude.com/docs/en/about-claude/pricing  (checked 2026-11-25). A model id that is not listed is "$?", never a guess:
+// add a row when a model ships. Dated ids (-20250929), "[1m]" and "-latest" suffixes are dropped before the lookup (modelKey).
+//
+// USD->KRW RATE: also only here, a fixed value (the desk never fetches a rate). Source: Bank of Korea ECOS, statistic 731Y001 "원/미국달러(매매기준율)",
+// https://ecos.bok.or.kr/api/StatisticSearch/sample/json/kr/1/10/731Y001/D/20261115/20261125/0000001  -> TIME 20261125 = 1343.6 (the Seoul Money
+// Brokerage page smbs.biz could not be read that day). poCosts puts both on every cost it returns (rate, rateNote) so the copied costLine block
+// below has no number of its own. To update: change the rate, the date in the note and this comment together.
+const COST_KRW_RATE = 1343.6;
+const COST_KRW_NOTE = "한국은행 ECOS 매매기준율, 2026-11-25 기준 고정값";
+const COST_PRICES = {
+  "claude-fable-5-2": [8, 10, 16, 0.2, 40], "claude-mythos-5-2": [8, 10, 16, 0.2, 40],
+  "claude-fable-5-1": [10, 12.5, 20, 0.25, 50], "claude-mythos-5-1": [10, 12.5, 20, 0.25, 50],
+  "claude-fable-5": [10, 12.5, 20, 1, 50], "claude-mythos-5": [10, 12.5, 20, 1, 50],
+  "claude-opus-5-5": [4, 5, 8, 0.2, 20],
+  "claude-opus-5": [5, 6.25, 10, 0.5, 25], "claude-opus-4-8": [5, 6.25, 10, 0.5, 25], "claude-opus-4-7": [5, 6.25, 10, 0.5, 25],
+  "claude-opus-4-6": [5, 6.25, 10, 0.5, 25], "claude-opus-4-5": [5, 6.25, 10, 0.5, 25],
+  "claude-opus-4-1": [15, 18.75, 30, 1.5, 75], "claude-opus-4": [15, 18.75, 30, 1.5, 75],
+  "claude-sonnet-5-5": [2, 2.5, 4, 0.1, 10], "claude-sonnet-5": [2, 2.5, 4, 0.2, 10],
+  "claude-sonnet-4-6": [3, 3.75, 6, 0.3, 15], "claude-sonnet-4-5": [3, 3.75, 6, 0.3, 15], "claude-sonnet-4": [3, 3.75, 6, 0.3, 15],
+  "claude-haiku-5-5": [0.1, 0.125, 0.2, 0.01, 0.5], // prompts up to 100,000 tokens; a longer prompt uses COST_BIG_PROMPT
+  "claude-haiku-4-5": [1, 1.25, 2, 0.1, 5],
+};
+// A request whose prompt (input + cache read + cache write tokens) is over `over` tokens is priced with `p` instead.
+const COST_BIG_PROMPT = { "claude-haiku-5-5": { over: 100000, p: [0.5, 0.625, 1, 0.05, 2.5] } };
+const COST_READ_MAX = 8 << 20; // at most this many new bytes of one transcript are read per call (a bigger backlog is caught up on the next calls)
+const COST_BUDGET = 16 << 20; // ... and at most this many over all the transcripts of one call
+const COST_IDS = 400; // message ids remembered per transcript for the streaming de-duplication (duplicates sit next to each other)
+const COST_FILES = 60; // transcripts (main + sub-agents) summed per PO
+const COST_CACHE = "po-cost-cache.json"; // {files:{<transcript path>:{off, sum, ids, unk}}}: where each transcript was read up to, so a call reads only what is new
+const PO_SESSION_DIR = "po-session"; // ~/.herdr-inbox/po-session/<po id>.json = {sid, path, at}: the transcript a PO's session writes
+
+const modelKey = (m) => String(m ?? "").trim().toLowerCase().replace(/\[[^\]]*\]$/, "").replace(/-latest$/, "").replace(/-\d{8}$/, "");
+const tokenN = (v) => (Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
+// [input, output, cache read, 5m cache write, 1h cache write] tokens of a message.usage, or null when it is not an object. The cache write
+// split comes from usage.cache_creation; what it does not account for (or all of it, when there is no split) is priced as a 5m write.
+function costTokens(u) {
+  if (!u || typeof u !== "object") return null;
+  const cc = u.cache_creation && typeof u.cache_creation === "object" ? u.cache_creation : null;
+  const total = tokenN(u.cache_creation_input_tokens);
+  const w1 = cc ? tokenN(cc.ephemeral_1h_input_tokens) : 0;
+  let w5 = cc ? tokenN(cc.ephemeral_5m_input_tokens) : 0;
+  if (w5 + w1 < total) w5 = total - w1;
+  return [tokenN(u.input_tokens), tokenN(u.output_tokens), tokenN(u.cache_read_input_tokens), w5, w1];
+}
+// USD of one message of `model` with tokens `v` (costTokens), or null when the model is not in the price table.
+function costUsd(model, v) {
+  const k = modelKey(model);
+  const base = COST_PRICES[k];
+  if (!base) return null;
+  const big = COST_BIG_PROMPT[k];
+  const p = big && v[0] + v[2] + v[3] + v[4] > big.over ? big.p : base;
+  return (v[0] * p[0] + v[3] * p[1] + v[4] * p[2] + v[2] * p[3] + v[1] * p[4]) / 1e6;
+}
+// Folds the lines of a transcript text into `st` ({sum, ids, unk}). A streamed reply is written as several lines with the same message.id
+// whose usage can grow, so each id counts once with the largest value seen per field. Lines without usage (or with all-zero usage, like
+// the harness's own messages) cost nothing; a model that is not in the table adds nothing to the sum and is listed in `unk`.
+function costFold(st, text) {
+  for (const line of String(text ?? "").split("\n")) {
+    if (!line.includes('"usage"')) continue;
+    let o;
+    try { o = JSON.parse(line); } catch { continue; }
+    const m = o?.message;
+    if (!m || typeof m !== "object") continue;
+    const v = costTokens(m.usage);
+    if (!v || !v.some((x) => x > 0)) continue;
+    const id = typeof m.id === "string" ? m.id.slice(0, 80) : "";
+    const prev = id ? st.ids[id] : null;
+    const model = (typeof m.model === "string" && m.model) || prev?.m || "";
+    const merged = prev ? v.map((x, i) => Math.max(x, prev.v[i])) : v;
+    const before = prev ? costUsd(prev.m, prev.v) ?? 0 : 0;
+    const now = costUsd(model, merged);
+    if (now === null) { const k = modelKey(model) || "?"; if (!st.unk.includes(k) && st.unk.length < 5) st.unk.push(k); }
+    st.sum += (now ?? 0) - before;
+    if (id) { delete st.ids[id]; st.ids[id] = { m: model, v: merged }; } // re-added last: the oldest ids are the ones dropped by the cap
+  }
+  const keys = Object.keys(st.ids);
+  for (const k of keys.slice(0, Math.max(0, keys.length - COST_IDS))) delete st.ids[k];
+  return st;
+}
+const costFresh = () => ({ off: 0, sum: 0, ids: {}, unk: [] });
+// Reads what is new in `file` since `ent.off` (a file that shrank starts over) and folds it into `ent`, within `budget` bytes. Only whole
+// lines are consumed: a half-written last line waits for the next call. Returns {ent, used, partial} (partial: more is left to read), or
+// null when the file cannot be read.
+function costRead(file, ent, budget = COST_READ_MAX) {
+  let fd;
+  try { fd = fs.openSync(file, "r"); } catch { return null; }
+  try {
+    const size = fs.fstatSync(fd).size;
+    const st = ent && Number.isFinite(ent.off) && ent.off <= size && ent.ids && Array.isArray(ent.unk) ? ent : costFresh();
+    const cap = Math.max(0, Math.min(COST_READ_MAX, budget));
+    const left = size - st.off;
+    const want = Math.min(left, cap);
+    let used = 0;
+    if (want > 0) {
+      const buf = Buffer.alloc(want);
+      const got = fs.readSync(fd, buf, 0, want, st.off);
+      used = got;
+      const end = buf.subarray(0, got).lastIndexOf(10);
+      if (end >= 0) { costFold(st, buf.toString("utf8", 0, end + 1)); st.off += end + 1; }
+      else if (got >= COST_READ_MAX) st.off += got; // one line longer than the whole window: skipped, never re-read
+    }
+    return { ent: st, used, partial: left > cap };
+  } catch { return null; } finally { try { fs.closeSync(fd); } catch {} }
+}
+// The sub-agent transcripts of a main transcript path: <path minus .jsonl>/subagents/*.jsonl (sorted, at most COST_FILES - 1).
+function subagentFiles(main) {
+  const dir = String(main).replace(/\.jsonl$/, "") + path.sep + "subagents";
+  try { return fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl")).sort().slice(0, COST_FILES - 1).map((n) => path.join(dir, n)); } catch { return []; }
+}
+const poSessionFile = (dir, id) => (cleanPoId(id) ? path.join(dir, PO_SESSION_DIR, `${cleanPoId(id)}.json`) : null);
+// What the hook knows of a PO's session: {sid, path} from a hook payload, or null (no usable transcript path -> nothing is recorded).
+function sessionRecord(payload) {
+  const p = typeof payload?.transcript_path === "string" ? payload.transcript_path : "";
+  if (!p || p.length > 1024 || p.includes("\0") || !path.isAbsolute(p) || !p.endsWith(".jsonl")) return null;
+  return { sid: typeof payload.session_id === "string" ? payload.session_id.slice(0, 80) : "", path: p };
+}
+// Writes the session record of PO `id` unless it is already the same (the hook runs on every prompt and reply). Returns true when written.
+function writePoSession(dir, id, payload, now = Date.now()) {
+  const file = poSessionFile(dir, id);
+  const rec = sessionRecord(payload);
+  if (!file || !rec) return false;
+  try { const old = JSON.parse(fs.readFileSync(file, "utf8")); if (old?.path === rec.path && old?.sid === rec.sid) return false; } catch {}
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify({ ...rec, at: new Date(Number(now) || Date.now()).toISOString() }), { mode: 0o600 });
+  fs.renameSync(tmp, file);
+  return true;
+}
+function readPoSession(dir, id) {
+  const file = poSessionFile(dir, id);
+  if (!file) return null;
+  try { const o = JSON.parse(fs.readFileSync(file, "utf8")); return sessionRecord({ transcript_path: o?.path, session_id: o?.sid }); } catch { return null; }
+}
+// {<po id>: {usd, unknown:[model ids not in the table], sub:<sub-agent transcripts counted>, partial}} for every PO that has a session record
+// whose transcript can be read. A PO without a record (it started before the hook recorded sessions) is simply absent: nothing is shown.
+// `cacheDir` is where the read-position cache lives: the desk watches the inbox folder (and reloads on any change in it), so collect() keeps the
+// cache outside it; it defaults to `dir` for callers that have no such folder.
+function poCosts(dir = inboxDir(), cacheDir = dir) {
+  const out = {};
+  let names = [];
+  try { names = fs.readdirSync(path.join(dir, PO_SESSION_DIR)); } catch { return out; }
+  let cache = { files: {} };
+  try { const c = JSON.parse(fs.readFileSync(path.join(cacheDir, COST_CACHE), "utf8")); if (c && typeof c.files === "object" && c.files) cache = { files: c.files }; } catch {}
+  const next = { files: {} };
+  let dirty = false;
+  let budget = COST_BUDGET;
+  for (const n of names) {
+    const id = n.endsWith(".json") ? n.slice(0, -5) : "";
+    const rec = readPoSession(dir, id);
+    if (!rec) continue;
+    let usd = 0, sub = 0, any = false, partial = false;
+    const unknown = [];
+    for (const [i, f] of [rec.path, ...subagentFiles(rec.path)].entries()) {
+      const r = costRead(f, cache.files[f], budget);
+      if (!r) { if (i === 0) break; continue; }
+      budget -= r.used;
+      if (r.used > 0 || !cache.files[f]) dirty = true;
+      next.files[f] = r.ent;
+      if (i === 0) any = true; else sub++;
+      usd += r.ent.sum;
+      partial = partial || r.partial;
+      for (const k of r.ent.unk) if (!unknown.includes(k)) unknown.push(k);
+    }
+    if (any) out[id] = { usd: Math.max(0, usd), unknown, sub, partial, rate: COST_KRW_RATE, rateNote: COST_KRW_NOTE };
+  }
+  if (Object.keys(next.files).length !== Object.keys(cache.files).length) dirty = true; // a transcript no PO is on any more is dropped
+  if (dirty) {
+    try {
+      const file = path.join(cacheDir, COST_CACHE);
+      fs.mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
+      const tmp = `${file}.tmp-${process.pid}`;
+      fs.writeFileSync(tmp, JSON.stringify(next), { mode: 0o600 });
+      fs.renameSync(tmp, file);
+    } catch {}
+  }
+  return out;
+}
+
 function collect(dir = inboxDir()) {
   let names = [];
-  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== OLD_PO_FILE); } catch { return { at: new Date().toISOString(), dir, leaders: [], po: {}, imgd: {}, root: appRoot() }; }
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== OLD_PO_FILE); } catch { return { at: new Date().toISOString(), dir, leaders: [], po: {}, imgd: {}, cost: {}, root: appRoot() }; }
   const leaders = [];
   for (const n of names) {
     try {
@@ -564,7 +748,9 @@ function collect(dir = inboxDir()) {
     } catch {}
   }
   leaders.sort((a, b) => (b.last?.ms ?? 0) - (a.last?.ms ?? 0));
-  return { at: new Date().toISOString(), dir, root: appRoot(), leaders, po: readPo(dir), imgd: imageDims() };
+  let cost = {};
+  try { cost = poCosts(dir, path.join(appRoot(), "data", "inbox")); } catch {} // a failed cost read never takes the desk's data down
+  return { at: new Date().toISOString(), dir, root: appRoot(), leaders, po: readPo(dir), imgd: imageDims(), cost };
 }
 
 // Which terminal is a waiting leader: a terminal named lead-* with the wait label decision|verify; returns that kind or "".
@@ -639,6 +825,32 @@ function usageTip(rows, now) {
   return parts.length ? parts.join(" · ") : "초기화 시각 정보가 없습니다";
 }
 // usageLine:end
+
+// costLine:begin
+// One PO's current-session cost, shown after the usage line: "이 세션 약 4,300원". The numbers come from inbox.cjs (poCosts: the usage fields of the
+// session transcript x the price table there x the fixed KRW rate there) as {usd, unknown, sub, partial, rate, rateNote}; this block only words them.
+// It is an API-equivalent estimate, not the subscription bill. `unknown` lists the model ids that are not in the price table: the label is then
+// "?원" (no guess). Copied between the markers into inbox/main.js and inbox.cjs (a test keeps them identical).
+function costLabel(c) {
+  if (!c || !Number.isFinite(c.usd)) return "";
+  if ((Array.isArray(c.unknown) && c.unknown.length) || !(c.rate > 0)) return "?원";
+  return `약 ${Math.round(c.usd * c.rate).toLocaleString("en-US")}원`;
+}
+function costTip(c) {
+  if (!c || !Number.isFinite(c.usd)) return "";
+  const unk = Array.isArray(c.unknown) && c.unknown.length;
+  return [
+    "이 PO의 현재 세션에서 쓴 금액: API 기준 추정 금액, 구독 청구액 아님",
+    unk ? "" : `달러로는 $${c.usd >= 1000 ? Math.round(c.usd).toLocaleString("en-US") : c.usd.toFixed(2)}`,
+    c.rate > 0 ? `환율 ${Number(c.rate).toLocaleString("en-US")}원/$ (${c.rateNote || "고정값"})` : "",
+    c.sub > 0 ? "서브에이전트 포함" : "메인 세션만",
+    unk ? `가격표에 없는 모델이라 합계를 내지 않았습니다: ${c.unknown.slice(0, 3).join(", ")}` : "",
+    c.partial ? "아직 다 읽지 못해 더 늘 수 있습니다" : "",
+    "빠른 모드·미국 데이터 거주 가격·웹 검색 같은 서버 도구 요금은 계산하지 않아 실제보다 적을 수 있습니다",
+    "/clear 하면 0부터 다시 셉니다",
+  ].filter(Boolean).join(" · ");
+}
+// costLine:end
 
 // The PO of a leader: that leader's terminal's parent, accepted only when the parent carries the label role=po. No guessing from
 // sibling lead-* terminals: a wrong guess would put an answer into some other agent's prompt. null when there is none.
@@ -1394,10 +1606,22 @@ function pinStep(st, o) {
   const prev = Number(st?.ct) || 0;
   const grew = ch > prev + 1;
   const near = y + vh >= ch - PIN_SLACK;
+  // The growth only counts for a view that was at the END OF WHAT IT SHOWED before it (the handle's y is still the old layout's): a person
+  // reading higher up (an expanded long bubble) is not dragged down by a new row, however often the content grows (#54).
+  const nearPrev = prev > 0 ? y + vh >= prev - PIN_SLACK : true;
   if (near) return { pinned: true, ct: ch, go: was && grew && y + vh < ch - 1 };
-  if (was && grew) return { pinned: true, ct: ch, go: true };
+  if (was && grew && nearPrev) return { pinned: true, ct: ch, go: true };
   return { pinned: false, ct: ch, go: false };
 }
+// A message the person just sent follows to the newest even from higher up: the first draw that shows a new last entry within SEND_FOLLOW_MS of the
+// send (`at` = when it was sent, 0 = none) goes to the end once.
+const SEND_FOLLOW_MS = 5000;
+const sendFollow = (at, now, key, seen) => Number(at) > 0 && now - Number(at) < SEND_FOLLOW_MS && key !== (seen ?? "");
+// ScrollHandle.scroll_to_item(i) reveals that row with the smallest scroll, so on a row TALLER than the viewport (an expanded long bubble, #54)
+// it lands on the row's top, then on its bottom, then on its top again: every call flips the view. A re-pin call is therefore made only while the
+// view is not at its end AND the content grew since the last call (`seen` = the content height at that call): within PIN_SLACK of the end, with
+// nothing new to catch up on, a view stays where it is (a call there would flip it just the same).
+const pinCall = (o, seen) => !atBottom(o?.y, o?.vh, o?.ch) && (Number(o?.ch) || 0) > (Number(seen) || 0) + 1;
 // ---- selection: a drag-selected text must not be rebuilt under the pointer
 const SEL_HOLD_MS = 120000, PRESS_HOLD_MS = 8000;
 // st = {sel: a selection is settled, selAt, press: the pointer is down in the list, pressAt}. While true, background redraws wait.
@@ -1467,10 +1691,123 @@ function bubbleCap(colW, minInner = 0) {
   return pic > cap && pic <= room ? pic : cap;
 }
 
+// ---- "PO 새로 시작": the desk asks the PO for a handoff note, then clears it (/clear) and starts it again (/PO). Everything here is pure.
+// The note is ~/.herdr-inbox/po/<po id>.handoff.md. Steps (RESTART_STEPS): 노트 요청 -> 노트 작성됨 -> 대화 비움 -> PO 다시 시작. `n` = how many are done.
+const RESTART_STEPS = ["노트 요청", "노트 작성됨", "대화 비움", "PO 다시 시작"];
+const RESTART_WAIT_MS = 5 * 60 * 1000; // a note that has not appeared by then: 다시 / 취소, nothing is cleared
+const RESTART_POLL_MS = 2000; // how often the note file and the PO's state are looked at
+const RESTART_CLEAR_MS = 20 * 1000; // how long the PO gets to finish /clear (its turn counter goes up) before /PO is given up on
+const RESTART_MARK = "[desk:handoff]"; // first words of the request (the PO's own history shows it; the desk never reads the screen)
+// Why the button cannot be pressed ("" when it can): the PO must be idle (not working, not on a prompt), a restart of it must not already run.
+function restartBlock({ po = "", status = "", running = false } = {}) {
+  const s = String(status ?? "").trim().toLowerCase();
+  if (!po) return "PO 터미널을 찾지 못했습니다";
+  if (running) return "이 PO를 새로 시작하는 중입니다";
+  if (s === "blocked") return "PO가 질문 중입니다 — 먼저 질문에 답하세요";
+  if (s === "working") return "PO가 작업 중입니다 — 끝난 뒤에 누르세요";
+  return "";
+}
+// The line pasted into the PO (English: it is read by an agent). `file` is where the note goes (shown with ~).
+function handoffAsk(file) {
+  return `${RESTART_MARK} The user will restart you with /clear. Before that, write a handoff note to ${file} (overwrite it; create the folder if needed) so that the next session can continue seamlessly: (1) decisions and final checks the user still has to answer, (2) each running leader with its task, issue/PR and state, (3) what you were doing and the next steps, (4) anything that is only in this conversation. Keep it short and in the user's language. Do nothing else; reply "handoff written" when the file is saved.`;
+}
+// What the confirm line says: what will happen and how many decisions / final checks still wait on the person.
+function restartConfirm(decisions = 0, verifies = 0) {
+  const d = Math.max(0, Number(decisions) || 0), v = Math.max(0, Number(verifies) || 0);
+  const wait = d + v ? `결정 대기 ${d}건 · 확인 대기 ${v}건이 있습니다(새로 시작해도 리더 쪽 대기는 그대로입니다).` : "결정·확인 대기는 없습니다.";
+  return `PO에게 인수인계 노트를 쓰게 한 뒤 대화를 비우고(/clear) /PO로 다시 시작합니다. PO 입력칸은 비어 있어야 합니다(남은 글이 있으면 함께 보내집니다). ${wait}`;
+}
+// The four steps for the room: `n` done, `fail` = the step at index n failed (so it shows as stopped).
+function restartSteps(n = 0, fail = false) {
+  const k = Math.max(0, Math.min(RESTART_STEPS.length, Number(n) || 0));
+  return RESTART_STEPS.map((label, i) => ({ label, state: i < k ? "done" : i === k ? (fail ? "fail" : "active") : "todo" }));
+}
+// The note may be fetched (text, not an empty file) and was written after the request (mtime in ms, 1 s slack for coarse file clocks).
+const restartNoteFresh = (note, since) => Boolean(note && note.exists && Number(note.size) > 0 && Number(note.ms) >= Number(since) - 1000);
+// One poll while the note is awaited: "wait" (no fresh note yet), "timeout" (the time is out), "idle-wait" (the note is there, the PO still works:
+// let it finish), "go" (the note is there and the PO is idle for two looks in a row: clear it).
+function restartPoll({ note, since, now, status, quiet = 0 } = {}) {
+  const fresh = restartNoteFresh(note, since);
+  const s = String(status ?? "").trim().toLowerCase();
+  if (!fresh) return Number(now) - Number(since) >= RESTART_WAIT_MS ? "timeout" : "wait";
+  if (s === "working" || s === "blocked") return "idle-wait";
+  return Number(quiet) >= 1 ? "go" : "idle-wait";
+}
+
+// ---- Sending goes through `hc send` (the path leaders use), never through the screen: the PO pane may be 2 columns wide, where no row of the
+// screen can be matched. `hc send <t> <text> --json` pastes the text and presses Enter; it prints {"started":true,"status":"idle|done","turn":N}
+// (status and turn as they were BEFORE the send) or {"error":{"kind":"blocked|status_mismatch|...","message":...}}.
+// The result of one `hc send`: ok only on exit code 0 and started === true. `why` is the Korean reason shown to the person, `detail` goes to diag.log.
+function restartSendResult(r) {
+  const code = r && Number.isFinite(Number(r.code)) ? Number(r.code) : -1;
+  const out = String(r?.stdout ?? "").trim(), err = String(r?.stderr ?? "").trim();
+  let j = null;
+  try { j = JSON.parse(out); } catch {}
+  const detail = `code ${code}; stdout ${out.slice(0, 160)}; stderr ${err.slice(0, 160)}`.replace(/\s+/g, " ");
+  if (code === 0 && j && j.started === true) {
+    const turn = Number(j.turn);
+    return { ok: true, turn: Number.isFinite(turn) ? turn : null, status: String(j.status ?? ""), why: "", detail };
+  }
+  const kind = String(j?.error?.kind ?? "");
+  const why = kind === "blocked" ? "PO가 질문 중이라 받지 않았습니다"
+    : kind === "status_mismatch" ? "PO가 일하는 중이라 받지 않았습니다"
+    : j?.error?.message ? `PO가 받지 않았습니다(${String(j.error.message).slice(0, 80)})`
+    : `hc send가 실패했습니다(종료 코드 ${code})`;
+  return { ok: false, turn: null, status: "", why, detail };
+}
+// `hc get <t> --json` as {live, status, turn}; null when it did not answer. Status and turn do not depend on the pane's size.
+function restartTerm(r) {
+  if (!r || Number(r.code) !== 0) return null;
+  let j = null;
+  try { j = JSON.parse(String(r.stdout ?? "")); } catch { return null; }
+  if (!j || typeof j !== "object") return null;
+  const turn = Number(j.turn);
+  return { live: String(j.state ?? "") === "live" && (j.exit_code === null || j.exit_code === undefined), status: String(j?.status?.state ?? "").trim().toLowerCase(), turn: Number.isFinite(turn) ? turn : null };
+}
+// Why nothing is sent now ("" when it can be): the terminal must be known and running, not on a prompt, not working (idle or done are both fine).
+function restartSendBlock(term) {
+  if (!term) return "PO 터미널의 상태를 읽지 못했습니다";
+  if (!term.live) return "PO 터미널이 실행 중이 아닙니다";
+  if (term.status === "blocked") return "PO가 질문 중입니다";
+  if (term.status === "working") return "PO가 일하는 중입니다";
+  return "";
+}
+// After `/clear` was sent (`sent` = the turn counter it reported, i.e. from before the command): "wait" while the PO still works or is on a prompt, or the counter
+// has not gone up, "done" once the PO is idle/done and the counter is higher (/clear counts as one turn), "gone" when the terminal is not running any more.
+// `done` counts too: herdr turns a "done" PO "idle" only once someone looks at its pane. That the line sent was really "/clear" is proven by restartClearCheck.
+function restartClearState(sent, term) {
+  if (!term || !term.live) return "gone";
+  if (term.status === "working" || term.status === "blocked") return "wait";
+  return term.turn !== null && sent !== null && term.turn > sent ? "done" : "wait";
+}
+// `hc send` does not empty the input box: text left there (a draft the person typed, or a chat line the desk only pasted: held / noenter) is sent together with it.
+// The desk cannot read the box (no screen reads), so it blocks on its own records: a held / noenter chat line of this room younger than RESTART_DRAFT_MS.
+const RESTART_DRAFT_MS = 10 * 60 * 1000;
+function restartDraft(mine, room, now) {
+  return (mine ?? []).some((m) => m && m.po === room && (m.status === "held" || m.status === "noenter") && Number(now) - (Number(m.at ?? m.ms) || 0) < RESTART_DRAFT_MS)
+    ? "먼저 PO 입력칸에 남은 글을 보내거나 지우세요(남아 있으면 함께 보내집니다). 채팅 말풍선의 Enter 버튼으로 보낼 수 있습니다" : "";
+}
+// What the PO's hook recorded as submitted (UserPromptSubmit -> kind "me" lines of po/<id>.jsonl) is the proof of what `hc send` really sent.
+// The step-1 request must come back as exactly itself: a draft left in the input box is sent in front of it ("<draft><request>"), and the run stops.
+// recs = [{ms, text}] ("me" lines); since = ms just before the send. "wait" = no record yet, "ok", "mismatch" (something else was submitted).
+const RESTART_REC_MS = 12 * 1000; // how long the desk waits for the record of a send (the hook writes it when the prompt is submitted)
+const restartNorm = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
+function restartSubmitCheck(recs, since, expected) {
+  const fresh = (recs ?? []).filter((x) => x && typeof x.text === "string" && Number(x.ms) >= Number(since));
+  if (!fresh.length) return "wait";
+  const e = restartNorm(expected);
+  const same = (x) => { const r = restartNorm(x.text); return r.endsWith("…") ? e.startsWith(r.slice(0, -1).trimEnd()) : r === e; }; // a record longer than the hook's limit ends in "…"
+  return fresh.every(same) ? "ok" : "mismatch";
+}
+// After the `/clear` send: the built-in /clear fires no UserPromptSubmit (verified on a scratch Claude Code: only SessionStart, source "clear"), so ANY new
+// "me" record means the line reached the model as text. "text" = fail (no /PO), "clean" = no such record.
+function restartClearCheck(recs, since) {
+  return (recs ?? []).some((x) => x && Number(x.ms) >= Number(since)) ? "text" : "clean";
+}
 // chat:end
 
 // Diagnostics for the desk (what the pointer and the selection do), kept in a small capped file the leader can read: <app root>/data/inbox/diag.log,
-// 0600; past DIAG_MAX it is moved to diag.log.1 (the older half is dropped) and a new one starts. Lines carry ids and lengths only, never message text.
+// 0600; past DIAG_MAX it is moved to diag.log.1 (the older half is dropped) and a new one starts. Lines carry ids and lengths only, never message text (one exception: a failed restart send logs the trimmed `hc send` output, see restartSendResult; never a screen).
 const DIAG_MAX = 64 * 1024;
 function diagAppend(lines, root = appRoot()) {
   const dir = path.join(root, "data", "inbox");
@@ -1484,16 +1821,36 @@ function diagAppend(lines, root = appRoot()) {
   try { try { fs.fchmodSync(fd, 0o600); } catch {} fs.writeSync(fd, text); } finally { fs.closeSync(fd); }
   return f;
 }
-module.exports = { USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, parseUsage, usageLeft, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, entryLeader, roomLeaders, settleLeader, leaderEntries, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+// The handoff note of a PO (the PO writes it when the desk restarts it): <inbox>/po/<po id>.handoff.md, or null for an invalid id.
+const handoffFile = (dir, id) => (cleanPoId(id) ? path.join(dir, PO_DIR, `${cleanPoId(id)}.handoff.md`) : null);
+const HANDOFF_MAX = 20000;
+// {path (as the PO is told: ~ for the home folder), exists, ms (mtime), size, text (the first HANDOFF_MAX characters, control characters out)}.
+// A missing, unreadable or invalid one is {exists: false}. The caller decides whether it is new enough (restartNoteFresh).
+function readHandoff(dir = inboxDir(), id = "") {
+  const file = handoffFile(dir, id);
+  if (!file) return { path: "", exists: false, ms: 0, size: 0, text: "" };
+  const home = os.homedir();
+  const shown = file.startsWith(home + path.sep) ? `~${file.slice(home.length).split(path.sep).join("/")}` : file;
+  try {
+    const st = fs.statSync(file);
+    if (!st.isFile()) return { path: shown, exists: false, ms: 0, size: 0, text: "" };
+    return { path: shown, exists: true, ms: Math.floor(st.mtimeMs), size: st.size, text: cleanText(fs.readFileSync(file, "utf8").slice(0, HANDOFF_MAX)) };
+  } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
+}
+
+module.exports = { COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, entryLeader, roomLeaders, settleLeader, leaderEntries};
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)
   // `node inbox.cjs clipimg`    -> {"path": <saved picture of the clipboard>|null}
+  // `node inbox.cjs handoff <po id>` -> {path, exists, ms, size, text} of that PO's handoff note
   // `node inbox.cjs addimg <f>` -> {"path": <saved copy of the picture file f>|null}
   const [cmd, arg] = process.argv.slice(2);
   const shown = (p) => { let d = null; try { const buf = fs.readFileSync(p).subarray(0, 65536); d = imgSize(buf); } catch {} return { path: p || null, ...(d ? { w: d[0], h: d[1] } : {}) }; };
   if (cmd === "clipimg") process.stdout.write(JSON.stringify(shown(clipImage())));
   else if (cmd === "diag") { try { diagAppend(JSON.parse(arg)); } catch {} process.stdout.write("{}"); }
+  else if (cmd === "po-me") { let me = []; try { const f = poFile(inboxDir(), arg); if (f) me = parsePoLines(readTail(f)).filter((x) => x.me).slice(-20).map((x) => ({ ms: x.ms, text: x.text })); } catch {} process.stdout.write(JSON.stringify(me)); }
+  else if (cmd === "handoff") process.stdout.write(JSON.stringify(readHandoff(inboxDir(), arg)));
   else if (cmd === "addimg") process.stdout.write(JSON.stringify(shown(importImage(arg))));
   else process.stdout.write(JSON.stringify(collect()));
 }

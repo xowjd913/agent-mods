@@ -117,6 +117,59 @@ test("bubbleWidth: hugs a short Korean line, grows with a long one, has a minimu
   assert.ok(I.bubbleWidth("a".repeat(20)) < I.bubbleWidth("가".repeat(20)));
 });
 
+test("pinCall: no re-pin call unless the content grew and the view is not at its end, so a row taller than the viewport cannot flip it (#54)", () => {
+  assert.equal(I.pinCall({ y: 8600, vh: 400, ch: 9000 }, 0), false); // at the end
+  assert.equal(I.pinCall({ y: 8599.5, vh: 400, ch: 9000 }, 0), false); // within the 1px of atBottom
+  assert.equal(I.pinCall({ y: 8000, vh: 400, ch: 9000 }, 9000), false); // not at the end, but nothing grew since the last call
+  assert.equal(I.pinCall({ y: 8000, vh: 400, ch: 9000 }, 8000), true); // grew, not at the end yet
+  assert.equal(I.pinCall({ y: 8000, vh: 400, ch: 9000 }, 8999.5), false); // within the 1px of "same height"
+  assert.equal(I.pinCall(null, 0), false); // no numbers (before the first frame): nothing to do
+  // A fake handle with scroll_to_item's "smallest scroll" rule on ONE row that is taller than the viewport (top above the view -> its top,
+  // else bottom below the view -> its bottom): each unguarded call flips the view between the row's top and its bottom.
+  const VH = 400, ROW_TOP = 500, ROW_H = 9000, CH = ROW_TOP + ROW_H;
+  const mk = (y) => ({ y, calls: 0, seen: 0, toItem() { this.calls++; if (ROW_TOP < this.y) this.y = ROW_TOP; else if (ROW_TOP + ROW_H > this.y + VH) this.y = CH - VH; } });
+  // pinGo's logic: look, remember the height, call only when pinCall says so
+  const look = (h, ch) => { const go = I.pinCall({ y: h.y, vh: VH, ch }, h.seen); h.seen = ch; if (go) h.toItem(); };
+  const draws = (h, guarded) => { // each draw makes the two catch-up calls (60ms, 220ms)
+    const tops = [];
+    for (let d = 0; d < 6; d++) for (let c = 0; c < 2; c++) { if (guarded) look(h, CH); else h.toItem(); tops.push(h.y); }
+    return tops;
+  };
+  const a = mk(CH - VH); const unguarded = draws(a, false);
+  assert.ok(new Set(unguarded).size > 1 && a.calls === 12, "unguarded calls flip the view"); // the old behaviour
+  const b = mk(CH - VH); b.seen = CH; const guarded = draws(b, true);
+  assert.equal(new Set(guarded).size, 1); // stays where it was
+  assert.equal(b.calls, 0);
+  // 1-40px above the end (inside PIN_SLACK, not atBottom), nothing grew: no call at all (review R1 P2)
+  const n = mk(CH - VH - 20); n.seen = CH; const near = draws(n, true);
+  assert.equal(n.calls, 0);
+  assert.equal(new Set(near).size, 1);
+  // the same spot but the content grew (a new row): still follows, once, and stops at the end
+  const g = mk(CH - VH - 20); g.seen = CH - 300; // the new last row is 300px high, below the old end: its bottom is the end
+  g.toItem = function () { this.calls++; if (CH - 300 + 300 > this.y + VH) this.y = CH - VH; };
+  const tops = draws(g, true);
+  assert.equal(tops[tops.length - 1], CH - VH);
+  assert.equal(g.calls, 1);
+  // not at the end (the bubble just grew a lot): the calls still catch up, and stop once the end is reached
+  const c = mk(300);
+  const tops2 = draws(c, true);
+  assert.equal(tops2[tops2.length - 1], CH - VH);
+  assert.ok(c.calls <= 1, `calls ${c.calls}`);
+});
+
+test("main.js (#54): the draw-time re-pin goes through pinGo/pinCall, and 더 보기 lets go of the bottom pin", () => {
+  assert.match(MAIN, /pinGo\(last, "draw"\)/);
+  assert.match(MAIN, /pinGo\(last, "follow"\)/);
+  assert.match(MAIN, /pinCall\(m, this\.pinCh\)/);
+  assert.match(MAIN, /if \(this\.reading\) \{/); // the poll right after a 더 보기 click does not restore the pin from the old layout...
+  assert.match(MAIN, /Math\.abs\(ct\.height - this\.reading\.ch\) <= 1/); // ...until the new layout has landed (a different content height)
+  assert.match(MAIN, /this\.reading = \{ ch:/);
+  // no bare scroll_to_item(last) left in a timer
+  assert.equal(/cx\.timer\.after\([^\n]*scroll_to_item/.test(MAIN), false);
+  const more = MAIN.slice(MAIN.indexOf("moreToggle(t, id, lc, open) {"));
+  assert.match(more.slice(0, 900), /this\.pin = \{ pinned: false/);
+});
+
 test("pinStep: re-pin when pinned and content grew; keep the place when the user scrolled up", () => {
   let st = { pinned: true, ct: 1000 };
   // grew while at the bottom -> go
@@ -440,4 +493,37 @@ test("saveImage never writes through a link, and the picture folder is capped (o
 test("diag never logs a view id (a timeline id holds the message text): kind + hash only", () => {
   assert.match(MAIN, /diagId\(id\)/);
   assert.doesNotMatch(MAIN, /settled in \$\{id\}|cleared in \$\{id\}/);
+});
+
+test("#54 re-fix: a view reading higher up is never dragged by growth; the end sentinel is the last child and the target of every go", () => {
+  // (a) an expanded tall bubble: the view sits ~4000px above the bottom and a new bubble arrives (content grows): no go, however often it grows
+  let st = { pinned: false, ct: 17130 }; // 더 보기 released the pin
+  for (const ch of [17508, 17567, 17700, 18000]) { const r = I.pinStep(st, { y: 11411, vh: 2127, ch }); assert.equal(r.go, false); assert.equal(r.pinned, false); st = { pinned: r.pinned, ct: r.ct }; }
+  // even a pin that is still "engaged" (a stale true) does not go when the view was far from the end of what it showed
+  const stale = I.pinStep({ pinned: true, ct: 17130 }, { y: 11157, vh: 2003, ch: 17508 }); // 3970px above the old end
+  assert.deepEqual(stale, { pinned: false, ct: 17508, go: false });
+  // (c) at the true bottom + growth: go (and keep following a stream of growth while each go lands)
+  let at = I.pinStep({ pinned: true, ct: 17130 }, { y: 17130 - 2127, vh: 2127, ch: 17508 });
+  assert.equal(at.go, true);
+  at = I.pinStep({ pinned: at.pinned, ct: at.ct }, { y: 17508 - 2127, vh: 2127, ch: 17900 }); // the first go landed at 17508, more came
+  assert.equal(at.go, true);
+  // (b) the person's own send follows once, from wherever they read, only for the first draw with a new last entry, and only shortly after the send
+  const k1 = I.tlKey("r~all", [{ ms: 1, key: "a" }]), k2 = I.tlKey("r~all", [{ ms: 1, key: "a" }, { ms: 2, key: "b" }]);
+  assert.equal(I.sendFollow(1000, 2000, k2, k1), true);
+  assert.equal(I.sendFollow(1000, 2000, k1, k1), false); // nothing new drawn
+  assert.equal(I.sendFollow(0, 2000, k2, k1), false); // no send
+  assert.equal(I.sendFollow(1000, 1000 + I.SEND_FOLLOW_MS + 1, k2, k1), false); // too late: someone else's bubble
+  assert.equal(I.tlFollow(k1, k2, false), false); // a bubble of someone else, reading higher up: no follow
+  assert.equal(I.tlFollow(k1, k2, true), true); // at the end: follows
+  // (d) wiring: the sentinel is pushed after the typing rows, lastIdx points at it, every go targets it, own send arms sendFollow once
+  const iTyping = MAIN.indexOf("for (const x of this.typing(v)) blocks.push(this.typingRow(t, x));");
+  const iEnd = MAIN.indexOf('blocks.push(div().id("inbox-end").flex_none().h(8));');
+  const iLast = MAIN.indexOf("this.lastIdx = Math.max(0, blocks.length - 1);");
+  assert.ok(iTyping > 0 && iEnd > iTyping && iLast > iEnd, "sentinel after the typing rows, before lastIdx");
+  assert.equal(/\.pb\(8\)\.overflow_y_scrollbar\(\)/.test(MAIN), false); // the 8px moved into the sentinel
+  assert.match(MAIN, /const last = blocks\.length - 1; \/\/ the end sentinel/);
+  assert.match(MAIN, /scroll_to_item\(this\.lastIdx\)/);
+  assert.equal((MAIN.match(/scroll_to_item\(/g) ?? []).length, 6); // 2 doc comments, pinTick, pinGo, follow, reveal(): none aimed at a bubble
+  assert.match(MAIN, /this\.sentAt2 = Date\.now\(\);/);
+  assert.match(MAIN, /if \(mine\) \{ this\.sentAt2 = 0;/); // once
 });
