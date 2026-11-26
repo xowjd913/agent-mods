@@ -505,7 +505,7 @@ test("R18: pinTick keeps the pin when a scroll is held back, so the view goes to
   d.ui.sel = false; // released
   d.pinTick({ notify() {} });
   assert.deepEqual(jumps, [7], "the next tick after the release still sees the growth and goes to the bottom");
-  assert.deepEqual(d.pin, { pinned: true, ct: 1100 });
+  assert.deepEqual(d.pin, { pinned: true, ct: 1100, vh: 400 });
   // not held and no growth: the pin is stored as before
   d.pinTick({ notify() {} });
   assert.equal(jumps.length, 1);

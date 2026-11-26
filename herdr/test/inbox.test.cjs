@@ -455,7 +455,7 @@ test("main.js: 방 목록과 방 칸이 행의 전체 높이를 채운다(타임
   assert.match(src, /id\("po-rooms"\)\.flex_none\(\)\.w\(SLIM_W\)\.h_full\(\)/);
   // the timeline itself keeps taking the rest of the column above the pinned chat box
   assert.match(src, /id\("inbox-list"\)[^\n]*\.flex_1\(\)\.min_h\(0\)/);
-  assert.match(src, /\.child\(lines\)\s*\n\s*\.when\(Boolean\(panel\), \(el\) => el\.child\(panel\)\)\s*\n\s*\.when\(Boolean\(rrow\), \(el\) => el\.child\(rrow\)\)\s*\n\s*\.child\(this\.chatBox\(t, v\)\)/);
+  assert.match(src, /\.child\(listBox\)\s*\n\s*\.when\(Boolean\(panel\), \(el\) => el\.child\(panel\)\)\s*\n\s*\.when\(Boolean\(rrow\), \(el\) => el\.child\(rrow\)\)\s*\n\s*\.child\(this\.chatBox\(t, v\)\)/);
 });
 
 test("답함 표시: 실제 lead-sched-acct 순서(결정·답, 확인·답, 결정·답)는 모두 답함이고 열린 것이 없다", () => {
@@ -1627,7 +1627,7 @@ test("main.js: 필터 배선 — 방별 상태, 열 때 기준 저장(표시 전
   // 한 full()이 Dock·창·페인 모두를 그린다: 칩 줄은 방 칸 안에, 타임라인 위
   const fl = methodOf(src, "  full(cx) {", "    return v_flex().size_full()");
   assert.ok(fl.indexOf(".child(el.child(bar))") < 0);
-  assert.ok(fl.indexOf("el.child(bar)") > 0 && fl.indexOf("el.child(bar)") < fl.indexOf(".child(lines)"));
+  assert.ok(fl.indexOf("el.child(bar)") > 0 && fl.indexOf("el.child(bar)") < fl.indexOf(".child(listBox)"));
   assert.equal((src.match(/^  full\(cx\) \{/gm) ?? []).length, 1);
 });
 // 동작: setFilter / markSeen 기준 / view 필터

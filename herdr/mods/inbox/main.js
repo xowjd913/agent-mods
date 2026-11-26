@@ -858,10 +858,21 @@ function pinStep(st, o) {
   // The growth only counts for a view that was at the END OF WHAT IT SHOWED before it (the handle's y is still the old layout's): a person
   // reading higher up (an expanded long bubble) is not dragged down by a new row, however often the content grows (#54).
   const nearPrev = prev > 0 ? y + vh >= prev - PIN_SLACK : true;
-  if (near) return { pinned: true, ct: ch, go: was && grew && y + vh < ch - 1 };
-  if (was && grew && nearPrev) return { pinned: true, ct: ch, go: true };
-  return { pinned: false, ct: ch, go: false };
+  // #67: the viewport got shorter (the input box grew under the list) while the view sat at the end of its old size: the end must stay on screen,
+  // so it goes to the end again. A view reading higher up (not pinned, or not near the old end) keeps its place.
+  const pvh = Number(st?.vh) || 0;
+  const shrunk = pvh > 0 && vh < pvh - 1 && y + pvh >= (prev > 0 ? prev : ch) - PIN_SLACK;
+  if (near) return { pinned: true, ct: ch, vh, go: was && (grew || shrunk) && y + vh < ch - 1 };
+  if (was && grew && nearPrev) return { pinned: true, ct: ch, vh, go: true };
+  if (was && shrunk) return { pinned: true, ct: ch, vh, go: true };
+  return { pinned: false, ct: ch, vh, go: false };
 }
+// #72: the "jump to the newest" button shows while the view is scrolled up by more than JUMP_MIN px from the end (more than PIN_SLACK, so it is never
+// there while the view follows), and a list that fits its viewport never shows it.
+const JUMP_MIN = 80;
+const jumpShown = (y, vh, ch) => (Number(ch) || 0) > (Number(vh) || 0) + 1 && (Number(y) || 0) + (Number(vh) || 0) < (Number(ch) || 0) - JUMP_MIN;
+// #67: the box grows to this many rows, then scrolls inside itself (the list above keeps the rest of the height).
+const INPUT_MAX_LINES = 4;
 // A message the person just sent follows to the newest even from higher up: the first draw that shows a new last entry within SEND_FOLLOW_MS of the
 // send (`at` = when it was sent, 0 = none) goes to the end once.
 const SEND_FOLLOW_MS = 5000;
@@ -1183,7 +1194,7 @@ export default class Inbox extends View {
     this.copied = null; // key of the command whose 복사 button just ran
     this.more = new Set(); // bubble ids the person opened with "더 보기" (#47: long messages start folded)
     this.chat = TextareaState.new({ value: "", rows: 1, placeholder: "PO에게 말하기 — Enter로 보내기, Shift+Enter로 줄바꿈, @로 리더 부르기, 그림은 붙여넣기" });
-    try { this.chat.set_auto_grow(1, 6); } catch {}
+    try { this.chat.set_auto_grow(1, INPUT_MAX_LINES); } catch {}
     this.menu = null; // the open "@" menu: {start, end, query, items, sel}
     this.changedAt = 0; // the last edit of the box (ms)
     this.sentAt = 0; // the last send (ms)
@@ -1212,6 +1223,7 @@ export default class Inbox extends View {
     this.ui = { sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0 }; // a drag-select in the list: redraws wait while it is held
     this.dirty = false; // a redraw was held back
     this.pin = { pinned: true, ct: 0 }; // the timeline's pin to the newest (see pinStep)
+    this.jump = false; // #72: the jump-to-newest button is shown (set by pinTick from the scroll position)
     this.pinCh = 0; // the content height at the last re-pin look/call (see pinCall)
     this.reading = null; // {ch, at}: a 더 보기 / 접기 click is waiting for its new layout to land: the 250ms poll must not restore the pin from the old one
     this.sentAt2 = 0; // when the person last sent a chat (the first draw with a new last entry after it goes to the end once, see sendFollow)
@@ -1317,16 +1329,38 @@ export default class Inbox extends View {
       if (this.reading) {
         if (Math.abs(ct.height - this.reading.ch) <= 1 && Date.now() - this.reading.at < 1500) return;
         this.reading = null;
-        this.pin = { pinned: o.y + vp.height >= ct.height - PIN_SLACK, ct: ct.height };
+        this.pin = { pinned: o.y + vp.height >= ct.height - PIN_SLACK, ct: ct.height, vh: vp.height };
         return;
       }
       const r = pinStep(this.pin, { y: o.y, vh: vp.height, ch: ct.height });
       // A scroll that is held back (drag / selection) leaves the pin as it was: pinned and the old content height stay, so the next tick after the
       // release still sees the growth and goes to the bottom (storing r.ct now would turn it into "pinned: false").
       if (r.go && quietNow(this.ui, Date.now())) return;
-      this.pin = { pinned: r.pinned, ct: r.ct };
+      this.pin = { pinned: r.pinned, ct: r.ct, vh: r.vh };
+      this.syncJump(cx, jumpShown(o.y, vp.height, ct.height));
       if (r.go) { this.pinCh = ct.height; this.diag(`pin: tick go y=${Math.round(o.y)} vh=${Math.round(vp.height)} ch=${Math.round(ct.height)}`); this.scroll.scroll_to_item(this.lastIdx); }
     } catch {}
+  }
+
+  // #72: the jump button follows the scroll position: a redraw only when it has to appear or go away.
+  syncJump(cx, on) {
+    if (on === Boolean(this.jump)) return;
+    this.jump = on;
+    this.softNotify(cx);
+  }
+  // The button: back to the newest bubble, and the view follows again from there (pinned) like at the bottom.
+  jumpToEnd(c) {
+    try {
+      const o = this.scroll.offset(), vp = this.scroll.viewport_size(), ct = this.scroll.content_size();
+      this.reading = null;
+      this.pinCh = 0;
+      this.pin = { pinned: true, ct: ct.height, vh: vp.height };
+      this.jump = false;
+      this.diag(`pin: jump y=${Math.round(o.y)} vh=${Math.round(vp.height)} ch=${Math.round(ct.height)}`);
+      this.scroll.scroll_to_item(this.lastIdx);
+    } catch {}
+    try { c.timer.after(80, () => { if (!quietNow(this.ui, Date.now())) this.pinGo(this.lastIdx, "jump"); }); } catch {}
+    c.notify();
   }
 
   // One catch-up call after a draw: scroll to the row `last` only while the content grew since the last call and the view is not at its end (see
@@ -2915,7 +2949,7 @@ export default class Inbox extends View {
       } catch {}
       // A message the person just sent follows too (once), from wherever they were reading; a new bubble of someone else does not (only at the end).
       const mine = sendFollow(this.sentAt2, Date.now(), key, this.tlSeen);
-      if (mine) { this.sentAt2 = 0; this.reading = null; this.pin = { pinned: true, ct: Number(this.pin?.ct) || 0 }; }
+      if (mine) { this.sentAt2 = 0; this.reading = null; this.pin = { pinned: true, ct: Number(this.pin?.ct) || 0, vh: Number(this.pin?.vh) || 0 }; }
       if (mine || tlFollow(this.tlSeen, key, atEnd)) {
         const last = blocks.length - 1; // the end sentinel
         this.pinCh = 0; // a new room: the retry below is a fresh catch-up
@@ -2938,6 +2972,15 @@ export default class Inbox extends View {
       .on_mouse_up("left", () => { this.ui.press = false; })
       .on_mouse_down_out((_e, c) => { this.ui.press = false; if (this.ui.sel) this.dropSel(); if (this.dirty) this.softNotify(c); })
       .when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks);
+    // #72: the round jump-to-newest button in the list's bottom-right corner (inside the list's own box: it never reaches the input below), shown only
+    // while the view is scrolled up from the end. The list itself is unchanged inside this box.
+    const jump = this.jump && blocks.length > 1
+      ? h_flex().id("inbox-jump").absolute().bottom(12).right(18).w(32).h(32).rounded(16).items_center().justify_center().cursor_pointer()
+        .bg(t.raised).border(1).border_color(t.border).text_color(t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground))
+        .on_mouse_down("left", stop).on_click((_e, c) => this.jumpToEnd(c)).tooltip("가장 아래(최신)로")
+        .child(div().text_size(15).child("↓"))
+      : null;
+    const listBox = v_flex().id("inbox-listbox").relative().flex_1().min_h(0).child(lines).when(Boolean(jump), (el) => el.child(jump));
     const bar = this.filterBar(t, v);
     const lbar = this.leaderBar(t, v);
     const rrow = this.restartRow(t, v, cx); // "PO 새로 시작": the button, its confirm line or its steps (null in the other-PO room)
@@ -2950,7 +2993,7 @@ export default class Inbox extends View {
       .when(Boolean(usage), (el) => el.child(usage))
       .when(Boolean(bar), (el) => el.child(bar))
       .when(Boolean(lbar), (el) => el.child(lbar))
-      .child(lines)
+      .child(listBox)
       .when(Boolean(panel), (el) => el.child(panel))
       .when(Boolean(rrow), (el) => el.child(rrow))
       .child(this.chatBox(t, v));
