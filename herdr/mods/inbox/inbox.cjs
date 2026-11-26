@@ -82,12 +82,12 @@ const HANGUL = /[ㄱ-ㆎ가-힣]/;
 // Short label of a URL: "PR #26", "issue #25", "comment" (an #issuecomment anchor), else host/path shortened.
 function linkLabel(url) {
   let u;
-  try { u = new URL(url); } catch { return String(url).slice(0, 28); }
+  try { u = new URL(url); } catch { return cutHead(url, 28); }
   if (/^#issuecomment-/.test(u.hash) || /^#discussion_r/.test(u.hash) || /^#pullrequestreview-/.test(u.hash)) return "comment";
   const m = u.pathname.match(/\/(pull|issues)\/(\d+)/);
   if (m) return `${m[1] === "pull" ? "PR" : "issue"} #${m[2]}`;
   const path = (u.host + u.pathname).replace(/\/+$/, "");
-  return path.length > 28 ? `${path.slice(0, 27)}…` : path;
+  return path.length > 28 ? `${cutHead(path, 27)}…` : path;
 }
 
 // "agent-mods#39" from a GitHub PR/issue URL (repo name + number, the owner left out); "" for anything else. Shown next to the
@@ -248,7 +248,7 @@ function enrich(it) {
   let lead = first ? plain(first.segs) : "";
   if (!it.head && !lead) lead = plain(it.blocks.find((b) => b.t === "h")?.segs) || it.title;
   it.leadFull = lead.length > MAX_LEAD;
-  it.lead = it.leadFull ? `${lead.slice(0, MAX_LEAD - 1)}…` : lead;
+  it.lead = it.leadFull ? `${cutHead(lead, MAX_LEAD - 1)}…` : lead;
   const content = it.blocks.filter((b) => b.t !== "gap");
   it.headHtml = escapeHtml(it.head || it.lead || it.title);
   it.leadHtml = escapeHtml(it.lead);
@@ -316,7 +316,7 @@ function parsePoLines(text) {
     if (!body.trim()) continue;
     const ms = Date.parse(o.ts);
     if (!(ms > 0)) continue;
-    out.push({ ts: new Date(ms).toISOString(), ms, text: body.trim().slice(0, MAX_PO_TEXT), to: typeof o.to === "string" ? o.to.trim() : "", ...(o.kind === "me" ? { me: true } : {}), pid: typeof o.pid === "string" ? o.pid : "" });
+    out.push({ ts: new Date(ms).toISOString(), ms, text: cutHead(body.trim(), MAX_PO_TEXT), to: typeof o.to === "string" ? o.to.trim() : "", ...(o.kind === "me" ? { me: true } : {}), pid: typeof o.pid === "string" ? o.pid : "" });
   }
   // An image line belongs to the prompt with its prompt id, else to the latest prompt within 2 minutes before it.
   for (const g of pics) {
@@ -546,7 +546,7 @@ function hookLine(payload, now = Date.now()) {
   if (stop && payload.stop_hook_active) return null;
   let text = cleanText(stop ? payload.last_assistant_message : payload.prompt).trim();
   if (!text || (!stop && HARNESS_PROMPT.test(text))) return null;
-  if (text.length > MAX_PO_TEXT) text = text.slice(0, MAX_PO_TEXT - 1) + "…";
+  if (text.length > MAX_PO_TEXT) text = cutHead(text, MAX_PO_TEXT - 1) + "…";
   return { ts: new Date(Number(now) || Date.now()).toISOString(), kind: stop ? "say" : "me", text, src: "hook", pid: typeof payload.prompt_id === "string" ? payload.prompt_id.slice(0, 80) : "" };
 }
 
@@ -972,6 +972,20 @@ function findPo(terms, leaderName, address) {
 
 
 // chat:begin
+// Cutting and passing on text (#113): JS strings are UTF-16, so a plain slice(0, n) can split an emoji (a surrogate pair) and leave a lone
+// half, which is not valid UTF-8: a TextView / element id that carries one makes the whole view fail ("invalid utf-8 sequence").
+// cutPoint(s, n) is n, or n - 1 when n falls between the two halves of a pair; cutHead/cutTail never leave half a pair; wellFormed turns
+// any lone half into U+FFFD (the engine's toWellFormed when it has one). Every cut of a person's / a PO's text goes through these.
+function cutPoint(s, n) {
+  const a = s.charCodeAt(n - 1), b = s.charCodeAt(n);
+  return n > 0 && n < s.length && a >= 0xd800 && a <= 0xdbff && b >= 0xdc00 && b <= 0xdfff ? n - 1 : n;
+}
+const cutHead = (v, n) => { const s = String(v ?? ""); return s.slice(0, cutPoint(s, Math.max(0, n))); };
+const cutTail = (v, n) => { const s = String(v ?? ""); const at = s.length - Math.max(0, n); return at <= 0 ? s : s.slice(at === cutPoint(s, at) ? at : at + 1); };
+const HALF_SURROGATE = /[\ud800-\udfff]/, SURROGATES = /([\ud800-\udbff][\udc00-\udfff])|[\ud800-\udfff]/g;
+const wellFormed = (v) => { const s = String(v ?? ""); return HALF_SURROGATE.test(s) ? s.replace(SURROGATES, (m, pair) => (pair ? m : "\ufffd")) : s; };
+// The first character as a capital (an avatar letter), a whole emoji when it starts with one, never half of it.
+const initial = (v) => (Array.from(String(v ?? ""))[0] ?? "").toUpperCase();
 // The chat box of the window: "@" mentions, the menu of live leaders and which PO a line goes to. Pure. The mods cannot require a
 // .cjs file, so this block is copied verbatim between the markers into inbox/main.js (a test keeps them identical).
 const MENTION_END = "(?=$|[\\s.,!?:;)])";
@@ -1116,7 +1130,10 @@ function staleDrafts(keys, live, seen, now) {
 // #74: a draft mirror. Every change of a text box is copied (`mirror`: {text, content, range}); when the box comes back empty without the
 // person's own key press (`keyAt`, within DRAFT_KEY_MS) and without a clear of ours (which empties the mirror first), the text is put back.
 const DRAFT_KEY_MS = 1000;
-const draftWiped = (mirror, value, keyAt, now) => Boolean(mirror) && String(mirror.text ?? "") !== "" && String(value ?? "") === "" && !(Number(now) - Number(keyAt) < DRAFT_KEY_MS);
+// #112: a mirror of ONE character is never taken for a wipe. A Korean/Japanese/Chinese IME that is composing takes the Backspace itself (the key press
+// never reaches `keyAt`), so deleting the first, still-composed character empties the box with no key just before it: that is the person's edit, and
+// putting the character back made it impossible to delete. (Losing a one-character draft to a rebuild is cheap.)
+const draftWiped = (mirror, value, keyAt, now) => Boolean(mirror) && [...String(mirror.text ?? "")].length > 1 && String(value ?? "") === "" && !(Number(now) - Number(keyAt) < DRAFT_KEY_MS);
 // #66 (draft per room): the unsent chat text each room holds while another room is shown. `cur` = what the box holds now {text, content, range, pics};
 // leaving `from` stores it there (nothing to keep = the room's entry goes), arriving at `to` takes that room's entry out (it is the box again) and
 // returns it as `load` (null = an empty box). A room that was left empty keeps no entry; the map is capped (oldest dropped). Pure (no mutation of `map`).
@@ -1205,7 +1222,7 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
   // button's life) before to 1 minute after it. One desk record covers one typed line.
   const sentBy = (mine ?? []).filter((m) => m.po === room && !["failed", "nopane", "gone"].includes(m.status));
   const taken = new Set();
-  const tnorm = (v) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 2000);
+  const tnorm = (v) => cutHead(String(v ?? "").replace(/\s+/g, " ").trim(), 2000);
   // Compared without wrapper tags (the terminal's paste wrapper must not make a copy look different) and, as a second chance, by words + pictures.
   const full = (v) => tlMemoGet("f", v, (s) => tnorm(unwrapTags(s)));
   const core = (v) => tlMemoGet("c", v, (s) => { const sp = splitImgs(s); return `${tnorm(sp.text)}|${sp.imgs.join(",")}`; });
@@ -1255,7 +1272,7 @@ function chatRecord(rec, status, now = 0, seq = "") {
   if ((!text && !imgs.length) || !rec?.po) return null;
   const ms = Number(now) || 0;
   const tos = [...new Set((Array.isArray(rec?.tos) ? rec.tos : []).map((x) => String(x ?? "")).filter(Boolean))].slice(0, 8); // every leader the line names (#58); `to` stays the first
-  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, ...(imgs.length ? { imgs } : {}), line: cleanText(rec.line ?? text).slice(0, 4000), to: String(rec.to ?? ""), ...(tos.length > 1 ? { tos } : {}), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", ak: String(rec.ak ?? ""), status: CHAT_STATUS.includes(status) ? status : "failed" };
+  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, ...(imgs.length ? { imgs } : {}), line: cutHead(cleanText(rec.line ?? text), 4000), to: String(rec.to ?? ""), ...(tos.length > 1 ? { tos } : {}), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", ak: String(rec.ak ?? ""), status: CHAT_STATUS.includes(status) ? status : "failed" };
 }
 // The list with record `id` set to `status` at `now` (null when there is no such record or it already has it).
 function setChatStatus(list, id, status, now = 0) {
@@ -1303,7 +1320,7 @@ const badgeTurn = (lease, id, now, ttl = 65000) => (!lease || lease.id === id ||
 // A spinner / timer row of the PO ("✻ Waiting (12s)", "✻ Thinking… (3s · esc to interrupt)"): it changes every second without the question
 // changing, so it is neither shown nor part of the signature.
 const PROMPT_TIMER = /^[\s│┃|]*[^\p{L}\p{N}\s]?\s*\p{L}[\p{L}\s'-]{0,30}[….]*\s*\((?:\d+\s*[hms]\s*)+[^)]*\)[\s│┃|]*$/u;
-const promptTail = (text, n = 10) => cleanText(text).split("\n").map((l) => l.trimEnd()).filter((l) => l.trim() && !PROMPT_TIMER.test(l)).slice(-n).map((l) => (l.length > 140 ? `${l.slice(0, 139)}…` : l));
+const promptTail = (text, n = 10) => cleanText(text).split("\n").map((l) => l.trimEnd()).filter((l) => l.trim() && !PROMPT_TIMER.test(l)).slice(-n).map((l) => (l.length > 140 ? `${cutHead(l, 139)}…` : l));
 const PROMPT_NUM = /^[\s│┃|]*([❯>›])?\s*(\d{1,2})[.)]\s+(\S.*?)[\s│┃|]*$/;
 const promptFooter = (l) => /^[^\p{L}\p{N}]*$/u.test(l) || (l.length <= 140 && /\b(esc|enter|tab|ctrl|shift|alt)\b|^\s*[↑↓←→]|\? for shortcuts/i.test(l));
 // {options: [{key, label, on}], head: the up to 2 lines right above the choices, tabs: the tab bar line of a multi-question prompt or ""}.
@@ -1339,7 +1356,7 @@ function promptParse(text) {
     rows.push(prev);
   }
   rows.reverse();
-  const options = rows.map((j) => { const m = num[j]; return { key: m[2], label: m[3].trim().slice(0, 80), on: m[1] === "❯" || m[1] === "›" }; });
+  const options = rows.map((j) => { const m = num[j]; return { key: m[2], label: cutHead(m[3].trim(), 80), on: m[1] === "❯" || m[1] === "›" }; });
   if (options.length < 2 || !options.every((o, i) => Number(o.key) === i + 1)) return none;
   const start = rows[0];
   const tabs = lines.slice(Math.max(0, start - 5), start).reverse().find((l) => PROMPT_TABS.test(l) && PROMPT_MARK.test(l)) ?? ""; // only near the question: an arrow line far up is output
@@ -1362,8 +1379,8 @@ function inputHas(screen, line) {
   const want = squeeze(cleanText(line)).replace(/^!\s*/, ""); // bash mode draws the "!" apart from the command
   if (!want) return false;
   const hay = squeeze(cleanText(screen).split("\n").filter((l) => l.trim()).slice(-14).join("\n"));
-  if (/\n/.test(cleanText(line).trim()) || want.length > 200) return /\[Pasted text/i.test(hay) || hay.includes(want.slice(0, 24)) || hay.includes(want.slice(-24));
-  return hay.includes(want.slice(0, 24)) || hay.includes(want.slice(-24));
+  if (/\n/.test(cleanText(line).trim()) || want.length > 200) return /\[Pasted text/i.test(hay) || hay.includes(cutHead(want, 24)) || hay.includes(cutTail(want, 24));
+  return hay.includes(cutHead(want, 24)) || hay.includes(cutTail(want, 24));
 }
 // A desk line that is a shell command for the PO's own prompt ("!ls": Claude Code's bash mode starts with "!"). null for any other text,
 // "" for a bare "!"; "!!" is not one. The command is the rest of the line, trimmed.
@@ -1452,10 +1469,10 @@ function snapStep(snaps, room, seen, now, ttl = SNAP_TTL_MS) {
 // The element id of a timeline row: the entry key, which ends in the "#n" of a duplicate; a long key keeps its start and gets a hash of the whole.
 function tlId(key) {
   const k = String(key ?? "");
-  if (k.length <= 80) return `tl-${k}`;
+  if (k.length <= 80) return `tl-${wellFormed(k)}`;
   let h = 5381;
   for (const ch of k) h = (Math.imul(h, 33) ^ ch.codePointAt(0)) >>> 0;
-  return `tl-${k.slice(0, 64)}~${h.toString(16).padStart(8, "0")}`;
+  return `tl-${wellFormed(cutHead(k, 64))}~${h.toString(16).padStart(8, "0")}`;
 }
 // {all, unread, decision, verify, done, stop}: how many entries each chip shows.
 const filterCounts = (entries, seen) => Object.fromEntries(CHAT_FILTERS.map(([k]) => [k, filterEntries(entries, k, seen).length]));
@@ -1523,6 +1540,33 @@ function decisionOptions(body) {
   if (options.length < 2) return { options: [], recommended: 0 };
   return { options, recommended: options.includes(rec) ? rec : 0 };
 }
+// A decision report that asks several questions (#76): a header line starting with a circled digit ("① 병합 시점", "**② 순서**", "- ③ …") opens a
+// question, and the "N안:" lines below it (until the next header) are that question's options. Only when at least two questions each have
+// at least two options; otherwise [] and the card reads the whole body as one question (decisionOptions). Options above the first header
+// belong to no question and make the body ambiguous, so they also give [].
+// -> [{ label: "①", options: [1, 2], recommended: 2 | 0 }, ...]
+const GROUP_HEAD = /^\s*(?:[-*#>]+\s*)?(?:\*\*)?([①②③④⑤⑥⑦⑧⑨⑩])/;
+function decisionGroups(body) {
+  const segs = [{ label: "", lines: [] }];
+  for (const line of String(body ?? "").split(/\r?\n/)) {
+    const m = line.match(GROUP_HEAD);
+    if (m) segs.push({ label: m[1], lines: [] });
+    else segs[segs.length - 1].lines.push(line);
+  }
+  if (segs.length < 3 || decisionOptions(segs[0].lines.join("\n")).options.length) return [];
+  const groups = segs.slice(1).map((s) => ({ label: s.label, ...decisionOptions(s.lines.join("\n")) }));
+  return groups.every((g) => g.options.length >= 2) && new Set(groups.map((g) => g.label)).size === groups.length ? groups : [];
+}
+// The answer for picks {label: N}: "①1안, ②2안" in the questions' order; "" until every question has a pick that is one of its options.
+function groupAnswer(groups, picks) {
+  const parts = [];
+  for (const g of groups ?? []) {
+    const n = picks?.[g.label];
+    if (!g.options.includes(n)) return "";
+    parts.push(`${g.label}${n}안`);
+  }
+  return parts.join(", ");
+}
 // What a decision report offers when it has no "N안:" lines (#62): its "추천: ..." and "답: ..." lines, shown on the card without opening it,
 // and the quoted answers after "답:" ("둘 다 진행" / "#59만" / "보류", also “…” and 「…」) as answer buttons when there are at least two.
 // Read strictly from the body; "답" must start a word (not "정답:" / "답변:"). The "추천" line may carry the "답:" part after it on the same line.
@@ -1531,7 +1575,7 @@ function decisionHints(body) {
   const lines = [];
   let answers = [];
   let rec = "";
-  const cut = (s) => (s.length > 160 ? `${s.slice(0, 159)}…` : s);
+  const cut = (s) => (s.length > 160 ? `${cutHead(s, 159)}…` : s);
   for (const raw of String(body ?? "").split(/\r?\n/)) {
     const line = raw.replace(/^\s*(?:[-*]\s*)?/, "").trim();
     const r = line.match(/^추천\s*[:：]\s*(.*?)(?:\s*[.。]?\s+답\s*[:：].*)?$/);
@@ -1741,6 +1785,7 @@ function clipLong(text) {
   const s = String(text ?? "");
   let end = Math.min(s.length, LONG_CHARS), n = 0, i = -1;
   while ((i = s.indexOf("\n", i + 1)) !== -1 && i < end) if (++n >= LONG_LINES) { end = i; break; }
+  end = cutPoint(s, end);
   if (end >= s.length) return { text: s, cut: false, more: 0 };
   return { text: s.slice(0, end).trimEnd(), cut: true, more: s.length - end };
 }
@@ -2014,7 +2059,7 @@ function restartSendResult(r) {
   const out = String(r?.stdout ?? "").trim(), err = String(r?.stderr ?? "").trim();
   let j = null;
   try { j = JSON.parse(out); } catch {}
-  const detail = `code ${code}; stdout ${out.slice(0, 160)}; stderr ${err.slice(0, 160)}`.replace(/\s+/g, " ");
+  const detail = `code ${code}; stdout ${cutHead(out, 160)}; stderr ${cutHead(err, 160)}`.replace(/\s+/g, " ");
   if (code === 0 && j && j.started === true) {
     const turn = Number(j.turn);
     return { ok: true, turn: Number.isFinite(turn) ? turn : null, status: String(j.status ?? ""), why: "", detail };
@@ -2024,7 +2069,7 @@ function restartSendResult(r) {
   if (code === 0 && j && j.started === false && !j.error) return { ok: false, notStarted: true, turn: null, status: "", why: "PO가 받아 시작하지 않았습니다(입력창에 쓰던 글이 있는지 확인하세요)", detail };
   const why = kind === "blocked" ? "PO가 질문 중이라 받지 않았습니다"
     : kind === "status_mismatch" ? "PO가 일하는 중이라 받지 않았습니다"
-    : j?.error?.message ? `PO가 받지 않았습니다(${String(j.error.message).slice(0, 80)})`
+    : j?.error?.message ? `PO가 받지 않았습니다(${cutHead(String(j.error.message), 80)})`
     : `hc send가 실패했습니다(종료 코드 ${code})`;
   return { ok: false, turn: null, status: "", why, detail };
 }
@@ -2089,7 +2134,7 @@ function diagAppend(lines, root = appRoot()) {
   let size = 0;
   try { size = fs.statSync(f).size; } catch {}
   if (size > DIAG_MAX) fs.renameSync(f, f + ".1");
-  const text = (Array.isArray(lines) ? lines : []).slice(0, 60).map((x) => String(x).replace(/[\r\n]+/g, " ").slice(0, 300)).join("\n") + "\n";
+  const text = (Array.isArray(lines) ? lines : []).slice(0, 60).map((x) => cutHead(String(x).replace(/[\r\n]+/g, " "), 300)).join("\n") + "\n";
   const fd = fs.openSync(f, "a", 0o600);
   try { try { fs.fchmodSync(fd, 0o600); } catch {} fs.writeSync(fd, text); } finally { fs.closeSync(fd); }
   return f;
@@ -2107,11 +2152,11 @@ function readHandoff(dir = inboxDir(), id = "") {
   try {
     const st = fs.statSync(file);
     if (!st.isFile()) return { path: shown, exists: false, ms: 0, size: 0, text: "" };
-    return { path: shown, exists: true, ms: Math.floor(st.mtimeMs), size: st.size, text: cleanText(fs.readFileSync(file, "utf8").slice(0, HANDOFF_MAX)) };
+    return { path: shown, exists: true, ms: Math.floor(st.mtimeMs), size: st.size, text: cleanText(cutHead(fs.readFileSync(file, "utf8"), HANDOFF_MAX)) };
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { CLIP_TEXT_MAX, clipText, bangCommand, promptInput, promptParse, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, roomWorking, REMOTE_CMD, REMOTE_POLLS, REMOTE_POLL_MS, remoteBlock, remoteScreen, remoteNote, SOLO_DIR, soloEnabled, readSolo, setSolo, SOLO_FLAG, soloFile, dropChat };
+module.exports = { initial, cutPoint, cutHead, cutTail, wellFormed, CLIP_TEXT_MAX, clipText, bangCommand, promptInput, promptParse, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, roomWorking, REMOTE_CMD, REMOTE_POLLS, REMOTE_POLL_MS, remoteBlock, remoteScreen, remoteNote, SOLO_DIR, soloEnabled, readSolo, setSolo, SOLO_FLAG, soloFile, decisionGroups, groupAnswer, dropChat };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)

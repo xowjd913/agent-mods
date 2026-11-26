@@ -1147,7 +1147,7 @@ test("main.js: 칩은 대기 중인 결정(decision) 말풍선에만, 같은 sen
   const src = mainSrc();
   const a = src.indexOf("  askActions(t, a, cx) {");
   const body = src.slice(a, src.indexOf("    if (!a.po) box.child", a));
-  assert.match(body, /const opts = kind === "decision" \? decisionOptions\(item\?\.body\)/); // 한 번만 계산
+  assert.match(body, /const opts = kind === "decision" && !groups\.length \? decisionOptions\(item\?\.body\)/); // 한 번만 계산
   assert.match(body, /kind === "decision" \? opts\.options\.map/);
   assert.match(body, /`\$\{n\}안 선택`/);
   assert.match(body, /this\.send\(a, `\$\{n\}안 선택`, c, "choice"\)/);
@@ -1184,7 +1184,7 @@ test("main.js: 추천·답 줄과 답 버튼은 N안 칩이 없는 결정 카드
   const src = mainSrc();
   const a = src.indexOf("  askActions(t, a, cx) {");
   const body = src.slice(a, src.indexOf("    if (!a.po) box.child", a));
-  assert.match(body, /const hint = kind === "decision" && opts\.options\.length < 2 \? decisionHints\(item\?\.body\)/);
+  assert.match(body, /const hint = kind === "decision" && !groups\.length && opts\.options\.length < 2 \? decisionHints\(item\?\.body\)/);
   assert.match(body, /hint\.lines\.map/);
   assert.match(body, /hint\.answers\.map/);
   assert.match(body, /this\.send\(a, w, c, "choice"\)/);
@@ -1423,6 +1423,7 @@ test("chatRecord·timeline: gone 상태가 있고, 내 글에 시각(at)이 실�
 // main.js 메서드를 가짜 this·전역으로 돌린다(런타임 없이 흐름만 본다).
 const runMethod = (src, head, next, globals) => {
   const m = methodOf(src, head, next);
+  globals = { cutHead: I.cutHead, wellFormed: I.wellFormed, initial: I.initial, ...globals }; // the shared text-cut helpers of the chat block (#113)
   const names = Object.keys(globals);
   return new Function(...names, `return ({ ${m.replace(/\n\s*\/\/[^\n]*\s*$/g, "")} });`)(...names.map((k) => globals[k]));
 };
