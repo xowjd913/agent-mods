@@ -455,7 +455,7 @@ test("main.js: 방 목록과 방 칸이 행의 전체 높이를 채운다(타임
   assert.match(src, /id\("po-rooms"\)\.flex_none\(\)\.w\(SLIM_W\)\.h_full\(\)/);
   // the timeline itself keeps taking the rest of the column above the pinned chat box
   assert.match(src, /id\("inbox-list"\)[^\n]*\.flex_1\(\)\.min_h\(0\)/);
-  assert.match(src, /\.child\(lines\)\s*\n\s*\.when\(Boolean\(panel\), \(el\) => el\.child\(panel\)\)\s*\n\s*\.when\(Boolean\(rrow\), \(el\) => el\.child\(rrow\)\)\s*\n\s*\.child\(this\.chatBox\(t, v\)\)/);
+  assert.match(src, /\.child\(listBox\)\s*\n\s*\.when\(Boolean\(panel\), \(el\) => el\.child\(panel\)\)\s*\n\s*\.when\(Boolean\(rrow\), \(el\) => el\.child\(rrow\)\)\s*\n\s*\.child\(this\.chatBox\(t, v\)\)/);
 });
 
 test("답함 표시: 실제 lead-sched-acct 순서(결정·답, 확인·답, 결정·답)는 모두 답함이고 열린 것이 없다", () => {
@@ -524,7 +524,7 @@ test("메신저 창: 방 목록·타임라인·인라인 버튼·답함 표시 �
   assert.match(src, /e\.who === "me"[\s\S]*items_end\(\)/); // 내 글은 오른쪽
   assert.match(src, /this\.circle\(t, color, letter\)|circle\(t, color, letter\) \{/);
   assert.match(src, /채팅 없음/); // PO 모름 방에는 채팅 상자가 없다
-  assert.match(src, /v\.pick === PO_OTHER[\s\S]*chat-none/);
+  assert.match(src, /const none = v\.pick === PO_OTHER/); // 같은 자리에 그리고 안내 줄만 바뀐다(#74)
 });
 
 // ---- 리더 이름(#33): 받은편지함과 에이전트 목록이 같은 규칙으로 세션 이름을 고른다.
@@ -1086,7 +1086,7 @@ test("poFile: 앞뒤 공백이 낀 id는 다듬은 id로 파일을 만든다", (
 
 test("main.js: Enter 전송은 imeHold를 거치고, PO 라벨이 없으면 안내를 보인다", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8").replace(/\r\n/g, "\n");
-  assert.match(src, /imeHold\(value, this\.editAt, this\.heldAt, now\)/); // 글자가 바뀐 때 기준(위젯이 넣은 줄바꿈은 편집이 아니다)
+  assert.match(src, /imeHold\(value, this\.editAt, this\.heldAt, now, atTextEnd\(value, cur\)\)/); // 글자가 바뀐 때 기준(위젯이 넣은 줄바꿈은 편집이 아니다)
   assert.match(src, /id\("po-hint"\)/);
   assert.match(src, /\.child\(this\.picker\(t, v\)\)/); // 전체 보기는 PO가 0개여도 안내를 그린다
 });
@@ -1122,6 +1122,20 @@ test("decisionOptions: 추천 줄은 그 칩만 primary로 가리킨다(없는 �
   assert.deepEqual(I.decisionOptions("1안: 가\n2안: 나\n- 추천：1안"), { options: [1, 2], recommended: 1 });
   assert.deepEqual(I.decisionOptions("1안: 가\n2안: 나\n추천: 3안"), { options: [1, 2], recommended: 0 });
   assert.deepEqual(I.decisionOptions("추천: 1안\n1안: 가"), { options: [], recommended: 0 }); // 선택지가 둘 미만이면 추천도 없다
+});
+
+test("decisionOptions: 번호와 콜론 사이의 (추천) 표시도 선택지로 읽고, 그 칩을 추천으로 가리킨다(#66)", () => {
+  assert.deepEqual(I.decisionOptions("1안(추천): 가\n2안: 나\n3안: 다"), { options: [1, 2, 3], recommended: 1 });
+  assert.deepEqual(I.decisionOptions("1안 (추천): 가\n2안: 나"), { options: [1, 2], recommended: 1 });
+  assert.deepEqual(I.decisionOptions("1안（추천）：가\n2안：나"), { options: [1, 2], recommended: 1 }); // 전각 괄호·콜론
+  assert.deepEqual(I.decisionOptions("1안: 가\n2안: 나 (추천)"), { options: [1, 2], recommended: 2 }); // 줄 끝 표시
+  assert.deepEqual(I.decisionOptions("- 1안 [권장]: 가\n- 2안: 나"), { options: [1, 2], recommended: 1 });
+  assert.deepEqual(I.decisionOptions("**1안(추천)**: 가\n**2안**: 나"), { options: [1, 2], recommended: 1 }); // 굵게
+  assert.deepEqual(I.decisionOptions("1안: 가 ★\n2안: 나"), { options: [1, 2], recommended: 1 });
+  assert.deepEqual(I.decisionOptions("1안(보류): 가\n2안: 나"), { options: [1, 2], recommended: 0 }); // 추천 표시가 아니면 선택지만
+  assert.deepEqual(I.decisionOptions("1안: 가\n2안: 나\n추천: 2안"), { options: [1, 2], recommended: 2 }); // 기존 추천 줄은 그대로
+  // 화면에 찍힌 그대로(PR #78 결정 카드)
+  assert.deepEqual(I.decisionOptions('어느 쪽 이름을 바꿀까요?\n1안(추천): 전체로 바꾸는 버튼을 "전체 화면"으로 (탭은 "UI 모드" 그대로)\n2안: 탭을 "UI 칸"으로\n3안: 둘 다 그대로'), { options: [1, 2, 3], recommended: 1 });
 });
 
 test("decisionOptions: 다른 형식은 추측하지 않는다(A:, 1), ①, 번호 목록, 4안, 문장 중간)", () => {
@@ -1625,7 +1639,7 @@ test("main.js: 필터 배선 — 방별 상태, 열 때 기준 저장(표시 전
   // 한 full()이 Dock·창·페인 모두를 그린다: 칩 줄은 방 칸 안에, 타임라인 위
   const fl = methodOf(src, "  full(cx) {", "    return v_flex().size_full()");
   assert.ok(fl.indexOf(".child(el.child(bar))") < 0);
-  assert.ok(fl.indexOf("el.child(bar)") > 0 && fl.indexOf("el.child(bar)") < fl.indexOf(".child(lines)"));
+  assert.ok(fl.indexOf("el.child(bar)") > 0 && fl.indexOf("el.child(bar)") < fl.indexOf(".child(listBox)"));
   assert.equal((src.match(/^  full\(cx\) \{/gm) ?? []).length, 1);
 });
 // 동작: setFilter / markSeen 기준 / view 필터
@@ -1646,8 +1660,9 @@ test("settleLeader: 방에 있는 리더면 유지, 방을 떠났거나 모르�
   assert.equal(I.settleLeader(po2, "lead-a"), ""); // 다른 PO 방에는 그 리더가 없다
   assert.equal(I.settleLeader(po1, ""), "");
   assert.equal(I.settleLeader(undefined, "lead-a"), "");
-  // The row hides under two leaders (nothing to pick), so a filter must not stay set behind it: one live leader left = the whole room.
-  assert.equal(I.settleLeader([{ id: "lead-a" }], "lead-a"), "");
+  // #70: one live leader still shows the row (전체 + that leader), so its pick stays; with none open the row is gone and no pick stays behind it.
+  assert.equal(I.settleLeader([{ id: "lead-a" }], "lead-a"), "lead-a");
+  assert.equal(I.settleLeader([{ id: "lead-a" }], "lead-z"), "");
   assert.equal(I.settleLeader([], "lead-a"), "");
 });
 test("aliveLeaders(#58): 터미널이 열려 있는 리더만 칩으로 남고, 닫힌 리더는 사라지되 기록은 전체에 남는다", () => {
@@ -1666,6 +1681,16 @@ test("aliveLeaders(#58): 터미널이 열려 있는 리더만 칩으로 남고, 
   assert.match(src, /aliveLeaders\(roomLeaders\(raw, \(n\) => shortName\(n\)\), terms, this\.data\?\.leaders\)/);
   const cut = (g) => { const t = fs.readFileSync(path.join(__dirname, g), "utf8"); const i = t.indexOf("const aliveLeaders"); return t.slice(i, t.indexOf("\n", i)); };
   assert.equal(cut("../mods/inbox/main.js"), cut("../mods/inbox/inbox.cjs"));
+});
+test("#70: the room header counts the live leaders (the chips' basis), not every leader in the history", () => {
+  const src = mainSrc();
+  assert.match(src, /리더 \$\{v\.choices\?\.length \?\? 0\}명/);
+  assert.ok(!/new Set\(v\.raw\.filter\(\(e\) => e\.leader\)/.test(src));
+  // the same list feeds the chips and the count: a closed leader drops out of both, a leader with a terminal stays in both
+  const room = [LD("lead-a", "done", 1), LD("lead-b", "done", 2)];
+  const live = I.aliveLeaders(I.roomLeaders(room), [{ name: "lead-a", address: "x1" }], []);
+  assert.deepEqual(live.map((x) => x.id), ["lead-a"]);
+  assert.equal(I.settleLeader(live, "lead-a"), "lead-a");
 });
 test("leaderEntries: 그 리더의 글 + 그 리더에게 보낸 내 글만 — 칩과 겹쳐 쓴다", () => {
   assert.deepEqual(keysOf(I.leaderEntries(ROOM, "lead-a")), ["l|lead-a|100", "me|300", "l|lead-a|500"]);
@@ -1737,7 +1762,7 @@ test("main.js: 리더 줄 배선 — 방별 상태, 칩 아래 한 줄, 방을 �
   assert.match(vw, /leaderEntries\(raw, who\)/);
   assert.match(vw, /raw, shown, filter, who, choices/); // raw(읽음 표시용)는 좁히지 않은 전체
   const bar = src.slice(src.indexOf("  leaderBar(t, v) {"), src.indexOf("  peek(s) {"));
-  assert.match(bar, /\(v\.choices\?\.length \?\? 0\) < 2\) return null/); // 리더가 둘 미만이면 고를 것이 없다
+  assert.match(bar, /\(v\.choices\?\.length \?\? 0\) < 1\) return null/); // #70: 열린 리더가 하나라도 있으면 보인다, 0명이면 숨긴다
   assert.match(bar, /on_mouse_down\("left", stop\)/);
   assert.match(bar, /this\.setWho\(v\.pick, id, c\)/);
   assert.match(src, /\.when\(Boolean\(lbar\), \(el\) => el\.child\(lbar\)\)/);
@@ -2726,6 +2751,22 @@ test("main.js: UI 모드(mained)의 deliver는 칸·포커스·클립보드 없�
   assert.match(by, /this\.mark\(id, "sent"\);[\s\S]*?ok\?\.\("sent"\)/);
   assert.match(by, /this\.opening\.delete\(po\)[\s\S]*?this\.mark\(id, "failed"\)/);
   assert.match(by, /return "opening"/);
+});
+
+test("#74 R4 decisionOptions: '(비추천)'·'추천하지 않음'·'not recommended' 같은 부정 표시는 추천으로 세지 않는다", () => {
+  const rec = (body) => I.decisionOptions(body).recommended;
+  assert.equal(rec("1안(비추천): 가\n2안: 나"), 0);
+  assert.equal(rec("1안 (비권장): 가\n2안: 나"), 0);
+  assert.equal(rec("1안: 가 (추천하지 않음)\n2안: 나"), 0);
+  assert.equal(rec("1안: 가 (권장하지 않습니다)\n2안: 나"), 0);
+  assert.equal(rec("1안: 가 (not recommended)\n2안: 나"), 0);
+  assert.equal(rec("1안: 가 (don't recommend)\n2안: 나"), 0);
+  assert.equal(rec("1안(비추천): 가\n2안(추천): 나"), 2); // the negated one never takes the mark, the plain one does
+  assert.equal(rec("1안(추천): 가\n2안(비추천): 나"), 1);
+  assert.equal(rec("1안: 가\n2안: 나 (추천)"), 2);
+  assert.equal(rec("1안: 가\n2안: 나 (권장)"), 2);
+  assert.equal(rec("1안: 가\n2안: 나 (recommended)"), 2);
+  assert.deepEqual(I.decisionOptions("1안(비추천): 가\n2안: 나").options, [1, 2], "still two options");
 });
 
 // ---- #60 step B (part 1): the desk, the writer's reader and the PO hook read the profile (docs/inbox-contract.md §9-§10)

@@ -67,6 +67,8 @@ const mk = ({ screen = IDLE, status = "idle", panes = [{ terminal: "t1" }], main
   const self = {
     ...bang, ...re,
     mained, bangBusy: false, menu: "x", sentAt2: 0,
+    mirror: new Map([["chat", { text }]]),
+    wipe(key, st) { this.mirror.delete(key); try { st.set_value(""); } catch {} },
     chat: { content: () => text, set_value: (v) => log.set.push(v) },
     liveTerms: () => [{ address: "t1", status }],
     view: () => ({ pick: log.pick ?? "po-room" }),
@@ -92,6 +94,7 @@ test("#93 보내기: PO가 쉬는 중이고 입력창이 비었으면 '!ls -la' 
   assert.equal(log.deliver[0].rec.kind, "chat");
   assert.equal(log.deliver[0].rec.text, "!ls -la");
   assert.deepEqual(log.set, [""]);
+  assert.equal(self.mirror.has("chat"), false, "draft mirror is dropped, so guard() cannot restore the sent '!cmd'");
   assert.equal(self.bangBusy, false);
   assert.equal(log.say.some((s) => s.bad), false);
 });
@@ -101,6 +104,7 @@ const refused = async (opts, why, args) => {
   await go(...(args ?? []));
   assert.equal(log.deliver.length, 0, "nothing is pasted");
   assert.deepEqual(log.set, [], "the text stays in the box");
+  assert.equal(self.mirror.has("chat"), true, "and in the draft mirror");
   assert.equal(log.say.length, 1);
   assert.equal(log.say[0].bad, true);
   assert.match(log.say[0].t, why);

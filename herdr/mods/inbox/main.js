@@ -180,10 +180,10 @@ const strayBreak = (value, sentAt, now) => String(value ?? "").length > 0 && Str
 // commit's own 100 ms edit) sends. `heldAt`: when an Enter was last held (0 = never); `changedAt`, `now`: ms.
 const IME_MS = 500;
 const IME_TAIL = /[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\u3040-\u30FF\u3400-\u9FFF]$/;
-const imeHold = (value, changedAt, heldAt, now) => {
+const imeHold = (value, changedAt, heldAt, now, atEnd = true) => {
   if (Number(heldAt) > 0 && Number(changedAt) <= Number(heldAt) + 100) return false;
   if (Number(now) - Number(changedAt) < IME_MS) return true;
-  return IME_TAIL.test(String(value ?? "").trimEnd());
+  return atEnd !== false && IME_TAIL.test(String(value ?? "").trimEnd()); // a syllable still being composed sits at the cursor: with the cursor inside the text the tail is settled
 };
 // The line break the widget itself puts in the box for a held Enter (it may add it before or after the key handler runs): the held Enter
 // must not leave it there, or the person sees a blank line appear before the second Enter. `heldAt`, `now`: ms; HELD_BREAK_MS covers both orders.
@@ -191,6 +191,30 @@ const HELD_BREAK_MS = 150;
 const strayHeld = (value, heldAt, now) => Number(heldAt) > 0 && Number(now) - Number(heldAt) < HELD_BREAK_MS && /\n$/.test(String(value ?? ""));
 // The text with its trailing line breaks cut: what "an edit" is measured on (the widget's own line break for an Enter is not an edit).
 const editCore = (value) => String(value ?? "").replace(/\n+$/, "");
+// #83: Enter sends from any cursor position. The widget may also put its own line break at the cursor (anywhere in the text, not only at the end):
+// `strayAt(prev, value)` is where exactly one "\n" was inserted into `prev` (-1 if the change is anything else), `withoutAt` takes it out again,
+// `enterPending(enterAt, now)` says an Enter was pressed just before (or up to 25 ms after) `now`, and `atTextEnd(value, cursor)` is whether the
+// cursor is at the end of the text (an unknown cursor counts as the end, the careful side for the IME hold).
+const strayAt = (prev, value) => {
+  const a = String(prev ?? ""), b = String(value ?? "");
+  if (b.length !== a.length + 1) return -1;
+  let i = 0;
+  while (i < a.length && a[i] === b[i]) i++;
+  return b[i] === "\n" && b.slice(0, i) + b.slice(i + 1) === a ? i : -1;
+};
+const withoutAt = (value, i) => String(value ?? "").slice(0, i) + String(value ?? "").slice(i + 1);
+// An Enter pressed with text selected makes the widget REPLACE the selection by "\n" (not insert one): `replacedAt(prev, value)` is {idx, end} when
+// `value` is `prev` with the span [idx, end) (at least one character) swapped for one "\n", else null. The span is the selected text to put back.
+const replacedAt = (prev, value) => {
+  const a = String(prev ?? ""), b = String(value ?? "");
+  for (let i = b.indexOf("\n"); i >= 0; i = b.indexOf("\n", i + 1)) {
+    const end = a.length - (b.length - i - 1);
+    if (end > i && b.slice(0, i) === a.slice(0, i) && b.slice(i + 1) === a.slice(end)) return { idx: i, end };
+  }
+  return null;
+};
+const enterPending = (enterAt, now) => Number(enterAt) > 0 && Number(now) - Number(enterAt) >= -25 && Number(now) - Number(enterAt) < HELD_BREAK_MS;
+const atTextEnd = (value, cursor) => cursor == null || !Number.isFinite(Number(cursor)) || Number(cursor) >= editCore(value).length;
 const holdShown = (changedAt, heldAt) => Number(heldAt) > 0 && Number(changedAt) <= Number(heldAt) + 100; // a held Enter is still waiting for its second one
 // The "@query" being typed right before `cursor` (offsets into the box text), or null. Not inside a chip, not in the middle of a word.
 function mentionQuery(text, cursor, tokens = []) {
@@ -257,6 +281,25 @@ function settlePick(pos, last, hasOther, liveAt, now) {
 const DRAFT_GRACE_MS = 60000;
 function staleDrafts(keys, live, seen, now) {
   return [...keys].filter((k) => !live.has(k) && !(now - (seen.get(k) ?? 0) < DRAFT_GRACE_MS));
+}
+// #74: a draft mirror. Every change of a text box is copied (`mirror`: {text, content, range}); when the box comes back empty without the
+// person's own key press (`keyAt`, within DRAFT_KEY_MS) and without a clear of ours (which empties the mirror first), the text is put back.
+const DRAFT_KEY_MS = 1000;
+const draftWiped = (mirror, value, keyAt, now) => Boolean(mirror) && String(mirror.text ?? "") !== "" && String(value ?? "") === "" && !(Number(now) - Number(keyAt) < DRAFT_KEY_MS);
+// #66 (draft per room): the unsent chat text each room holds while another room is shown. `cur` = what the box holds now {text, content, range, pics};
+// leaving `from` stores it there (nothing to keep = the room's entry goes), arriving at `to` takes that room's entry out (it is the box again) and
+// returns it as `load` (null = an empty box). A room that was left empty keeps no entry; the map is capped (oldest dropped). Pure (no mutation of `map`).
+const ROOM_DRAFTS_MAX = 24;
+function swapDraft(map, from, to, cur) {
+  const out = new Map(map);
+  if (from != null) {
+    out.delete(from);
+    if (cur && (String(cur.text ?? "") !== "" || (cur.pics ?? []).length > 0)) out.set(from, cur);
+  }
+  const load = to != null && to !== from ? out.get(to) ?? null : null;
+  if (to != null && to !== from) out.delete(to);
+  while (out.size > ROOM_DRAFTS_MAX) out.delete(out.keys().next().value);
+  return { map: out, load };
 }
 // The "@" menu: "@here" first, then the live leaders of the picked PO (`pick`, a PO id; none for PO_OTHER), by shown name. `query`
 // filters by hc name or shown name.
@@ -544,7 +587,7 @@ function roomLeaders(entries, label = (id) => id) {
   return out.sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
 }
 // The leader to filter by: `leader` while the room still has it, else "" (= everyone; a leader that left the room goes back to 전체).
-const settleLeader = (choices, leader) => (leader && (choices ?? []).length >= 2 && (choices ?? []).some((x) => x.id === leader) ? String(leader) : "");
+const settleLeader = (choices, leader) => (leader && (choices ?? []).length >= 1 && (choices ?? []).some((x) => x.id === leader) ? String(leader) : "");
 // Only the leaders whose terminal is open now stay as choices (a closed leader's session is gone: its history stays under "전체"). A leader is live when a
 // terminal carries its hc name, or sits at the address its summary recorded. `sums` = [{leader, terminal}].
 const aliveLeaders = (choices, terms, sums) => (choices ?? []).filter((c) => (terms ?? []).some((t) => t.name === c.id || (t.address && (sums ?? []).some((s) => s.leader === c.id && s.terminal === t.address))));
@@ -619,12 +662,24 @@ function dockTarget(here, f, terms) {
 // The options of a decision report, read strictly from its body (the leader report rule: one "N안: ..." line per option, N = 1..3, and
 // optionally a "추천: N안" line). At least two distinct numbers, otherwise none (nothing is guessed: "A:", "1)", "①", "1. step" are not options).
 // -> { options: [1, 2], recommended: 2 | 0 }
+// "추천"/"권장"/"recommend" mark a recommended option, but not when negated: "비추천", "비권장", "추천하지 않", "권장하지 않", "not recommended",
+// "don't recommend" (a negated option is one the report says NOT to pick, so it never gets the "(추천)" mark).
+const REC_MARK = /추천|권장|recommend/i;
+const REC_NEG = /비\s*추천|비\s*권장|(?:추천|권장)\s*(?:하지\s*(?:않|말)|안\s*함|드리지\s*않|할\s*수\s*없)|(?:not|n['’]t|never)\s+(?:be\s+)?recommend|un-?recommend/i;
+const recMarked = (txt) => REC_MARK.test(String(txt ?? "")) && !REC_NEG.test(String(txt ?? ""));
 function decisionOptions(body) {
   const nums = new Set();
   let rec = 0;
   for (const line of String(body ?? "").split(/\r?\n/)) {
-    let m = line.match(/^\s*(?:[-*]\s*)?([1-3])안\s*[:：)]\s*\S/);
-    if (m) { nums.add(Number(m[1])); continue; }
+    // "1안: …", "1안) …", and with a marker between the number and the colon: "1안(추천): …", "1안 (추천): …", "**1안** [권장]: …"
+    let m = line.match(/^\s*(?:[-*]\s*)?(?:\*\*)?([1-3])안(?:\*\*)?\s*(?:[(（\[［]([^)）\]］\n]{0,24})[)）\]］])?\s*(?:\*\*)?\s*[:：)]\s*\S/);
+    if (m) {
+      const n = Number(m[1]);
+      nums.add(n);
+      // the recommendation marked on the option itself: "1안(추천):" or "… (추천)" / "★" at the end of its line
+      if (!rec && (recMarked(m[2]) || recMarked(line.match(/[(（\[［]([^)）\]］\n]{0,24})[)）\]］]\s*$/)?.[1]) || /[★⭐]\s*$/.test(line))) rec = n;
+      continue;
+    }
     m = line.match(/^\s*(?:[-*]\s*)?추천\s*[:：]\s*([1-3])안/);
     if (m && !rec) rec = Number(m[1]);
   }
@@ -854,62 +909,75 @@ function clipLong(text) {
   return { text: s.slice(0, end).trimEnd(), cut: true, more: s.length - end };
 }
 const moreLabel = (more) => `더 보기 · ${String(Math.max(0, Number(more) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}자 더`;
-// Where the **bold** runs of a Markdown text (the string given to TextView.markdown) sit, as [{start,end}] UTF-16 offsets into that same string,
-// markers included. The TextView draws no heavier weight for them (it ignores bold), so main.js paints a tint behind these ranges instead.
-// Fenced blocks and `code spans` are skipped, a \\* is not a marker, an opening ** must be followed and a closing ** preceded by a non-blank.
-// Bounded: a line over 2000 chars, work past 20000 chars or more than 100 ranges is left plain. Pure.
-function boldRanges(md) {
-  const out = [];
-  let fence = false, pos = 0, work = 0;
-  for (const ln of String(md ?? "").split("\n")) {
-    const at = pos;
-    pos += ln.length + 1;
-    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; continue; }
-    if (fence || ln.length > 2000 || !ln.includes("**")) continue;
-    work += ln.length;
-    if (work > 20000 || out.length >= 100) break;
-    let m = ln, i = 0;
-    while (i < m.length) { // blank out the code spans (same length, so the offsets stay)
-      if (m[i] === "\\") { i += 2; continue; }
-      if (m[i] !== "`") { i++; continue; }
-      let n = 1;
-      while (m[i + n] === "`") n++;
-      const run = "`".repeat(n);
-      let j = m.indexOf(run, i + n);
-      while (j !== -1 && m[j + n] === "`") j = m.indexOf(run, j + n + 1);
-      if (j === -1) { i += n; continue; }
-      m = m.slice(0, i) + " ".repeat(j + n - i) + m.slice(j + n);
-      i = j + n;
-    }
-    i = 0;
-    while (i < m.length - 1 && out.length < 100) {
-      if (m[i] === "\\") { i += 2; continue; }
-      if (m[i] === "*" && m[i + 1] === "*" && i + 2 < m.length && !/[\s*]/.test(m[i + 2])) {
-        let j = m.indexOf("**", i + 2);
-        while (j !== -1 && (/\s/.test(m[j - 1]) || m[j - 1] === "\\" || m[j + 2] === "*")) j = m.indexOf("**", j + 1);
-        if (j !== -1) { out.push({ start: at + i, end: at + j + 2 }); i = j + 2; continue; }
-        i += 2; continue;
-      }
-      i++;
-    }
-  }
-  return out;
-}
+// A list item line of a Markdown source: "-", "*" or "+", or "1." / "1)", then a blank and some text.
+const MD_ITEM = /^\s*(?:[-*+]|(\d{1,9})[.)])\s+\S/;
+// A first line like "[lead-po-inbox] 최종 확인 요청": a [tag], a blank, a short title.
+const MD_HEAD = /^\s*\[(?![ xX✓✔]?\])[^\]\n]{1,60}\][ \t]+\S[^\n]{0,60}$/; // not a checkbox line: "[ ] 할 일", "[x] 끝"
 // A message text as Markdown for a TextView.markdown(...).raw_html(false): wrapper tags removed first (they would print literally), a line that
-// is only 【...】 made bold, images switched off (![x](y) -> a plain link), and single line breaks kept as line breaks (Markdown would join them).
-// Code fences are left as written. Never produces HTML: the view shows tags as text. Pure.
+// is only 【...】 made bold, images switched off (![x](y) -> a plain link), single line breaks kept as line breaks (Markdown would join them), and
+// the list marks people type ("•", "1)") written as real Markdown items with a blank line before the list and after it (#66), so the view draws
+// them as a list whose wrapped lines sit under the item text. The words themselves are never changed. Code fences are left as written.
+// Never produces HTML: the view shows tags as text. Pure.
+// A single "~" is written "\~" so the view does not strike text through between two of them ("3~4.5일 ... 1.5~2일" is a range, not a
+// strikethrough); "~~text~~" stays a strikethrough. `code` spans and links/URLs are left as they are (an escape would show inside them). Pure.
+const TILDE_KEEP = /(`+[^`\n]*`+|\]\([^)\n]*\)|<?(?:https?:\/\/|www\.)[^\s<>)]*>?)/;
+function escTilde(ln) {
+  if (!ln.includes("~")) return ln;
+  return ln.split(TILDE_KEEP).map((seg, i) => (i % 2 ? seg : seg.replace(/(?<![~\\])~(?!~)/g, "\\~"))).join("");
+}
 function mdText(text) { return tlMemoGet("m", text, mdTextRaw); }
 function mdTextRaw(text) {
+  const norm = (ln) => ln.replace(/!\[/g, "!\\[").replace(/^(\s*)[•‣▪◦●・]\s+/, "$1- ").replace(/^(\s*)(\d{1,3})[)）]\s+/, "$1$2. ");
   const src = unwrapTags(text).replace(/\r\n?/g, "\n").split("\n");
-  let fence = false;
-  const rows = src.map((ln) => {
-    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; return { s: ln, flow: false }; }
-    if (fence) return { s: ln, flow: false };
-    let s = ln.replace(/!\[/g, "!\\[");
-    if (/^\s*【[^】\n]*】[:：]?\s*$/.test(s)) s = `**${s.trim()}**`;
-    return { s, flow: true };
-  });
-  return rows.map((r, i) => (r.flow && r.s.trim() && rows[i + 1]?.flow && rows[i + 1].s.trim() && !/ {2}$/.test(r.s) ? r.s + "  " : r.s)).join("\n");
+  // a first line like "[이름] 종류" over more text is the header of the message: shown bold, as a line of its own
+  const first = src.findIndex((l) => l.trim());
+  const head = first >= 0 && src.length > first + 1 && src.slice(first + 1).some((l) => l.trim()) && MD_HEAD.test(src[first]) && !src[first].includes("**") && !MD_ITEM.test(norm(src[first]));
+  let fence = false, inList = false;
+  const rows = [];
+  for (let i = 0; i < src.length; i++) {
+    const ln = src[i];
+    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; inList = false; rows.push({ s: ln, flow: false }); continue; }
+    if (fence) { rows.push({ s: ln, flow: false }); continue; }
+    let s = escTilde(norm(ln));
+    if (head && i === first) s = `**${s.trim()}**`;
+    else if (/^\s*【[^】\n]*】[:：]?\s*$/.test(s)) s = `**${s.trim()}**`;
+    const m = MD_ITEM.exec(s);
+    const item = Boolean(m) && (inList || m[1] === undefined || m[1] === "1"); // a "2025. 11" line is text, not a list that starts at 2025
+    const prev = rows[rows.length - 1];
+    const blank = !s.trim();
+    // blank lines between two items of one list are dropped: a list with a gap between its items is drawn as paragraphs, and a numbered
+    // list people write as "1. a", blank, "2. b" must look like the "-" list (compact); a gap only separates real paragraphs
+    if (blank && inList) {
+      let j = i + 1;
+      while (j < src.length && !src[j].trim()) j++;
+      if (j < src.length && !/^\s*(?:```|~~~)/.test(src[j]) && MD_ITEM.test(norm(src[j]))) continue;
+    }
+    // a list needs a blank line before it to be one, and the line after it a blank line to be out of it again
+    if (prev?.flow && prev.s.trim() && ((item && !inList) || (!item && !blank && inList && !/^\s/.test(s)))) rows.push({ s: "", flow: true });
+    if (blank) inList = false;
+    else if (item) inList = true;
+    else if (!/^\s{2,}/.test(s)) inList = false;
+    rows.push({ s, flow: true, item });
+  }
+  return rows.map((r, i) => (r.flow && r.s.trim() && rows[i + 1]?.flow && rows[i + 1].s.trim() && !rows[i + 1].item && !/ {2}$/.test(r.s) ? r.s + "  " : r.s)).join("\n");
+}
+// A whole line that is only **bold** text.
+const BOLD_LINE = /^\*\*(\S(?:(?:(?!\*\*).)*?\S)?)\*\*[ \t]*$/;
+// The mdText source cut into what is drawn as its own TextView: [{s, bold}]. A line that is only **bold** text is its own block (bold: true, the
+// ** removed), because the TextView draws no heavier weight inside a text but the whole view can be given one. Everything between stays
+// Markdown as one block. A **bold** run inside a sentence is shown at the normal weight, without markers. Fences are skipped. Pure.
+function mdBlocks(md) {
+  const out = [];
+  let cur = [], fence = false;
+  const flush = () => { const s = cur.join("\n").replace(/^\n+|\n+$/g, ""); if (s.trim()) out.push({ s, bold: false }); cur = []; };
+  for (const ln of String(md ?? "").split("\n")) {
+    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; cur.push(ln); continue; }
+    const m = fence ? null : BOLD_LINE.exec(ln);
+    if (m) { flush(); out.push({ s: m[1], bold: true }); continue; }
+    cur.push(ln);
+  }
+  flush();
+  return out;
 }
 // A message text -> {text without its "[image: ...]" lines, imgs: the paths those lines named}.
 function splitImgs(text) { return tlMemoGet("s", unwrapTags(text), splitImgsRaw); }
@@ -968,10 +1036,21 @@ function pinStep(st, o) {
   // The growth only counts for a view that was at the END OF WHAT IT SHOWED before it (the handle's y is still the old layout's): a person
   // reading higher up (an expanded long bubble) is not dragged down by a new row, however often the content grows (#54).
   const nearPrev = prev > 0 ? y + vh >= prev - PIN_SLACK : true;
-  if (near) return { pinned: true, ct: ch, go: was && grew && y + vh < ch - 1 };
-  if (was && grew && nearPrev) return { pinned: true, ct: ch, go: true };
-  return { pinned: false, ct: ch, go: false };
+  // #67: the viewport got shorter (the input box grew under the list) while the view sat at the end of its old size: the end must stay on screen,
+  // so it goes to the end again. A view reading higher up (not pinned, or not near the old end) keeps its place.
+  const pvh = Number(st?.vh) || 0;
+  const shrunk = pvh > 0 && vh < pvh - 1 && y + pvh >= (prev > 0 ? prev : ch) - PIN_SLACK;
+  if (near) return { pinned: true, ct: ch, vh, go: was && (grew || shrunk) && y + vh < ch - 1 };
+  if (was && grew && nearPrev) return { pinned: true, ct: ch, vh, go: true };
+  if (was && shrunk) return { pinned: true, ct: ch, vh, go: true };
+  return { pinned: false, ct: ch, vh, go: false };
 }
+// #72: the "jump to the newest" button shows while the view is scrolled up by more than JUMP_MIN px from the end (more than PIN_SLACK, so it is never
+// there while the view follows), and a list that fits its viewport never shows it.
+const JUMP_MIN = 80;
+const jumpShown = (y, vh, ch) => (Number(ch) || 0) > (Number(vh) || 0) + 1 && (Number(y) || 0) + (Number(vh) || 0) < (Number(ch) || 0) - JUMP_MIN;
+// #67: the box grows to this many rows, then scrolls inside itself (the list above keeps the rest of the height).
+const INPUT_MAX_LINES = 4;
 // A message the person just sent follows to the newest even from higher up: the first draw that shows a new last entry within SEND_FOLLOW_MS of the
 // send (`at` = when it was sent, 0 = none) goes to the end once.
 const SEND_FOLLOW_MS = 5000;
@@ -986,43 +1065,6 @@ const SEL_HOLD_MS = 120000, PRESS_HOLD_MS = 8000;
 // st = {sel: a selection is settled, selAt, press: the pointer is down in the list, pressAt}. While true, background redraws wait.
 const quietNow = (st, now) => Boolean((st?.sel && now - (st.selAt || 0) < SEL_HOLD_MS) || (st?.press && now - (st.pressAt || 0) < PRESS_HOLD_MS));
 
-// ---- highlight colours: the band behind **bold** runs, from the theme's own tokens.
-// A colour is "#rrggbb" + an alpha byte. The alpha starts strong (so the area is clearly visible) and steps down only while the text colour
-// would stop being readable on the blended result (contrast < HL_MIN_CONTRAST), so it holds on a light and a dark theme alike.
-const HL_MIN_CONTRAST = 3.5;
-const HL_KINDS = {
-  bold: { alpha: 0x73, floor: 0x40, tokens: ["accent", "ansi4", "foreground"] }, // about 45%
-};
-const HEX6 = /^#[0-9a-f]{6}$/i;
-// A theme colour as "#rrggbb": "#rgb" is expanded and "#rrggbbaa" loses its alpha (the tint sets its own); anything else -> null.
-const hex6 = (c) => {
-  if (typeof c !== "string") return null;
-  if (HEX6.test(c)) return c.toLowerCase();
-  if (/^#[0-9a-f]{3}$/i.test(c)) return "#" + [...c.slice(1)].map((x) => x + x).join("").toLowerCase();
-  if (/^#[0-9a-f]{8}$/i.test(c)) return c.slice(0, 7).toLowerCase();
-  return null;
-};
-const rgbOf = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
-const lumOf = (h) => {
-  const [r, g, b] = rgbOf(h).map((v) => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-};
-const contrastOf = (a, b) => { const x = lumOf(a), y = lumOf(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
-const blendHex = (top, under, a) => { const u = rgbOf(under); return "#" + rgbOf(top).map((v, i) => Math.round(v * a + u[i] * (1 - a)).toString(16).padStart(2, "0")).join(""); };
-// kind -> "#rrggbbaa", or null when the theme has no usable token (the caller then paints nothing and logs it once, see tintMiss).
-function tintHex(t, kind) {
-  const k = HL_KINDS[kind];
-  const base = k && k.tokens.map((n) => hex6(t?.[n])).find(Boolean);
-  if (!base) return null;
-  let a = k.alpha;
-  const bg = hex6(t.background), fg = hex6(t.foreground);
-  if (bg && fg) {
-    while (a > k.floor && contrastOf(fg, blendHex(base, bg, a / 255)) < HL_MIN_CONTRAST) a = Math.max(k.floor, a - 8);
-  }
-  return base + a.toString(16).padStart(2, "0");
-}
-// Why tintHex gave nothing: the tokens it looked at and what they held (colours only), for one diag line.
-const tintMiss = (t, kind) => `highlight ${kind}: no usable theme token (${(HL_KINDS[kind]?.tokens ?? []).map((n) => `${n}=${JSON.stringify(t?.[n] ?? null)}`).join(" ")}); nothing painted`;
 // A TextView selection event -> {start, end} (UTF-16 offsets into the Markdown source), or null when it carries no usable range.
 // `len` is the length of the string the view was given: a range past it belongs to an older text and is dropped.
 function selRangeOf(sel, len) {
@@ -1370,9 +1412,13 @@ export default class Inbox extends View {
     this.copied = null; // key of the command whose 복사 button just ran
     this.more = new Set(); // bubble ids the person opened with "더 보기" (#47: long messages start folded)
     this.chat = TextareaState.new({ value: "", rows: 1, placeholder: "PO에게 말하기 — Enter로 보내기, Shift+Enter로 줄바꿈, @로 리더 부르기, 그림은 붙여넣기" });
-    try { this.chat.set_auto_grow(1, 6); } catch {}
+    try { this.chat.set_auto_grow(1, INPUT_MAX_LINES); } catch {}
     this.menu = null; // the open "@" menu: {start, end, query, items, sel}
     this.changedAt = 0; // the last edit of the box (ms)
+    this.roomDrafts = new Map(); // #66: room id -> the unsent chat draft {text, content, range, pics} of a room that is not shown now (see swapDraft)
+    this.draftRoom = null; // the room the chat box belongs to now
+    this.mirror = new Map(); // #74: box key ("chat" or a leader) -> {text, content, range}: the last text each box held (see keep / guard)
+    this.keyAt = 0; // the last key press in a box (ms): an emptied box with no key press just before it was wiped, not edited
     this.sentAt = 0; // the last send (ms)
     this.uid = Math.random().toString(36).slice(2, 8); // this copy of the desk (the badge lease, record ids)
     this.seq = 0;
@@ -1393,15 +1439,20 @@ export default class Inbox extends View {
     this.heldAt = 0; // the last Enter held back as a possible IME confirm (ms)
     this.nlAt = 0; // the last Shift+Enter handled (ms)
     this.core = ""; // the box text without trailing line breaks, as of the last change
+    this.lastValue = ""; // #83: the box text as of the last change (a line break the widget put at the cursor is found against it)
+    this.enterAt = 0; // #83: the last plain Enter (key or submit event) in the chat box (ms)
+    this.brk = null; // #83: {idx, at, core, editAt}: the line break the widget last put in the text, and the edit state before it
     this.editAt = 0; // the last time that text changed (ms); the IME hold reads this, not changedAt
     this.pics = []; // pictures waiting in the box: [{path, w, h}] (saved under the inbox's po/img by the helper)
-    this.picBusy = 0; // pictures being read from the clipboard / a file right now
+    this.picBusy = 0; // pictures being read from the clipboard / a file right now FOR THE ROOM SHOWN (picBusyBy: per room)
+    this.picBusyBy = new Map();
     this.replyPics = new Map(); // leader -> pictures waiting in that leader's answer box (same shape as this.pics)
     this.replyBusy = new Map(); // leader -> pictures being read for that answer box
     this.imgd = new Map(); // path -> [w, h] of pictures added here (the helper's list covers the others)
     this.ui = { sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0 }; // a drag-select in the list: redraws wait while it is held
     this.dirty = false; // a redraw was held back
     this.pin = { pinned: true, ct: 0 }; // the timeline's pin to the newest (see pinStep)
+    this.jump = false; // #72: the jump-to-newest button is shown (set by pinTick from the scroll position)
     this.pinCh = 0; // the content height at the last re-pin look/call (see pinCall)
     this.reading = null; // {ch, at}: a 더 보기 / 접기 click is waiting for its new layout to land: the 250ms poll must not restore the pin from the old one
     this.sentAt2 = 0; // when the person last sent a chat (the first draw with a new last entry after it goes to the end once, see sendFollow)
@@ -1413,10 +1464,19 @@ export default class Inbox extends View {
       this.changedAt = Date.now();
       let value = "";
       try { value = this.chat.value(); } catch {}
+      if (this.guard("chat", this.chat, value)) return; // the box was emptied behind the person's back: the text is back, nothing else to do
+      this.keep("chat", this.chat, value);
+      const prev = this.lastValue;
+      const brk = strayAt(prev, value); // #83: the widget put a line break at the cursor
+      const rep = brk < 0 ? replacedAt(prev, value) : null; // ... or an Enter over a selection swapped the selected text for one
+      this.lastValue = value;
+      if (brk >= 0 && enterPending(this.enterAt, this.changedAt)) { this.dropAt(value, brk, this.editAt); return; } // the Enter (sent or held) left it: take it out, wherever it is
+      if (rep && enterPending(this.enterAt, this.changedAt)) { this.putBack(prev, rep, this.editAt); return; } // the selected text comes back
+      this.brk = brk >= 0 ? { idx: brk, at: this.changedAt, core: this.core, editAt: this.editAt } : rep ? { idx: rep.idx, at: this.changedAt, core: this.core, editAt: this.editAt, rep, prev } : null; // (the key may come after this change: see enterBox)
       const core = editCore(value); // an edit is a change of the text itself: the widget's own line break for an Enter is not one
       if (core !== this.core) { this.core = core; this.editAt = this.changedAt; }
       this.heldTick(c);
-      if (strayBreak(value, this.sentAt, this.changedAt)) { try { this.chat.set_value(""); } catch {} return; } // the Enter that sent left a line break
+      if (strayBreak(value, this.sentAt, this.changedAt)) { this.wipe("chat", this.chat); return; } // the Enter that sent left a line break
       if (strayHeld(value, this.heldAt, this.changedAt)) { this.dropBreak(value); return; } // the held Enter left a line break
       this.syncMenu(c);
     });
@@ -1498,6 +1558,7 @@ export default class Inbox extends View {
 
   // ---- redraw gating (a drag-select must not be rebuilt under the pointer) and the pin to the newest
   pinTick(cx) {
+    this.guardAll();
     if (this.dirty && !quietNow(this.ui, Date.now())) { this.dirty = false; try { cx.notify(); } catch {} }
     if (!this.scroll || !this.drawnAt) return;
     try {
@@ -1508,16 +1569,39 @@ export default class Inbox extends View {
       if (this.reading) {
         if (Math.abs(ct.height - this.reading.ch) <= 1 && Date.now() - this.reading.at < 1500) return;
         this.reading = null;
-        this.pin = { pinned: o.y + vp.height >= ct.height - PIN_SLACK, ct: ct.height };
+        this.pin = { pinned: o.y + vp.height >= ct.height - PIN_SLACK, ct: ct.height, vh: vp.height };
         return;
       }
       const r = pinStep(this.pin, { y: o.y, vh: vp.height, ch: ct.height });
       // A scroll that is held back (drag / selection) leaves the pin as it was: pinned and the old content height stay, so the next tick after the
       // release still sees the growth and goes to the bottom (storing r.ct now would turn it into "pinned: false").
       if (r.go && quietNow(this.ui, Date.now())) return;
-      this.pin = { pinned: r.pinned, ct: r.ct };
+      this.pin = { pinned: r.pinned, ct: r.ct, vh: r.vh };
+      // A tick that goes to the bottom is mid-move: o.y is the old offset against the new height, so the button is judged on the next tick (no flash).
+      if (!r.go) this.syncJump(cx, jumpShown(o.y, vp.height, ct.height));
       if (r.go) { this.pinCh = ct.height; this.diag(`pin: tick go y=${Math.round(o.y)} vh=${Math.round(vp.height)} ch=${Math.round(ct.height)}`); this.scroll.scroll_to_item(this.lastIdx); }
     } catch {}
+  }
+
+  // #72: the jump button follows the scroll position: a redraw only when it has to appear or go away.
+  syncJump(cx, on) {
+    if (on === Boolean(this.jump)) return;
+    this.jump = on;
+    this.softNotify(cx);
+  }
+  // The button: back to the newest bubble, and the view follows again from there (pinned) like at the bottom.
+  jumpToEnd(c) {
+    try {
+      const o = this.scroll.offset(), vp = this.scroll.viewport_size(), ct = this.scroll.content_size();
+      this.reading = null;
+      this.pinCh = 0;
+      this.pin = { pinned: true, ct: ct.height, vh: vp.height };
+      this.jump = false;
+      this.diag(`pin: jump y=${Math.round(o.y)} vh=${Math.round(vp.height)} ch=${Math.round(ct.height)}`);
+      this.scroll.scroll_to_item(this.lastIdx);
+    } catch {}
+    try { c.timer.after(80, () => { if (!quietNow(this.ui, Date.now())) this.pinGo(this.lastIdx, "jump"); }); } catch {}
+    c.notify();
   }
 
   // One catch-up call after a draw: scroll to the row `last` only while the content grew since the last call and the view is not at its end (see
@@ -1573,6 +1657,69 @@ export default class Inbox extends View {
     if (this.selMark) this.selMark.downs++;
     this.diag(`press (list mouse down), click ${e?.click_count ?? "?"}${this.ui.selAt && this.selMark ? `, ${Date.now() - this.ui.selAt}ms after the last settle` : ""}`);
   }
+  // #74: the draft mirror. keep(): copy what a box holds (text, tokens, cursor) after each change. wipe(): the mod's own clear (send, a stale
+  // draft): the mirror is emptied first so the clear is not taken for a loss. guard(): a box that is empty while the mirror holds text and no
+  // key of the person's came just before was emptied by something else (a rebuild of the view): the text and the cursor are put back.
+  keep(key, st, value) {
+    try {
+      const text = value ?? st.value();
+      if (text === "") { this.mirror.delete(key); return; }
+      let content = null, range = null;
+      try { content = st.content(); } catch {}
+      try { range = st.selected_range(); } catch {}
+      this.mirror.set(key, { text, content, range });
+    } catch {}
+  }
+  // #66: the chat box holds the draft of the room shown. When the room changes (a click on a room, or the shown room moving by itself) the box's
+  // text, mention chips, cursor and pictures go to that room's slot and the new room's slot comes back (or an empty box). Sending clears only the
+  // box of the room shown, so another room's draft is untouched. Idempotent: called with the room already shown it does nothing.
+  syncRoom(pick) {
+    if (pick == null || pick === this.draftRoom) return;
+    const from = this.draftRoom;
+    this.draftRoom = pick;
+    if (from == null) return; // first look: the box was never anyone else's
+    let cur = null;
+    try { cur = { text: this.chat.value(), content: this.chat.content(), range: this.chat.selected_range(), pics: this.pics.slice() }; } catch {}
+    const r = swapDraft(this.roomDrafts, from, pick, cur);
+    this.roomDrafts = r.map;
+    this.menu = null;
+    this.heldAt = 0;
+    this.mirror.delete("chat"); // the swap below is the mod's own write, not a loss
+    try {
+      if (r.load) {
+        try { this.chat.set_value(r.load.content ?? r.load.text); } catch { this.chat.set_value(r.load.text); }
+        if (r.load.range) this.chat.set_selected_range(r.load.range);
+      } else this.chat.set_value("");
+    } catch {}
+    this.pics = r.load?.pics ?? [];
+    this.picBusy = this.picBusyBy.get(pick) ?? 0;
+    try { this.lastValue = this.chat.value(); this.core = editCore(this.lastValue); } catch {}
+    this.brk = null;
+    this.keep("chat", this.chat);
+    this.diag(`draft: room switched, ${r.load ? `restored ${String(r.load.text).length} chars` : "empty box"}`);
+  }
+  wipe(key, st) {
+    this.mirror.delete(key);
+    try { st.set_value(""); } catch {}
+  }
+  guard(key, st, value) {
+    const m = this.mirror.get(key);
+    let v = value;
+    if (v === undefined) { try { v = st.value(); } catch { return false; } }
+    if (!draftWiped(m, v, this.keyAt, Date.now())) return false;
+    try {
+      st.set_value(m.content ?? m.text);
+      if (m.range) st.set_selected_range(m.range);
+    } catch { try { st.set_value(m.text); } catch {} }
+    this.diag(`draft restored in ${key === "chat" ? "chat" : "answer box"} (${m.text.length} chars)`);
+    return true;
+  }
+  // Every box is looked at once per draw and once per poll tick, so a loss that raised no change event is mended within a tick.
+  guardAll() {
+    this.guard("chat", this.chat);
+    for (const [k, st] of this.inputs) this.guard(k, st);
+  }
+
   // A held Enter whose second Enter never came (the person kept typing): the "한 번 더 Enter" hint goes away. The redraw respects the selection hold.
   heldTick(c) {
     if (this.heldAt && !holdShown(this.editAt, this.heldAt)) { this.heldAt = 0; this.softNotify(c); }
@@ -1609,14 +1756,6 @@ export default class Inbox extends View {
     try { cx.notify(); } catch {}
   }
 
-  // One diag line per kind when the theme gave nothing to paint with (the next redraws stay quiet).
-  tintWarn(t, kind) {
-    const w = (this.tintWarned ??= new Set());
-    if (w.has(kind)) return;
-    w.add(kind);
-    this.diag(tintMiss(t, kind));
-  }
-
   // A TextView's selection settled (sel) or cleared (null): only the hold on background redraws (ui.sel / selAt) and the diag.log lines, which
   // show whether a drag-copy sees the selection come and go (the range is logged when the app sends one). Nothing is painted for a selection.
   onSel(id, sel, cx) {
@@ -1644,13 +1783,21 @@ export default class Inbox extends View {
     else if (list.length) this.replyPics.set(key, list);
     else this.replyPics.delete(key);
   }
-  bumpBusy(key, n) {
-    if (key == null) { this.picBusy = Math.max(0, this.picBusy + n); return; }
+  // The PO box's reads are counted per room (`room` = the room the read started in), and only the room shown sees its own count: a read that
+  // started in another room never blocks sending or shows "reading…" here.
+  bumpBusy(key, n, room = this.draftRoom) {
+    if (key == null) {
+      const v = Math.max(0, (this.picBusyBy.get(room) ?? 0) + n);
+      if (v) this.picBusyBy.set(room, v); else this.picBusyBy.delete(room);
+      this.picBusy = this.picBusyBy.get(this.draftRoom) ?? 0;
+      return;
+    }
     const v = Math.max(0, (this.replyBusy.get(key) ?? 0) + n);
     if (v) this.replyBusy.set(key, v); else this.replyBusy.delete(key);
   }
-  async addPic(args, c, key = null) {
-    this.bumpBusy(key, 1);
+  // A picture for the PO box goes to the room the read STARTED in: when that room is not shown any more it joins that room's saved draft.
+  async addPic(args, c, key = null, room = this.draftRoom) {
+    this.bumpBusy(key, 1, room);
     try { c.notify(); } catch {}
     try {
       const r = await exec("node", [HELPER(), ...args], { timeout: 20000 });
@@ -1658,18 +1805,25 @@ export default class Inbox extends View {
       const o = JSON.parse(r.stdout);
       if (!o?.path) throw new Error("그림이 없습니다");
       if (o.w > 0 && o.h > 0) this.imgd.set(o.path, [o.w, o.h]);
-      const cur = this.picsOf(key);
+      const away = key == null && room !== this.draftRoom;
+      const slot = away ? this.roomDrafts.get(room) : null;
+      const cur = away ? (slot?.pics ?? []) : this.picsOf(key);
+      const pic = { path: o.path, w: o.w ?? 0, h: o.h ?? 0 };
       if (cur.length >= MAX_IMGS) this.say(`그림은 한 번에 ${MAX_IMGS}장까지 붙일 수 있습니다.`, true);
-      else if (!cur.some((x) => x.path === o.path)) this.setPics(key, [...cur, { path: o.path, w: o.w ?? 0, h: o.h ?? 0 }]);
+      else if (!cur.some((x) => x.path === o.path)) {
+        if (away) this.roomDrafts.set(room, { text: "", ...(slot ?? {}), pics: [...cur, pic] });
+        else this.setPics(key, [...cur, pic]);
+      }
       this.msg = null;
     } catch (e) { this.say(`그림을 붙이지 못했습니다: ${String(e?.message ?? e).slice(0, 140)}`, true); }
-    finally { this.bumpBusy(key, -1); try { c.notify(); } catch {} }
+    finally { this.bumpBusy(key, -1, room); try { c.notify(); } catch {} }
   }
   pastePic(c, key = null) { return this.addPic(["clipimg"], c, key); }
   async pickPics(c, key = null) {
+    const room = this.draftRoom; // the room the file button was pressed in
     let files = null;
     try { files = await pickFiles({ prompt: "그림 붙이기", multiple: true }); } catch (e) { this.say(`파일을 고르지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); try { c.notify(); } catch {} return; }
-    for (const f of (files ?? []).slice(0, MAX_IMGS)) await this.addPic(["addimg", f], c, key);
+    for (const f of (files ?? []).slice(0, MAX_IMGS)) await this.addPic(["addimg", f], c, key, room);
   }
   dropPics(paths, c, key = null) { for (const f of (paths ?? []).slice(0, MAX_IMGS)) this.addPic(["addimg", f], c, key); }
   removePic(i, c, key = null) { this.setPics(key, this.picsOf(key).filter((_x, k) => k !== i)); try { c.notify(); } catch {} }
@@ -1783,7 +1937,7 @@ export default class Inbox extends View {
     const now = Date.now();
     for (const k of live) this.inputSeen.set(k, now);
     for (const k of staleDrafts(this.inputs.keys(), live, this.inputSeen, now)) { // an old draft must not reappear on the leader's next card (but one missing poll must not wipe it: #57)
-      try { const st = this.inputs.get(k); if (String(st.value() ?? "") !== "") st.set_value(""); } catch {}
+      try { const st = this.inputs.get(k); if (String(st.value() ?? "") !== "" || this.mirror.has(k)) this.wipe(k, st); } catch {}
       this.inputSeen.delete(k);
     }
   }
@@ -2014,6 +2168,7 @@ export default class Inbox extends View {
 
   pickPo(id, c) {
     this.heldAt = 0;
+    this.syncRoom(id);
     try { setShared(PICK_KEY, id); } catch {}
     this.menu = null;
     this.markSeen();
@@ -2027,9 +2182,10 @@ export default class Inbox extends View {
   }
 
   // #58: the leader row under the chips — 전체 | one chip per leader of the room. It works together with the chips (the chip filters that leader's
-  // entries). Shown when the room has two or more leaders (with one there is nothing to choose); a leader that waits on the person is marked.
+  // entries). Shown while the room has one or more live leaders (#70: with one it still says who is there; none open = no row); a leader that
+  // waits on the person is marked.
   leaderBar(t, v) {
-    if (!v.pick || (v.choices?.length ?? 0) < 2) return null;
+    if (!v.pick || (v.choices?.length ?? 0) < 1) return null;
     const chip = (id, label, on, mark, tip) => div().id(`who-${id || "all"}`).flex_none().h(22).px(8).rounded(11).flex().items_center().cursor_pointer().text_size(11).on_mouse_down("left", stop)
       .bg(on ? t.selected : t.raised).border(1).border_color(on ? t.foreground + "40" : t.border).text_color(on ? t.foreground : t.muted)
       .hover((x) => x.bg(t.hover).text_color(t.foreground)).on_click((_e, c) => this.setWho(v.pick, id, c)).tooltip(tip).child(mark ? `${label} ●` : label);
@@ -2671,7 +2827,7 @@ export default class Inbox extends View {
     const leader = a.s.leader;
     try { setShared(SENT_KEY, { ...(shared(SENT_KEY) ?? {}), [leader]: this.askKey(a) + (how === "held" ? "|held" : "") }); } catch {}
     const st = this.inputs.get(leader);
-    if (st && (!sent || String(st.value() ?? "").trim() === sent.text)) st.set_value("");
+    if (st && (!sent || String(st.value() ?? "").trim() === sent.text)) this.wipe(leader, st);
     this.setPics(leader, sent ? this.picsOf(leader).filter((x) => !sent.imgs.includes(x.path)) : []);
     if (this.writing === a.s.leader) this.writing = null;
   }
@@ -2682,6 +2838,7 @@ export default class Inbox extends View {
       s = InputState.new({ value: "", placeholder: "답을 적고 Enter" });
       s.on("submit", (_e, c) => { const a = this.asks().find((x) => x.s.leader === leader); if (a) this.send(a, s.value(), c); });
       s.on("paste_other", (_e, c) => this.pastePic(c, leader)); // Cmd+V found no text: take a picture from the clipboard, as the PO box does
+      s.on("change", () => { let v; try { v = s.value(); } catch { return; } if (!this.guard(leader, s, v)) this.keep(leader, s, v); }); // #74: the draft mirror
       this.inputs.set(leader, s);
     }
     return s;
@@ -2727,10 +2884,26 @@ export default class Inbox extends View {
   enterBox(intent, c) {
     const now = Date.now();
     if (intent === "send") {
+      this.enterAt = now;
       if (now - this.pickedAt <= 250 || now - this.sentAt <= 250 || now - this.heldAt < 150) return; // (the key and the submit event of one press are one Enter)
       let value = "";
       try { value = this.chat.value(); } catch {}
-      if (value.trim() && imeHold(value, this.editAt, this.heldAt, now)) { // maybe the IME's confirming Enter: only this once
+      let cur = null; // #83: where the cursor was when Enter was pressed (Enter sends from any position; the IME tail rule is for the end)
+      try { cur = this.chat.selected_range().end; } catch {}
+      const b = this.brk;
+      if (b && now - b.at <= 25 && value[b.idx] === "\n") { // the widget's line break at the cursor came before this key: it is not the person's text
+        if (b.rep) { // it replaced a selection: the selected text is the person's text and comes back
+          value = b.prev;
+          cur = b.rep.end;
+          this.putBack(b.prev, b.rep, b.editAt);
+        } else {
+          value = withoutAt(value, b.idx);
+          cur = b.idx;
+          this.dropAt(this.chat.value(), b.idx, b.editAt);
+        }
+        this.core = b.core;
+      }
+      if (value.trim() && imeHold(value, this.editAt, this.heldAt, now, atTextEnd(value, cur))) { // maybe the IME's confirming Enter: only this once
         this.heldAt = now;
         if (strayHeld(value, now, now) && now - this.changedAt <= 25) this.dropBreak(value); // the widget already added its line break
         c.notify();
@@ -2741,6 +2914,36 @@ export default class Inbox extends View {
       this.nlAt = now;
       try { c.timer.after(40, () => { if (needsNewline(this.changedAt, now)) { try { this.chat.replace("\n"); } catch {} } }); } catch {}
     }
+  }
+
+  // #83: takes the one line break at `idx` out (the text and the chips around it stay, the cursor goes where the break was); `editAt` is the edit time to keep.
+  dropAt(value, idx, editAt) {
+    const next = withoutAt(value, idx);
+    this.lastValue = next;
+    this.core = editCore(next);
+    this.editAt = editAt;
+    this.brk = null;
+    try {
+      this.chat.set_selected_range({ start: idx, end: idx + 1 });
+      this.chat.replace("");
+      if (this.chat.value() !== next) this.chat.set_value(next); // the widget would not replace with nothing: plain text instead
+      this.chat.set_selected_range({ start: idx, end: idx });
+    } catch {}
+  }
+
+  // #83: an Enter over a selection made the widget swap the selected text for a line break: the text of `prev` comes back (chips of the selected span
+  // become plain text) with its selection, and the Enter then sends it whole.
+  putBack(prev, rep, editAt) {
+    this.lastValue = prev;
+    this.core = editCore(prev);
+    this.editAt = editAt;
+    this.brk = null;
+    try {
+      this.chat.set_selected_range({ start: rep.idx, end: rep.idx + 1 });
+      this.chat.replace(prev.slice(rep.idx, rep.end));
+      if (this.chat.value() !== prev) this.chat.set_value(prev);
+      this.chat.set_selected_range({ start: rep.idx, end: rep.end });
+    } catch {}
   }
 
   // Takes the one trailing line break the widget added out of the box (the cursor goes to the end, where it was).
@@ -2754,6 +2957,7 @@ export default class Inbox extends View {
 
   // Keys of the box: the open menu's keys first, then Enter / Shift+Enter.
   inputKey(e, c) {
+    this.keyAt = Date.now();
     if (this.menu) { this.menuKey(e, c); return; }
     const intent = enterIntent(e?.key, Boolean(e?.modifiers?.shift));
     if (!intent) return;
@@ -2820,7 +3024,7 @@ export default class Inbox extends View {
         this.bangClipBack(cx, clip, res);
         if (res === "sent") {
           this.sentAt2 = Date.now();
-          if (composeChat(this.chat.content()) === text) { this.chat.set_value(""); this.menu = null; }
+          if (composeChat(this.chat.content()) === text) { this.wipe("chat", this.chat); this.menu = null; }
         }
       } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
       try { cx.notify(); } catch {}
@@ -2906,7 +3110,7 @@ export default class Inbox extends View {
       const r = this.deliver(po, line, c, { text: p.text, imgs: pics.map((x) => x.path), to: p.to[0] ?? "", tos: p.to, po: v.pick, kind: "chat" });
       if (r === "sent" || r === "held" || r === "opening") { // opening: the bubble holds the text and sends it by itself once the pane opens
         this.sentAt2 = Date.now(); // the draw that shows the new bubble goes to the end once (sendFollow)
-        this.chat.set_value("");
+        this.wipe("chat", this.chat);
         this.pics = [];
         this.menu = null;
       }
@@ -2916,10 +3120,9 @@ export default class Inbox extends View {
 
   // The chat footer: the "@" menu, the input with mention chips, the send button. The room has no box while it is "PO 모름" (no PO to send to).
   chatBox(t, v) {
-    if (v.pick === PO_OTHER) {
-      return div().id("chat-none").flex_none().px(12).py(8).border_t(1).border_color(t.border).text_size(11.5).text_color(t.dim)
-        .child("PO를 알 수 없는 방이라 여기서는 보낼 곳이 없습니다. 왼쪽에서 PO 방을 고르세요.");
-    }
+    // #74: the box is drawn in every room (the "PO 모름" room too, with a note instead of a target), at the same place in the tree with ids on
+    // its parts, so a room switch, a refresh or a hint line coming and going never rebuilds the input the person is typing in.
+    const none = v.pick === PO_OTHER;
     const menu = this.menu && v_flex().id("chat-menu").flex_none().p(4).gap(2).rounded(8).bg(t.raised).border(1).border_color(t.border)
       .children(this.menu.items.map((it, i) => h_flex().id(`mn-${it.id}`).h(26).px(8).gap(8).items_center().rounded(6).cursor_pointer()
         .bg(i === this.menu.sel ? t.selected : t.raised).hover((x) => x.bg(t.hover))
@@ -2930,16 +3133,16 @@ export default class Inbox extends View {
     const target = v.tabs.find((x) => x.id === v.pick && x.id !== PO_OTHER && !x.ghost);
     const chip = (ctx) => div().h(ctx.line_height).px(5).rounded(5).flex().items_center().bg(t.working + "26").text_color(t.working).text_size(12.5).font_semibold()
       .child(ctx.token.label ?? ctx.token.text.trim());
-    return v_flex().flex_none().px(10).pb(10).pt(6).gap(6).border_t(1).border_color(t.border)
+    return v_flex().id("chat-box").flex_none().px(10).pb(10).pt(6).gap(6).border_t(1).border_color(t.border)
       .on_key_down((e, c) => this.inputKey(e, c))
       .when(Boolean(menu), (el) => el.child(menu))
       .when(holdShown(this.changedAt, this.heldAt), (el) => el.child(div().text_size(11).text_color(t.working).child("한 번 더 Enter로 보냅니다")))
-      .child(div().truncate().text_size(10.5).text_color(t.dim).child(target ? `받는 PO: ${target.label}` : ghost ? "PO 터미널을 다시 찾는 중입니다 — 쓰던 글은 그대로 있습니다" : "받는 PO가 없습니다 — PO를 고르세요"))
+      .child(div().id("chat-target").truncate().text_size(10.5).text_color(t.dim).child(none ? "PO를 알 수 없는 방이라 여기서는 보낼 곳이 없습니다 — 왼쪽에서 PO 방을 고르세요(쓰던 글은 그대로 있습니다)" : target ? `받는 PO: ${target.label}` : ghost ? "PO 터미널을 다시 찾는 중입니다 — 쓰던 글은 그대로 있습니다" : "받는 PO가 없습니다 — PO를 고르세요"))
       .when(this.pics.length > 0 || this.picBusy > 0, (el) => el.child(this.picRow(t, null)))
-      .child(h_flex().gap(6).items_center()
+      .child(h_flex().id("chat-row").gap(6).items_center()
         .on_drop((ev, c) => this.dropPics(ev?.paths, c))
         .child(this.button(t, "chat-attach", "그림", (c) => { this.pickPics(c); }, { tip: "그림 파일을 골라 붙입니다(Cmd+V로 붙여넣거나 파일을 끌어다 놓아도 됩니다). 보내면 PO가 파일을 열어 봅니다" }))
-        .child(div().flex_1().min_w(0).on_mouse_down("left", stop)
+        .child(div().id("chat-input").flex_1().min_w(0).on_mouse_down("left", stop)
           .child(Textarea.new(this.chat).token((ctx) => chip(ctx)).min_h(30).px(10).py(5).rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
         .child(this.button(t, "chat-send", "PO에 보내기", (c) => this.sendChat(c), { primary: true, tip: "고른 PO 터미널에 글을 붙여 넣고 Enter까지 눌러 보냅니다(글은 클립보드를 거칩니다). Shift+Enter는 줄바꿈" })));
   }
@@ -3064,29 +3267,28 @@ export default class Inbox extends View {
       : div().flex_none().w(f.w).h(f.h).rounded(4).bg(t.hover);
   }
 
-  // A message as Markdown (bold, headings, lists, `code`, links; no raw HTML: tags show as text). The wrapper tags are removed first (mdText).
+  // A message as Markdown (headings, lists, `code`, links; no raw HTML: tags show as text). The wrapper tags are removed first (mdText).
   // Selectable like text(); a link opens only when it is http(s) (openUrl ignores everything else).
-  // The TextView draws **bold** at the normal weight (it ignores bold and the weight around it), so each bold run also gets a tint behind it
-  // (highlight_range, offsets into the very string given to markdown): bold stays visible without a weight.
-  md(id, src, t) {
-    this.tvN = (this.tvN ?? 0) + 1;
-    const m = mdText(src);
-    let tv = TextView.markdown(id, m).raw_html(false).selectable(true).on_link_click((url, c) => openUrl(url, c)).on_selection_change((sel, c) => this.onSel(id, sel, c));
-    if (t) {
-      try {
-        const bc = tintHex(t, "bold"); // theme accent at ~45% (less when the text would stop being readable), see HL_KINDS
-        if (bc) for (const r of boldRanges(m)) tv = tv.highlight_range(r.start, r.end, bc);
-        else this.tintWarn(t, "bold");
-      } catch {}
-    }
-    return tv;
+  // The person's own bubble and the PO's bubbles both draw through here, so a list, `code` and a bold header read the same in both (#66).
+  // The TextView draws **bold** at the normal weight (it ignores bold and the weight around it), so a line that is only **bold** text is its own
+  // TextView with font_weight(700) (mdBlocks, #66); a bold run inside a sentence stays at the normal weight. Nothing is painted behind bold.
+  md(id, src) {
+    const view = (vid, s, bold) => {
+      this.tvN = (this.tvN ?? 0) + 1;
+      const tv = TextView.markdown(vid, s).raw_html(false).selectable(true).on_link_click((url, c) => openUrl(url, c)).on_selection_change((sel, c) => this.onSel(vid, sel, c));
+      return bold ? tv.font_weight(700) : tv;
+    };
+    const blocks = mdBlocks(mdText(src));
+    if (!blocks.length) return view(id, "", false);
+    if (blocks.length === 1 && !blocks[0].bold) return view(id, blocks[0].s, false);
+    return v_flex().min_w(0).gap(3).children(blocks.map((b, i) => (b.bold ? div().min_w(0).pt(i ? 3 : 0).child(view(`${id}-${i}`, b.s, true)) : view(`${id}-${i}`, b.s, false))));
   }
 
   // A PO message folded like the person's own (#47): a long one shows its first lines and a "더 보기" under them.
   mdFolded(id, src, t) {
     const lc = clipLong(unwrapTags(src)), open = lc.cut && this.more.has(id);
-    if (!lc.cut) return this.md(id, src, t);
-    return v_flex().min_w(0).gap(6).child(this.md(id, open ? src : lc.text, t)).child(this.moreToggle(t, id, lc, open));
+    if (!lc.cut) return this.md(id, src);
+    return v_flex().min_w(0).gap(6).child(this.md(id, open ? src : lc.text)).child(this.moreToggle(t, id, lc, open));
   }
 
   // "더 보기 · N자 더" / "접기" under a folded bubble. Only this bubble opens; the 복사 chip copies the whole text either way.
@@ -3141,7 +3343,7 @@ export default class Inbox extends View {
       const key = `${id}-${i}`;
       if (p.t === "code") return div().min_w(0).pl(p.depth ? p.depth * 14 + 18 : 0).child(this.codeBlock(t, p.text, p.html, `copy-${key}`));
       if (p.t === "h") return div().min_w(0).pt(4).child(this.heading_text(t, key, p.html, 14.5));
-      return div().min_w(0).text_size(12.5).text_color(t.foreground).child(typeof p.md === "string" && p.md ? this.md(key, p.md, t) : this.text(key, p.html));
+      return div().min_w(0).text_size(12.5).text_color(t.foreground).child(typeof p.md === "string" && p.md ? this.md(key, p.md) : this.text(key, p.html));
     }));
   }
 
@@ -3191,7 +3393,7 @@ export default class Inbox extends View {
       .children(hint.lines.map((x, i) => div().id(`hint-${s.leader}-${i}`).min_w(0).text_size(12).text_color(t.foreground).child(x)))
       .child(h_flex().gap(6).items_center().flex_wrap()
         .when(Boolean(link) && link !== item?.link, (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", (c) => openUrl(link, c))))
-        .children(kind === "decision" ? opts.options.map((n) => this.button(t, `opt-${s.leader}-${n}`, `${n}안 선택`, (c) => this.send(a, `${n}안 선택`, c, "choice"), { primary: n === opts.recommended, disabled: a.po ? "" : NO_PO(), tip: CLIP })) : [])
+        .children(kind === "decision" ? opts.options.map((n) => this.button(t, `opt-${s.leader}-${n}`, `${n}안 선택${n === opts.recommended ? " (추천)" : ""}`, (c) => this.send(a, `${n}안 선택`, c, "choice"), { primary: n === opts.recommended, disabled: a.po ? "" : NO_PO(), tip: CLIP })) : [])
         .children(hint.answers.map((w, i) => this.button(t, `ans-${s.leader}-${i}`, w, (c) => this.send(a, w, c, "choice"), { primary: w === hint.recommended, disabled: a.po ? "" : NO_PO(), tip: CLIP })))
         .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c, "verify"), { primary: true, disabled: a.po ? "" : NO_PO(), tip: CLIP })))
         .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); this.reveal(this.spot(s, item)); c.notify(); }, { disabled: a.po ? "" : NO_PO() }))
@@ -3201,7 +3403,8 @@ export default class Inbox extends View {
       const input = this.box(s.leader, cx);
       const row = this.picRow(t, s.leader);
       if (row) box.child(row);
-      box.child(h_flex().gap(6).items_center()
+      box.child(h_flex().id(`reply-${s.leader}`).gap(6).items_center()
+        .on_key_down(() => { this.keyAt = Date.now(); })
         .on_drop((ev, c) => this.dropPics(ev?.paths, c, s.leader))
         .child(this.button(t, `attach-${s.leader}`, "그림", (c) => { this.pickPics(c, s.leader); }, { tip: "그림 파일을 골라 붙입니다(Cmd+V로 붙여넣거나 파일을 끌어다 놓아도 됩니다). 보내면 PO가 파일을 열어 봅니다" }))
         .child(div().flex_1().min_w(0).on_mouse_down("left", stop).child(Input.new(input).h(30).px(10).items_center().rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
@@ -3263,7 +3466,7 @@ export default class Inbox extends View {
               .on_click(() => openFile(p)).tooltip("눌러서 그림 열기")
               .child(image(imgRel(root, p)).w(sizes[i].w).h(sizes[i].h)))) // image() loads only paths under the app folder: data/inbox/img/<file>
             .when(bp.chips.length > 0, (el) => el.child(h_flex().gap(4).flex_wrap().children(bp.chips.map((n) => div().flex_none().px(6).h(17).rounded(5).flex().items_center().bg(t.raised).text_size(10.5).text_color(t.muted).child(`사진 #${n}`)))))
-            .when(Boolean(bp.text), (el) => el.child(this.text(`${id}-t`, chatHtml(words))))
+            .when(Boolean(bp.text), (el) => el.child(this.md(`${id}-t`, words)))
             .when(lc.cut, (el) => el.child(this.moreToggle(t, id, lc, open)))))
         .when(Boolean(note), (el) => el.child(h_flex().max_w("100%").min_w(0).gap(6).items_center().flex_wrap().justify_end()
           .child(div().min_w(0).text_size(10.5).text_color(bad ? t.blocked : t.dim).child(note))
@@ -3316,12 +3519,14 @@ export default class Inbox extends View {
   full(cx) {
     this.tvN = 0;
     this.noteRedraw(cx);
+    this.guardAll();
     Promise.resolve().then(() => { // once per draw (only when the count changed or 10s passed, so a busy desk does not flood the file)
       const now = Date.now();
       if (this.tvLast !== this.tvN || now - (this.tvLogAt ?? 0) > 10000) { this.tvLast = this.tvN; this.tvLogAt = now; this.diag(`draw: ${this.tvN} selectable TextView(s)`, cx); }
     });
     const t = theme();
     const v = this.view();
+    this.syncRoom(v.pick); // the room can move by itself (a closed PO, the first pick): the box follows it
     this.drawnAt = Date.now();
     const strip = this.windowed && this.narrow; // a narrow window: the rooms are a strip on top; the dock and a pane use the slim column when narrow
     const blocks = [];
@@ -3367,7 +3572,7 @@ export default class Inbox extends View {
       } catch {}
       // A message the person just sent follows too (once), from wherever they were reading; a new bubble of someone else does not (only at the end).
       const mine = sendFollow(this.sentAt2, Date.now(), key, this.tlSeen);
-      if (mine) { this.sentAt2 = 0; this.reading = null; this.pin = { pinned: true, ct: Number(this.pin?.ct) || 0 }; }
+      if (mine) { this.sentAt2 = 0; this.reading = null; this.pin = { pinned: true, ct: Number(this.pin?.ct) || 0, vh: Number(this.pin?.vh) || 0 }; }
       if (mine || tlFollow(this.tlSeen, key, atEnd)) {
         const last = blocks.length - 1; // the end sentinel
         this.pinCh = 0; // a new room: the retry below is a fresh catch-up
@@ -3390,6 +3595,15 @@ export default class Inbox extends View {
       .on_mouse_up("left", () => { this.ui.press = false; })
       .on_mouse_down_out((_e, c) => { this.ui.press = false; if (this.ui.sel) this.dropSel(); if (this.dirty) this.softNotify(c); })
       .when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks);
+    // #72: the round jump-to-newest button in the list's bottom-right corner (inside the list's own box: it never reaches the input below), shown only
+    // while the view is scrolled up from the end. The list itself is unchanged inside this box.
+    const jump = this.jump && blocks.length > 1
+      ? h_flex().id("inbox-jump").absolute().bottom(12).right(18).w(32).h(32).rounded(16).items_center().justify_center().cursor_pointer()
+        .bg(t.raised).border(1).border_color(t.border).text_color(t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground))
+        .on_mouse_down("left", stop).on_click((_e, c) => this.jumpToEnd(c)).tooltip("가장 아래(최신)로")
+        .child(div().text_size(15).child("↓"))
+      : null;
+    const listBox = v_flex().id("inbox-listbox").relative().flex_1().min_h(0).child(lines).when(Boolean(jump), (el) => el.child(jump));
     const bar = this.filterBar(t, v);
     const lbar = this.leaderBar(t, v);
     const rrow = this.restartRow(t, v, cx); // "PO 새로 시작": the button, its confirm line or its steps (null in the other-PO room)
@@ -3400,13 +3614,13 @@ export default class Inbox extends View {
     const room = v_flex().flex_1().min_w(0).min_h(0).when(!strip, (el) => el.h_full()) // beside the rooms the column must fill the row (h_flex centers children)
       .when(!strip && Boolean(head), (el) => el.child(h_flex().flex_none().h(30).px(14).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(head))
-        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : `리더 ${new Set(v.raw.filter((e) => e.leader).map((e) => e.leader)).size}명`))
+        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : `리더 ${v.choices?.length ?? 0}명`))
         .when(Boolean(rcb), (el) => el.child(rcb))))
       .when(strip && Boolean(rcb), (el) => el.child(h_flex().flex_none().min_w(0).px(14).pb(4).justify_end().child(rcb))) // the picker layout has no room header
       .when(Boolean(usage), (el) => el.child(usage))
       .when(Boolean(bar), (el) => el.child(bar))
       .when(Boolean(lbar), (el) => el.child(lbar))
-      .child(lines)
+      .child(listBox)
       .when(Boolean(panel), (el) => el.child(panel))
       .when(Boolean(rrow), (el) => el.child(rrow))
       .child(this.chatBox(t, v));
