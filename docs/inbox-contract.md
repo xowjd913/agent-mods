@@ -219,20 +219,20 @@ node herdr/tools/inbox-write.cjs say --hub main --to lead-demo --text "배포는
 
 ### 10.2 설정을 읽는 곳
 
-한 곳(`loadProfile`)에서 읽어 각 모드에 넘깁니다. 지금은 `inbox.cjs`·`main.js`가 같은 로직을 복사해 가지고 있고(`main.js`는 모드가 `require`를 못 해서), `leader-tabs`·`tabs-mine`도 각자 가진 것이 문제의 대부분입니다. 아래는 하드코딩된 규칙의 현재 위치(기준 커밋의 줄 번호)입니다.
+한 곳(`loadProfile`)에서 읽어 각 모드에 넘깁니다. 지금은 `inbox.cjs`·`main.js`가 같은 로직을 복사해 가지고 있고(모드는 `.cjs`를 `require`할 수 없어서), `leader-tabs`·`agent-groups`·`work`·`tabs-mine`도 이름 규칙을 각자 가지고 있습니다(7개 파일, 관련 줄 약 90개). 복사본이 많은 것이 작업량의 대부분입니다. 아래는 하드코딩된 규칙의 현재 위치(기준 커밋의 줄 번호)입니다.
 
 | 규칙 | `inbox/inbox.cjs` | `inbox/main.js` | 그 밖 |
 |---|---|---|---|
 | 종류 집합 `KINDS` / `ASK_KINDS` | 10-11 | — | (계약 자체라 설정 대상 아님) |
 | 대기 판정 `lead-*` + `wait` 라벨 | 759 | 50 | `tabs-mine/main.js:32`, 주석 173 |
-| 표시 이름·세션 이름 (`리더 · ` 접두어, `lead-` 떼기, `labels.session`) | 767-770 | 58-61 | `leader-tabs/main.js:71-74`, `tabs-mine/main.js:103` |
-| `/^lead-/` 에이전트 이름 검사 | 776, 953, 979, 1358, 1398, 1413 | 67, 175, 201, 580, 620, 635, 2348 | `leader-tabs/main.js:80` |
+| 표시 이름·세션 이름 (`리더 · ` 접두어, `lead-` 떼기, `labels.session`) | 767-770 | 58-61 | `leader-tabs/main.js:71-74`, `agent-groups/main.js:124-135`, `work/main.js:16-27`, `tabs-mine/main.js:103` (같은 블록을 복사해 두고 테스트가 같음을 지킴) |
+| `/^lead-/` 에이전트 이름 검사 | 776, 953, 979, 1358, 1398, 1413 | 67, 175, 201, 580, 620, 635, 2348 | `leader-tabs/main.js:80`, `agent-groups/main.js:87,147-150,231-234`, `work/main.js:42` |
 | 허브 터미널 찾기 `labels.role === "po"` | 858-862 | 81-85 | — |
 | 답 줄 템플릿 | 866-868 | 88-90 | — |
 | `@멘션` 정규식(`lead-`) | 875 | 97 | — |
 | 허브 id 규칙·라벨 (`PO_ID`, `cleanPoId`, `isPoTerm`, `poId`) | 933-937 | 155-159 | `inbox/po-hook.cjs:99-100` |
 | "PO 모름" 방 이름 `PO_OTHER` | 934 | 156 | — |
-| 에이전트 역할 라벨 `role === "leader"` | 1257 | 479 | `leader-tabs/main.js:25` |
+| 에이전트 역할 라벨 `role === "leader"` | 1257 | 479 | `leader-tabs/main.js:25`, `agent-groups/main.js:150,234` |
 | 허브 폴더 `po/`, `po-session` 폴더 | 591 | — | `po-hook.cjs` |
 | 화면 문구 (`NO_PO`, `role=po` 안내 등) | — | 44, 2359, 2409, 2641-2654 | — |
 
