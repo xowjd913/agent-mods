@@ -1,7 +1,7 @@
 // Clone of Herdr's shipped `tabs` mod. The PRs button shows a count of PRs needing my action (collect.cjs `attention`: my open PRs with failing CI or changes requested, plus open PRs asking me to review). The layout blocks are "work-board" (mod work) and "pr-board" (mod prs); the id "work" is already a layout column. Changed: the right-panel buttons are Files, Changes, then Work and PRs (added after the stock ones).
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, ScrollHandle } from "gpui-base";
-import { spaces, panes, terminals, focused, run, notify, openOverlay, theme, window, shared, layout, settings, exec, appHome, checking } from "herdr";
+import { spaces, panes, terminals, focused, run, notify, openOverlay, theme, window, shared, layout, settings, exec, appHome, checking, layouts, nextCommand } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -31,6 +31,16 @@ function label(tab, lead) {
 // Which terminal is a waiting leader. Copied verbatim from inbox/inbox.cjs (a test keeps them identical).
 const waitingKind = (t) => (/^lead-/.test(String(t?.name ?? "")) ? (["decision", "verify"].find((k) => k === String(t.labels?.wait ?? "").trim().toLowerCase()) ?? "") : "");
 
+// UI 모드/터미널 모드: 설치기가 터미널 모드 레이아웃(<이름>)에서 만든 `<이름>-ui`와 서로 바꾼다. 짝이 없으면 null.
+function modeTarget() {
+  try {
+    const cur = String(shared("layout") ?? "");
+    const ui = cur.endsWith("-ui");
+    const name = ui ? cur.slice(0, -3) : `${cur}-ui`;
+    return cur && (layouts() ?? []).includes(name) ? { ui, name } : null;
+  } catch { return null; }
+}
+
 export default class Tabs extends View {
   init(_props, cx) {
     this.attention = 0;
@@ -46,6 +56,8 @@ export default class Tabs extends View {
       this.adopted = new Set();
       cx.timer.every(2000, () => this.adoptSchedules());
       cx.timer.every(150, () => this.restoreAdopted());
+      // keys.json의 "tabs-mine.mode"(예: "cmd-shift-u": "tabs-mine.mode")로도 같은 전환을 한다.
+      cx.spawn(async () => { for (;;) { const c = String(await nextCommand()); if (c === "mode") { const m = modeTarget(); if (m) run("layout.switch", { name: m.name }); } } });
     }
     this.pressed = null;
     this.scroll = ScrollHandle.new();
@@ -298,6 +310,10 @@ export default class Tabs extends View {
       .when(enabled.includes("schedules-board"), el => el.child(panelButton("schedules-board", "예약", "mods/workspace-chrome/clock.svg")))
       .when(enabled.includes("accounts-board"), el => el.child(panelButton("accounts-board", "계정", "mods/workspace-chrome/git-branch.svg")))
       .when(enabled.includes("inbox-board"), el => el.child(panelButton("inbox-board", "PO 데스크", "mods/workspace-chrome/archive.svg", this.inboxWaiting())))
+      .when(Boolean(modeTarget()), el => el.child(h_flex().id("mode-switch").h(26).px(8).flex_none().items_center().rounded(6).text_size(12).bg(t.selected).text_color(t.foreground)
+        .hover(s => s.bg(t.hover)).on_mouse_down("left", stop).on_click(() => { const m = modeTarget(); if (m) run("layout.switch", { name: m.name }); })
+        .tooltip(modeTarget()?.ui ? "터미널 화면으로 돌아갑니다. 터미널은 꺼지지 않습니다" : "PO 데스크를 메인 화면으로 씁니다. 터미널은 숨겨질 뿐 계속 돕니다")
+        .child(modeTarget()?.ui ? "터미널 모드" : "UI 모드")))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/tabs/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));

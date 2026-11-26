@@ -95,7 +95,7 @@ const deliverOf = (src) => methodOf(src, '  deliver(po, text, c, rec = null, ok 
 
 test("main.js: 답 버튼·답 상자·N안 칩·채팅은 모두 deliver() 한 길로 붙여넣고 Enter까지 보낸다", () => {
   const src = mainSrc();
-  assert.ok(!/hc\(\["send"/.test(src.replace('hc(["send", po, text, "--json"])', "")) && !/terminal\.send|send_key/i.test(src)); // chat/answers: no hc send (it adds a <hc from=...> tag); only the restart sendLine uses it (a /clear must run as a command)
+  assert.ok(!/hc\(\["send"/.test(src.replaceAll('hc(["send", "--json", "--", po, text])', "")) && !/terminal\.send|send_key/i.test(src)); // chat/answers: no hc send (it adds a <hc from=...> tag); only the restart sendLine uses it (a /clear must run as a command)
   const send = methodOf(src, "  send(a, text, cx, kind = \"answer\") {", "  clearBox(a");
   const chat = methodOf(src, "  sendChat(c) {", "  // The chat footer");
   const del = deliverOf(src);
@@ -334,7 +334,7 @@ test("main.js: 카드는 접힌 채 시작하고, 펼침은 공유 상태에 두
   // 링크: 앱의 open_url 먼저, http(s)만
   assert.match(src, /cx\.open_url\(url\)/);
   assert.match(src, /if \(!\/\^https\?:\\\/\\\/\/i\.test\(url\)\) return;/);
-  assert.ok(!/hc\(\["send"/.test(src.replace('hc(["send", po, text, "--json"])', ""))); // 클립보드로만(채팅의 Enter는 hc keys); 재시작의 sendLine만 hc send
+  assert.ok(!/hc\(\["send"/.test(src.replaceAll('hc(["send", "--json", "--", po, text])', ""))); // 클립보드로만(채팅의 Enter는 hc keys); 재시작의 sendLine만 hc send
 });
 
 test("toParts·escapeHtml: 글자는 이스케이프하고, 목록은 <ul>로 묶고, 명령은 코드 조각으로 뺀다", () => {
@@ -377,7 +377,7 @@ test("main.js: 오른쪽 칸(Dock)도 창과 같은 메신저 화면이다: 좁�
   assert.match(slim, /\.tooltip\(/); // 프로젝트 이름은 툴팁
   assert.match(slim, /\.on_click\(\(_e, c\) => this\.pickPo\(x\.id, c\)\)/);
   assert.match(src, /this\.button\(t, "inbox-open", "창 열기"/); // Dock 머리줄의 창 열기
-  assert.match(src, /\.when\(!this\.windowed, \(el\) => el\.child\(this\.button\(t, "inbox-open"/);
+  assert.match(src, /\.when\(!this\.windowed && !this\.mained, \(el\) => el\.child\(this\.button\(t, "inbox-open"/);
   assert.match(src, /markSeen\(\) \{\s*if \(!this\.drawnAt \|\| !this\.drawing\(\)\) return;/);
   assert.match(src, /대기 \$\{waiting\}/); // 머리줄의 대기 수 표시
   // Dock이 방을 보여 주는 동안 읽은 것으로 친다(그려지지 않는 동안은 아니다)
@@ -427,7 +427,7 @@ test("main.js: 페인 모드: 같은 메신저 화면, 자기 제목줄을 쓰�
   assert.match(open, /if \(this\.windowed\) \{ try \{ closeOverlay/); // 창에서 열면 창을 닫는다
   assert.ok(!/hc send|hc\(/.test(open));
   // 머리줄: 페인은 제목·옆에 열기가 없고(페인 머리줄·이미 페인), 닫기 버튼도 만들지 않는다
-  assert.match(src, /\.when\(!this\.paned, \(el\) => el\.child\(div\(\)\.text_size\(15\)[^\n]*PO 데스크/);
+  assert.match(src, /\.when\(!this\.paned \|\| this\.mained, \(el\) => el\.child\(div\(\)\.text_size\(15\)[^\n]*PO 데스크/); // 페인은 자기 제목줄이 있고, UI 모드 main 칸은 없어서 제목을 그린다
   assert.match(src, /\.when\(!this\.paned, \(el\) => el\.child\(this\.button\(t, "inbox-beside", "옆에 열기"/);
   assert.match(src, /\.when\(this\.windowed, \(el\) => el\.child\(div\(\)\.id\("inbox-close"\)/);
   // 갱신·뱃지: 창과 페인은 5초(페인은 그려지는 동안만), Dock만 30초, 뱃지는 창만 건너뛴다
@@ -1037,7 +1037,7 @@ test("main.js: 채팅 입력은 Textarea, Enter는 붙여넣고 hc keys enter까
   assert.match(src, /TextareaState\.new\(/);
   assert.match(src, /Textarea\.new\(this\.chat\)/);
   assert.match(src, /hc\(\["keys", po, "enter"\]\)/);
-  assert.ok(!/hc\(\["send"/.test(src.replace('hc(["send", po, text, "--json"])', "")));
+  assert.ok(!/hc\(\["send"/.test(src.replaceAll('hc(["send", "--json", "--", po, text])', "")));
   assert.match(src, /=== "blocked"/);
   assert.match(src, /enterIntent\(e\?\.key, Boolean\(e\?\.modifiers\?\.shift\)\)/);
   assert.match(src, /PO에 보내기/);
@@ -2450,8 +2450,8 @@ const restartWorld = ({ clearWorks = true, cols = 2, glue = "", noRecs = false, 
         return { code: 0, stdout: JSON.stringify({ address: a[1], state: po.live ? "live" : "exited", exit_code: po.live ? null : 0, status: { state: po.status }, turn: po.turn, cols, rows: 115 }), stderr: "" };
       }
       if (a[0] === "send") {
-        assert.equal(a[3], "--json"); assert.ok(!a.includes("--if"), "no --if: it refuses a PO that is 'done'");
-        const text = a[2];
+        assert.deepEqual(a.slice(0, 4), ["send", "--json", "--", a[3]]); assert.ok(!a.includes("--if"), "no --if: it refuses a PO that is 'done'");
+        const text = a[4];
         if (po.sendFail) return po.sendFail;
         log.sends.push(text);
         // the hook records what was submitted: a glued draft comes in front; the built-in /clear records nothing (unless the test makes it go as text)
@@ -2636,7 +2636,7 @@ test("새로 시작: 재시작 길(sendLine·restartFlow)은 화면 읽기·클�
     assert.ok(!src.includes(gone), `${gone} is deleted from main.js`);
     assert.ok(!(gone in I), `${gone} is not exported`);
   }
-  assert.match(flow, /hc\(\["send", po, text, "--json"\]\)/);
+  assert.match(flow, /hc\(\["send", "--json", "--", po, text\]\)/);
   assert.ok(!/"--if"/.test(flow), "no --if: it refuses a PO that is 'done'");
   assert.ok(flow.indexOf("restartClearState(clr.turn") < flow.indexOf('sendLine(po, "/PO"'), "/PO only after the clear signal");
 });
@@ -2651,4 +2651,39 @@ test("restartDraft: 이 방에 데스크가 붙여 넣기만 한 글(held/noente
   assert.equal(I.restartDraft([m({ at: now - I.RESTART_DRAFT_MS - 1 })], "r", now), "");
   assert.equal(I.restartDraft(null, "r", now), "");
   assert.match(I.restartConfirm(0, 0), /입력칸은 비어 있어야/);
+});
+
+test('UI 모드(#59): inbox mode "main"은 페인처럼 전체 메신저 화면이고, 터미널 모드로 돌아가는 버튼은 <기본>-ui에서만 기본 레이아웃으로 바꾼다', () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8");
+  assert.match(src, /this\.mained = mode === "main";/);
+  assert.match(src, /this\.paned = mode === "pane" \|\| this\.mained;/);
+  assert.match(src, /cur\.endsWith\("-ui"\) \? cur\.slice\(0, -3\)/);
+  assert.match(src, /run\("layout\.switch", \{ name: base \}\)/);
+  assert.match(src, /"inbox-terminal-mode"/);
+  const tabs = fs.readFileSync(path.join(__dirname, "..", "mods", "tabs-mine", "main.js"), "utf8");
+  assert.match(tabs, /"mode-switch"/);
+  assert.match(tabs, /layout\.switch/);
+});
+
+// ---- UI 모드(main): 터미널 칸이 없으므로 PO 터미널 주소로 보낸다 (review-59 R1 P2)
+test("main.js: UI 모드(mained)의 deliver는 칸·포커스·클립보드 없이 hc send(터미널 주소)로 보내고, 터미널 모드 경로는 그대로다", () => {
+  const src = mainSrc();
+  const del = deliverOf(src);
+  const by = methodOf(src, "  deliverByAddress(po, text, c, rec, ok, id) {", "  // Gives the keyboard back after a send");
+  // deliver: 기록(record) 뒤, 클립보드·panes()·terminal.keep 앞에서 mained면 주소 경로로 간다
+  const at = del.search(/this\.mained\) return this\.deliverByAddress\(po, text, c, rec, ok, id\)/);
+  assert.ok(at > del.indexOf("this.record(") && at < del.indexOf("write_to_clipboard(text)") && at < del.indexOf("panes()") && at < del.indexOf('"terminal.keep"'));
+  assert.equal((del.match(/this\.record\(/g) ?? []).length, 1); // 기록은 여전히 deliver 한 곳
+  // 주소 경로: hc send <po> <text> --json 하나로 붙여넣기+Enter, 칸/포커스/클립보드/--force 없음
+  assert.match(by, /hc\(\["send", "--json", "--", po, text\]\)/); // "--" ends the options: text starting with "-" / "--" (e.g. "- a", "--force x") is not read as an hc option
+  for (const t of ["- a", "--force x", "-", "--"]) { const args = ["send", "--json", "--", "t7", t]; assert.equal(args.indexOf("--", 2), 2); assert.equal(args.slice(3).join("|"), `t7|${t}`); } // the user text always sits after the first "--"
+  assert.match(by, /c\.spawn\(async \(cx\) =>/);
+  assert.ok(!/panes\(|terminal\.keep|pane\.focus|terminal\.paste|write_to_clipboard|submitPo|--force/.test(by));
+  // 막힌 PO는 보내지 않고(failed), 성공하면 sent + ok("sent"), 실패는 failed + 이유, 같은 PO에 한 번에 하나(opening)
+  assert.match(by, /if \(this\.isBlocked\(po\)\)[\s\S]*?this\.mark\(id, "failed"\)[\s\S]*?return "failed"/);
+  assert.match(by, /this\.opening\.add\(po\)/);
+  assert.match(by, /restartSendResult\(r\)/);
+  assert.match(by, /this\.mark\(id, "sent"\);[\s\S]*?ok\?\.\("sent"\)/);
+  assert.match(by, /this\.opening\.delete\(po\)[\s\S]*?this\.mark\(id, "failed"\)/);
+  assert.match(by, /return "opening"/);
 });
