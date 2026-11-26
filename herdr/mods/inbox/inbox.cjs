@@ -1907,6 +1907,8 @@ function restartSendResult(r) {
     return { ok: true, turn: Number.isFinite(turn) ? turn : null, status: String(j.status ?? ""), why: "", detail };
   }
   const kind = String(j?.error?.kind ?? "");
+  // exit 0 and started:false with no error: `hc send` waited and gave up (a person's unfinished draft in the PO's input) — the text may or may not be in the box
+  if (code === 0 && j && j.started === false && !j.error) return { ok: false, notStarted: true, turn: null, status: "", why: "PO가 받아 시작하지 않았습니다(입력창에 쓰던 글이 있는지 확인하세요)", detail };
   const why = kind === "blocked" ? "PO가 질문 중이라 받지 않았습니다"
     : kind === "status_mismatch" ? "PO가 일하는 중이라 받지 않았습니다"
     : j?.error?.message ? `PO가 받지 않았습니다(${String(j.error.message).slice(0, 80)})`
