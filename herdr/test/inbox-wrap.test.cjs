@@ -511,6 +511,28 @@ test("R18: pinTick keeps the pin when a scroll is held back, so the view goes to
   assert.equal(jumps.length, 1);
 });
 
+test("#72 pinTick: a go tick (pinned, a long new row) does not flash the jump button; a tick scrolled away shows it once", () => {
+  const Inbox = loadInbox();
+  const d = new Inbox();
+  let y = 900, ch = 1400, notified = 0;
+  d.scroll = { offset: () => ({ y }), viewport_size: () => ({ height: 500 }), content_size: () => ({ height: ch }), scroll_to_item: () => { y = ch - 500; } };
+  d.drawnAt = 1; d.lastIdx = 7; d.softNotify = () => { notified++; };
+  d.pin = { pinned: true, ct: 1400, vh: 500 };
+  ch = 1520; // a 120px row arrived while pinned at the bottom: pinStep goes, the old y against the new height would read as "away"
+  d.pinTick({ notify() {} });
+  assert.equal(Boolean(d.jump), false);
+  assert.equal(notified, 0);
+  d.pinTick({ notify() {} }); // the next tick sees the real position (bottom): still hidden
+  assert.equal(Boolean(d.jump), false);
+  assert.equal(notified, 0);
+  y = 100; // the person scrolled far up
+  d.pinTick({ notify() {} });
+  assert.equal(Boolean(d.jump), true);
+  assert.equal(notified, 1);
+  d.pinTick({ notify() {} });
+  assert.equal(notified, 1, "no redraw while the state is unchanged");
+});
+
 test("R18: pruneReply clears only a leader's non-empty draft; copy() redraws through softNotify", () => {
   const d = replyDesk();
   let sets = 0;

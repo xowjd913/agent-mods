@@ -1337,7 +1337,8 @@ export default class Inbox extends View {
       // release still sees the growth and goes to the bottom (storing r.ct now would turn it into "pinned: false").
       if (r.go && quietNow(this.ui, Date.now())) return;
       this.pin = { pinned: r.pinned, ct: r.ct, vh: r.vh };
-      this.syncJump(cx, jumpShown(o.y, vp.height, ct.height));
+      // A tick that goes to the bottom is mid-move: o.y is the old offset against the new height, so the button is judged on the next tick (no flash).
+      if (!r.go) this.syncJump(cx, jumpShown(o.y, vp.height, ct.height));
       if (r.go) { this.pinCh = ct.height; this.diag(`pin: tick go y=${Math.round(o.y)} vh=${Math.round(vp.height)} ch=${Math.round(ct.height)}`); this.scroll.scroll_to_item(this.lastIdx); }
     } catch {}
   }
