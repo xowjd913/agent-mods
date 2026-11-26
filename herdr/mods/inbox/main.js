@@ -1118,7 +1118,7 @@ function remoteBlock({ po = "", status = "", running = false, sending = false } 
 const REMOTE_POLLS = 5, REMOTE_POLL_MS = 1000; // after the send: this many screen reads, this far apart (~5 s)
 const REMOTE_URL = /https:\/\/claude\.ai\/code\/[^\s)\]>"'`]+/g;
 // What the PO's screen says about Remote Control. `menu` = Claude Code's "already connected" menu (Disconnect this session / Show QR code / Continue), `active` = the
-// footer says it is on, `url` = the last session link on screen. Text copied from Claude Code's UI and NOT verified against a real terminal (UNVERIFIED).
+// footer says it is on, `url` = the last session link on screen, `off` = a disconnect line is on screen after the last on line (#109: that clears the saved on-record). Text copied from Claude Code's UI and NOT verified against a real terminal (UNVERIFIED).
 function remoteScreen(text) {
   const clean = cleanText(text);
   const lines = clean.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim());
@@ -1132,7 +1132,7 @@ function remoteScreen(text) {
   let on = -1, off = -1;
   lines.forEach((l, i) => { if (/\/?remote[- ]control (is )?(active|connected)/i.test(l)) on = i; if (/remote[- ]control (is )?(disconnected|off|stopped|inactive)|disconnected (this )?session/i.test(l)) off = i; });
   const urls = clean.match(REMOTE_URL) ?? [];
-  return { menu, active, seen: active || (on >= 0 && on > off), url: urls.length ? urls[urls.length - 1].replace(/[.,;:]+$/, "") : "" };
+  return { menu, active, seen: active || (on >= 0 && on > off), off: !active && off >= 0 && off > on, url: urls.length ? urls[urls.length - 1].replace(/[.,;:]+$/, "") : "" };
 }
 // The one-line system note for the room's chat. kind: on | already | fail | unknown.
 function remoteNote(kind, { url = "", why = "" } = {}) {
@@ -1200,6 +1200,15 @@ function restartTerm(r) {
   if (!j || typeof j !== "object") return null;
   const turn = Number(j.turn);
   return { live: String(j.state ?? "") === "live" && (j.exit_code === null || j.exit_code === undefined), status: String(j?.status?.state ?? "").trim().toLowerCase(), turn: Number.isFinite(turn) ? turn : null };
+}
+// The claude process of a terminal from `hc get <t> --json` ({code, stdout}): its foreground process when that is claude, else null (a shell prompt, a child in front).
+function termPid(r) {
+  if (!r || Number(r.code) !== 0) return null;
+  let j = null;
+  try { j = JSON.parse(String(r.stdout ?? "")); } catch { return null; }
+  const f = j?.foreground, pid = Number(f?.pid);
+  const name = String(f?.name ?? (Array.isArray(f?.argv) ? f.argv[0] : "") ?? "");
+  return Number.isInteger(pid) && pid > 1 && /(^|[\\/])claude(\.exe)?$/i.test(name) ? pid : null;
 }
 // Why nothing is sent now ("" when it can be): the terminal must be known and running, not on a prompt, not working (idle or done are both fine).
 function restartSendBlock(term) {
@@ -2733,10 +2742,11 @@ export default class Inbox extends View {
     if (why) { this.remoteSet(room, { phase: "fail", kind: "fail", why }, c); return; }
     this.remoteSet(room, { phase: "send", why: "" }, c);
     c.spawn(async (cx) => {
-      const done = (phase, kind, extra = {}) => this.remoteSet(room, { phase, kind, why: "", url: "", ...extra }, cx);
+      const done = (phase, kind, extra = {}) => { this.remoteSet(room, { phase, kind, why: "", url: "", ...extra }, cx); if (phase === "on" || phase === "already") this.remoteMark(room, po, extra.url ?? ""); };
       try {
         const pre0 = await this.remoteRead(po);
         const pre = pre0 === null ? null : remoteScreen(pre0);
+        if (pre && pre.off) await this.remoteHelper("remote-clear", room); // the screen says it was turned off: the saved on-record is stale
         if (pre && pre.active) { // already on (or its menu is open and the person is stuck in it): no send
           if (pre.menu && !(await this.remoteClose(po, cx))) { done("fail", "fail", { why: "이미 켜져 있고 터미널에 연결 메뉴가 열려 있습니다. 닫지 못했습니다 — 터미널에서 Continue를 고르세요(Disconnect는 고르지 마세요)" }); return; }
           done("already", "already", { url: pre.url });
@@ -2770,7 +2780,7 @@ export default class Inbox extends View {
     const at = on ? new Date(r.at).toTimeString().slice(0, 5) : "";
     return h_flex().id(`rc-${room}`).flex_none().min_w(0).gap(6).items_center()
       .when(r?.phase === "send", (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child("확인 중…")))
-      .child(this.button(t, on ? "rc-on-done" : "rc-on", on ? h_flex().items_center().gap(6).child(div().flex_none().w(8).h(8).rounded(4).bg(t.working)).child("원격 연결 켜짐") : "원격 연결 켜기", (c) => this.remoteOn(room, po, c), { disabled: why, tip: why || (on ? `${at}에 화면으로 확인한 상태입니다. 그 뒤 터미널에서 끊었는지는 보지 않습니다. 누르면 화면을 다시 확인하고, 꺼져 있을 때만 /remote-control을 보냅니다` : "이 PO 터미널에 /remote-control을 보내 원격 연결(Remote Control)을 켭니다. Herdr를 다시 켠 뒤에는 이미 켜져 있어도 이 글자로 보일 수 있습니다(터미널 화면에서 켜짐 안내 줄이 밀려나면 알 수 없습니다). 눌러도 안전합니다: 화면을 먼저 확인하고, 이미 켜져 있으면 연결 메뉴를 Esc로 닫기만 합니다") }));
+      .child(this.button(t, on ? "rc-on-done" : "rc-on", on ? h_flex().items_center().gap(6).child(div().flex_none().w(8).h(8).rounded(4).bg(t.working)).child("원격 연결 켜짐") : "원격 연결 켜기", (c) => this.remoteOn(room, po, c), { disabled: why, tip: why || (on ? `${at}에 화면으로 확인한 상태입니다. 그 뒤 터미널에서 끊었는지는 보지 않습니다. 누르면 화면을 다시 확인하고, 꺼져 있을 때만 /remote-control을 보냅니다` : "이 PO 터미널에 /remote-control을 보내 원격 연결(Remote Control)을 켭니다. Herdr를 다시 켜도 이 데스크가 켜짐을 본 적이 있으면 켜짐으로 이어서 보여 줍니다. 본 적이 없거나 확인할 수 없는 경우(예: Windows)에는 이미 켜져 있어도 이 글자로 보일 수 있습니다. 눌러도 안전합니다: 화면을 먼저 확인하고, 이미 켜져 있으면 연결 메뉴를 Esc로 닫기만 합니다") }));
   }
   // The system note of the last 원격 연결 try, as a quiet line at the end of the room's chat.
   remoteNoteRow(t, room) {
@@ -2780,9 +2790,12 @@ export default class Inbox extends View {
       .child(div().min_w(0).text_size(11).text_color(n.bad ? t.blocked : t.dim).child(this.text(`rc-note-t-${room}`, chatHtml(`원격 연결 · ${new Date(n.ms).toTimeString().slice(0, 5)} · ${n.text}`))));
   }
 
-  // After a start or a reload of the desk the in-memory state is gone, so every PO terminal's screen is read ONCE (read only, nothing is sent or pressed) and a room whose
-  // screen still shows Claude Code's "/remote-control is active" line gets the on-state without a chat note. The screen is the only source: when that line has scrolled away
-  // it is not seen and the button stays "켜기" (a click then checks again). A state is only ever set here, never cleared. `force` (the refresh button) checks again.
+  // After a start or a reload of the desk the in-memory state is gone, so every PO terminal is checked ONCE (read only, nothing is sent or pressed). Two sources, the screen first:
+  // (1) the screen still shows Claude Code's "/remote-control is active" line: on (and that is saved, see remoteMark); a disconnect line after it: off (the saved record is deleted).
+  // (2) the line has scrolled away (the usual case after the Herdr app restarts: the PO's claude process keeps running there, so remote really is still on): the saved record
+  // of when the desk last saw it on counts only while that same process (pid + start time from `hc get` and ps) still runs, in the same session, and the transcript's newest
+  // transcript record is not the empty one a disconnect leaves (#109; inbox.cjs checkRemote). Without a record, a pid or a start time (Windows) it stays "켜기" (a click re-checks).
+  // A state is only ever set here, never cleared. `force` (the refresh button) checks again.
   remoteRestore(cx, force = false) {
     if (force) this.rcChecked.clear();
     const pos = poList(this.liveTerms()).filter((p) => !this.rcChecked.has(p.address));
@@ -2791,14 +2804,39 @@ export default class Inbox extends View {
       cx.spawn(async (c) => {
         const txt = await this.remoteRead(p.address);
         if (txt === null) { this.rcChecked.delete(p.address); return; } // could not read: try again at the next load
+        const sc = remoteScreen(txt);
+        let url = sc.url;
+        if (sc.off) { await this.remoteHelper("remote-clear", p.id); return; }
+        if (sc.seen) this.remoteMark(p.id, p.address, sc.url);
+        else {
+          const pid = await this.remotePid(p.address);
+          const j = pid ? await this.remoteHelper("remote-check", p.id, String(pid)) : null;
+          if (!j || j.on !== true) return;
+          url = String(j.url ?? "");
+        }
         const r = this.rc.get(p.id);
         if (r && r.phase !== "on" && r.phase !== "already") return; // a try of this session (sending, failed, unknown) is newer than the screen
-        const sc = remoteScreen(txt);
-        if (!sc.seen) return;
-        this.rc.set(p.id, { ...(r ?? {}), phase: "on", at: Date.now(), url: sc.url || r?.url || "", why: "" });
+        this.rc.set(p.id, { ...(r ?? {}), phase: "on", at: Date.now(), url: url || r?.url || "", why: "" });
         try { c.notify(); } catch {}
       });
     }
+  }
+  // The claude process of a PO terminal (`hc get`), null when it is not the foreground process or could not be read.
+  async remotePid(po) {
+    try { return termPid(await hc(["get", po, "--json"])); } catch { return null; }
+  }
+  // The helper's remote-check / remote-mark / remote-clear (it reads and writes the record file and runs ps; the desk cannot). null when it did not answer.
+  async remoteHelper(cmd, ...args) {
+    try {
+      const r = await exec("node", [HELPER(), cmd, ...args], { timeout: 8000 });
+      if (r.code === 0) return JSON.parse(r.stdout);
+    } catch {}
+    return null;
+  }
+  // The desk saw remote on in terminal `po` (room = the PO id): save the process behind it for the next restore. Quiet and best effort: a failure only means no restore.
+  async remoteMark(room, po, url = "") {
+    const pid = await this.remotePid(po);
+    if (pid) await this.remoteHelper("remote-mark", room, String(pid), String(url ?? ""));
   }
   // A panel answer: the answer line goes through deliver(). The box is cleared and the ask marked once it reached the PO (or, when the PO had
   // no pane, once the pane opened and it was delivered).
