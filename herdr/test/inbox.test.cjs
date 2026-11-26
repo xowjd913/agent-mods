@@ -1649,6 +1649,23 @@ test("settleLeader: 방에 있는 리더면 유지, 방을 떠났거나 모르�
   assert.equal(I.settleLeader(po1, ""), "");
   assert.equal(I.settleLeader(undefined, "lead-a"), "");
 });
+test("aliveLeaders(#58): 터미널이 열려 있는 리더만 칩으로 남고, 닫힌 리더는 사라지되 기록은 전체에 남는다", () => {
+  const room = [LD("lead-a", "done", 1), LD("lead-b", "done", 2), LD("lead-c", "done", 3)];
+  const all = I.roomLeaders(room);
+  const terms = [{ name: "lead-a", address: "x1" }, { name: "", address: "x9" }];
+  const sums = [{ leader: "lead-b", terminal: "x9" }, { leader: "lead-c", terminal: "x7" }];
+  const alive = I.aliveLeaders(all, terms, sums);
+  assert.deepEqual(alive.map((x) => x.id), ["lead-a", "lead-b"]); // 이름으로, 또는 보고에 적힌 터미널 주소로 열려 있다
+  assert.deepEqual(I.aliveLeaders(all, [], sums), []); // 다 닫히면 칩이 없다
+  assert.deepEqual(I.aliveLeaders(all, undefined, undefined), []);
+  assert.equal(I.settleLeader(alive, "lead-c"), ""); // 고른 리더가 닫히면 전체로
+  assert.equal(I.settleLeader(alive, "lead-a"), "lead-a");
+  assert.equal(I.leaderEntries(room, "").length, 3); // 전체에는 닫힌 리더의 기록도 그대로
+  const src = mainSrc();
+  assert.match(src, /aliveLeaders\(roomLeaders\(raw, \(n\) => shortName\(n\)\), terms, this\.data\?\.leaders\)/);
+  const cut = (g) => { const t = fs.readFileSync(path.join(__dirname, g), "utf8"); const i = t.indexOf("const aliveLeaders"); return t.slice(i, t.indexOf("\n", i)); };
+  assert.equal(cut("../mods/inbox/main.js"), cut("../mods/inbox/inbox.cjs"));
+});
 test("leaderEntries: 그 리더의 글 + 그 리더에게 보낸 내 글만 — 칩과 겹쳐 쓴다", () => {
   assert.deepEqual(keysOf(I.leaderEntries(ROOM, "lead-a")), ["l|lead-a|100", "me|300", "l|lead-a|500"]);
   assert.deepEqual(keysOf(I.leaderEntries(ROOM, "lead-c")), ["w|lead-c"]);

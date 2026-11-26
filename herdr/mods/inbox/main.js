@@ -459,6 +459,9 @@ function roomLeaders(entries, label = (id) => id) {
 }
 // The leader to filter by: `leader` while the room still has it, else "" (= everyone; a leader that left the room goes back to 전체).
 const settleLeader = (choices, leader) => (leader && (choices ?? []).some((x) => x.id === leader) ? String(leader) : "");
+// Only the leaders whose terminal is open now stay as choices (a closed leader's session is gone: its history stays under "전체"). A leader is live when a
+// terminal carries its hc name, or sits at the address its summary recorded. `sums` = [{leader, terminal}].
+const aliveLeaders = (choices, terms, sums) => (choices ?? []).filter((c) => (terms ?? []).some((t) => t.name === c.id || (t.address && (sums ?? []).some((s) => s.leader === c.id && s.terminal === t.address))));
 // Attributed by a field only, never by guessing from the text: the person's line whose `to` / `tos` names the leader (a chat with @lead-x, an
 // answer button of its card), and the PO's line whose `to` names it or whose `about` does (its reply to a prompt the desk sent to that leader).
 const leaderEntries = (entries, leader) => (leader ? (entries ?? []).filter((e) => entryLeader(e) === leader
@@ -1805,7 +1808,7 @@ export default class Inbox extends View {
       return { ...r, n: all.filter((a) => a.owner === r.id).length, unread: r.id === pick ? 0 : unreadCount(entries, seen[r.id]) };
     });
     const filter = pick ? this.filt.get(pick) ?? "all" : "all";
-    const choices = roomLeaders(raw, (n) => shortName(n)); // #58: the leaders of the picked room (follows the room; a gone one is dropped)
+    const choices = aliveLeaders(roomLeaders(raw, (n) => shortName(n)), terms, this.data?.leaders); // #58: the live leaders of the picked room (follows the room; a closed session is dropped, its history stays under 전체)
     const who = pick ? settleLeader(choices, this.who.get(pick)) : "";
     const scope = leaderEntries(raw, who); // the 1:1 view of one leader (all of the room when none): the chips work on this
     let snaps = {};
