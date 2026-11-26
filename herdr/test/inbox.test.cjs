@@ -2962,8 +2962,8 @@ test("원격 연결 켜기: 작업 중인 PO에는 Esc를 누르지 않는다(�
   const w = await rcRun({ pre: RC_BASE, afterSend: [RC_MENU], statusAfterSend: "working" }); // the PO started a turn after the send
   assert.equal(w.rc.phase, "fail"); assert.deepEqual(w.log.keys, []);
   const blocked = await rcRun({ pre: RC_BASE, status: "working" }); // a working PO takes no command at all
-  assert.equal(blocked.rc?.phase, "fail"); assert.deepEqual(blocked.log.sends, []); // nothing sent; the reason is a note in the chat, no toast row
-  assert.match(blocked.rc.note.text, /^켜지 못함: /); assert.deepEqual(blocked.log.says, []);
+  assert.equal(blocked.rc?.phase, "fail"); assert.deepEqual(blocked.log.sends, []); // nothing sent; the reason is a note in the chat and also a floating notice
+  assert.match(blocked.rc.note.text, /^켜지 못함: /); assert.deepEqual(blocked.log.says, [{ m: `원격 연결 · ${blocked.rc.note.text}`, bad: true }]);
 });
 test("원격 연결 켜기: 켜짐(새 세션 주소)·결과 모름·보내기 실패를 각각 알려 준다", async () => {
   const on = await rcRun({ pre: RC_BASE, afterSend: [RC_BASE, `${RC_BASE}\n  Remote Control active\n  ${RC_URL}`] });
@@ -2972,8 +2972,21 @@ test("원격 연결 켜기: 켜짐(새 세션 주소)·결과 모름·보내기 
   assert.equal(stale.rc.phase, "unknown"); assert.equal(stale.rc.note.bad, true);
   const bad = await rcRun({ pre: RC_BASE, send: { ok: false, why: "PO 입력칸에 글이 있습니다" } });
   assert.equal(bad.rc.phase, "fail"); assert.equal(bad.rc.note.text, "켜지 못함: PO 입력칸에 글이 있습니다");
-  assert.deepEqual(bad.log.says, []); // the result is the chat note only: a toast row above the room came and went and moved the whole chat
-  assert.doesNotMatch(methodOf(mainSrc(), "  remoteSet(room, patch, c) {", "  remoteOn(room"), /this\.say\(/);
+  assert.deepEqual(bad.log.says, [{ m: "원격 연결 · 켜지 못함: PO 입력칸에 글이 있습니다", bad: true }]); // the result also floats over the room (a notice, no layout row)
+  assert.equal(on.log.says.at(-1).bad, false); assert.match(on.log.says.at(-1).m, /^원격 연결 · 원격 연결 켜짐/);
+  const set = methodOf(mainSrc(), "  remoteSet(room, patch, c) {", "  remoteOn(room");
+  assert.equal((set.match(/this\.say\(/g) ?? []).length, 1); assert.match(set, /if \(patch\.kind && r\.note\) this\.say\(/); // only a result says; a restore (no kind) stays quiet
+});
+test("떠 있는 공지: 레이아웃 칸을 차지하지 않고(absolute), 몇 초 뒤 스스로 사라지며 누르면 닫힌다", () => {
+  const m = mainSrc();
+  const render = m.slice(m.indexOf("return v_flex().size_full().min_h(0).relative()"));
+  assert.ok(render.startsWith("return v_flex().size_full().min_h(0).relative()")); // the positioned parent of the notice
+  assert.match(render, /\.child\(strip \? room : h_flex\(\)\.flex_1\(\)[^\n]*\.child\(room\)\)\n\s*\/\/[^\n]*\n\s*\.when\(Boolean\(this\.msg\), \(el\) => el\.child\(h_flex\(\)\.id\("inbox-msg-layer"\)\.absolute\(\)\.top\(NOTICE_TOP\)\.left\(0\)\.right\(0\)/); // after the room, absolute
+  assert.doesNotMatch(render, /\.when\(Boolean\(this\.msg\), \(el\) => el\.child\(div\(\)\.id\("inbox-msg"\)\.px\(14\)\.pb\(6\)/); // the old layout row is gone
+  assert.match(render, /id\("inbox-msg"\)[^\n]*\n[^\n]*on_click\(\(_e, c\) => \{ this\.msg = null; c\.notify\(\); \}\)/); // a click hides it
+  assert.match(m, /say\(text, bad = false\) \{ this\.msg = \{ text, bad, at: Date\.now\(\) \};/);
+  assert.match(m, /cx\.timer\.every\(MSG_TICK_MS, \(cx\) => \{ if \(this\.msg && Date\.now\(\) - this\.msg\.at >= MSG_MS\) \{ this\.msg = null; this\.softNotify\(cx\); \} \}\);/);
+  const ms = Number(m.match(/^const MSG_MS = (\d+);/m)[1]); assert.ok(ms >= 3000 && ms <= 8000);
 });
 
 // ---- #79: the on-state after a start / reload of the desk is read from the PO's screen (read only)

@@ -1202,6 +1202,10 @@ function restartClearCheck(recs, since) {
 // The pending-question card: the screen lines scroll inside it (all options stay reachable), the buttons stay under them.
 const PROMPT_LINES_H = 240, PROMPT_MAX_H = 340;
 const DIAG_FLUSH_MS = 2000; // the diag queue is written out this often (one timer started in init)
+const NOTICE_TOP = 44; // just under the 38px header
+const NOTICE_MAX_W = 560;
+const MSG_MS = 5000; // how long a floating notice stays before it hides itself (a click hides it sooner)
+const MSG_TICK_MS = 500; // how often the notice is checked for expiry
 const PIN_TICK_MS = 250; // how often the timeline checks that it still sits at the newest
 const LOAD_REDRAW_MS = 25000; // an unchanged load still redraws this often (the "5분 전" clocks)
 
@@ -1443,6 +1447,7 @@ export default class Inbox extends View {
     // row, the dots, a picture that finished loading) is seen here and the view goes back to the bottom. A held-back redraw is let go
     // once the selection / press is over.
     cx.timer.every(PIN_TICK_MS, (cx) => this.pinTick(cx));
+    cx.timer.every(MSG_TICK_MS, (cx) => { if (this.msg && Date.now() - this.msg.at >= MSG_MS) { this.msg = null; this.softNotify(cx); } });
     cx.timer.every(DIAG_FLUSH_MS, () => this.flushDiag());
     this.usage = undefined; // the rows of the usage line: undefined before the first read, null = Unknown, else [{label, percent, resetsAt}]
     this.usageSig = "";
@@ -2038,7 +2043,7 @@ export default class Inbox extends View {
     else this.say("그 리더 터미널이 지금 없습니다.", true);
   }
 
-  say(text, bad = false) { this.msg = { text, bad }; }
+  say(text, bad = false) { this.msg = { text, bad, at: Date.now() }; } // drawn as a floating notice over the top of the room (see render), gone after MSG_MS
 
   // The ONE way the panel puts text into a PO terminal (answer buttons, the answer box, option chips and the chat box):
   // clipboard -> focus the PO pane -> terminal.paste -> Enter after PASTE_SETTLE_MS (submitPo) -> the keyboard goes back to where it was.
@@ -2545,7 +2550,8 @@ export default class Inbox extends View {
     const r = { ...(this.rc.get(room) ?? {}), at: Date.now(), ...patch };
     if (patch.kind) { const ms = Date.now(); r.note = { text: remoteNote(patch.kind, r), ms, bad: patch.kind === "fail" || patch.kind === "unknown" }; delete r.kind; }
     this.rc.set(room, r);
-    try { c.notify(); } catch {} // the result is the system note at the end of the chat: no toast row above the room (it came and went and moved the whole chat)
+    if (patch.kind && r.note) this.say(`원격 연결 · ${r.note.text}`, r.note.bad); // the same result also floats over the top of the room for a few seconds (no layout space)
+    try { c.notify(); } catch {}
   }
   remoteOn(room, po, c) {
     const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "");
@@ -3388,7 +3394,7 @@ export default class Inbox extends View {
       .when(Boolean(panel), (el) => el.child(panel))
       .when(Boolean(rrow), (el) => el.child(rrow))
       .child(this.chatBox(t, v));
-    return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
+    return v_flex().size_full().min_h(0).relative().bg(t.chrome).text_size(13)
       .on_window_mouse_move((e, c) => this.pointer(e, c))
       .on_window_mouse_up("left", (e, c) => this.pointerUp(c, e))
       .on_size_change((size, c) => this.onSize(size.width, c))
@@ -3410,8 +3416,10 @@ export default class Inbox extends View {
       .when(strip, (el) => el.child(this.picker(t, v)))
       .when(!strip && !v.tabs.some((x) => x.id !== PO_OTHER), (el) => el.child(this.poHint(t)))
       .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
-      .when(Boolean(this.msg), (el) => el.child(div().id("inbox-msg").px(14).pb(6).text_size(11.5).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
-        .on_mouse_down("left", stop).on_click((_e, c) => { this.msg = null; c.notify(); }).child(this.msg.text)))
-      .child(strip ? room : h_flex().flex_1().min_h(0).items_stretch().child(this.narrow ? this.slimRooms(t, v) : this.roomList(t, v)).child(room));
+      .child(strip ? room : h_flex().flex_1().min_h(0).items_stretch().child(this.narrow ? this.slimRooms(t, v) : this.roomList(t, v)).child(room))
+      // The notice floats over the top of the room: absolute, so it takes no layout space and the chat never moves when it comes or goes.
+      .when(Boolean(this.msg), (el) => el.child(h_flex().id("inbox-msg-layer").absolute().top(NOTICE_TOP).left(0).right(0).px(14).justify_center()
+        .child(div().id("inbox-msg").max_w(NOTICE_MAX_W).px(12).py(5).rounded(6).bg(t.chrome).shadow_md().text_size(11.5).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
+          .on_mouse_down("left", stop).on_click((_e, c) => { this.msg = null; c.notify(); }).tooltip("눌러서 닫기").child(this.msg.text))));
   }
 }
