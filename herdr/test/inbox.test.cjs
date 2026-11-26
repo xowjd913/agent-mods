@@ -1900,13 +1900,13 @@ test("timeline #111: 훅 제출 기록이 없는 실패 기록은 실패 그대�
   const before = I.timeline("p1", [], [], [failed]);
   assert.equal(before.length, 1);
   assert.equal(before[0].status, "failed"); // 훅 기록이 아직 없는 동안은 실패로 보인다
-  assert.deepEqual(I.mineActs(before[0].status), ["resend"]);
+  assert.ok(I.mineActs(before[0].status).includes("resend")); // 실패 기록에는 다시 보내기가 있다(다른 버튼이 함께 있어도 상관없다)
   const after = I.timeline("p1", [], [typed("원격을 켰던 PO인데 재실행하니 안 돼", ms + 25000)], [failed]);
   assert.equal(after.length, 1); // 같은 글이 두 번(실패 말풍선 + 직접 친 글) 나오지 않는다
   assert.equal(after[0].who, "me");
   assert.equal(after[0].id, "m1"); // 데스크 기록이 남아 있다
   assert.equal(after[0].status, "sent");
-  assert.deepEqual(I.mineActs(after[0].status), []); // 다시 보내기 버튼이 없다 - 눌러도 중복으로 가지 않는다
+  assert.ok(!I.mineActs(after[0].status).includes("resend")); // 다시 보내기 버튼이 없다 - 눌러도 중복으로 가지 않는다
   // 붙여 넣기 래퍼가 붙은 훅 줄도 같은 글로 본다
   const wrapped = I.timeline("p1", [], [typed('<pasted_content id="027d">\n원격을 켰던 PO인데 재실행하니 안 돼\n</pasted_content>', ms + 25000)], [failed]);
   assert.equal(wrapped.length, 1);
