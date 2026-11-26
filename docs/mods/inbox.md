@@ -6,7 +6,7 @@
   PO 데스크                                         ⟳  ×
   ┌─ PO 방 ───────┬─ DevNotes ─────────────── 리더 2명 ─┐
   │ (D) DevNotes 2│ (L) 받은편지함 패널  결정      09:12 │
-  │ (M) mascoz  1 │     ┌────────────────────────────┐   │
+  │ (M) Docs    1 │     ┌────────────────────────────┐   │
   │ (?) PO 모름   │     │ 1안: 지금 합친다           │   │
   │               │     │ 2안: 다음 주에 합친다      │   │
   │               │     └────────────────────────────┘   │
@@ -57,7 +57,7 @@ hc label <PO 터미널> role=po po=devnotes
 
 `po=<id>`는 소문자·숫자·`-` 1~40자이고 방마다 하나씩, 다른 PO와 겹치지 않게 붙입니다. 방 이름은 PO 터미널이 든 탭 이름 `PO · <프로젝트>`의 `<프로젝트>`이고, 그런 모양이 아니면 `po` id를 씁니다.
 
-**2. 리더 이름은 `lead-`로 시작합니다**(예: `lead-po-inbox`). 이 이름의 터미널만 리더로 읽습니다.
+**2. 리더 이름은 `lead-`로 시작합니다**(예: `lead-po-inbox`). 이 이름의 터미널만 리더로 읽습니다. 터미널을 띄울 때 `hc run --name lead-po-inbox …`로 이름을 붙입니다(이름은 살아 있는 터미널 중 유일해야 합니다).
 
 **3. 리더가 보고를 남깁니다.** 저장소의 쓰기 도구 [`herdr/tools/inbox-write.cjs`](../../herdr/tools/inbox-write.cjs)가 한 줄을 쓰고 터미널 라벨까지 붙여 줍니다(설치기는 이 도구를 복사하지 않으니 저장소를 내려받아 경로로 부릅니다).
 
@@ -66,7 +66,7 @@ hc label <PO 터미널> role=po po=devnotes
 node inbox-write.cjs report --kind done --title "받은편지함 패널 완료" --body "PR #12 병합 가능" --link https://github.com/…/pull/12
 
 # 결정 요청 — 선택지는 `N안: …` 줄, 추천은 `추천: N안`
-node inbox-write.cjs report --kind decision --title "병합 시점" --link https://github.com/…/pull/12 --body - <<'EOF'
+node inbox-write.cjs report --kind decision --title "병합 시점" --link https://github.com/…/pull/12 --file - <<'EOF'
 1안: 지금 합친다
 2안: 다음 주에 합친다
 추천: 1안

@@ -151,7 +151,7 @@ node herdr/tools/inbox-write.cjs report --kind decision --agent lead-demo \
 # $'...'는 bash/zsh 전용입니다. 다른 쉘(PowerShell, cmd, sh)에서는 아래처럼 파일이나 표준 입력으로 줍니다.
 printf '어느 쪽으로?\n1안: 지금\n2안: 나중\n추천: 2안\n' > card.txt
 node herdr/tools/inbox-write.cjs report --kind decision --agent lead-demo --title "[lead-demo] 결정" --file card.txt
-printf '어느 쪽으로?\n1안: 지금\n2안: 나중\n' | node herdr/tools/inbox-write.cjs report --kind decision --agent lead-demo --title "[lead-demo] 결정" --body -
+printf '어느 쪽으로?\n1안: 지금\n2안: 나중\n' | node herdr/tools/inbox-write.cjs report --kind decision --agent lead-demo --title "[lead-demo] 결정" --file -
 
 # 긴 본문은 파일이나 표준 입력(-)으로
 node herdr/tools/inbox-write.cjs report --kind done --agent lead-demo --file report.md
