@@ -102,8 +102,13 @@ test("install hook --solo turns the flag on (and --remove --solo off); without -
   assert.equal(I.soloEnabled(inbox), true);
   r = run();
   assert.equal(I.soloEnabled(inbox), true); // a plain re-run does not switch it off
+  const ours = () => JSON.stringify(JSON.parse(fs.readFileSync(settings, "utf8"))).split("po-hook.cjs").length - 1;
+  assert.equal(ours(), 2); // Stop + UserPromptSubmit
   r = run("--remove", "--solo");
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /혼자 모드 기록을 껐습니다/);
   assert.equal(I.soloEnabled(inbox), false);
+  assert.equal(ours(), 2); // --remove --solo only turns solo off: the PO hook is still there
+  r = run("--remove");
+  assert.equal(ours(), 0); // a plain --remove still takes the PO hook out
 });
