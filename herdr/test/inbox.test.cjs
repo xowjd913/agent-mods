@@ -2042,6 +2042,33 @@ const tm = (o) => ({ address: "t1", name: "", labels: {}, status: "idle", parent
 const poT = (o = {}) => tm({ address: "tp", name: "po-a", labels: { role: "po", po: "pa" }, where: "공간 / PO · 데스크", ...o });
 const leadT = (n, o = {}) => tm({ address: `t-${n}`, name: n, parent: "tp", ...o });
 
+test("roomWorking(#69): PO·리더·팀원 중 working이 있는 방만 낸다 — 승인 대기만이면 아니다", () => {
+  const po2 = (o = {}) => tm({ address: "tq", name: "po-b", labels: { role: "po", po: "pb" }, where: "공간 / PO · 둘째", ...o });
+  const none = I.roomWorking([poT(), po2(), leadT("lead-a")]);
+  assert.deepEqual([...none], []); // 모두 쉬면 아무 방도 아니다
+  assert.deepEqual([...I.roomWorking([poT({ status: "working" }), po2()])], ["pa"]); // PO 자신
+  assert.deepEqual([...I.roomWorking([poT(), po2(), leadT("lead-a", { status: "working" })])], ["pa"]); // 리더
+  const member = tm({ address: "m1", name: "worker", parent: "t-lead-a", status: "working" });
+  assert.deepEqual([...I.roomWorking([poT(), po2(), leadT("lead-a"), member])], ["pa"]); // 리더 밑 팀원
+  const other = leadT("lead-x", { parent: "", status: "working" });
+  assert.deepEqual([...I.roomWorking([poT(), other])], [I.PO_OTHER]); // 주인 없는 리더 → "PO 모름"
+  assert.deepEqual([...I.roomWorking([poT({ status: "blocked" }), leadT("lead-a", { status: "blocked" })])], []); // 승인 대기는 일하는 중이 아니다
+  assert.deepEqual([...I.roomWorking([poT({ status: "working" }), po2({ status: "working" })])].sort(), ["pa", "pb"]);
+  assert.deepEqual([...I.roomWorking(null)], []);
+});
+
+test("main.js: 방 목록 작업 중 점(#69) — 세 보기가 같은 점을 쓰고, 자리는 늘 잡아 둔다", () => {
+  const src = mainSrc();
+  const dot = methodOf(src, "  roomDot(t, x) {", "\n  }\n");
+  assert.match(dot, /x\.working/);
+  assert.match(dot, /t\.working/); // 테마 강조색
+  assert.match(dot, /작업 중/);
+  assert.equal((src.match(/this\.roomDot\(t, x\)/g) ?? []).length, 3); // 고르개·좁은 목록·방 칸
+  assert.match(src, /working: busy\.has\(p\.id\)/);
+  assert.match(src, /working: busy\.has\(PO_OTHER\)/);
+  assert.match(src, /roomWorking\(terms\)/);
+});
+
 test("typingNow: 방의 PO와 그 방 리더 중 working인 것만, 이름순으로 낸다", () => {
   const terms = [poT({ status: "working" }), leadT("lead-b", { status: "working", title: "베타 작업" }), leadT("lead-a", { status: "working", title: "알파 작업" }), leadT("lead-c", { status: "idle" }), leadT("lead-d", { status: "blocked" })];
   assert.deepEqual(I.typingNow(terms, "pa", {}), [{ who: "po", name: "데스크", label: "작업중" }, { who: "l:lead-d", name: "d", label: "승인 대기" }, { who: "l:lead-b", name: "베타 작업", label: "작업중" }, { who: "l:lead-a", name: "알파 작업", label: "작업중" }]); // PO 먼저, 리더는 이름순; 권한 기다림(blocked)도 일하는 중으로 센다

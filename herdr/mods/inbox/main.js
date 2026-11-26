@@ -743,6 +743,20 @@ function typingNow(terms, room, memo, track = null, now = 0) {
   leaders.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return [...out, ...leaders];
 }
+// #69: the rooms with work going on, as a Set of room ids (a PO's id, or PO_OTHER): a room is working when its PO, a leader of it, or a team
+// member below them is "working" right now. Status only (the terminals the poll already reads), no grace: it goes out as soon as all stop.
+// Waiting for an approval ("blocked") is not working: the room's red count / "질문" chip says that.
+function roomWorking(terms) {
+  const list = terms ?? [];
+  const out = new Set();
+  const states = workStates(list);
+  for (const p of poList(list)) if (states.get(p.address)?.work) out.add(p.id);
+  for (const t of list) {
+    if (!isAgentName(t?.name) || !states.get(t.address)?.work) continue;
+    if (leaderOwner(list, t.name, t.address) === PO_OTHER) { out.add(PO_OTHER); break; }
+  }
+  return out;
+}
 // A short text that changes exactly when something the desk shows from the terminals changes: the status, the wait label and the shown
 // name of every PO and leader, and whether a leader has work below it (a team member working). The 1.5 s poll redraws a copy only when this
 // differs from the last one (no redraw on a quiet second).
@@ -1858,8 +1872,9 @@ export default class Inbox extends View {
     const leaders = (this.data?.leaders ?? []).map((s) => ({ s, owner: leaderOwner(terms, s.leader, s.terminal, s.po) }));
     const waits = (id) => all.filter((a) => a.owner === id).map((a) => ({ leader: a.s.leader, ts: a.item?.ts ?? "", kind: a.kind }));
     const room = (id) => timeline(id, leaders, id === PO_OTHER ? [] : this.data?.po?.[id] ?? [], mine, waits(id), now);
-    const rooms = pos.map((p) => ({ id: p.id, label: p.label, title: p.title, blocked: this.isBlocked(p.address) }));
-    if (hasOther) rooms.push({ id: PO_OTHER, label: OTHER_LABEL, title: "", blocked: false });
+    const busy = roomWorking(terms); // #69: the rooms with work going on (a dot beside the name)
+    const rooms = pos.map((p) => ({ id: p.id, label: p.label, title: p.title, blocked: this.isBlocked(p.address), working: busy.has(p.id) }));
+    if (hasOther) rooms.push({ id: PO_OTHER, label: OTHER_LABEL, title: "", blocked: false, working: busy.has(PO_OTHER) });
     if (settled.ghost && !rooms.some((r) => r.id === pick)) rooms.push({ id: pick, label: this.pickLive.label, title: "", blocked: false, ghost: true }); // held for a moment: the room list does not lose it
     let raw = [];
     const tabs = rooms.map((r) => {
@@ -2612,6 +2627,12 @@ export default class Inbox extends View {
       .child(`PO 터미널에 ${hubTag()}, ${NAMES.hubIdLabel}=<id> 라벨을 달면 PO별로 나뉩니다. 지금은 PO가 없어 채팅을 보낼 수 없습니다.`);
   }
 
+  // #69: the "working" dot of a room: a small accent dot, always in the layout (clear when idle) so the name does not move when it comes and goes.
+  roomDot(t, x) {
+    const d = div().flex_none().size(6).rounded(3);
+    return x.working ? d.bg(t.working).tooltip("작업 중") : d;
+  }
+
   // The count badges of a room: unread (green) and waiting leaders (red).
   roomBadges(t, x) {
     return [
@@ -2633,6 +2654,7 @@ export default class Inbox extends View {
           .hover((s) => s.bg(on ? t.selected : t.hover)).on_click((_e, c) => this.pickPo(x.id, c))
           .tooltip(x.id === PO_OTHER ? OTHER_TIP : `po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
           .child(div().max_w(150).truncate().text_size(11.5).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
+          .child(this.roomDot(t, x))
           .children(this.roomBadges(t, x));
       }));
   }
@@ -2648,7 +2670,9 @@ export default class Inbox extends View {
           .bg(on ? t.selected : t.chrome).hover((s) => s.bg(on ? t.selected : t.hover)).on_click((_e, c) => this.pickPo(x.id, c))
           .tooltip(x.id === PO_OTHER ? OTHER_TIP : `${x.label} · po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
           .child(this.circle(t, color, x.id === PO_OTHER ? "?" : String(x.label).slice(0, 1).toUpperCase()))
-          .child(div().w(SLIM_W - 10).truncate().text_center().text_size(9.5).text_color(on ? t.foreground : t.dim).child(x.label))
+          .child(h_flex().w(SLIM_W - 10).gap(3).items_center().justify_center()
+            .child(div().min_w(0).truncate().text_center().text_size(9.5).text_color(on ? t.foreground : t.dim).child(x.label))
+            .child(this.roomDot(t, x)))
           .when(badges.length > 0, (el) => el.child(h_flex().gap(3).items_center().children(badges)));
       }));
   }
@@ -2666,6 +2690,7 @@ export default class Inbox extends View {
           .child(v_flex().flex_1().min_w(0)
             .child(div().min_w(0).truncate().text_size(12.5).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
             .child(div().min_w(0).truncate().text_size(10).text_color(t.dim).child(x.id === PO_OTHER ? "채팅 없음" : "PO")))
+          .child(this.roomDot(t, x))
           .children(this.roomBadges(t, x));
       }));
   }
