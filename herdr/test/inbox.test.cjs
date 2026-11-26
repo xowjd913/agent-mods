@@ -1323,7 +1323,7 @@ test("main.js: 다시 보내기·Enter 누르기·질문 패널은 PO가 지금 
   assert.ok(pp.indexOf('hc(["read"') < pp.indexOf('hc(["keys", po, key])') && /promptSig\(text\) !== want/.test(pp)); // 키 전에 화면을 다시 읽어 같은 질문인지 본다
   const panel = methodOf(src, "  promptPanel(t, v, cx) {", "  // A panel answer:");
   assert.match(panel, /if \(!po \|\| !this\.isBlocked\(po\)\) \{ this\.prompt = null; return null; \}/); // 질문 중일 때만 보인다
-  assert.match(panel, /promptOptions\(shown\.text\)/);
+  assert.match(panel, /promptParse\(shown\.text\)/);
   assert.match(panel, /"enter"/);
   assert.match(panel, /"esc"/);
   const callers = src.match(/this\.pressPrompt\(/g) ?? [];
@@ -2013,9 +2013,9 @@ test("main.js: 질문 패널 — 왼쪽 눌림 stop, 같은 화면이면 상태�
   assert.match(pp, /id\("po-prompt"\)[^\n]*on_mouse_down\("left", stop\)/);
   assert.ok(!/초 전 화면/.test(pp));
   const rp = methodOf(src, "  readPrompt(po, cx) {", "  // A key press from the question panel");
-  assert.match(rp, /promptSame\(this\.prompt\.text, text\)/);
-  assert.match(rp, /if \(!same\) this\.softNotify\(cx\)/); // 드래그 중에는 softNotify가 다시 그리기를 미룬다
-  assert.match(rp, /chain === this\.promptChain && this\.isBlocked\(po\)\) this\.readPrompt\(po, c2\)/);
+  assert.match(rp, /promptSame\(cur\.text, text\)/);
+  assert.match(rp, /if \(!same\) this\.softNotify\(c2\)/); // 드래그 중에는 softNotify가 다시 그리기를 미룬다
+  assert.match(rp, /chain === this\.promptChain && this\.isBlocked\(po\)\) this\.readPrompt\(po, c3\)/);
   assert.match(src, /id = tlId\(e\.key\)/);
 });
 
