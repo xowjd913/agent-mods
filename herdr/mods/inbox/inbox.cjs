@@ -1865,6 +1865,40 @@ function restartBlock({ po = "", status = "", running = false } = {}) {
   if (s === "working") return "PO가 작업 중입니다 — 끝난 뒤에 누르세요";
   return "";
 }
+// ---- "원격 연결 켜기" (#79): one click sends `/remote-control` to the room's terminal through the same `hc send` path as 새로 시작 (sendLine). The desk cannot
+// press it for the person any other way (a skill cannot run the command). Pure part: why it cannot be pressed now ("" when it can).
+const REMOTE_CMD = "/remote-control";
+function remoteBlock({ po = "", status = "", running = false, sending = false } = {}) {
+  if (sending) return "원격 연결 명령을 보내는 중입니다";
+  return restartBlock({ po, status, running });
+}
+const REMOTE_POLLS = 5, REMOTE_POLL_MS = 1000; // after the send: this many screen reads, this far apart (~5 s)
+const REMOTE_URL = /https:\/\/claude\.ai\/code\/[^\s)\]>"'`]+/g;
+// What the PO's screen says about Remote Control. `menu` = Claude Code's "already connected" menu (Disconnect this session / Show QR code / Continue), `active` = the
+// footer says it is on, `url` = the last session link on screen. Text copied from Claude Code's UI and NOT verified against a real terminal (UNVERIFIED).
+function remoteScreen(text) {
+  const clean = cleanText(text);
+  const lines = clean.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim());
+  const tail = lines.slice(-14).join("\n");
+  // Only the three numbered option lines together count (prose that merely mentions these words is not the menu).
+  const opt = (n, re) => new RegExp(`^\\s*(?:[❯>›▶]\\s*)?${n}[.)]\\s*${re}\\s*$`, "im").test(tail);
+  const menu = opt(1, "Disconnect this session") && opt(2, "Show QR code") && opt(3, "Continue");
+  const active = menu || /Remote Control (is )?(active|connected)/i.test(lines.slice(-8).join("\n"));
+  // `seen` = the transcript line Claude Code prints when it turned on ("/remote-control is active · Continue here, on your phone, or at <url>", copied from a real
+  // screen) is on screen and no later line says it was turned off. Weaker than `active`: that line scrolls away, and a disconnect line's wording is UNVERIFIED.
+  let on = -1, off = -1;
+  lines.forEach((l, i) => { if (/\/?remote[- ]control (is )?(active|connected)/i.test(l)) on = i; if (/remote[- ]control (is )?(disconnected|off|stopped|inactive)|disconnected (this )?session/i.test(l)) off = i; });
+  const urls = clean.match(REMOTE_URL) ?? [];
+  return { menu, active, seen: active || (on >= 0 && on > off), url: urls.length ? urls[urls.length - 1].replace(/[.,;:]+$/, "") : "" };
+}
+// The one-line system note for the room's chat. kind: on | already | fail | unknown.
+function remoteNote(kind, { url = "", why = "" } = {}) {
+  const u = url ? ` — ${url}` : "";
+  if (kind === "on") return `원격 연결 켜짐${u}`;
+  if (kind === "already") return `이미 켜져 있음${u}`;
+  if (kind === "unknown") return "원격 연결 명령을 보냈지만 5초 안에 화면에서 결과를 확인하지 못했습니다. 터미널에서 확인하세요";
+  return `켜지 못함: ${why || "알 수 없는 이유"}`;
+}
 // The line pasted into the PO (English: it is read by an agent). `file` is where the note goes (shown with ~).
 function handoffAsk(file) {
   return `${RESTART_MARK} The user will restart you with /clear. Before that, write a handoff note to ${file} (overwrite it; create the folder if needed) so that the next session can continue seamlessly: (1) decisions and final checks the user still has to answer, (2) each running leader with its task, issue/PR and state, (3) what you were doing and the next steps, (4) anything that is only in this conversation. Keep it short and in the user's language. Do nothing else; reply "handoff written" when the file is saved.`;
@@ -1996,7 +2030,7 @@ function readHandoff(dir = inboxDir(), id = "") {
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { CLIP_TEXT_MAX, clipText, bangCommand, promptInput, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, promptParse, PROMPT_TIMER, typingNow, roomWorking, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries};
+module.exports = { CLIP_TEXT_MAX, clipText, bangCommand, promptInput, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, promptParse, PROMPT_TIMER, typingNow, roomWorking, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, REMOTE_CMD, REMOTE_POLLS, REMOTE_POLL_MS, remoteBlock, remoteScreen, remoteNote};
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)
