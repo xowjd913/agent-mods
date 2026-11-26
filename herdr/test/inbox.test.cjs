@@ -1648,6 +1648,9 @@ test("settleLeader: 방에 있는 리더면 유지, 방을 떠났거나 모르�
   assert.equal(I.settleLeader(po2, "lead-a"), ""); // 다른 PO 방에는 그 리더가 없다
   assert.equal(I.settleLeader(po1, ""), "");
   assert.equal(I.settleLeader(undefined, "lead-a"), "");
+  // The row hides under two leaders (nothing to pick), so a filter must not stay set behind it: one live leader left = the whole room.
+  assert.equal(I.settleLeader([{ id: "lead-a" }], "lead-a"), "");
+  assert.equal(I.settleLeader([], "lead-a"), "");
 });
 test("aliveLeaders(#58): 터미널이 열려 있는 리더만 칩으로 남고, 닫힌 리더는 사라지되 기록은 전체에 남는다", () => {
   const room = [LD("lead-a", "done", 1), LD("lead-b", "done", 2), LD("lead-c", "done", 3)];

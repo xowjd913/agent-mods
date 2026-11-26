@@ -458,7 +458,7 @@ function roomLeaders(entries, label = (id) => id) {
   return out.sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
 }
 // The leader to filter by: `leader` while the room still has it, else "" (= everyone; a leader that left the room goes back to 전체).
-const settleLeader = (choices, leader) => (leader && (choices ?? []).some((x) => x.id === leader) ? String(leader) : "");
+const settleLeader = (choices, leader) => (leader && (choices ?? []).length >= 2 && (choices ?? []).some((x) => x.id === leader) ? String(leader) : "");
 // Only the leaders whose terminal is open now stay as choices (a closed leader's session is gone: its history stays under "전체"). A leader is live when a
 // terminal carries its hc name, or sits at the address its summary recorded. `sums` = [{leader, terminal}].
 const aliveLeaders = (choices, terms, sums) => (choices ?? []).filter((c) => (terms ?? []).some((t) => t.name === c.id || (t.address && (sums ?? []).some((s) => s.leader === c.id && s.terminal === t.address))));
