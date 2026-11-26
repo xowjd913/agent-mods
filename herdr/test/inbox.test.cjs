@@ -1577,10 +1577,10 @@ test("main.js: 필터 배선 — 방별 상태, 열 때 기준 저장(표시 전
   assert.ok(!/this\.snap\b/.test(src));
   // view: 기준으로 거르고, raw(읽음 표시용)는 거르지 않은 전체
   const vw = methodOf(src, "  view() {", "  // Remembers that the person");
-  assert.match(vw, /filterEntries\(raw, filter, base\)/);
+  assert.match(vw, /filterEntries\(scope, filter, base\)/);
   assert.match(vw, /snapBase\(snaps, pick, seen, now\)/);
-  assert.match(vw, /keepWaiting\(raw, shown\)/);
-  assert.match(vw, /filterCounts\(raw, base\)/);
+  assert.match(vw, /keepWaiting\(scope, shown\)/);
+  assert.match(vw, /filterCounts\(scope, base\)/);
   // 칩 줄: 6칩, 개수, 0이어도 누를 수 있다(on_click은 항상), 누름이 창을 끌지 않게 stop
   const fb = methodOf(src, "  filterBar(t, v) {", "  pickPo(id, c) {");
   assert.match(fb, /CHAT_FILTERS\.map/);
@@ -1598,6 +1598,65 @@ test("main.js: 필터 배선 — 방별 상태, 열 때 기준 저장(표시 전
   assert.equal((src.match(/^  full\(cx\) \{/gm) ?? []).length, 1);
 });
 // 동작: setFilter / markSeen 기준 / view 필터
+// ---- #58: 특정 리더만(1:1) 보기
+const LD = (leader, kind, ms, extra = {}) => ({ key: `l|${leader}|${ms}`, who: `l:${leader}`, ms, leader, it: { kind }, ...extra });
+const ME = (to, ms) => ({ key: `me|${ms}`, who: "me", ms, text: "t", to, status: "sent" });
+const ROOM = [LD("lead-a", "done", 100), LD("lead-b", "decision", 200, { waiting: "decision" }), ME("lead-a", 300), ME("", 350), { key: "po|400", who: "po", ms: 400, text: "p" }, LD("lead-a", "verify", 500), { key: "w|lead-c", who: "l:lead-c", ms: 900, leader: "lead-c", waiting: "verify", wait: true }];
+test("roomLeaders: 방에 글이 있는 리더만 보이는 이름 순으로, 기다리는 리더는 표시한다", () => {
+  const names = { "lead-a": "나", "lead-b": "가", "lead-c": "다" };
+  assert.deepEqual(I.roomLeaders(ROOM, (n) => names[n]), [{ id: "lead-b", label: "가", waiting: true }, { id: "lead-a", label: "나", waiting: false }, { id: "lead-c", label: "다", waiting: true }]);
+  assert.deepEqual(I.roomLeaders([ME("lead-a", 1), { who: "po" }]), []); // 내 글·PO 글만으로는 리더가 생기지 않는다
+  assert.deepEqual(I.roomLeaders(undefined), []);
+});
+test("settleLeader: 방에 있는 리더면 유지, 방을 떠났거나 모르면 전체('')로 돌아간다 — PO마다 목록이 다르다", () => {
+  const po1 = I.roomLeaders([LD("lead-a", "done", 1), LD("lead-b", "done", 2)]);
+  const po2 = I.roomLeaders([LD("lead-x", "done", 1), LD("lead-y", "done", 2)]);
+  assert.equal(I.settleLeader(po1, "lead-a"), "lead-a");
+  assert.equal(I.settleLeader(po2, "lead-a"), ""); // 다른 PO 방에는 그 리더가 없다
+  assert.equal(I.settleLeader(po1, ""), "");
+  assert.equal(I.settleLeader(undefined, "lead-a"), "");
+});
+test("leaderEntries: 그 리더의 글 + 그 리더에게 보낸 내 글만 — 칩과 겹쳐 쓴다", () => {
+  assert.deepEqual(keysOf(I.leaderEntries(ROOM, "lead-a")), ["l|lead-a|100", "me|300", "l|lead-a|500"]);
+  assert.deepEqual(keysOf(I.leaderEntries(ROOM, "lead-c")), ["w|lead-c"]);
+  assert.equal(I.leaderEntries(ROOM, "").length, ROOM.length); // 고르지 않으면 방 전체
+  const scope = I.leaderEntries(ROOM, "lead-a");
+  assert.deepEqual(keysOf(I.filterEntries(scope, "verify", 0)), ["l|lead-a|500"]); // 칩은 그 리더 안에서만 거른다
+  assert.deepEqual(keysOf(I.filterEntries(scope, "decision", 0)), []); // lead-b 의 결정은 보이지 않는다
+  assert.deepEqual(I.filterCounts(scope, 0), { all: 3, unread: 2, decision: 0, verify: 1, done: 1, stop: 0 });
+  // 다른 리더가 기다리는 중이어도 1:1 보기에서는 그 리더의 글만 남는다
+  assert.deepEqual(keysOf(I.keepWaiting(scope, I.filterEntries(scope, "done", 0))), ["l|lead-a|100"]);
+});
+test("main.js: 리더 줄 배선 — 방별 상태, 칩 아래 한 줄, 방을 떠난 리더는 전체, '전체 보기'는 둘 다 푼다", () => {
+  const src = mainSrc();
+  assert.match(src, /this\.who = new Map\(\)/);
+  const vw = methodOf(src, "  view() {", "  // Remembers that the person");
+  assert.match(vw, /roomLeaders\(raw, \(n\) => shortName\(n\)\)/);
+  assert.match(vw, /settleLeader\(choices, this\.who\.get\(pick\)\)/);
+  assert.match(vw, /leaderEntries\(raw, who\)/);
+  assert.match(vw, /raw, shown, filter, who, choices/); // raw(읽음 표시용)는 좁히지 않은 전체
+  const bar = src.slice(src.indexOf("  leaderBar(t, v) {"), src.indexOf("  peek(s) {"));
+  assert.match(bar, /\(v\.choices\?\.length \?\? 0\) < 2\) return null/); // 리더가 둘 미만이면 고를 것이 없다
+  assert.match(bar, /on_mouse_down\("left", stop\)/);
+  assert.match(bar, /this\.setWho\(v\.pick, id, c\)/);
+  assert.match(src, /\.when\(Boolean\(lbar\), \(el\) => el\.child\(lbar\)\)/);
+  assert.match(src, /tlKey\(`\$\{v\.pick\}~\$\{v\.filter\}~\$\{v\.who\}`, v\.shown\)/); // 리더를 바꾸면 맨 아래로
+  assert.match(src, /\(v\.filter !== "all" \|\| v\.who\) && v\.raw\.length/);
+  assert.match(src, /this\.setWho\(v\.pick, "", c\); this\.setFilter\(v\.pick, "all", c\)/);
+});
+test("setWho: 방마다 따로 기억하고, 빈 값이면 풀어 다시 그린다", () => {
+  let n = 0;
+  const m = runMethod(mainSrc(), "  setWho(room, leader, c) {", "  // #58: the leader row", mkGlobals()).setWho;
+  const self = { who: new Map() };
+  m.call(self, "r1", "lead-a", { notify: () => n++ });
+  m.call(self, "r2", "lead-b", { notify: () => n++ });
+  m.call(self, "", "lead-c", { notify: () => n++ });
+  assert.equal(self.who.get("r1"), "lead-a");
+  assert.equal(self.who.size, 2);
+  m.call(self, "r1", "", { notify: () => n++ });
+  assert.equal(self.who.has("r1"), false);
+  assert.equal(n, 3);
+});
 test("setFilter: 방마다 따로 기억하고 다시 그린다", () => {
   const src = mainSrc();
   let n = 0;

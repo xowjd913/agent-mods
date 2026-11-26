@@ -438,6 +438,24 @@ function keepWaiting(raw, shown) {
   const have = new Set(shown ?? []);
   return (raw ?? []).filter((e) => have.has(e) || e.waiting);
 }
+// #58: "특정 리더만" — the 1:1 view of one leader inside the picked room, on top of the chips (the chip then filters that leader's entries).
+// A leader's entries are its reports (who "l:<leader>", also the made-up waiting one) and the person's lines to it (who "me", `to` = the leader).
+const entryLeader = (e) => (String(e?.who ?? "").startsWith("l:") ? String(e.who).slice(2) : "");
+// The leaders that have an entry in the room, by shown name: [{id, label, waiting}] (waiting = one of its entries waits on the person).
+function roomLeaders(entries, label = (id) => id) {
+  const out = [];
+  for (const e of entries ?? []) {
+    const id = entryLeader(e);
+    if (!id) continue;
+    const had = out.find((x) => x.id === id);
+    if (had) had.waiting = had.waiting || Boolean(e.waiting);
+    else out.push({ id, label: String(label(id) ?? id), waiting: Boolean(e.waiting) });
+  }
+  return out.sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
+}
+// The leader to filter by: `leader` while the room still has it, else "" (= everyone; a leader that left the room goes back to 전체).
+const settleLeader = (choices, leader) => (leader && (choices ?? []).some((x) => x.id === leader) ? String(leader) : "");
+const leaderEntries = (entries, leader) => (leader ? (entries ?? []).filter((e) => entryLeader(e) === leader || (e?.who === "me" && e.to === leader)) : entries ?? []);
 // The "안 읽은 것" base, shared by every copy of the mod (Dock, window, pane): {<room>: {seen, ts}}. The first copy to draw a room takes the room's
 // last-opened marker before it moves, and the others use that same value for SNAP_TTL_MS after it was last drawn (each draw renews it).
 const SNAP_TTL_MS = 30000;
@@ -1036,6 +1054,7 @@ export default class Inbox extends View {
     this.promptBusyAt = 0;
     this.promptGen = 0;
     this.promptChain = 0; // the newest scheduled re-read of the screen; an older one does nothing
+    this.who = new Map(); // room -> the leader the room is narrowed to (#58, "특정 리더만"); like `filt`, not saved
     this.filt = new Map(); // room -> the chat filter chip picked there (전체 when missing); not saved: a restart shows every message again
     this.heldAt = 0; // the last Enter held back as a possible IME confirm (ms)
     this.nlAt = 0; // the last Shift+Enter handled (ms)
@@ -1567,13 +1586,16 @@ export default class Inbox extends View {
       return { ...r, n: all.filter((a) => a.owner === r.id).length, unread: r.id === pick ? 0 : unreadCount(entries, seen[r.id]) };
     });
     const filter = pick ? this.filt.get(pick) ?? "all" : "all";
+    const choices = roomLeaders(raw, (n) => shortName(n)); // #58: the leaders of the picked room (follows the room; a gone one is dropped)
+    const who = pick ? settleLeader(choices, this.who.get(pick)) : "";
+    const scope = leaderEntries(raw, who); // the 1:1 view of one leader (all of the room when none): the chips work on this
     let snaps = {};
     try { snaps = shared(SNAP_KEY) ?? {}; } catch {}
     const base = snapBase(snaps, pick, seen, now); // opening a room moves `seen` to now: filter by the marker from before (the same one in every copy)
-    const shown = filterEntries(raw, filter, base);
-    const keep = keepWaiting(raw, shown); // a leader still waiting on the person stays visible under any chip
+    const shown = filterEntries(scope, filter, base);
+    const keep = keepWaiting(scope, shown); // a leader still waiting on the person stays visible under any chip
     const entries = groupTimeline(keep.filter((e, i) => i >= keep.length - MAX_ENTRIES || e.waiting));
-    return { terms, tabs, pick, raw, shown, filter, counts: filterCounts(raw, base), entries, asks: all.filter((a) => a.owner === pick), reports: reps.filter((r) => r.owner === pick) };
+    return { terms, tabs, pick, raw, shown, filter, who, choices, counts: filterCounts(scope, base), entries, asks: all.filter((a) => a.owner === pick), reports: reps.filter((r) => r.owner === pick) };
   }
 
   // Remembers that the person has the picked room's newest message on screen. Both the window and the dock show a room, so both
@@ -1594,7 +1616,6 @@ export default class Inbox extends View {
     this.filt.set(room, key);
     c.notify();
   }
-
   // The chips above a room's timeline: 전체 | 안 읽은 것 | 결정 필요 | 최종 확인 요청 | 결과 | 멈춤, each with its count (0 = dim, still pressable).
   filterBar(t, v) {
     if (!v.pick || !v.raw.length) return null;
@@ -1614,6 +1635,25 @@ export default class Inbox extends View {
     this.menu = null;
     this.markSeen();
     c.notify();
+  }
+
+  setWho(room, leader, c) {
+    if (!room) return;
+    if (leader) this.who.set(room, leader); else this.who.delete(room);
+    c.notify();
+  }
+
+  // #58: the leader row under the chips — 전체 | one chip per leader of the room. It works together with the chips (the chip filters that leader's
+  // entries). Shown when the room has two or more leaders (with one there is nothing to choose); a leader that waits on the person is marked.
+  leaderBar(t, v) {
+    if (!v.pick || (v.choices?.length ?? 0) < 2) return null;
+    const chip = (id, label, on, mark, tip) => div().id(`who-${id || "all"}`).flex_none().h(22).px(8).rounded(11).flex().items_center().cursor_pointer().text_size(11).on_mouse_down("left", stop)
+      .bg(on ? t.selected : t.raised).border(1).border_color(on ? t.foreground + "40" : t.border).text_color(on ? t.foreground : t.muted)
+      .hover((x) => x.bg(t.hover).text_color(t.foreground)).on_click((_e, c) => this.setWho(v.pick, id, c)).tooltip(tip).child(mark ? `${label} ●` : label);
+    return h_flex().flex_none().min_w(0).px(10).py(5).gap(5).items_center().flex_wrap().border_b(1).border_color(t.border)
+      .child(div().flex_none().text_size(10.5).text_color(t.dim).child("리더"))
+      .child(chip("", "전체", !v.who, false, "이 방의 모든 리더"))
+      .children(v.choices.map((x) => chip(x.id, x.label, v.who === x.id, x.waiting, `${x.label}와 주고받은 글만(● = 나의 답을 기다림)`)));
   }
 
   peek(s) {
@@ -2434,10 +2474,10 @@ export default class Inbox extends View {
       }
       blocks.push(this.entryRow(t, e, v, cx));
     });
-    if (!blocks.length && v.pick && v.filter !== "all" && v.raw.length) {
+    if (!blocks.length && v.pick && (v.filter !== "all" || v.who) && v.raw.length) {
       blocks.push(h_flex().flex_none().p(14).gap(8).items_center()
         .child(div().text_size(12).text_color(t.dim).child("해당 메시지 없음 —"))
-        .child(this.button(t, "flt-reset", "전체 보기", (c) => this.setFilter(v.pick, "all", c), { primary: true })));
+        .child(this.button(t, "flt-reset", "전체 보기", (c) => { this.setWho(v.pick, "", c); this.setFilter(v.pick, "all", c); }, { primary: true })));
     }
     if (!blocks.length) {
       blocks.push(div().flex_none().p(14).text_size(12).text_color(t.dim)
@@ -2449,7 +2489,7 @@ export default class Inbox extends View {
     for (const x of this.typing(v)) blocks.push(this.typingRow(t, x));
     // Follow the newest: a new message scrolls to the bottom when the room just opened or the person already was at the bottom;
     // a person who scrolled up keeps their place. The handle's numbers are those of the last layout.
-    const key = tlKey(`${v.pick}~${v.filter}`, v.shown); // a new filter scrolls to the newest like a new room
+    const key = tlKey(`${v.pick}~${v.filter}~${v.who}`, v.shown); // a new filter scrolls to the newest like a new room
     this.lastIdx = Math.max(0, blocks.length - 1);
     if (this.scroll) {
       let atEnd = true;
@@ -2480,6 +2520,7 @@ export default class Inbox extends View {
       .on_mouse_down_out((_e, c) => { this.ui.press = false; if (this.ui.sel) this.dropSel(); if (this.dirty) this.softNotify(c); })
       .when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks);
     const bar = this.filterBar(t, v);
+    const lbar = this.leaderBar(t, v);
     const usage = this.usageLine(t); // null before the first read
     const panel = this.promptPanel(t, v, cx); // a blocked PO's screen + its keys (null while the room's PO is not waiting on a prompt)
     const room = v_flex().flex_1().min_w(0).min_h(0).when(!strip, (el) => el.h_full()) // beside the rooms the column must fill the row (h_flex centers children)
@@ -2488,6 +2529,7 @@ export default class Inbox extends View {
         .child(div().flex_none().text_size(10.5).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : `리더 ${new Set(v.raw.filter((e) => e.leader).map((e) => e.leader)).size}명`))))
       .when(Boolean(usage), (el) => el.child(usage))
       .when(Boolean(bar), (el) => el.child(bar))
+      .when(Boolean(lbar), (el) => el.child(lbar))
       .child(lines)
       .when(Boolean(panel), (el) => el.child(panel))
       .child(this.chatBox(t, v));
