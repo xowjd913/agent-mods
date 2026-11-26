@@ -1167,3 +1167,32 @@ test("#74: 소스 — 채팅 상자는 모든 방에서 같은 자리에 그려�
   const where = (n) => { const head = MAIN.slice(0, MAIN.split("\n").slice(0, n).join("\n").length); return head.slice(head.lastIndexOf("\n  ") + 1).split("\n")[0]; };
   for (const [n] of writers) assert.match(MAIN.split("\n").slice(0, n).reverse().find((l) => /^  [a-zA-Z]+\(.*\) \{$/.test(l)), /pickMenu|enterBox|dropBreak/, `line ${n}`);
 });
+
+test("#66 mdText: a numbered list stays compact even when the source has blank lines between its items, like the '-' list", () => {
+  assert.equal(I.mdText("앞\n\n1. 하나\n\n2. 둘\n\n3. 셋\n\n뒤"), "앞\n\n1. 하나\n2. 둘\n3. 셋\n\n뒤");
+  assert.equal(I.mdText("- a\n\n- b"), "- a\n- b");
+  assert.equal(I.mdText("1) 하나\n\n\n2) 둘"), "1. 하나\n2. 둘");
+  // a blank line between a list and a real paragraph stays, and so does one between two paragraphs
+  assert.equal(I.mdText("- a\n\n문단\n\n다음 문단"), "- a\n\n문단\n\n다음 문단");
+  assert.equal(I.mdText("- a\n\n```\nx\n```"), "- a\n\n```\nx\n```");
+});
+
+test("#66 mdText: a first line '[이름] 종류' over more text is a bold header; a link, a lone line or a long sentence is not", () => {
+  assert.equal(I.mdText("[lead-po-inbox] 최종 확인 요청\n\n본문"), "**[lead-po-inbox] 최종 확인 요청**\n\n본문");
+  assert.deepEqual(I.mdBlocks(I.mdText("[lead-po-inbox] 최종 확인 요청\n본문\n\n1. 하나\n\n2. 둘")), [{ s: "[lead-po-inbox] 최종 확인 요청", bold: true }, { s: "본문\n\n1. 하나\n2. 둘", bold: false }]);
+  assert.equal(I.mdText("[a] b"), "[a] b"); // nothing under it
+  assert.equal(I.mdText("[링크](http://x) 가\n다"), "[링크](http://x) 가  \n다");
+  assert.equal(I.mdText("[a] " + "긴 ".repeat(40) + "\n다"), "[a] " + "긴 ".repeat(40) + "  \n다");
+  assert.equal(I.mdText("앞 줄\n[a] 둘째 줄\n다"), "앞 줄  \n[a] 둘째 줄  \n다"); // only the first line
+  assert.equal(I.mdText("**[a] 이미 굵게**\n다"), "**[a] 이미 굵게**  \n다");
+});
+
+test("#66 the person's own bubble draws through the same Markdown path as the PO bubbles (list, `code`, bold header)", () => {
+  assert.match(MAIN, /when\(Boolean\(bp\.text\), \(el\) => el\.child\(this\.md\(`\$\{id\}-t`, words\)\)\)/);
+  assert.ok(!/chatHtml\(words\)/.test(MAIN));
+  assert.match(MAIN, /this\.mdFolded\(id, e\.text, t\)/);
+});
+
+test("#66 the recommended option's button says so, and still sends the plain '<N>안 선택'", () => {
+  assert.match(MAIN, /`\$\{n\}안 선택\$\{n === opts\.recommended \? " \(추천\)" : ""\}`, \(c\) => this\.send\(a, `\$\{n\}안 선택`, c, "choice"\)/);
+});

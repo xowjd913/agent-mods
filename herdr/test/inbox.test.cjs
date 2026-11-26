@@ -1126,6 +1126,20 @@ test("decisionOptions: 추천 줄은 그 칩만 primary로 가리킨다(없는 �
   assert.deepEqual(I.decisionOptions("추천: 1안\n1안: 가"), { options: [], recommended: 0 }); // 선택지가 둘 미만이면 추천도 없다
 });
 
+test("decisionOptions: 번호와 콜론 사이의 (추천) 표시도 선택지로 읽고, 그 칩을 추천으로 가리킨다(#66)", () => {
+  assert.deepEqual(I.decisionOptions("1안(추천): 가\n2안: 나\n3안: 다"), { options: [1, 2, 3], recommended: 1 });
+  assert.deepEqual(I.decisionOptions("1안 (추천): 가\n2안: 나"), { options: [1, 2], recommended: 1 });
+  assert.deepEqual(I.decisionOptions("1안（추천）：가\n2안：나"), { options: [1, 2], recommended: 1 }); // 전각 괄호·콜론
+  assert.deepEqual(I.decisionOptions("1안: 가\n2안: 나 (추천)"), { options: [1, 2], recommended: 2 }); // 줄 끝 표시
+  assert.deepEqual(I.decisionOptions("- 1안 [권장]: 가\n- 2안: 나"), { options: [1, 2], recommended: 1 });
+  assert.deepEqual(I.decisionOptions("**1안(추천)**: 가\n**2안**: 나"), { options: [1, 2], recommended: 1 }); // 굵게
+  assert.deepEqual(I.decisionOptions("1안: 가 ★\n2안: 나"), { options: [1, 2], recommended: 1 });
+  assert.deepEqual(I.decisionOptions("1안(보류): 가\n2안: 나"), { options: [1, 2], recommended: 0 }); // 추천 표시가 아니면 선택지만
+  assert.deepEqual(I.decisionOptions("1안: 가\n2안: 나\n추천: 2안"), { options: [1, 2], recommended: 2 }); // 기존 추천 줄은 그대로
+  // 화면에 찍힌 그대로(PR #78 결정 카드)
+  assert.deepEqual(I.decisionOptions('어느 쪽 이름을 바꿀까요?\n1안(추천): 전체로 바꾸는 버튼을 "전체 화면"으로 (탭은 "UI 모드" 그대로)\n2안: 탭을 "UI 칸"으로\n3안: 둘 다 그대로'), { options: [1, 2, 3], recommended: 1 });
+});
+
 test("decisionOptions: 다른 형식은 추측하지 않는다(A:, 1), ①, 번호 목록, 4안, 문장 중간)", () => {
   for (const body of ["A: 가\nB: 나", "1) 가\n2) 나", "① 가\n② 나", "1. 첫 단계\n2. 둘째 단계", "4안: 가\n5안: 나", "옵션 1안: 가\n옵션 2안: 나", "1안:\n2안:", "1안 가\n2안 나", "", null, undefined])
     assert.deepEqual(I.decisionOptions(body), { options: [], recommended: 0 }, String(body));

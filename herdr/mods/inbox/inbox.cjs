@@ -1315,12 +1315,20 @@ function dockTarget(here, f, terms) {
 // The options of a decision report, read strictly from its body (the leader report rule: one "N안: ..." line per option, N = 1..3, and
 // optionally a "추천: N안" line). At least two distinct numbers, otherwise none (nothing is guessed: "A:", "1)", "①", "1. step" are not options).
 // -> { options: [1, 2], recommended: 2 | 0 }
+const REC_MARK = /추천|권장|recommend/i;
 function decisionOptions(body) {
   const nums = new Set();
   let rec = 0;
   for (const line of String(body ?? "").split(/\r?\n/)) {
-    let m = line.match(/^\s*(?:[-*]\s*)?([1-3])안\s*[:：)]\s*\S/);
-    if (m) { nums.add(Number(m[1])); continue; }
+    // "1안: …", "1안) …", and with a marker between the number and the colon: "1안(추천): …", "1안 (추천): …", "**1안** [권장]: …"
+    let m = line.match(/^\s*(?:[-*]\s*)?(?:\*\*)?([1-3])안(?:\*\*)?\s*(?:[(（\[［]([^)）\]］\n]{0,24})[)）\]］])?\s*(?:\*\*)?\s*[:：)]\s*\S/);
+    if (m) {
+      const n = Number(m[1]);
+      nums.add(n);
+      // the recommendation marked on the option itself: "1안(추천):" or "… (추천)" / "★" at the end of its line
+      if (!rec && (REC_MARK.test(m[2] ?? "") || /[(（\[［][^)）\]］\n]{0,24}(?:추천|권장)[^)）\]］\n]{0,24}[)）\]］]\s*$/.test(line) || /[★⭐]\s*$/.test(line))) rec = n;
+      continue;
+    }
     m = line.match(/^\s*(?:[-*]\s*)?추천\s*[:：]\s*([1-3])안/);
     if (m && !rec) rec = Number(m[1]);
   }
@@ -1537,6 +1545,8 @@ function clipLong(text) {
 const moreLabel = (more) => `더 보기 · ${String(Math.max(0, Number(more) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}자 더`;
 // A list item line of a Markdown source: "-", "*" or "+", or "1." / "1)", then a blank and some text.
 const MD_ITEM = /^\s*(?:[-*+]|(\d{1,9})[.)])\s+\S/;
+// A first line like "[lead-po-inbox] 최종 확인 요청": a [tag], a blank, a short title.
+const MD_HEAD = /^\s*\[[^\]\n]{1,60}\][ \t]+\S[^\n]{0,60}$/;
 // A message text as Markdown for a TextView.markdown(...).raw_html(false): wrapper tags removed first (they would print literally), a line that
 // is only 【...】 made bold, images switched off (![x](y) -> a plain link), single line breaks kept as line breaks (Markdown would join them), and
 // the list marks people type ("•", "1)") written as real Markdown items with a blank line before the list and after it (#66), so the view draws
@@ -1544,18 +1554,31 @@ const MD_ITEM = /^\s*(?:[-*+]|(\d{1,9})[.)])\s+\S/;
 // Never produces HTML: the view shows tags as text. Pure.
 function mdText(text) { return tlMemoGet("m", text, mdTextRaw); }
 function mdTextRaw(text) {
+  const norm = (ln) => ln.replace(/!\[/g, "!\\[").replace(/^(\s*)[•‣▪◦●・]\s+/, "$1- ").replace(/^(\s*)(\d{1,3})[)）]\s+/, "$1$2. ");
   const src = unwrapTags(text).replace(/\r\n?/g, "\n").split("\n");
+  // a first line like "[이름] 종류" over more text is the header of the message: shown bold, as a line of its own
+  const first = src.findIndex((l) => l.trim());
+  const head = first >= 0 && src.length > first + 1 && src.slice(first + 1).some((l) => l.trim()) && MD_HEAD.test(src[first]) && !src[first].includes("**") && !MD_ITEM.test(norm(src[first]));
   let fence = false, inList = false;
   const rows = [];
-  for (const ln of src) {
+  for (let i = 0; i < src.length; i++) {
+    const ln = src[i];
     if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; inList = false; rows.push({ s: ln, flow: false }); continue; }
     if (fence) { rows.push({ s: ln, flow: false }); continue; }
-    let s = ln.replace(/!\[/g, "!\\[").replace(/^(\s*)[•‣▪◦●・]\s+/, "$1- ").replace(/^(\s*)(\d{1,3})[)）]\s+/, "$1$2. ");
-    if (/^\s*【[^】\n]*】[:：]?\s*$/.test(s)) s = `**${s.trim()}**`;
+    let s = norm(ln);
+    if (head && i === first) s = `**${s.trim()}**`;
+    else if (/^\s*【[^】\n]*】[:：]?\s*$/.test(s)) s = `**${s.trim()}**`;
     const m = MD_ITEM.exec(s);
     const item = Boolean(m) && (inList || m[1] === undefined || m[1] === "1"); // a "2025. 11" line is text, not a list that starts at 2025
     const prev = rows[rows.length - 1];
     const blank = !s.trim();
+    // blank lines between two items of one list are dropped: a list with a gap between its items is drawn as paragraphs, and a numbered
+    // list people write as "1. a", blank, "2. b" must look like the "-" list (compact); a gap only separates real paragraphs
+    if (blank && inList) {
+      let j = i + 1;
+      while (j < src.length && !src[j].trim()) j++;
+      if (j < src.length && !/^\s*(?:```|~~~)/.test(src[j]) && MD_ITEM.test(norm(src[j]))) continue;
+    }
     // a list needs a blank line before it to be one, and the line after it a blank line to be out of it again
     if (prev?.flow && prev.s.trim() && ((item && !inList) || (!item && !blank && inList && !/^\s/.test(s)))) rows.push({ s: "", flow: true });
     if (blank) inList = false;
