@@ -3115,9 +3115,23 @@ test("checkRemote #109: 트랜스크립트의 마지막 bridge-session 기록이
   const g = rcFix([RB_ON, RB_OFF, JSON.stringify({ type: "user" }), RB_ON]); g.mark();
   assert.equal(I.bridgeState(g.tp), "on");
   assert.equal(g.check().on, true);
-  const h = rcFix([JSON.stringify({ type: "user" })]); h.mark(); // no bridge line at all: the record alone (the desk saw it on)
+  const h = rcFix([JSON.stringify({ type: "user" })]); h.mark(); // no bridge line at all: nothing backs the record
   assert.equal(I.bridgeState(h.tp), "none");
-  assert.equal(h.check().on, true);
+  assert.equal(h.check().on, false);
+});
+test("checkRemote #109: 켜짐 근거가 되는 bridge 줄(비어 있지 않은 마지막 줄)이 안 보이면 꺼짐(없음·잘린 꼬리), 세션 기록이 사라졌어도 꺼짐", () => {
+  const f = rcFix([JSON.stringify({ type: "user", message: "x".repeat(200) })]); f.mark();
+  assert.equal(I.bridgeState(f.tp), "none"); // the whole file read and no bridge line in it
+  assert.deepEqual(f.check(), { on: false, why: "bridge", url: "" });
+  const g = rcFix([RB_OFF, JSON.stringify({ type: "user", message: "y".repeat(300) })]); g.mark(); // a disconnect line buried behind a long tail
+  assert.equal(I.bridgeState(g.tp, 64), "none"); // the 64-byte tail holds no bridge line
+  assert.deepEqual(g.check(4242, { bridge: (file) => I.bridgeState(file, 64) }), { on: false, why: "bridge", url: "" });
+  const k = rcFix([RB_OFF, RB_ON, JSON.stringify({ type: "user", message: "z" })]); k.mark();
+  assert.equal(I.bridgeState(k.tp, 160), "on"); // a non-empty line inside the tail still backs the record
+  assert.equal(k.check(4242, { bridge: (file) => I.bridgeState(file, 160) }).on, true);
+  const h = rcFix(); h.mark();
+  fs.unlinkSync(path.join(h.dir, "po-session", "a.json"));
+  assert.deepEqual(h.check(), { on: false, why: "session", url: "" });
 });
 test("checkRemote #109: pid가 이미 없으면(ps가 못 찾음) 꺼짐이고 기록을 지운다", () => {
   const f = rcFix(); f.mark();

@@ -812,8 +812,10 @@ function checkRemote(dir, id, pid, { psRun = null, platform = process.platform, 
   if (!start) return off("dead");
   if (start !== rec.start) return off("start");
   const ses = readPoSession(dir, id);
+  if (rec.sid && !ses) return off("session"); // the session record the desk saw is gone: the transcript cannot be checked
   if (rec.sid && ses?.sid && ses.sid !== rec.sid) return off("session");
-  if (ses && bridge(ses.path) === "off") return off("bridge");
+  // Only a non-empty newest bridge line backs the record. "none" (no line at all, or none inside the 8 MiB tail read: a disconnect may be buried further back) is not enough.
+  if (ses && bridge(ses.path) !== "on") return off("bridge");
   return { on: true, why: "", url: typeof rec.url === "string" ? rec.url : "" };
 }
 // {<po id>: {usd, unknown:[model ids not in the table], sub:<sub-agent transcripts counted>, partial}} for every PO that has a session record
