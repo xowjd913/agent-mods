@@ -1147,7 +1147,7 @@ test("main.js: 칩은 대기 중인 결정(decision) 말풍선에만, 같은 sen
   const src = mainSrc();
   const a = src.indexOf("  askActions(t, a, cx) {");
   const body = src.slice(a, src.indexOf("    if (!a.po) box.child", a));
-  assert.match(body, /const opts = kind === "decision" \? decisionOptions\(item\?\.body\)/); // 한 번만 계산
+  assert.match(body, /const opts = kind === "decision" && !groups\.length \? decisionOptions\(item\?\.body\)/); // 한 번만 계산
   assert.match(body, /kind === "decision" \? opts\.options\.map/);
   assert.match(body, /`\$\{n\}안 선택`/);
   assert.match(body, /this\.send\(a, `\$\{n\}안 선택`, c, "choice"\)/);
@@ -1184,7 +1184,7 @@ test("main.js: 추천·답 줄과 답 버튼은 N안 칩이 없는 결정 카드
   const src = mainSrc();
   const a = src.indexOf("  askActions(t, a, cx) {");
   const body = src.slice(a, src.indexOf("    if (!a.po) box.child", a));
-  assert.match(body, /const hint = kind === "decision" && opts\.options\.length < 2 \? decisionHints\(item\?\.body\)/);
+  assert.match(body, /const hint = kind === "decision" && !groups\.length && opts\.options\.length < 2 \? decisionHints\(item\?\.body\)/);
   assert.match(body, /hint\.lines\.map/);
   assert.match(body, /hint\.answers\.map/);
   assert.match(body, /this\.send\(a, w, c, "choice"\)/);
@@ -1240,7 +1240,7 @@ test("timeline: 내 글은 그 방(po)에만, 종류·상태·받는 리더를 �
 test("main.js: 모든 데스크 보내기는 deliver 한 곳에서 한 번만 기록하고, 말풍선은 오른쪽(내 것)·왼쪽(리더·PO)에 시간을 바깥 아래에 둔다", () => {
   const src = mainSrc();
   const del = deliverOf(src);
-  assert.equal((src.match(/setShared\(CHAT_KEY/g) ?? []).length, 2); // 쓰는 곳은 record()(새 글)와 mark()(상태 바꿈) 둘뿐
+  assert.equal((src.match(/setShared\(CHAT_KEY/g) ?? []).length, 3); // 쓰는 곳은 record()(새 글)·mark()(상태 바꿈)·discard()(보내지 못한 말풍선 삭제) 셋뿐
   assert.equal((del.match(/this\.record\(/g) ?? []).length, 1); // 새 기록은 deliver 한 곳에서 한 번(다시 보내기는 같은 id로 상태만 바꾼다)
   assert.match(del, /if \(!id\) id = this\.record\(\{ \.\.\.rec, line: text \}, "sending"\)/);
   for (const st of ["failed", "held", "nopane"]) assert.match(del, new RegExp(`this\\.mark\\(id, "${st}"\\)`));
@@ -1271,7 +1271,7 @@ test("setChatStatus: 그 id의 기록만 상태와 시각을 바꾸고, 같은 �
 
 test("mineActs: 아무것도 못 간 것은 다시 보내기, Enter만 빠진 것은 Enter(10분 안)·다시 보내기(오래되면), 질문에 답한 뒤의 held도 버튼이 생긴다", () => {
   const MIN = 60000;
-  for (const st of ["nopane", "failed", "gone"]) assert.deepEqual(I.mineActs(st), ["resend"], st);
+  for (const st of ["nopane", "failed", "gone"]) assert.deepEqual(I.mineActs(st), ["resend", "delete"], st); // 보내지 못한 말풍선만 삭제도 있다
   assert.deepEqual(I.mineActs("noenter", false, 0), ["enter"]);
   assert.deepEqual(I.mineActs("noenter", false, 9 * MIN), ["enter"]);
   assert.deepEqual(I.mineActs("noenter", false, 11 * MIN), ["resend"]); // 10분 지난 Enter 버튼은 사라진다(입력창이 바뀌었을 수 있다)
@@ -1280,6 +1280,7 @@ test("mineActs: 아무것도 못 간 것은 다시 보내기, Enter만 빠진 �
   assert.deepEqual(I.mineActs("held", false, 1000), ["enter", "resend"]); // 질문에 답한 뒤
   assert.deepEqual(I.mineActs("held", false, 11 * MIN), ["resend"]);
   for (const st of ["sent", "sending", "opening"]) assert.deepEqual(I.mineActs(st, false, 0), [], st);
+  for (const [st, blocked, age] of [["noenter", false, 0], ["noenter", false, 11 * MIN], ["held", false, 0], ["held", true, 0], ["held", false, 11 * MIN]]) assert.ok(!I.mineActs(st, blocked, age).includes("delete"), st); // PO 입력창에 글이 남았을 수 있는 것은 지우지 않는다
   assert.equal(I.mineAct, undefined); // 옛 단일 버튼 함수는 없다
 });
 
@@ -1422,6 +1423,7 @@ test("chatRecord·timeline: gone 상태가 있고, 내 글에 시각(at)이 실�
 // main.js 메서드를 가짜 this·전역으로 돌린다(런타임 없이 흐름만 본다).
 const runMethod = (src, head, next, globals) => {
   const m = methodOf(src, head, next);
+  globals = { cutHead: I.cutHead, wellFormed: I.wellFormed, initial: I.initial, ...globals }; // the shared text-cut helpers of the chat block (#113)
   const names = Object.keys(globals);
   return new Function(...names, `return ({ ${m.replace(/\n\s*\/\/[^\n]*\s*$/g, "")} });`)(...names.map((k) => globals[k]));
 };
@@ -1877,14 +1879,69 @@ test("timeline: 터미널에 직접 친 글(me)은 오른쪽 내 말풍선으로
   assert.deepEqual(kinds(I.timeline("p1", [], [typed("@lead-a 데스크 글")], [sent])), ["me"]);
   // 기록 하나는 직접 친 글 하나만 덮는다
   assert.deepEqual(kinds(I.timeline("p1", [], [typed("데스크 글"), typed("데스크 글", ms + 1000)], [sent])), ["me", "me:typed"]);
-  // 실패·칸 없음·사라짐 기록은 PO에 닿지 않았으니 덮지 않는다
-  for (const status of ["failed", "nopane", "gone"]) assert.deepEqual(kinds(I.timeline("p1", [], [typed("데스크 글")], [{ ...sent, status }])).sort(), ["me", "me:typed"]);
+  // 실패·칸 없음·사라짐으로 적힌 기록도 PO 훅이 같은 글을 제출로 기록했으면 닿은 것이다(#111): 하나로 덮이고 "sent"로 보인다
+  for (const status of ["failed", "nopane", "gone", "noenter", "sending"]) {
+    const t = I.timeline("p1", [], [typed("데스크 글")], [{ ...sent, status }]);
+    assert.deepEqual(kinds(t), ["me"], status);
+    assert.equal(t[0].status, "sent", status);
+  }
   // 다른 PO의 기록, 11분보다 오래된 기록, 훅 줄보다 1분 넘게 나중인 기록은 덮지 않는다
   assert.equal(I.timeline("p1", [], [typed("데스크 글")], [{ ...sent, po: "p2" }]).length, 1);
   assert.deepEqual(kinds(I.timeline("p1", [], [typed("데스크 글")], [{ ...sent, ms: ms - 12 * 60000 }])), ["me", "me:typed"]);
   assert.deepEqual(kinds(I.timeline("p1", [], [typed("데스크 글")], [{ ...sent, ms: ms + 2 * 60000 }])).sort(), ["me", "me:typed"]);
   // PO 모름 방에는 직접 친 글도 없다
   assert.equal(I.timeline(I.PO_OTHER, [], [typed("x")], []).length, 0);
+});
+
+test("timeline #111: 훅 제출 기록이 없는 실패 기록은 실패 그대로이고, 있는 것은 sent로 바뀐다 (17:02 실제 기록의 모양)", () => {
+  const ms = Date.parse(T(10));
+  const typed = (text, at) => ({ ts: new Date(at).toISOString(), ms: at, text, to: "", me: true });
+  // 17:02:24 데스크가 보냈고 hc send는 started:false로 끝나 실패로 적혔다. PO는 일하는 중이라 글을 줄에 세웠다가 25초 뒤 턴이 끝나자 제출했다
+  const failed = { id: "m1", ms, at: ms, text: "원격을 켰던 PO인데 재실행하니 안 돼", line: "원격을 켰던 PO인데 재실행하니 안 돼", to: "", po: "p1", status: "failed" };
+  const before = I.timeline("p1", [], [], [failed]);
+  assert.equal(before.length, 1);
+  assert.equal(before[0].status, "failed"); // 훅 기록이 아직 없는 동안은 실패로 보인다
+  assert.ok(I.mineActs(before[0].status).includes("resend")); // 실패 기록에는 다시 보내기가 있다(다른 버튼이 함께 있어도 상관없다)
+  const after = I.timeline("p1", [], [typed("원격을 켰던 PO인데 재실행하니 안 돼", ms + 25000)], [failed]);
+  assert.equal(after.length, 1); // 같은 글이 두 번(실패 말풍선 + 직접 친 글) 나오지 않는다
+  assert.equal(after[0].who, "me");
+  assert.equal(after[0].id, "m1"); // 데스크 기록이 남아 있다
+  assert.equal(after[0].status, "sent");
+  assert.ok(!I.mineActs(after[0].status).includes("resend")); // 다시 보내기 버튼이 없다 - 눌러도 중복으로 가지 않는다
+  // 붙여 넣기 래퍼가 붙은 훅 줄도 같은 글로 본다
+  const wrapped = I.timeline("p1", [], [typed('<pasted_content id="027d">\n원격을 켰던 PO인데 재실행하니 안 돼\n</pasted_content>', ms + 25000)], [failed]);
+  assert.equal(wrapped.length, 1);
+  assert.equal(wrapped[0].status, "sent");
+  // 다른 글의 훅 줄, 11분이 지난 훅 줄은 실패 기록을 살리지 않는다
+  assert.equal(I.timeline("p1", [], [typed("전혀 다른 글", ms + 25000)], [failed]).find((e) => e.id === "m1").status, "failed");
+  assert.equal(I.timeline("p1", [], [typed(failed.text, ms + 12 * 60000)], [failed]).find((e) => e.id === "m1").status, "failed");
+  // 같은 글의 정상 기록(sent)과 실패 기록이 함께 있으면 훅 줄 하나는 정상 기록이 먼저 가져간다 - 실패 기록은 실패로 남는다
+  const good = { ...failed, id: "m2", status: "sent", ms: ms + 1000, at: ms + 1000 };
+  const both = I.timeline("p1", [], [typed(failed.text, ms + 25000)], [failed, good]);
+  assert.equal(both.find((e) => e.id === "m1").status, "failed");
+  assert.equal(both.find((e) => e.id === "m2").status, "sent");
+  assert.equal(both.length, 2);
+  // 같은 글을 두 번 보냈고 훅 줄이 둘이면 둘 다 sent
+  const two = I.timeline("p1", [], [typed(failed.text, ms + 25000), typed(failed.text, ms + 40000)], [failed, { ...failed, id: "m3", ms: ms + 2000, at: ms + 2000 }]);
+  assert.deepEqual(two.filter((e) => e.who === "me").map((e) => e.status), ["sent", "sent"]);
+});
+
+test("hookProved #111: 훅의 me 줄이 기록의 글을 제출로 보았는지만 가린다", () => {
+  const ms = 1_000_000;
+  const rec = { line: "안녕  하세요", text: "안녕 하세요", ms };
+  assert.equal(I.hookProved([{ ms: ms + 25000, text: "안녕 하세요" }], rec), true);
+  assert.equal(I.hookProved([{ ms: ms + 25000, text: '<pasted_content id="1">안녕 하세요</pasted_content>' }], rec), true);
+  assert.equal(I.hookProved([{ ms: ms + 25000, text: "다른 글" }], rec), false);
+  assert.equal(I.hookProved([], rec), false);
+  assert.equal(I.hookProved(null, rec), false);
+  assert.equal(I.hookProved([{ ms: ms - 61000, text: "안녕 하세요" }], rec), false); // 보내기 1분 넘게 전의 줄
+  assert.equal(I.hookProved([{ ms: ms + 12 * 60000, text: "안녕 하세요" }], rec), false); // 11분 넘게 뒤의 줄
+  assert.equal(I.hookProved([{ ms: ms + 5, text: 7 }], rec), false);
+  // since로 창의 시작을 옮긴다(보내기 시작 시각)
+  assert.equal(I.hookProved([{ ms: ms + 50000, text: "안녕 하세요" }], rec, ms + 49000), true);
+  // 훅이 2000자에서 자른 긴 글("…")도 시작이 같으면 같은 글이다
+  const long = "가".repeat(900) + " " + "나".repeat(900);
+  assert.equal(I.hookProved([{ ms: ms + 1, text: long.slice(0, 1500) + "…" }], { line: long, text: long, ms }), true);
 });
 
 test("timeline: me 줄이 아닌 say는 왼쪽 PO 말풍선 그대로다", () => {
@@ -2974,6 +3031,52 @@ test("main.js: 프로필을 읽어 온 names를 쓰고, 읽지 못한 이유를 
   assert.ok(!/\/\^lead-\/\.test/.test(fs.readFileSync(path.join(__dirname, "../mods/inbox/po-hook.cjs"), "utf8")));
 });
 
+test("dropChat: 그 id의 기록만 빼고 나머지 순서는 그대로, 없는 id·배열 아님은 null", () => {
+  const list = [{ id: "1-a", text: "a" }, { id: "2-b", text: "b" }, { id: "3-c", text: "c" }];
+  assert.deepEqual(I.dropChat(list, "2-b").map((x) => x.id), ["1-a", "3-c"]);
+  assert.equal(list.length, 3); // 원본은 그대로
+  assert.equal(I.dropChat(list, "9-z"), null);
+  assert.equal(I.dropChat(null, "1-a"), null);
+  assert.deepEqual(I.dropChat([{ id: "1-a" }], "1-a"), []);
+});
+
+test("discard: 보내지 못한 말풍선만 지우고(다른 말풍선은 그대로), 보냈거나 보내는 중·Enter만 빠진 것은 지우지 않는다", () => {
+  const src = mainSrc();
+  const mk = (status) => ({ id: "2-b", status, at: Date.now() - 1000, ms: 1, text: "b", line: "b", to: "lead-a", po: "p1" });
+  const store = { list: [] };
+  const setShared = (_k, v) => { store.list = v; };
+  const g = mkGlobals({ dropChat: I.dropChat, CHAT_KEY: "inbox.chat", shared: () => store.list, setShared });
+  const self = { backs: new Map([["2-b", "pane"]]), recordPo: () => "t5", isBlocked: () => false };
+  self.recordOf = (id) => store.list.find((x) => x.id === id) ?? null;
+  self.recordActs = runMethod(src, "  recordActs(r, po", "  // The bubble's \"다시 보내기\"", mkGlobals()).recordActs.bind(self);
+  const { discard } = runMethod(src, "  discard(id, c) {", "  recordOf(id) {", g);
+  let notified = 0;
+  const c = { notify() { notified++; } };
+  for (const st of ["nopane", "failed", "gone"]) {
+    store.list = [{ id: "1-a", status: "sent", at: 1, text: "a" }, mk(st), { id: "3-c", status: "sent", at: 1, text: "c" }];
+    self.backs.set("2-b", "pane");
+    discard.call(self, "2-b", c);
+    assert.deepEqual(store.list.map((x) => x.id), ["1-a", "3-c"], st);
+    assert.equal(self.backs.has("2-b"), false);
+  }
+  assert.equal(notified, 3);
+  for (const st of ["sent", "sending", "opening", "noenter", "held"]) {
+    store.list = [mk(st)];
+    discard.call(self, "2-b", c);
+    assert.equal(store.list.length, 1, st);
+  }
+  store.list = [mk("failed")];
+  discard.call(self, "9-z", c); // 없는 id
+  assert.equal(store.list.length, 1);
+});
+
+test("main.js: 말풍선의 삭제 버튼은 다시 보내기 옆에서 discard를 부른다", () => {
+  const src = mainSrc();
+  assert.match(src, /delete: \["삭제", .*\(c\) => this\.discard\(e\.id, c\)\]/);
+  const row = methodOf(src, "  entryRow(t, e, v, cx) {", "    if (e.who === \"po\") {");
+  assert.match(row, /acts\.map\(\(k, i\) => this\.button\(t, `ma-\$\{k\}-\$\{e\.id\}`/); // 버튼은 mineActs 순서(다시 보내기 → 삭제)대로 그려진다
+});
+
 // ---- 원격 연결 켜기 (#79) ----
 test("remoteBlock: 새로 시작과 같은 이유로 막고, 보내는 중이면 한 번 더 누르지 못한다", () => {
   assert.match(I.remoteBlock({}), /찾지 못/);
@@ -3174,7 +3277,7 @@ test("checkRemote #109: 같은 pid·같은 시작 시각·같은 세션이고 br
   assert.equal(f.mark(), false); // the same record again is not rewritten
   const rec = JSON.parse(fs.readFileSync(path.join(f.dir, "po-remote", "a.json"), "utf8"));
   assert.deepEqual({ on: rec.on, pid: rec.pid, start: rec.start, sid: rec.sid, url: rec.url }, { on: true, pid: 4242, start: "Tue Nov 24 12:31:42 2026", sid: "s1", url: RC_URL });
-  assert.equal((fs.statSync(path.join(f.dir, "po-remote", "a.json")).mode & 0o777), 0o600);
+  if (process.platform !== "win32") assert.equal((fs.statSync(path.join(f.dir, "po-remote", "a.json")).mode & 0o777), 0o600); // Windows has no POSIX modes
   assert.deepEqual(f.check(), { on: true, why: "", url: RC_URL });
   assert.equal(I.readRemoteRec(f.dir, "a").pid, 4242); // a true check keeps the record
 });
