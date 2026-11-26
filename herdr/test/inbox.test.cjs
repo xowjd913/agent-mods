@@ -2964,7 +2964,7 @@ const rcRun = async ({ pre, afterSend = [], status = "idle", statusAfterSend = s
     if (a[0] === "keys") { log.keys.push(a[2]); if (esc !== null) queue = [esc]; return { code: 0, stdout: "" }; }
     return { code: 1, stdout: "" };
   };
-  const g = { hc, PROMPT_LINES: 40, REMOTE_CMD: "/remote-control", REMOTE_POLLS: 3, REMOTE_POLL_MS: 0, remoteScreen: I.remoteScreen, remoteNote: I.remoteNote, remoteBlock: I.remoteBlock };
+  const g = { hc, PROMPT_LINES: 40, REMOTE_CMD: "/remote-control", REMOTE_POLLS: 3, REMOTE_POLL_MS: 0, remoteScreen: I.remoteScreen, remoteNote: I.remoteNote, remoteBlock: I.remoteBlock, soloWords: (x) => x };
   const self = {
     rc: new Map(), rs: new Map(), st: status, liveTerms() { return [{ address: "t9", status: this.st }]; }, poTerm: async function () { return { live: true, status: self.st }; }, say: (m, bad) => log.says.push({ m, bad: Boolean(bad) }),
     sleepOn: async () => {}, sendLine: async function (po, text) { log.sends.push(text); self.st = statusAfterSend; queue = afterSend.length ? afterSend : [pre]; return send; },
@@ -3045,7 +3045,7 @@ test("remoteRestore: 시작·새로고침 때 PO마다 화면을 한 번만 읽�
   const reads = [], other = [];
   const screens = { t1: `${RC_LINE}\n${RC_BASE}`, t2: RC_BASE, t3: null };
   const g = { hc: async (a) => { if (a[0] === "read") { reads.push(a[1]); return screens[a[1]] === null ? { code: 1, stdout: "" } : { code: 0, stdout: screens[a[1]] }; } other.push(a); return { code: 0, stdout: "" }; },
-    PROMPT_LINES: 40, remoteScreen: I.remoteScreen, poList: (terms) => terms.map((t) => ({ id: t.id, address: t.address })) };
+    PROMPT_LINES: 40, remoteScreen: I.remoteScreen, soloMode: () => false, soloRooms: () => [], poList: (terms) => terms.map((t) => ({ id: t.id, address: t.address })) };
   const self = { rc: new Map(), rcChecked: new Set(), say: () => { throw new Error("no toast"); }, liveTerms: () => [{ id: "a", address: "t1" }, { id: "b", address: "t2" }, { id: "c", address: "t3" }] };
   Object.assign(self, runMethod(src, "  async remoteRead(po) {", "  // Esc closes the menu", g), runMethod(src, "  remoteRestore(cx, force = false) {", "  // A panel answer: the answer line", g));
   let notified = 0; const spawned = [];

@@ -163,7 +163,7 @@ test("collect: returns the solo lines per terminal (empty without the folder)", 
   assert.deepEqual(Object.keys(I.collect(d).solo), ["t4"]);
 });
 
-test("main.js: solo mode hides every leader part (chips, @ menu, cards, restart, remote, permission panel) and the PO structure stays as it was", () => {
+test("main.js: solo mode hides every leader part (chips, @ menu, cards, permission panel) and the PO structure stays as it was", () => {
   const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
   const view = src.slice(src.indexOf("  view() {"), src.indexOf("  view() {") + 6000);
   assert.match(view, /const solo = soloMode\(terms\)/);
@@ -173,15 +173,39 @@ test("main.js: solo mode hides every leader part (chips, @ menu, cards, restart,
   assert.match(src, /if \(v\.solo \|\| !v\.pick \|\| !v\.raw\.length\) return null;/); // the filter chips
   assert.match(src, /if \(v\.solo \|\| !v\.pick \|\| v\.pick === PO_OTHER\) return null;/); // the restart row
   assert.match(src, /const po = !v\.solo && v\.pick && v\.pick !== PO_OTHER \? chatTarget/); // the permission-question panel
-  assert.match(src, /const rpo = !v\.solo && v\.pick/); // the remote button
+  assert.match(src, /const rpo = v\.pick && v\.pick !== PO_OTHER \? chatTarget/); // the remote button works in a solo room too (chatTarget gives the room's terminal)
   assert.match(src, /soloWords\(this\.msg\.text\)/); // notices say 터미널, not PO
   assert.equal(/\bsolo\b/.test(src.slice(src.indexOf("  badge() {"), src.indexOf("  // The \"pasted into the PO\""))), false); // the badge counts leaders as before
 });
 
 test("soloWords: PO(x) becomes 터미널(x) in notices only while solo", () => {
   const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
-  const fn = src.match(/^const soloWords = .*$/m)[0];
+  const fn = src.slice(src.indexOf("const soloWords = "), src.indexOf("// The pending-question card"));
   const make = (solo) => new Function("soloMode", "terminals", `${fn}; return soloWords;`)(() => solo, () => []);
   assert.equal(make(true)("PO(abc)에 붙여넣었어요"), "터미널(abc)에 붙여넣었어요");
   assert.equal(make(false)("PO(abc)에 붙여넣었어요"), "PO(abc)에 붙여넣었어요");
+});
+
+test("soloWords: the fixed phrases of the shared blocks read 터미널 in a solo room", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const fn = src.slice(src.indexOf("const soloWords = "), src.indexOf("// The pending-question card"));
+  const make = (solo) => new Function("soloMode", "terminals", `${fn}; return soloWords;`)(() => solo, () => []);
+  const sw = make(true), po = make(false);
+  for (const [a, b] of [["PO 터미널을 찾지 못했습니다", "터미널을 찾지 못했습니다"], ["이 PO를 새로 시작하는 중입니다", "이 터미널을 새로 시작하는 중입니다"], ["PO가 작업 중입니다 — 끝난 뒤에 누르세요", "터미널이 작업 중입니다 — 끝난 뒤에 누르세요"]]) {
+    assert.equal(sw(a), b); assert.equal(po(a), a);
+  }
+});
+
+test("remoteRestore: in a solo room it reads the screens of the solo terminals (the rooms), not the PO list", async () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const a = src.indexOf("  remoteRestore(cx, force = false) {"), b = src.indexOf("  // A panel answer: the answer line", a);
+  const body = src.slice(a, b);
+  const reads = [];
+  const make = new Function("soloMode", "soloRooms", "poList", `return { ${body.replace(/^\s+remoteRestore\(/, "remoteRestore(")} };`);
+  const self = make(() => true, (terms, solo) => terms.filter((t) => solo[t.address]).map((t) => ({ id: t.address, address: t.address })), () => { throw new Error("no PO list in solo"); });
+  const o = { rc: new Map(), rcChecked: new Set(), data: { solo: { t1: [{}] } }, liveTerms: () => [{ address: "t1" }, { address: "t2" }], remoteRead: async (p) => { reads.push(p); return null; } };
+  const cxs = []; const cx = { spawn: (fn) => cxs.push(fn(cx)), notify() {} };
+  self.remoteRestore.call(o, cx);
+  await Promise.all(cxs);
+  assert.deepEqual(reads, ["t1"]); // only the terminal with a room
 });

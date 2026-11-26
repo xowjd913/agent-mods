@@ -1267,8 +1267,12 @@ function restartClearCheck(recs, since) {
   return (recs ?? []).some((x) => x && Number(x.ms) >= Number(since)) ? "text" : "clean";
 }
 // chat:end
-// A notice says "터미널(<address>)" for a solo room (there is no PO there); every other notice keeps "PO(<address>)".
-const soloWords = (text) => { let solo = false; try { solo = soloMode(terminals()); } catch {} return solo ? String(text).replace(/PO\(([^)]*)\)/g, "터미널($1)") : text; };
+// A notice says "터미널(<address>)" for a solo room (there is no PO there); every other notice keeps "PO(<address>)". The same for the few fixed phrases
+// the shared blocks use ("PO 터미널", "이 PO를", "PO가").
+const soloWords = (text) => {
+  let solo = false; try { solo = soloMode(terminals()); } catch {}
+  return solo ? String(text).replace(/PO\(([^)]*)\)/g, "터미널($1)").replace(/PO 터미널/g, "터미널").replace(/이 PO를/g, "이 터미널을").replace(/PO가/g, "터미널이") : text;
+};
 // The pending-question card: the screen lines scroll inside it (all options stay reachable), the buttons stay under them.
 const PROMPT_LINES_H = 240, PROMPT_MAX_H = 340;
 const DIAG_FLUSH_MS = 2000; // the diag queue is written out this often (one timer started in init)
@@ -2759,7 +2763,7 @@ export default class Inbox extends View {
     const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "");
     const r0 = this.rc.get(room);
     const rs = this.rs.get(room);
-    const why = remoteBlock({ po, status: st, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")), sending: r0?.phase === "send" });
+    const why = soloWords(remoteBlock({ po, status: st, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")), sending: r0?.phase === "send" }));
     if (why) { this.remoteSet(room, { phase: "fail", kind: "fail", why }, c); return; }
     this.remoteSet(room, { phase: "send", why: "" }, c);
     c.spawn(async (cx) => {
@@ -2773,7 +2777,7 @@ export default class Inbox extends View {
           return;
         }
         const res = await this.sendLine(po, REMOTE_CMD, () => true, room);
-        if (!res.ok) { done("fail", "fail", { why: res.why }); return; }
+        if (!res.ok) { done("fail", "fail", { why: soloWords(res.why) }); return; }
         if (pre === null) { done("unknown", "unknown"); return; }
         for (let i = 0; i < REMOTE_POLLS; i++) {
           await this.sleepOn(cx, REMOTE_POLL_MS);
@@ -2795,7 +2799,7 @@ export default class Inbox extends View {
   remoteButton(t, room, po, status) {
     const r = this.rc.get(room);
     const rs = this.rs.get(room);
-    const why = remoteBlock({ po, status, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")), sending: r?.phase === "send" });
+    const why = soloWords(remoteBlock({ po, status, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")), sending: r?.phase === "send" }));
     const on = r && (r.phase === "on" || r.phase === "already");
     const at = on ? new Date(r.at).toTimeString().slice(0, 5) : "";
     return h_flex().id(`rc-${room}`).flex_none().min_w(0).gap(6).items_center()
@@ -2815,7 +2819,8 @@ export default class Inbox extends View {
   // it is not seen and the button stays "켜기" (a click then checks again). A state is only ever set here, never cleared. `force` (the refresh button) checks again.
   remoteRestore(cx, force = false) {
     if (force) this.rcChecked.clear();
-    const pos = poList(this.liveTerms()).filter((p) => !this.rcChecked.has(p.address));
+    const terms = this.liveTerms();
+    const pos = (soloMode(terms) ? soloRooms(terms, this.data?.solo) : poList(terms)).filter((p) => !this.rcChecked.has(p.address)); // #90: a solo room is its terminal
     for (const p of pos) {
       this.rcChecked.add(p.address);
       cx.spawn(async (c) => {
@@ -3639,7 +3644,7 @@ export default class Inbox extends View {
     const bar = this.filterBar(t, v);
     const lbar = this.leaderBar(t, v);
     const rrow = this.restartRow(t, v, cx); // "PO 새로 시작": the button, its confirm line or its steps (null in the other-PO room)
-    const rpo = !v.solo && v.pick && v.pick !== PO_OTHER ? chatTarget(v.terms, [], v.pick).po ?? "" : ""; // (no remote button in a solo room yet)
+    const rpo = v.pick && v.pick !== PO_OTHER ? chatTarget(v.terms, [], v.pick).po ?? "" : ""; // (a solo room's terminal too)
     const rcb = rpo ? this.remoteButton(t, v.pick, rpo, String(v.terms.find((x) => x.address === rpo)?.status ?? "")) : null; // "원격 연결 켜기" (#79): in the room header
     const usage = this.usageLine(t, v.pick); // null before the first read (and when there is no cost to show either)
     const panel = this.promptPanel(t, v, cx); // a blocked PO's screen + its keys (null while the room's PO is not waiting on a prompt)
