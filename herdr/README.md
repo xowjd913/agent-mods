@@ -27,7 +27,8 @@
 
 | 모드 | 한 줄 | 기본/추가 | 문서 |
 | --- | --- | --- | --- |
-| 패널 버튼 (`tabs-mine`) | 탭 줄에 Work·PRs·예약 버튼을 붙이고, 손봐야 할 PR 수를 띄웁니다 | 기본 | [tabs-mine](../docs/mods/tabs-mine.md) |
+| 패널 버튼 (`tabs-mine`) | 탭 줄에 Work·PRs·예약 버튼과 `설정` 버튼을 붙이고, 손봐야 할 PR 수를 띄웁니다 | 기본 | [tabs-mine](../docs/mods/tabs-mine.md) |
+| 설정 (`settings`) | 탭 줄의 `설정` 버튼으로 여는 창입니다. GitHub 계정(아래 계정 패널 그대로)과 설치된 모드를 한곳에서 봅니다 | 기본 | [settings](../docs/mods/settings.md) |
 | Work (`work`) | 세션마다 맡은 이슈, 워크트리, PR, CI를 한 트리로 봅니다 | 기본 | [work](../docs/mods/work.md) |
 | PRs (`prs`) | 저장소별 열린 PR과 리뷰 상태, 정리할 워크트리를 봅니다 | 기본 | [prs](../docs/mods/prs.md) |
 | 예약 (`schedules`) | 정해진 시각에 Claude나 Codex 세션을 띄워 프롬프트를 보냅니다 | 기본 | [schedules](../docs/mods/schedules.md) |
@@ -36,7 +37,7 @@
 | 작업별 묶음 (`agent-groups`) | 사이드바에서 터미널을 리더별로 묶고 리더 아래에 팀원을 둡니다 | 추가 | [agent-groups](../docs/mods/agent-groups.md) |
 | 리더 탭 (`leader-tabs`) | 리더 세션이 둘 이상이면 칸 머리줄에 리더 탭을 띄웁니다 | 추가 | [leader-tabs](../docs/mods/leader-tabs.md) |
 | 경로 메뉴 (`path-menu`) | 터미널의 파일 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄웁니다 | 추가 | [path-menu](../docs/mods/path-menu.md) |
-| 계정 (`gh-accounts`) | 스페이스·저장소마다 쓸 GitHub 계정을 보고 고릅니다([gh-account](../docs/gh-account.md) 도구 필요) | 추가 | [gh-accounts](../docs/mods/gh-accounts.md) |
+| 계정 (`gh-accounts`) | 스페이스·저장소마다 쓸 GitHub 계정을 보고 고릅니다([gh-account](../docs/gh-account.md) 도구 필요). 설정 창의 GitHub 칸으로 열립니다 | 기본 | [gh-accounts](../docs/mods/gh-accounts.md) |
 | UI 모드 (`inbox`) | 리더 결과 보고를 채팅처럼 보여 주고, 결정이 필요한 보고에 답하거나 채팅칸에서 `@리더`로 말하면 PO 터미널에 입력으로 전해 줍니다 | 추가 | [inbox](../docs/mods/inbox.md), [인박스 계약](../docs/inbox-contract.md) |
 
 <!-- 새 모드: docs/mods/<모드>.md를 같은 틀(제목, 한 줄 소개, 스크린샷, 사용법, 필요한 것, 설치, 돌아가기 링크)로 만들고 위 표와 ../README.md 모드 표에 한 줄씩 더합니다. -->
@@ -110,7 +111,7 @@ sh agent-mods/herdr/install.sh --extras   # Windows: .\agent-mods\herdr\install.
 
 | macOS·Linux | Windows | 하는 일 |
 | --- | --- | --- |
-| (옵션 없음) | (옵션 없음) | 설치된 모드만 갱신합니다. 처음이면 기본 모드 5개를 설치합니다. |
+| (옵션 없음) | (옵션 없음) | 설치된 모드만 갱신합니다. 처음이면 기본 모드 7개를 설치합니다. |
 | `--extras` | `-Extras` | 모드 11개를 모두 설치합니다. |
 | `--only <모드>` | `-Only <모드>` | 고른 모드만 설치·갱신합니다. 이미 설치된 다른 모드는 그대로 둡니다. |
 | `--add <모드>` | `-Add <모드>` | 설치된 모드에 고른 모드를 더합니다. |
@@ -154,10 +155,11 @@ Windows는 `.\agent-mods\herdr\install.ps1 -Only usage-status`입니다.
 - 옵션은 한 번에 하나만 씁니다. 둘을 함께 주면 아무것도 하지 않고 안내만 출력합니다.
 - 모르는 모드 이름을 주면 쓸 수 있는 이름을 보여 주고 끝납니다.
 - 필요한 모드는 자동으로 함께 설치합니다.
+  - `tabs-mine`: `settings`
+  - `settings`: `gh-accounts`
   - `work`: `tabs-mine`, `wt-menu`
   - `prs`: `work`, `tabs-mine`, `wt-menu`
   - `schedules`: `tabs-mine`
-  - `gh-accounts`: `tabs-mine`
   - `inbox`: `tabs-mine`
 - 남은 모드가 쓰는 모드는 지우지 않습니다.
   - 예: `work`가 설치돼 있으면 `--remove wt-menu`는 아무것도 지우지 않고, 함께 지울 이름을 알려 줍니다.
@@ -181,7 +183,7 @@ sh herdr/install.sh --gh-account-uninstall  # 제거
 - gh 활성 계정은 바꾸지 않고(패널의 계정 추가만 로그인 직후 원래대로 되돌림), 토큰은 저장하지 않습니다.
 - 매핑이 없거나 깨졌으면 `gh`와 `git`은 원래대로 동작합니다.
 - macOS·Linux만 지원하고, HTTPS 원격만 인증합니다.
-- 오른쪽 패널에서 보고 고르려면 계정 패널을 더합니다: `sh herdr/install.sh --add gh-accounts` ([gh-accounts](../docs/mods/gh-accounts.md)). 도구 설치·되돌리기와 계정 추가도 패널 버튼으로 할 수 있습니다.
+- 보고 고르려면 탭 줄의 `설정` 버튼을 눌러 `GitHub` 칸을 엽니다([settings](../docs/mods/settings.md), [gh-accounts](../docs/mods/gh-accounts.md)). 기본 모드에 들어 있습니다. 도구 설치·되돌리기와 계정 추가도 그 칸에서 할 수 있습니다.
 - 자세한 사용법과 한계: [gh-account](../docs/gh-account.md)
 
 ---
@@ -256,7 +258,7 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
    - `main`을 복제하고, 그 레이아웃으로 바꿉니다.
 3. **블록 넣기**: `dashboard`에 설치된 모드의 블록을 넣습니다.
    - `tabs-mine`: 탭 줄 `tabs`를 `tabs-mine`으로 바꿉니다.
-   - `work`·`prs`·`schedules`·`gh-accounts`·`inbox`: 오른쪽 패널에 `work-board`, `pr-board`, `schedules-board`, `accounts-board`, `inbox-board`를 더합니다.
+   - `work`·`prs`·`schedules`·`inbox`: 오른쪽 패널에 `work-board`, `pr-board`, `schedules-board`, `inbox-board`를 더합니다. `gh-accounts`는 더하지 않습니다(입구가 설정 창뿐이라서). 예전에 들어간 `accounts-board`는 `--remove`가 그대로 되돌립니다.
    - `agent-groups`: `agents`를 `agent-groups`로 바꿉니다.
    - `usage-status`: `workspace-status`를 `usage-status`로 바꿉니다.
    - `leader-tabs`: 칸 머리줄 `pane`을 `leader-tabs`로 바꿉니다.

@@ -1,6 +1,6 @@
 ﻿# Herdr 모드를 설치·갱신한다(Windows). 다시 실행해도 된다. install.sh의 Windows 버전이다.
-#   기본 모드: tabs-mine, work, prs, wt-menu, schedules
-#   추가 모드(-Extras): usage-status, agent-groups, leader-tabs, path-menu, gh-accounts, inbox
+#   기본 모드: tabs-mine, settings, gh-accounts, work, prs, wt-menu, schedules
+#   추가 모드(-Extras): usage-status, agent-groups, leader-tabs, path-menu, inbox
 #   인자 없이 실행하면 설치된 모드만 갱신한다(처음이면 기본 모드를 설치한다).
 #   -Only work,prs / -Add usage-status / -Remove leader-tabs / -List 로 모드를 고를 수 있다.
 # 저장소를 받지 않고 바로 실행할 수도 있다.

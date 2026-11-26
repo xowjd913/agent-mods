@@ -18,7 +18,8 @@ Herdr는 터미널 작업 공간 앱이고, 모드는 그 화면에 패널과 �
 
 | 모드 | 한 줄 | 기본/추가 | 문서 |
 | --- | --- | --- | --- |
-| 패널 버튼 (`tabs-mine`) | 탭 줄에 Work·PRs·예약 버튼을 붙이고, 손봐야 할 PR 수를 띄웁니다 | 기본 | [tabs-mine](docs/mods/tabs-mine.md) |
+| 패널 버튼 (`tabs-mine`) | 탭 줄에 Work·PRs·예약 버튼과 `설정` 버튼을 붙이고, 손봐야 할 PR 수를 띄웁니다 | 기본 | [tabs-mine](docs/mods/tabs-mine.md) |
+| 설정 (`settings`) | 탭 줄의 `설정` 버튼으로 여는 창입니다. GitHub 계정(아래 계정 패널 그대로)과 설치된 모드를 한곳에서 봅니다 | 기본 | [settings](docs/mods/settings.md) |
 | Work (`work`) | 세션마다 맡은 이슈, 워크트리, PR, CI를 한 트리로 봅니다 | 기본 | [work](docs/mods/work.md) |
 | PRs (`prs`) | 저장소별 열린 PR과 리뷰 상태, 정리할 워크트리를 봅니다 | 기본 | [prs](docs/mods/prs.md) |
 | 예약 (`schedules`) | 정해진 시각에 Claude나 Codex 세션을 띄워 프롬프트를 보냅니다 | 기본 | [schedules](docs/mods/schedules.md) |
@@ -27,7 +28,7 @@ Herdr는 터미널 작업 공간 앱이고, 모드는 그 화면에 패널과 �
 | 작업별 묶음 (`agent-groups`) | 사이드바에서 터미널을 리더별로 묶고 리더 아래에 팀원을 둡니다 | 추가 | [agent-groups](docs/mods/agent-groups.md) |
 | 리더 탭 (`leader-tabs`) | 리더 세션이 둘 이상이면 칸 머리줄에 리더 탭을 띄웁니다 | 추가 | [leader-tabs](docs/mods/leader-tabs.md) |
 | 경로 메뉴 (`path-menu`) | 터미널의 파일 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄웁니다 | 추가 | [path-menu](docs/mods/path-menu.md) |
-| 계정 (`gh-accounts`) | 스페이스·저장소마다 쓸 GitHub 계정을 보고 고릅니다([gh-account](docs/gh-account.md) 도구 필요) | 추가 | [gh-accounts](docs/mods/gh-accounts.md) |
+| 계정 (`gh-accounts`) | 스페이스·저장소마다 쓸 GitHub 계정을 보고 고릅니다([gh-account](docs/gh-account.md) 도구 필요). 설정 창의 GitHub 칸으로 열립니다 | 기본 | [gh-accounts](docs/mods/gh-accounts.md) |
 | UI 모드 (`inbox`) | 리더 결과 보고를 채팅처럼 보여 주고, 결정이 필요한 보고에 답하거나 채팅칸에서 `@리더`로 말하면 PO 터미널에 입력으로 전해 줍니다 | 추가 | [inbox](docs/mods/inbox.md), [인박스 계약](docs/inbox-contract.md) |
 
 <!-- 새 모드: docs/mods/<모드>.md를 만들고 이 표와 herdr/README.md 모드 표에 한 줄씩 더합니다. -->
@@ -45,7 +46,7 @@ Claude Code(`claude/`)와 Orca(`orca/`)용은 계획 중입니다.
    - [Herdr](https://github.com/herdrdev/herdr) 앱을 한 번 실행해 두고 켜 둡니다.
    - [Node.js](https://nodejs.org/)가 필요합니다.
    - [GitHub CLI](https://cli.github.com/)를 설치하고 `gh auth login`으로 로그인합니다.
-2. **설치 명령 한 줄**로 기본 모드 5개를 설치합니다.
+2. **설치 명령 한 줄**로 기본 모드 7개를 설치합니다.
 
    macOS·Linux:
 

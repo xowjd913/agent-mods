@@ -163,8 +163,8 @@ test("기본 설치 뒤 --extras로 다시 설치하면 추가 모드 블록만 
 
 // 예전 설치: 모든 모드에 예전 표시·기록, layouts/agent-groups.json, 레이아웃 이름 기록 없음.
 // full이면 예전 --extras 설치처럼 모든 블록이 바뀐 레이아웃을 만든다.
-// 예전 설치기에는 path-menu·gh-accounts·inbox가 없었다.
-const LEGACY_MODS = inst.ALL.filter((m) => m !== "path-menu" && m !== "gh-accounts" && m !== "inbox");
+// 예전 설치기에는 path-menu·gh-accounts·inbox·settings가 없었다.
+const LEGACY_MODS = inst.ALL.filter((m) => !["path-menu", "gh-accounts", "inbox", "settings"].includes(m));
 function legacyHome(full) {
   const home = tempHome();
   for (const m of LEGACY_MODS) {
@@ -193,7 +193,8 @@ test("예전 설치(agent-groups 레이아웃·예전 표시·기록)는 레이�
   const { home, file, text } = legacyHome(false);
   assert.equal(inst.pendingLayout(home), "");
   const { result } = quiet(() => inst.installMods(home, false));
-  assert.deepEqual(result.installed, LEGACY_MODS);
+  // tabs-mine이 settings 를, settings 가 gh-accounts 를 끌어와 예전 설치를 갱신하면 둘이 더해진다. 레이아웃은 바뀌지 않는다.
+  assert.deepEqual(result.installed, inst.ALL.filter((m) => LEGACY_MODS.includes(m) || m === "settings" || m === "gh-accounts"));
   quiet(() => inst.applyLayout(home, false));
   assert.equal(fs.readFileSync(file, "utf8"), text);
   assert.ok(!fs.existsSync(path.join(home, "layouts", inst.LAYOUT_NAME + ".json")));
@@ -238,10 +239,10 @@ const cli = (...args) => spawnSync(process.execPath, [CLI, ...args], { encoding:
 test("--only는 고른 모드와 필요한 모드만 설치하고, 함께 설치한다고 알린다", () => {
   const home = tempHome();
   const { result, out } = quiet(() => inst.installMods(home, { only: ["prs"] }));
-  assert.deepEqual(result.installed, ["tabs-mine", "work", "prs", "wt-menu"]);
-  assert.deepEqual([...result.added].sort(), ["tabs-mine", "work", "wt-menu"]);
+  assert.deepEqual(result.installed, ["tabs-mine", "settings", "gh-accounts", "work", "prs", "wt-menu"]);
+  assert.deepEqual([...result.added].sort(), ["gh-accounts", "settings", "tabs-mine", "work", "wt-menu"]);
   assert.match(out, /prs 에 work 이\(가\) 필요해 함께 설치합니다/);
-  assert.deepEqual(installed(home), ["tabs-mine", "work", "prs", "wt-menu"]);
+  assert.deepEqual(installed(home), ["tabs-mine", "settings", "gh-accounts", "work", "prs", "wt-menu"]);
 });
 
 test("--only는 고르지 않은 설치된 모드를 지우지도 갱신하지도 않는다", () => {
@@ -250,7 +251,7 @@ test("--only는 고르지 않은 설치된 모드를 지우지도 갱신하지�
   fs.writeFileSync(path.join(home, "mods", "schedules", "main.js"), "old");
   const { result, out } = quiet(() => inst.installMods(home, { only: ["wt-menu"] }));
   assert.deepEqual(result.installed, ["wt-menu"]);
-  assert.deepEqual(result.kept, ["tabs-mine", "work", "prs", "schedules"]);
+  assert.deepEqual(result.kept, ["tabs-mine", "settings", "gh-accounts", "work", "prs", "schedules"]);
   assert.match(out, /그대로 둡니다/);
   assert.equal(fs.readFileSync(path.join(home, "mods", "schedules", "main.js"), "utf8"), "old");
 });
@@ -258,12 +259,12 @@ test("--only는 고르지 않은 설치된 모드를 지우지도 갱신하지�
 test("--add는 설치된 모드에 더하고, 인자 없는 실행은 설치된 모드만 갱신한다", () => {
   const home = tempHome();
   quiet(() => inst.installMods(home, { only: ["schedules"] }));
-  assert.deepEqual(installed(home), ["tabs-mine", "schedules"]);
+  assert.deepEqual(installed(home), ["tabs-mine", "settings", "gh-accounts", "schedules"]);
   quiet(() => inst.installMods(home, { add: ["usage-status"] }));
-  assert.deepEqual(installed(home), ["tabs-mine", "schedules", "usage-status"]);
+  assert.deepEqual(installed(home), ["tabs-mine", "settings", "gh-accounts", "schedules", "usage-status"]);
   fs.writeFileSync(path.join(home, "mods", "usage-status", "main.js"), "old");
   const { result } = quiet(() => inst.installMods(home, {}));
-  assert.deepEqual(result.installed, ["tabs-mine", "schedules", "usage-status"]);
+  assert.deepEqual(result.installed, ["tabs-mine", "settings", "gh-accounts", "schedules", "usage-status"]);
   assert.notEqual(fs.readFileSync(path.join(home, "mods", "usage-status", "main.js"), "utf8"), "old");
 });
 
@@ -627,18 +628,48 @@ test("mods·remove 명령은 Claude 설정 파일을 건드리지 않는다(CLAU
   assert.equal(inst.settingsPath({ CLAUDE_CONFIG_DIR: dir }), path.join(dir, "settings.json"));
 });
 
-test("--add gh-accounts는 오른쪽 패널에 accounts-board를 더하고, 제거하면 뺀다", () => {
+test("--add gh-accounts는 오른쪽 패널을 더하지 않고, 예전에 더해진 accounts-board는 제거할 때 되돌린다", () => {
   const home = tempHome();
   quiet(() => inst.installMods(home, { add: ["gh-accounts"] }));
-  assert.deepEqual(installed(home).sort(), ["gh-accounts", "tabs-mine"]);
+  assert.deepEqual(installed(home), ["gh-accounts"]);
   const file = cloneInto(home, inst.LAYOUT_NAME);
   quiet(() => inst.applyLayout(home, true));
   const ids = () => JSON.stringify(readJson(file)).match(/"id":"accounts-board"/g) ?? [];
+  assert.equal(ids().length, 0);
+  assert.ok(!mods(readJson(file)).includes("gh-accounts"));
+  // 예전 설치가 더해 둔 블록
+  const l = readJson(file);
+  (function walk(n) {
+    if (n.id === "panel-body") n.children.push({ id: "accounts-board", type: "block", content: { mod: "gh-accounts" } });
+    for (const c of n.children || []) walk(c);
+  })(l);
+  fs.writeFileSync(file, JSON.stringify(l, null, 2) + "\n");
   assert.equal(ids().length, 1);
-  assert.ok(mods(readJson(file)).includes("gh-accounts"));
   quiet(() => inst.removeMods(home, ["gh-accounts"]));
   assert.equal(ids().length, 0);
   assert.ok(!fs.existsSync(path.join(home, "mods", "gh-accounts")));
+});
+
+test("settings는 기본 모드이고 tabs-mine이 기대며, gh-accounts를 함께 설치한다", () => {
+  assert.ok(inst.CORE.includes("settings") && inst.CORE.includes("gh-accounts"));
+  assert.ok(!inst.EXTRAS.includes("gh-accounts"));
+  assert.deepEqual(inst.MODS["tabs-mine"].deps, ["settings"]);
+  assert.deepEqual(inst.MODS.settings.deps, ["gh-accounts"]);
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { only: ["settings"] }));
+  assert.deepEqual(installed(home), ["settings", "gh-accounts"].sort((x, y) => inst.ALL.indexOf(x) - inst.ALL.indexOf(y)));
+  for (const f of ["main.js", "mod.json"]) assert.ok(fs.existsSync(path.join(home, "mods", "settings", f)), f);
+});
+
+test("tabs-mine을 설치하면 settings와 gh-accounts가 함께 들어가고, settings만 제거하는 것은 막는다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { only: ["tabs-mine"] }));
+  assert.deepEqual(installed(home), ["tabs-mine", "settings", "gh-accounts"]);
+  const { result } = quiet(() => inst.removeMods(home, ["settings"]));
+  assert.deepEqual(result.blocked, ["tabs-mine"]);
+  assert.ok(fs.existsSync(path.join(home, "mods", "settings")));
+  quiet(() => inst.removeMods(home, ["tabs-mine", "settings", "gh-accounts"]));
+  assert.deepEqual(installed(home), []);
 });
 
 // UI 모드(#59): 기본 레이아웃(터미널 모드)에서 main 칸만 UI 모드로 바꾼 `<이름>-ui` 레이아웃.

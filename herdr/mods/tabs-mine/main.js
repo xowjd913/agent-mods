@@ -1,4 +1,4 @@
-// Clone of Herdr's shipped `tabs` mod. The PRs button shows a count of PRs needing my action (collect.cjs `attention`: my open PRs with failing CI or changes requested, plus open PRs asking me to review). The layout blocks are "work-board" (mod work) and "pr-board" (mod prs); the id "work" is already a layout column. Changed: the right-panel buttons are Files, Changes, then Work and PRs (added after the stock ones).
+// Clone of Herdr's shipped `tabs` mod. The PRs button shows a count of PRs needing my action (collect.cjs `attention`: my open PRs with failing CI or changes requested, plus open PRs asking me to review). The layout blocks are "work-board" (mod work) and "pr-board" (mod prs); the id "work" is already a layout column. Changed: the right-panel buttons are Files, Changes, then Work and PRs (added after the stock ones). A 설정 button opens the settings window (mods/settings); the 계정 panel button moved into it.
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, ScrollHandle } from "gpui-base";
 import { spaces, panes, terminals, focused, run, notify, openOverlay, theme, window, shared, layout, settings, exec, appHome, checking, layouts, nextCommand } from "herdr";
@@ -27,6 +27,23 @@ function label(tab, lead) {
   const telling = live && live !== lead.terminal && live !== prog && !path && !live.includes("@") && live.toLowerCase() !== lead.program.key;
   return (tab.name === prog || !tab.named) && telling ? live : base;
 }
+
+// settings-window:begin
+// 설정 창의 모양. tabs-mine/main.js와 settings/main.js에 이 블록을 그대로 복사해 둔다(모드끼리 파일을 불러올 수 없다. 테스트가 둘이 같은지 본다).
+// 칸을 바꾸면 SETTINGS_BODY와 settings/main.js의 SECTIONS를 함께 고친다.
+const SETTINGS_SHARED = "settings.section"; // 마지막으로 본 칸. 버튼으로 다시 열면 그 칸으로 연다
+const SETTINGS_BODY = { github: { mod: "gh-accounts" }, mods: { mod: "settings", props: { part: "mods" } } };
+const settingsWindow = (section) => {
+  const id = SETTINGS_BODY[section] ? section : "github";
+  return { kind: "window", key: "settings", width: 900, height: 640, layout: { id: "settings", type: "column", children: [
+    { id: "settings-bar", type: "block", content: { mod: "settings", props: { part: "bar" } }, size: { px: 40 }, window_drag: true },
+    { id: "settings-main", type: "row", children: [
+      { id: "settings-nav", type: "block", content: { mod: "settings", props: { part: "nav", section: id } }, size: { px: 200 } },
+      { id: "settings-body", type: "block", content: SETTINGS_BODY[id], size: { weight: 1 } },
+    ] },
+  ] } };
+};
+// settings-window:end
 
 // names:begin
 // The names this desk recognizes: which terminals are reporting agents and hubs, the labels it reads, the answer line (the profile, docs/inbox-contract.md
@@ -333,7 +350,7 @@ export default class Tabs extends View {
     // Another mod may set workspace.panels without our ids: always offer the panels this layout actually has,
     // and drop the ones it doesn't (the stock list names Files, which this layout replaced).
     const have = (body?.children ?? []).map(c => c.id);
-    const listed = shared("workspace.panels") ?? ["files", "changes", "work-board", "pr-board", "schedules-board", "accounts-board", "inbox-board"];
+    const listed = shared("workspace.panels") ?? ["files", "changes", "work-board", "pr-board", "schedules-board", "inbox-board"];
     const enabled = [...new Set([...listed.filter(id => !have.length || have.includes(id)), ...have])];
     this.syncPanel(space, panel, body, enabled);
     const panelButton = (id, label, icon, badge) => {
@@ -360,8 +377,10 @@ export default class Tabs extends View {
       .when(enabled.includes("work-board"), el => el.child(panelButton("work-board", "Work", "mods/workspace-chrome/layers.svg")))
       .when(enabled.includes("pr-board"), el => el.child(panelButton("pr-board", "PRs", "mods/workspace-chrome/git-compare.svg", this.attention)))
       .when(enabled.includes("schedules-board"), el => el.child(panelButton("schedules-board", "예약", "mods/workspace-chrome/clock.svg")))
-      .when(enabled.includes("accounts-board"), el => el.child(panelButton("accounts-board", "계정", "mods/workspace-chrome/git-branch.svg")))
       .when(enabled.includes("inbox-board"), el => el.child(panelButton("inbox-board", "UI 모드", "mods/workspace-chrome/archive.svg", this.inboxWaiting())))
+      .child(h_flex().id("settings-open").h(26).px(8).gap(5).flex_none().items_center().rounded(6).text_size(12).bg(t.chrome).text_color(t.muted)
+        .hover(s => s.bg(t.hover)).on_mouse_down("left", stop).tooltip("설정 창: GitHub 계정, 설치된 모드")
+        .on_click(() => { try { openOverlay(settingsWindow(shared(SETTINGS_SHARED))); } catch {} }).child(svg("mods/workspace-chrome/settings.svg").size(14)).child("설정"))
       .when(Boolean(modeTarget()), el => el.child(h_flex().id("mode-switch").h(26).px(8).flex_none().items_center().rounded(6).text_size(12).bg(t.selected).text_color(t.foreground)
         .hover(s => s.bg(t.hover)).on_mouse_down("left", stop).on_click(() => { const m = modeTarget(); if (m) run("layout.switch", { name: m.name }); })
         .tooltip(modeTarget()?.ui ? "터미널 화면으로 돌아갑니다. 터미널은 꺼지지 않습니다" : "UI 모드를 전체 화면으로 씁니다. 터미널은 숨겨질 뿐 계속 돕니다")
