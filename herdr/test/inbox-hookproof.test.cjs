@@ -23,7 +23,7 @@ const empty = "● Done.\n╭────────────────╮
 const world = ({ me = [], rec = { text: TEXT, po: "devnotes", kind: "chat" } } = {}) => {
   const log = { marks: [], say: [], diag: [], oks: [], hc: [], poMe: 0 };
   const g = {
-    restartSendResult: I.restartSendResult, inputHas: I.inputHas, PROMPT_LINES: 40, RESTART_REC_MS: 30, hookProved: I.hookProved,
+    restartSendResult: I.restartSendResult, inputHas: I.inputHas, PROMPT_LINES: 40, RESTART_REC_MS: 30, SEND_PROOF_BACK_MS: I.SEND_PROOF_BACK_MS, hookProved: I.hookProved,
     hc: async (a) => { log.hc.push(a[0]); if (a[0] === "send") return NOT_STARTED; if (a[0] === "read") return { code: 0, stdout: empty, stderr: "" }; return { code: 0, stdout: "", stderr: "" }; },
   };
   const self = {
@@ -78,6 +78,29 @@ test("#111 다른 글의 훅 기록, 보내기 전의 훅 기록은 증거가 �
   const w = world({ me: [{ ms: Date.now() + 5, text: "전혀 다른 글" }, { ms: Date.now() - 5 * 60000, text: TEXT }] });
   await w.go();
   assert.deepEqual(w.log.marks, ["sending", "failed"]);
+});
+
+test("#111 같은 글을 방금 전(1분 안)에 보낸 훅 줄은 이번 전송의 증거가 아니다 — 반복해서 보내는 '네' 같은 글", async () => {
+  for (const ago of [60000, 30000, 10000, 5000]) {
+    const w = world({ me: [{ ms: Date.now() - ago, text: TEXT }] });
+    await w.go();
+    assert.deepEqual(w.log.marks, ["sending", "failed"], `${ago}ms 전의 같은 글`);
+    assert.deepEqual(w.log.oks, []);
+  }
+  const ok = world({ me: [{ ms: Date.now() - 500, text: TEXT }] }); // 보내기 시작 직전(시계 오차 안)은 이번 전송의 줄
+  await ok.go();
+  assert.deepEqual(ok.log.marks, ["sending", "sent"]);
+});
+
+test("#111 hookProved: back으로 보내기 시작 전 몇 초까지만 센다 (기본 1분은 타임라인 합치기용)", () => {
+  const ms = Date.now();
+  const rec = { line: "네", text: "네", ms };
+  const x = (d) => [{ ms: ms + d, text: "네" }];
+  assert.equal(I.hookProved(x(-30000), rec), true); // 타임라인: 1분 전까지
+  assert.equal(I.hookProved(x(-30000), rec, ms, I.SEND_PROOF_BACK_MS), false);
+  assert.equal(I.hookProved(x(-1500), rec, ms, I.SEND_PROOF_BACK_MS), true);
+  assert.equal(I.hookProved(x(3000), rec, ms, I.SEND_PROOF_BACK_MS), true);
+  assert.equal(I.SEND_PROOF_BACK_MS, 2000);
 });
 
 test("#111 기록(rec)이 없으면 훅을 확인하지 않고 곧바로 failed(기존 동작)", async () => {
