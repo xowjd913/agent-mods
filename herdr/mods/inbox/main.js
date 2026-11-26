@@ -27,6 +27,7 @@ const LOAD_TIMEOUT = 20000, LOAD_STALL_MS = 30000, WINDOW_REFRESH_MS = 5000, PAN
 const KIND = { done: ["완료", "working"], decision: ["결정", "blocked"], verify: ["확인", "blocked"], stop: ["중단", "idle"], resume: ["재개", "dim"], other: ["알림", "dim"], start: ["시작", "dim"] };
 const WINDOW = { mod: "inbox", kind: "window", key: "inbox", keep: true, width: 720, height: 680, props: { mode: "window" } };
 const SENT_KEY = "inbox.sent";
+const SOLO_PICK_KEY = "inbox.solo"; // #90: the room picked in solo mode (kept apart, so a PO appearing for a moment does not lose the PO pick)
 const PICK_KEY = "inbox.po"; // the PO id the person picked last (shared, so it also holds across window reopens)
 const CHAT_KEY = "inbox.chat"; // the lines the person sent through the chat box [{ts, ms, text, to, po}] (po: the PO id they went to)
 const MAX_CHAT = 100, MAX_ENTRIES = 80; // MAX_ENTRIES: the newest timeline entries drawn (a waiting one is always drawn)
@@ -2127,12 +2128,13 @@ export default class Inbox extends View {
     const hasOther = asks.some((a) => a.owner === PO_OTHER) || reps.some((r) => r.owner === PO_OTHER);
     let last = "";
     try { last = shared(PICK_KEY) ?? ""; } catch {}
+    if (solo) { try { last = shared(SOLO_PICK_KEY) ?? ""; } catch {} }
     const now = Date.now();
     const settled = settlePick(pos, last, hasOther, this.pickLive.id === last ? this.pickLive.at : 0, now);
     const pick = settled.pick;
     if (!settled.ghost) {
       if (last && (pos.some((p) => p.id === last) || (last === PO_OTHER && hasOther))) this.pickLive = { id: last, at: now, label: last === PO_OTHER ? OTHER_LABEL : pos.find((p) => p.id === last)?.label ?? last };
-      if (pick && pick !== last) { try { setShared(PICK_KEY, pick); } catch {} } // the room shown is the room kept: an automatic pick no longer floats with the leader counts
+      if (pick && pick !== last) { try { setShared(solo ? SOLO_PICK_KEY : PICK_KEY, pick); } catch {} } // the room shown is the room kept: an automatic pick no longer floats with the leader counts
     }
     let mine = [], seen = {};
     try { mine = shared(CHAT_KEY) ?? []; } catch {}
@@ -2197,7 +2199,7 @@ export default class Inbox extends View {
   pickPo(id, c) {
     this.heldAt = 0;
     this.syncRoom(id);
-    try { setShared(PICK_KEY, id); } catch {}
+    try { if (soloMode(this.liveTerms())) setShared(SOLO_PICK_KEY, id); else setShared(PICK_KEY, id); } catch {}
     this.menu = null;
     this.markSeen();
     c.notify();

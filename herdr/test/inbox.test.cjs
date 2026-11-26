@@ -813,7 +813,7 @@ test("#57 재현: 답변 상자 초안은 리더가 한 번 빠졌다고 지워�
 test("#57: view()는 settlePick으로 고른 방을 붙들고, 자동으로 고른 방도 저장해 리더 수에 따라 떠다니지 않게 한다", () => {
   const MAIN = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
   assert.match(MAIN, /settlePick\(pos, last, hasOther, this\.pickLive\.id === last \? this\.pickLive\.at : 0, now\)/);
-  assert.match(MAIN, /if \(pick && pick !== last\) \{ try \{ setShared\(PICK_KEY, pick\); \} catch \{\} \}/);
+  assert.match(MAIN, /if \(pick && pick !== last\) \{ try \{ setShared\(solo \? SOLO_PICK_KEY : PICK_KEY, pick\); \} catch \{\} \}/);
   assert.match(MAIN, /settled\.ghost && !rooms\.some/); // 붙든 방은 방 목록에도 남는다
   assert.match(MAIN, /staleDrafts\(this\.inputs\.keys\(\), live, this\.inputSeen, now\)/);
   const chat = (src) => src.slice(src.indexOf("// chat:begin"), src.indexOf("// chat:end"));
