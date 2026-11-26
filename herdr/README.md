@@ -37,7 +37,7 @@
 | 리더 탭 (`leader-tabs`) | 리더 세션이 둘 이상이면 칸 머리줄에 리더 탭을 띄웁니다 | 추가 | [leader-tabs](../docs/mods/leader-tabs.md) |
 | 경로 메뉴 (`path-menu`) | 터미널의 파일 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄웁니다 | 추가 | [path-menu](../docs/mods/path-menu.md) |
 | 계정 (`gh-accounts`) | 스페이스·저장소마다 쓸 GitHub 계정을 보고 고릅니다([gh-account](../docs/gh-account.md) 도구 필요) | 추가 | [gh-accounts](../docs/mods/gh-accounts.md) |
-| PO 데스크 (`inbox`) | 리더 결과 보고를 채팅처럼 보여 주고, 결정이 필요한 보고에 답하거나 채팅칸에서 `@리더`로 말하면 PO 터미널에 입력으로 전해 줍니다 | 추가 | [inbox](../docs/mods/inbox.md), [인박스 계약](../docs/inbox-contract.md) |
+| UI 모드 (`inbox`) | 리더 결과 보고를 채팅처럼 보여 주고, 결정이 필요한 보고에 답하거나 채팅칸에서 `@리더`로 말하면 PO 터미널에 입력으로 전해 줍니다 | 추가 | [inbox](../docs/mods/inbox.md), [인박스 계약](../docs/inbox-contract.md) |
 
 <!-- 새 모드: docs/mods/<모드>.md를 같은 틀(제목, 한 줄 소개, 스크린샷, 사용법, 필요한 것, 설치, 돌아가기 링크)로 만들고 위 표와 ../README.md 모드 표에 한 줄씩 더합니다. -->
 
@@ -273,8 +273,8 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
   - collect.cjs는 Herdr 터미널 목록, 각 저장소의 git 워크트리, Claude Code 세션 기록(`~/.claude`)을 로컬에서 읽습니다.
   - GitHub 이슈·PR·리뷰·CI는 `gh`로 GraphQL 한 번에 읽습니다. 쓰기는 하지 않습니다.
   - 캐시는 로컬 30초, GitHub 3분입니다. 처음 읽을 때는 5~15초쯤 걸립니다.
-- **UI 모드/터미널 모드(#59)**: `inbox`를 설치하면 `layout` 단계가 쓰던 레이아웃 옆에 `<이름>-ui.json`을 하나 더 만듭니다. 가운데 터미널 칸만 PO 데스크 채팅(`mode: "main"`)으로 바뀐 레이아웃이고, 탭 줄 `UI 모드`/`터미널 모드` 버튼이나 `keys.json`의 `"cmd-shift-u": "tabs-mine.mode"`(직접 추가)로 `layout.switch`합니다. 직접 고친 `-ui` 파일은 덮어쓰지 않고, `--remove inbox`는 우리가 만든 파일만 지웁니다. UI 모드에서 데스크가 보내는 글은 칸 없이 `hc send`로 PO 터미널 주소에 갑니다. 마지막 모드가 재시작 뒤에도 유지되는지와 숨겨진 터미널에 실제로 들어가는지는 실제 앱에서 확인하지 못했습니다. 자세한 규칙과 확인하지 못한 것은 [inbox](../docs/mods/inbox.md#ui-모드와-터미널-모드-59)에 있습니다.
-- PO 데스크(`inbox`)는 리더가 `~/.herdr-inbox/<리더>.jsonl`에 남긴 보고를 `mods/inbox/inbox.cjs`가 **읽기만 해서** 메신저 화면으로 보여 줍니다(Dock 30초, 창·페인 5초, 앱 아이콘 숫자는 Dock이 맡음). 답과 채팅은 PO 터미널로 보내지고 PO의 말은 PO 답 훅이 `~/.herdr-inbox/po/<po id>.jsonl`에 남깁니다. 쓰는 법·채팅 필터·1:1 보기·답이 가는 곳·질문 패널·확인하지 못한 것은 모두 [inbox](../docs/mods/inbox.md)에, 파일 규칙은 [인박스 계약](../docs/inbox-contract.md)에 있습니다. 탭 줄 `PO 데스크` 숫자·Dock `대기 n`·앱 아이콘 숫자는 **이름이 `lead-`로 시작하고 `wait=decision|verify` 라벨이 있는 터미널**을 같은 규칙으로 셉니다([이름 규칙과 프로필](../docs/mods/inbox.md#이름-규칙과-프로필)).
+- **UI 모드/터미널 모드(#59)**: `inbox`를 설치하면 `layout` 단계가 쓰던 레이아웃 옆에 `<이름>-ui.json`을 하나 더 만듭니다. 가운데 터미널 칸만 UI 모드 채팅(`mode: "main"`)으로 바뀐 레이아웃이고, 탭 줄 `UI 모드`/`터미널 모드` 버튼이나 `keys.json`의 `"cmd-shift-u": "tabs-mine.mode"`(직접 추가)로 `layout.switch`합니다. 직접 고친 `-ui` 파일은 덮어쓰지 않고, `--remove inbox`는 우리가 만든 파일만 지웁니다. UI 모드 전체 화면에서 보내는 글은 칸 없이 `hc send`로 PO 터미널 주소에 갑니다. 마지막 모드가 재시작 뒤에도 유지되는지와 숨겨진 터미널에 실제로 들어가는지는 실제 앱에서 확인하지 못했습니다. 자세한 규칙과 확인하지 못한 것은 [inbox](../docs/mods/inbox.md#ui-모드와-터미널-모드-59)에 있습니다.
+- UI 모드(`inbox`)는 리더가 `~/.herdr-inbox/<리더>.jsonl`에 남긴 보고를 `mods/inbox/inbox.cjs`가 **읽기만 해서** 메신저 화면으로 보여 줍니다(Dock 30초, 창·페인 5초, 앱 아이콘 숫자는 Dock이 맡음). 답과 채팅은 PO 터미널로 보내지고 PO의 말은 PO 답 훅이 `~/.herdr-inbox/po/<po id>.jsonl`에 남깁니다. 쓰는 법·채팅 필터·1:1 보기·답이 가는 곳·질문 패널·확인하지 못한 것은 모두 [inbox](../docs/mods/inbox.md)에, 파일 규칙은 [인박스 계약](../docs/inbox-contract.md)에 있습니다. 탭 줄 `UI 모드` 숫자·Dock `대기 n`·앱 아이콘 숫자는 **이름이 `lead-`로 시작하고 `wait=decision|verify` 라벨이 있는 터미널**을 같은 규칙으로 셉니다([이름 규칙과 프로필](../docs/mods/inbox.md#이름-규칙과-프로필)).
 - 예약 패널은 `mods/schedules/schedules.cjs`를 30초마다 불러 때가 된 예약을 실행합니다.
   - 실행은 `hc run --bg`로 세션을 띄운 뒤 `hc send`로 프롬프트를 보내는 방식입니다.
 
@@ -294,6 +294,6 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
 | `<설정 폴더>/gh-account/` | gh-account 프로그램, 설치 상태, 계정별 커밋 신원 파일 | gh-account 제거할 때 지웁니다 |
 | `~/.claude/usage-limits.json` | usage-status가 읽는 파일(다른 도구가 씀) | 이 저장소가 만들지 않습니다 |
 | `~/.herdr-inbox/<리더>.jsonl` | inbox가 읽는 리더 보고 기록(`report`가 씀, 규칙은 [인박스 계약](../docs/inbox-contract.md)) | 이 저장소의 `tools/inbox-write.cjs`로 쓸 수 있습니다(설치기는 만들지 않음). 지우면 그 리더의 보고가 사라집니다 |
-| `~/.herdr-inbox/po/<po id>.jsonl` | PO 데스크가 읽는 그 PO의 말 기록(PO 답 훅이나 쓰기 도구의 `say`가 씀. 프롬프트 글이 들어가므로 `0600`). 데스크가 붙인 그림은 앱 폴더 `data/inbox/img/`에 저장됩니다 | 이 저장소가 만들지 않습니다. 없으면 PO의 말이 없는 것으로 봅니다. 규칙은 [인박스 계약](../docs/inbox-contract.md), 훅은 [inbox](../docs/mods/inbox.md#po-답-훅) |
+| `~/.herdr-inbox/po/<po id>.jsonl` | UI 모드가 읽는 그 PO의 말 기록(PO 답 훅이나 쓰기 도구의 `say`가 씀. 프롬프트 글이 들어가므로 `0600`). UI 모드가 붙인 그림은 앱 폴더 `data/inbox/img/`에 저장됩니다 | 이 저장소가 만들지 않습니다. 없으면 PO의 말이 없는 것으로 봅니다. 규칙은 [인박스 계약](../docs/inbox-contract.md), 훅은 [inbox](../docs/mods/inbox.md#po-답-훅) |
 
 패널 선택이나 토글 같은 화면 설정은 Herdr가 모드마다 따로 보관합니다.
