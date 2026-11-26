@@ -314,3 +314,72 @@ test("#93 보내기: 화면을 읽는 동안 다른 방으로 바꿔도 말풍�
   assert.equal(log.deliver.length, 1);
   assert.equal(log.deliver[0].rec.po, "room-A");
 });
+
+// --- P1 fix: parseMention no longer strips the person's own leading "!" (it ran before bangCommand, so a '!' line never took the bang path) ---
+
+test("#93 parseMention: 처음의 '!' 는 글 그대로 남고, @멘션을 뺀 자리에 남은 문장부호만 걷힌다", () => {
+  assert.equal(I.parseMention("! gh pr merge 1").text, "! gh pr merge 1");
+  assert.equal(I.parseMention("!ls -la").text, "!ls -la");
+  assert.equal(I.parseMention("  !ls\n").text, "!ls");
+  assert.equal(I.parseMention("!!안녕").text, "!!안녕");
+  assert.equal(I.parseMention("@here, 안녕").text, "안녕"); // the old cleanup still works after a removed mention
+  assert.equal(I.parseMention("@here ! 안녕").text, "안녕");
+  assert.equal(I.parseMention("? 안녕").text, "안녕");
+});
+
+const realSend = (raw, { known = [] } = {}) => {
+  const log = { bang: [], deliver: [], say: [] };
+  const src = mainSrc();
+  const globals = {
+    parseMention: I.parseMention, composeChat: I.composeChat, bangCommand: I.bangCommand, chatTarget: () => ({ po: "t1" }), imgLine: () => "", MAX_IMGS: 4, PO_OTHER: "__other", isAgentName: () => true, leaderOwner: () => "po-room",
+  };
+  const m = runMethod(src, "  sendChat(c) {", "  // The chat footer", globals);
+  const self = {
+    ...m, pics: [], menu: null,
+    chat: { content: () => ({ text: raw, tokens: [] }), set_value() {} },
+    view: () => ({ pick: "po-room", terms: [] }),
+    say: (t) => log.say.push(t),
+    sendBang: (c, po, p, pics) => log.bang.push({ po, p, pics }),
+    deliver: (po, line, c, rec) => { log.deliver.push({ po, line, rec }); return "sent"; },
+  };
+  self.sendChat({ notify() {} });
+  return { log, known };
+};
+
+test("#93 sendChat(실제 순서): '!cmd' 는 parseMention 을 거친 뒤에도 sendBang 으로 가고, 보통 글은 deliver 로 간다", () => {
+  for (const raw of ["!ls -la", "! gh pr merge 1", "  !git status "]) {
+    const { log } = realSend(raw);
+    assert.equal(log.bang.length, 1, raw);
+    assert.equal(log.deliver.length, 0, raw);
+    assert.equal(I.bangCommand(log.bang[0].p.text), I.bangCommand(raw));
+    assert.match(log.bang[0].p.text, /^!/);
+  }
+  const plain = realSend("안녕 !ls");
+  assert.equal(plain.log.bang.length, 0);
+  assert.equal(plain.log.deliver.length, 1);
+  assert.equal(plain.log.deliver[0].line, "안녕 !ls");
+  const dbl = realSend("!!안녕");
+  assert.equal(dbl.log.bang.length, 0); // "!!" is a plain line, and it keeps both "!"
+  assert.equal(dbl.log.deliver[0].line, "!!안녕");
+});
+
+test("#93 다시 보내기(실제 resend): '!' 기록은 resendBang 으로만 가고 deliver 를 직접 부르지 않으며, 보통 글은 deliver 로 간다", () => {
+  const run = (text, line) => {
+    const log = { bang: [], deliver: [] };
+    const m = runMethod(mainSrc(), "  resend(id, c) {", "  // A '!' bubble's resend goes through", { bangCommand: I.bangCommand });
+    const r = { id: "r1", text, line, status: "failed", po: "po-room" };
+    const self = {
+      ...m, recordOf: () => r, recordPo: () => "t1", recordActs: () => ["resend"], say() {}, mark() {}, markAsk() {},
+      resendBang: (id, c, po, rr) => log.bang.push(rr), deliver: (po, l) => { log.deliver.push(l); return "sent"; },
+    };
+    self.resend("r1", { notify() {} });
+    return log;
+  };
+  const bang = run("!ls -la", "!ls -la");
+  assert.equal(bang.bang.length, 1);
+  assert.equal(bang.deliver.length, 0);
+  assert.equal(run("! gh pr merge 1", undefined).bang.length, 1); // text only, no line
+  const plain = run("안녕", "안녕");
+  assert.equal(plain.bang.length, 0);
+  assert.deepEqual(plain.deliver, ["안녕"]);
+});
