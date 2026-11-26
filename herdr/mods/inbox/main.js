@@ -37,6 +37,7 @@ const ROOM_W = 168, SLIM_W = 58; // the window's room list / the dock's slim roo
 const PASTE_SETTLE_MS = 350; // the PO terminal takes the paste before Enter is pressed
 const PANE_POLL_MS = 300, PANE_WAIT_MS = 6000; // a send to a PO with no pane: how often / how long to wait for the pane the send opened
 const PROMPT_TIMEOUT_MS = 5000, PROMPT_RETRY_MS = 2000; // a screen read that has not answered by then ends as "could not read" and is tried again after PROMPT_RETRY_MS
+const BANG_READ_MS = 6000; // a '!' command's screen read must answer within this, else it is refused and the busy flag is released
 const PROMPT_REFRESH_MS = 3000, PROMPT_LINES = 40; // a blocked PO's screen is re-read this often while shown (the last PROMPT_LINES lines are read)
 const BADGE_KEY = "inbox.badge"; // {id, ts}: the copy (dock / pane) that writes the app icon badge
 const OPEN_KEY = "inbox.expanded"; // cards the person opened ("자세히"), shared so they stay open across re-renders and window reopens
@@ -165,7 +166,7 @@ function parseMention(raw, known = []) {
     else if (known.includes(name)) { if (!to.includes(name)) to.push(name); } else return m;
     return pre;
   }).trim() === "";
-  const text = flat.replace(/(^|\n)@here[.,!?:;)]+ ?/g, "$1").replace(HERE_PUNCT, "").replace(HERE, "$1").replace(/[ \t]+/g, " ").replace(/ ?\n ?/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/^[\s,.:;!?)]+/, "").trim();
+  const text = flat.replace(/(^|\n)@here[.,!?:;)]+ ?/g, "$1").replace(HERE_PUNCT, "").replace(HERE, "$1").replace(/[ \t]+/g, " ").replace(/ ?\n ?/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/^[\s,.:;!?)]+/, (m) => (flat.startsWith("!") ? m : "")).trim(); // a "!" the person started with is theirs (a "!cmd" line, #93); only punctuation left by a removed mention goes
   return { text, to, here, empty };
 }
 // What an Enter does in the box: Shift+Enter is a line break, a plain Enter (or Cmd/Ctrl+Enter) sends, any other key nothing.
@@ -526,11 +527,24 @@ const promptSame = (a, b) => promptTail(a, 40).map((l) => l.replace(/\s+/g, " ")
 // whitespace ignored), or, for a long / multi-line paste the PO folds into "[Pasted text …]", that marker is.
 function inputHas(screen, line) {
   const squeeze = (s) => s.replace(/[│┃|]/g, " ").replace(/\s+/g, " ").trim();
-  const want = squeeze(cleanText(line));
+  const want = squeeze(cleanText(line)).replace(/^!\s*/, ""); // bash mode draws the "!" apart from the command
   if (!want) return false;
   const hay = squeeze(cleanText(screen).split("\n").filter((l) => l.trim()).slice(-14).join("\n"));
   if (/\n/.test(cleanText(line).trim()) || want.length > 200) return /\[Pasted text/i.test(hay) || hay.includes(want.slice(0, 24)) || hay.includes(want.slice(-24));
   return hay.includes(want.slice(0, 24)) || hay.includes(want.slice(-24));
+}
+// A desk line that is a shell command for the PO's own prompt ("!ls": Claude Code's bash mode starts with "!"). null for any other text,
+// "" for a bare "!"; "!!" is not one. The command is the rest of the line, trimmed.
+const bangCommand = (text) => { const m = /^\s*!(?!!)([\s\S]*)$/.exec(String(text ?? "")); return m ? m[1].trim() : null; };
+// What stands in the PO's input box on its screen: the text after the last prompt mark (❯ > ›) among the last 14 lines (box borders ignored), "" for an empty
+// box, null when no prompt line is there. A dim placeholder hint reads as text (colors are not on the screen), so the desk then refuses: it never types over text.
+function promptInput(screen) {
+  const lines = cleanText(screen).split("\n").filter((l) => l.trim()).slice(-14);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = /^[\s│┃|]*([❯>›])(?:\s+(.*?))?[\s│┃|]*$/.exec(lines[i]);
+    if (m) return (m[2] ?? "").trim();
+  }
+  return null;
 }
 // Slack-style headers: `head` is true for the first entry and whenever the sender changes or the gap to the entry before is over `gap`.
 const groupTimeline = (entries, gap = TL_GAP_MS) => (entries ?? []).map((e, i, a) => ({ ...e, head: i === 0 || a[i - 1].who !== e.who || e.ms - a[i - 1].ms > gap }));
@@ -1098,6 +1112,40 @@ function restartBlock({ po = "", status = "", running = false } = {}) {
   if (s === "working") return "PO가 작업 중입니다 — 끝난 뒤에 누르세요";
   return "";
 }
+// ---- "원격 연결 켜기" (#79): one click sends `/remote-control` to the room's terminal through the same `hc send` path as 새로 시작 (sendLine). The desk cannot
+// press it for the person any other way (a skill cannot run the command). Pure part: why it cannot be pressed now ("" when it can).
+const REMOTE_CMD = "/remote-control";
+function remoteBlock({ po = "", status = "", running = false, sending = false } = {}) {
+  if (sending) return "원격 연결 명령을 보내는 중입니다";
+  return restartBlock({ po, status, running });
+}
+const REMOTE_POLLS = 5, REMOTE_POLL_MS = 1000; // after the send: this many screen reads, this far apart (~5 s)
+const REMOTE_URL = /https:\/\/claude\.ai\/code\/[^\s)\]>"'`]+/g;
+// What the PO's screen says about Remote Control. `menu` = Claude Code's "already connected" menu (Disconnect this session / Show QR code / Continue), `active` = the
+// footer says it is on, `url` = the last session link on screen. Text copied from Claude Code's UI and NOT verified against a real terminal (UNVERIFIED).
+function remoteScreen(text) {
+  const clean = cleanText(text);
+  const lines = clean.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim());
+  const tail = lines.slice(-14).join("\n");
+  // Only the three numbered option lines together count (prose that merely mentions these words is not the menu).
+  const opt = (n, re) => new RegExp(`^\\s*(?:[❯>›▶]\\s*)?${n}[.)]\\s*${re}\\s*$`, "im").test(tail);
+  const menu = opt(1, "Disconnect this session") && opt(2, "Show QR code") && opt(3, "Continue");
+  const active = menu || /Remote Control (is )?(active|connected)/i.test(lines.slice(-8).join("\n"));
+  // `seen` = the transcript line Claude Code prints when it turned on ("/remote-control is active · Continue here, on your phone, or at <url>", copied from a real
+  // screen) is on screen and no later line says it was turned off. Weaker than `active`: that line scrolls away, and a disconnect line's wording is UNVERIFIED.
+  let on = -1, off = -1;
+  lines.forEach((l, i) => { if (/\/?remote[- ]control (is )?(active|connected)/i.test(l)) on = i; if (/remote[- ]control (is )?(disconnected|off|stopped|inactive)|disconnected (this )?session/i.test(l)) off = i; });
+  const urls = clean.match(REMOTE_URL) ?? [];
+  return { menu, active, seen: active || (on >= 0 && on > off), url: urls.length ? urls[urls.length - 1].replace(/[.,;:]+$/, "") : "" };
+}
+// The one-line system note for the room's chat. kind: on | already | fail | unknown.
+function remoteNote(kind, { url = "", why = "" } = {}) {
+  const u = url ? ` — ${url}` : "";
+  if (kind === "on") return `원격 연결 켜짐${u}`;
+  if (kind === "already") return `이미 켜져 있음${u}`;
+  if (kind === "unknown") return "원격 연결 명령을 보냈지만 5초 안에 화면에서 결과를 확인하지 못했습니다. 터미널에서 확인하세요";
+  return `켜지 못함: ${why || "알 수 없는 이유"}`;
+}
 // The line pasted into the PO (English: it is read by an agent). `file` is where the note goes (shown with ~).
 function handoffAsk(file) {
   return `${RESTART_MARK} The user will restart you with /clear. Before that, write a handoff note to ${file} (overwrite it; create the folder if needed) so that the next session can continue seamlessly: (1) decisions and final checks the user still has to answer, (2) each running leader with its task, issue/PR and state, (3) what you were doing and the next steps, (4) anything that is only in this conversation. Keep it short and in the user's language. Do nothing else; reply "handoff written" when the file is saved.`;
@@ -1140,6 +1188,8 @@ function restartSendResult(r) {
     return { ok: true, turn: Number.isFinite(turn) ? turn : null, status: String(j.status ?? ""), why: "", detail };
   }
   const kind = String(j?.error?.kind ?? "");
+  // exit 0 and started:false with no error: `hc send` waited and gave up (a person's unfinished draft in the PO's input) — the text may or may not be in the box
+  if (code === 0 && j && j.started === false && !j.error) return { ok: false, notStarted: true, turn: null, status: "", why: "PO가 받아 시작하지 않았습니다(입력창에 쓰던 글이 있는지 확인하세요)", detail };
   const why = kind === "blocked" ? "PO가 질문 중이라 받지 않았습니다"
     : kind === "status_mismatch" ? "PO가 일하는 중이라 받지 않았습니다"
     : j?.error?.message ? `PO가 받지 않았습니다(${String(j.error.message).slice(0, 80)})`
@@ -1214,6 +1264,10 @@ const syncFont = (force = false) => {
 // The pending-question card: the screen lines scroll inside it (all options stay reachable), the buttons stay under them.
 const PROMPT_LINES_H = 240, PROMPT_MAX_H = 340;
 const DIAG_FLUSH_MS = 2000; // the diag queue is written out this often (one timer started in init)
+const NOTICE_TOP = 44; // just under the 38px header
+const NOTICE_MAX_W = 560;
+const MSG_MS = 5000; // how long a floating notice stays before it hides itself (a click hides it sooner)
+const MSG_TICK_MS = 500; // how often the notice is checked for expiry
 const PIN_TICK_MS = 250; // how often the timeline checks that it still sits at the newest
 const LOAD_REDRAW_MS = 25000; // an unchanged load still redraws this often (the "5분 전" clocks)
 
@@ -1386,6 +1440,7 @@ export default class Inbox extends View {
     this.sentAt = 0; // the last send (ms)
     this.uid = Math.random().toString(36).slice(2, 8); // this copy of the desk (the badge lease, record ids)
     this.seq = 0;
+    this.bangBusy = false; // a '!' command is being checked (screen read) before it is pasted
     this.opening = new Set(); // PO terminals a send is waiting on (their pane is opening): one send per PO at a time
     this.backs = new Map(); // record id -> the pane that had the keyboard before the send (given back after Enter)
     this.prompt = null; // {po, at, text}: the screen tail of the picked room's PO while it waits on a prompt
@@ -1395,6 +1450,8 @@ export default class Inbox extends View {
     this.promptChain = 0; // the newest scheduled re-read of the screen; an older one does nothing
     this.who = new Map(); // room -> the leader the room is narrowed to (#58, "특정 리더만"); like `filt`, not saved
     this.rs = new Map(); // room -> the state of its "PO 새로 시작" (see restartOpen)
+    this.rcChecked = new Set(); // PO terminal addresses whose screen was read for the on-state (see remoteRestore)
+    this.rc = new Map(); // room -> the state of its "원격 연결 켜기" {phase: send | on | already | unknown | fail, at, url, why, note {text, ms, bad}} (see remoteOn)
     this.rgen = 0; // numbers a restart run: a timer of an older run does nothing
     this.filt = new Map(); // room -> the chat filter chip picked there (전체 when missing); not saved: a restart shows every message again
     this.heldAt = 0; // the last Enter held back as a possible IME confirm (ms)
@@ -1473,6 +1530,7 @@ export default class Inbox extends View {
     // row, the dots, a picture that finished loading) is seen here and the view goes back to the bottom. A held-back redraw is let go
     // once the selection / press is over.
     cx.timer.every(PIN_TICK_MS, (cx) => this.pinTick(cx));
+    cx.timer.every(MSG_TICK_MS, (cx) => { if (this.msg && Date.now() - this.msg.at >= MSG_MS) { this.msg = null; this.softNotify(cx); } });
     cx.timer.every(DIAG_FLUSH_MS, () => this.flushDiag());
     this.usage = undefined; // the rows of the usage line: undefined before the first read, null = Unknown, else [{label, percent, resetsAt}]
     this.usageSig = "";
@@ -1996,6 +2054,7 @@ export default class Inbox extends View {
         this.error = err;
         rememberLeaders();
         this.markSeen();
+        this.remoteRestore(cx);
         if (this.drawing()) this.startWatch(cx);
       } catch (e) { if (gen === this.gen) { this.error = `불러오기 실패: ${String(e?.message ?? e).slice(0, 180)}`; this.changed = true; } }
       finally {
@@ -2163,7 +2222,7 @@ export default class Inbox extends View {
     else this.say("그 리더 터미널이 지금 없습니다.", true);
   }
 
-  say(text, bad = false) { this.msg = { text, bad }; }
+  say(text, bad = false) { this.msg = { text, bad, at: Date.now() }; } // drawn as a floating notice over the top of the room (see render), gone after MSG_MS
 
   // The ONE way the panel puts text into a PO terminal (answer buttons, the answer box, option chips and the chat box):
   // clipboard -> focus the PO pane -> terminal.paste -> Enter after PASTE_SETTLE_MS (submitPo) -> the keyboard goes back to where it was.
@@ -2257,7 +2316,21 @@ export default class Inbox extends View {
         let r = null;
         try { r = await hc(["send", "--json", "--", po, text]); } catch (e) { r = { code: -1, stdout: "", stderr: String(e?.message ?? e) }; }
         const res = restartSendResult(r);
-        if (!res.ok) { this.diag(`desk send failed: ${res.detail} (po ${po})`); fail(res.why, cx); return; }
+        if (!res.ok) {
+          this.diag(`desk send failed: ${res.detail} (po ${po})`);
+          if (res.notStarted) { // no turn started: read the PO's screen — the text in its input only needs Enter (no second paste), else it did not arrive
+            let rd = null;
+            try { rd = await hc(["read", po, "--lines", String(PROMPT_LINES)]); } catch {}
+            if (rd && rd.code === 0 && inputHas(String(rd.stdout ?? ""), text) && !this.isBlocked(po)) {
+              this.opening.delete(po); this.mark(id, "noenter");
+              this.say(`PO(${po})의 입력창에 글은 들어갔지만 시작되지 않았습니다. 말풍선의 'Enter 누르기'를 누르세요.`, true);
+              try { cx.notify(); } catch {}
+              return;
+            }
+          }
+          fail(res.why, cx);
+          return;
+        }
         this.opening.delete(po);
         this.mark(id, "sent");
         try { ok?.("sent"); } catch {}
@@ -2318,6 +2391,7 @@ export default class Inbox extends View {
     if (!this.recordActs(r, po).includes("resend")) return;
     if (!po) { this.say(NO_PO(), true); c.notify(); return; }
     const before = r.status;
+    if (bangCommand(r.line || r.text) !== null) { this.resendBang(id, c, po, r, before); return; }
     this.mark(id, "sending");
     try {
       const out = this.deliver(po, r.line || r.text, c, r, (r2) => this.markAsk(r, r2), id);
@@ -2325,6 +2399,28 @@ export default class Inbox extends View {
       else if (out === "sent" || out === "held") this.markAsk(r, out);
     } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
     c.notify();
+  }
+
+  // A '!' bubble's resend goes through the same guard as the first send (PO idle, pane open, input box empty), so a resend never types into a PO that
+  // has since started working or has text in its box. A refusal puts the record back as it was and says why.
+  resendBang(id, c, po, r, before) {
+    const stop = (why, cx = c) => { this.bangBusy = false; this.mark(id, before); this.say(`${why} '!' 명령은 보내지 않았습니다. 상태를 확인한 뒤 '다시 보내기'를 누르세요.`, true); try { cx.notify(); } catch {} };
+    if (this.bangBusy) { this.say("앞의 '!' 명령을 확인하는 중입니다. 잠시 뒤에 다시 보내세요.", true); try { c.notify(); } catch {} return; }
+    if (this.mained) { this.say("UI 모드에서는 PO 터미널에 글을 그대로 붙여 넣을 수 없어 '!' 명령을 보내지 않았습니다.", true); try { c.notify(); } catch {} return; }
+    const gate = this.bangGate(po);
+    if (gate) { this.say(`${gate} '!' 명령은 보내지 않았습니다.`, true); try { c.notify(); } catch {} return; }
+    this.mark(id, "sending");
+    this.bangBusy = true;
+    this.bangCheck(c, po, stop, (cx, clip) => {
+      this.bangBusy = false;
+      try {
+        const out = this.deliver(po, r.line || r.text, cx, r, (r2) => this.markAsk(r, r2), id);
+        this.bangClipBack(cx, clip, out);
+        if (out === "busy") this.mark(id, before);
+        else if (out === "sent" || out === "held") this.markAsk(r, out);
+      } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
+      try { cx.notify(); } catch {}
+    });
   }
 
   // The bubble's "Enter 누르기": the text is in the PO's normal prompt and only Enter is missing. Before the key goes, the PO's screen is read and the
@@ -2505,7 +2601,7 @@ export default class Inbox extends View {
   restartRun(room, po, id, c) {
     const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "");
     const why = restartBlock({ po, status: st });
-    if (why) { this.say(why, true); try { c.notify(); } catch {} return; }
+    if (why) { this.remoteSet(room, { phase: "fail", kind: "fail", why }, c); return; }
     const g = ++this.rgen;
     this.rs.set(room, { phase: "run", n: 0, gen: g, po, id, since: 0, path: "", note: null, quiet: 0, why: "" });
     try { c.notify(); } catch {}
@@ -2618,6 +2714,113 @@ export default class Inbox extends View {
         .child(this.button(t, "rs-close", r.phase === "run" || r.phase === "clear" || r.phase === "timeout" ? "취소" : "닫기", (c) => this.restartClose(room, c), { tip: r.phase === "run" || r.phase === "clear" ? "기다리기를 멈춥니다(이미 보낸 요청은 그대로입니다)" : "" })));
   }
 
+  // ---- "원격 연결 켜기" (#79), per terminal: `room` = the key of the state, `po` = the terminal address, `status` = its hc status. A room of any kind can use it (PO room
+  // now, a solo room later): it needs only the terminal's address. The flow: read the screen (already on? the "already connected" menu open? then no send), send the one line
+  // /remote-control, read the screen again a few times (~5 s) to see what it did, and close the "already connected" menu with Esc only (never Disconnect, never Enter) after
+  // checking it is still on screen. The result is a system note in the room's chat (rc.note) and a small mark by the button. What the screen looks like is UNVERIFIED.
+  async remoteRead(po) {
+    try {
+      const o = await hc(["read", po, "--lines", String(PROMPT_LINES)]);
+      return o && o.code === 0 ? String(o.stdout ?? "") : null;
+    } catch { return null; }
+  }
+  // Esc closes the menu, pressed ONCE (a second Esc in a row can rewind the PO's conversation). Right before it the screen must still show the whole menu and the
+  // terminal's status is read again (poTerm): not running or working = no press (Esc would stop its turn). After it the screen is read again; true = the menu is gone,
+  // false = it is still there (or anything could not be checked) and nothing more is pressed.
+  async remoteClose(po, cx) {
+    const t = await this.remoteRead(po);
+    if (t === null) return false;
+    if (!remoteScreen(t).menu) return true;
+    const term = await this.poTerm(po);
+    if (!term || !term.live || term.status === "working") return false;
+    let k = null; try { k = await hc(["keys", po, "esc"]); } catch {}
+    if (!(k && k.code === 0)) return false;
+    await this.sleepOn(cx, 600);
+    const after = await this.remoteRead(po);
+    return after !== null && !remoteScreen(after).menu;
+  }
+  remoteSet(room, patch, c) {
+    const r = { ...(this.rc.get(room) ?? {}), at: Date.now(), ...patch };
+    if (patch.kind) { const ms = Date.now(); r.note = { text: remoteNote(patch.kind, r), ms, bad: patch.kind === "fail" || patch.kind === "unknown" }; delete r.kind; }
+    this.rc.set(room, r);
+    if (patch.kind && r.note) this.say(`원격 연결 · ${r.note.text}`, r.note.bad); // the same result also floats over the top of the room for a few seconds (no layout space)
+    try { c.notify(); } catch {}
+  }
+  remoteOn(room, po, c) {
+    const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "");
+    const r0 = this.rc.get(room);
+    const rs = this.rs.get(room);
+    const why = remoteBlock({ po, status: st, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")), sending: r0?.phase === "send" });
+    if (why) { this.remoteSet(room, { phase: "fail", kind: "fail", why }, c); return; }
+    this.remoteSet(room, { phase: "send", why: "" }, c);
+    c.spawn(async (cx) => {
+      const done = (phase, kind, extra = {}) => this.remoteSet(room, { phase, kind, why: "", url: "", ...extra }, cx);
+      try {
+        const pre0 = await this.remoteRead(po);
+        const pre = pre0 === null ? null : remoteScreen(pre0);
+        if (pre && pre.active) { // already on (or its menu is open and the person is stuck in it): no send
+          if (pre.menu && !(await this.remoteClose(po, cx))) { done("fail", "fail", { why: "이미 켜져 있고 터미널에 연결 메뉴가 열려 있습니다. 닫지 못했습니다 — 터미널에서 Continue를 고르세요(Disconnect는 고르지 마세요)" }); return; }
+          done("already", "already", { url: pre.url });
+          return;
+        }
+        const res = await this.sendLine(po, REMOTE_CMD, () => true, room);
+        if (!res.ok) { done("fail", "fail", { why: res.why }); return; }
+        if (pre === null) { done("unknown", "unknown"); return; }
+        for (let i = 0; i < REMOTE_POLLS; i++) {
+          await this.sleepOn(cx, REMOTE_POLL_MS);
+          const txt = await this.remoteRead(po);
+          if (txt === null) continue;
+          const now = remoteScreen(txt);
+          if (now.menu) { // it was already connected: the command opened Claude Code's menu
+            if (await this.remoteClose(po, cx)) done("already", "already", { url: now.url });
+            else done("fail", "fail", { why: "이미 켜져 있어 연결 메뉴가 열렸고 닫지 못했습니다 — 터미널에서 Continue를 고르세요(Disconnect는 고르지 마세요)" });
+            return;
+          }
+          if (now.active || (now.url && now.url !== pre.url)) { done("on", "on", { url: now.url }); return; }
+        }
+        done("unknown", "unknown");
+      } catch (e) { done("fail", "fail", { why: String(e?.message ?? e).slice(0, 100) }); }
+    });
+  }
+  // The button and, beside it, the last known state: once the last screen check saw it on, the button itself reads "● 원격 연결 켜짐" (a click re-checks the screen and only sends if it no longer shows on). Not watched, so a disconnect made in the terminal shows only after the next check.
+  remoteButton(t, room, po, status) {
+    const r = this.rc.get(room);
+    const rs = this.rs.get(room);
+    const why = remoteBlock({ po, status, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")), sending: r?.phase === "send" });
+    const on = r && (r.phase === "on" || r.phase === "already");
+    const at = on ? new Date(r.at).toTimeString().slice(0, 5) : "";
+    return h_flex().id(`rc-${room}`).flex_none().min_w(0).gap(6).items_center()
+      .when(r?.phase === "send", (el) => el.child(div().flex_none().text_size(fz(10.5)).text_color(t.dim).child("확인 중…")))
+      .child(this.button(t, on ? "rc-on-done" : "rc-on", on ? h_flex().items_center().gap(6).child(div().flex_none().w(8).h(8).rounded(4).bg(t.working)).child("원격 연결 켜짐") : "원격 연결 켜기", (c) => this.remoteOn(room, po, c), { disabled: why, tip: why || (on ? `${at}에 화면으로 확인한 상태입니다. 그 뒤 터미널에서 끊었는지는 보지 않습니다. 누르면 화면을 다시 확인하고, 꺼져 있을 때만 /remote-control을 보냅니다` : "이 PO 터미널에 /remote-control을 보내 원격 연결(Remote Control)을 켭니다. 이미 켜져 있으면 보내지 않습니다") }));
+  }
+  // The system note of the last 원격 연결 try, as a quiet line at the end of the room's chat.
+  remoteNoteRow(t, room) {
+    const n = this.rc.get(room)?.note;
+    if (!n) return null;
+    return h_flex().id(`rc-note-${room}`).flex_none().min_w(0).px(14).py(4).gap(6).justify_center().items_center()
+      .child(div().min_w(0).text_size(fz(11)).text_color(n.bad ? t.blocked : t.dim).child(this.text(`rc-note-t-${room}`, chatHtml(`원격 연결 · ${new Date(n.ms).toTimeString().slice(0, 5)} · ${n.text}`))));
+  }
+
+  // After a start or a reload of the desk the in-memory state is gone, so every PO terminal's screen is read ONCE (read only, nothing is sent or pressed) and a room whose
+  // screen still shows Claude Code's "/remote-control is active" line gets the on-state without a chat note. The screen is the only source: when that line has scrolled away
+  // it is not seen and the button stays "켜기" (a click then checks again). A state is only ever set here, never cleared. `force` (the refresh button) checks again.
+  remoteRestore(cx, force = false) {
+    if (force) this.rcChecked.clear();
+    const pos = poList(this.liveTerms()).filter((p) => !this.rcChecked.has(p.address));
+    for (const p of pos) {
+      this.rcChecked.add(p.address);
+      cx.spawn(async (c) => {
+        const txt = await this.remoteRead(p.address);
+        if (txt === null) { this.rcChecked.delete(p.address); return; } // could not read: try again at the next load
+        const r = this.rc.get(p.id);
+        if (r && r.phase !== "on" && r.phase !== "already") return; // a try of this session (sending, failed, unknown) is newer than the screen
+        const sc = remoteScreen(txt);
+        if (!sc.seen) return;
+        this.rc.set(p.id, { ...(r ?? {}), phase: "on", at: Date.now(), url: sc.url || r?.url || "", why: "" });
+        try { c.notify(); } catch {}
+      });
+    }
+  }
   // A panel answer: the answer line goes through deliver(). The box is cleared and the ask marked once it reached the PO (or, when the PO had
   // no pane, once the pane opened and it was delivered).
   send(a, text, cx, kind = "answer") {
@@ -2817,6 +3020,89 @@ export default class Inbox extends View {
     try { c.timer.after(settle, press); } catch { press(c); }
   }
 
+  // A desk line that starts with "!" goes into the PO's own prompt as the person's raw input (Claude Code's bash mode). `hc send` wraps text in <hc …> and
+  // `hc keys` has no "!", so this is the unwrapped paste path (clipboard + terminal.paste + Enter, keyboard given back). Only when nothing else is in play:
+  // not UI mode (no pane), no @mention or picture, one line, the PO's pane open, the PO idle (not working, not on a question) and its input box empty.
+  // Otherwise nothing is sent, the text stays in the box and the reason is shown. Whether a pasted leading "!" enters bash mode is unverified in the real app.
+  sendBang(c, po, p, pics) {
+    const cmd = bangCommand(p.text);
+    const refuse = (why, cx = c) => { this.bangBusy = false; this.say(`${why} '!' 명령은 보내지 않았고 글은 입력칸에 그대로 있습니다.`, true); try { cx.notify(); } catch {} };
+    if (this.bangBusy) { this.say("앞의 '!' 명령을 확인하는 중입니다. 잠시 뒤에 다시 보내세요.", true); try { c.notify(); } catch {} return; }
+    if (this.mained) { refuse("UI 모드에서는 PO 터미널에 글을 그대로 붙여 넣을 수 없어(보내기는 글을 <hc …>로 감쌉니다)"); return; }
+    if (p.to.length) { refuse("'!' 명령은 PO에게만 보낼 수 있어(@멘션을 빼 주세요)"); return; }
+    if (pics.length) { refuse("'!' 명령은 그림과 함께 보낼 수 없어"); return; }
+    if (!cmd) { refuse("'!' 뒤에 실행할 명령이 없어"); return; }
+    if (/\n/.test(cmd)) { refuse("'!' 명령은 한 줄만 보낼 수 있어"); return; }
+    const gate = this.bangGate(po);
+    if (gate) { refuse(gate); return; }
+    const text = composeChat(this.chat.content());
+    const room = this.view().pick; // the room it is sent from: the screen read below can end after another room was picked
+    this.bangBusy = true;
+    this.bangCheck(c, po, refuse, (cx, clip) => {
+      this.bangBusy = false;
+      try {
+        const res = this.deliver(po, `!${cmd}`, cx, { text: `!${cmd}`, imgs: [], to: "", tos: [], po: room, kind: "chat" });
+        this.bangClipBack(cx, clip, res);
+        if (res === "sent") {
+          this.sentAt2 = Date.now();
+          if (composeChat(this.chat.content()) === text) { this.wipe("chat", this.chat); this.menu = null; }
+        }
+      } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
+      try { cx.notify(); } catch {}
+    });
+  }
+
+  // The checks that need no screen read: the PO's pane is open and the PO is neither working nor on a question. "" when it may go on, else the reason.
+  bangGate(po) {
+    let hasPane = false;
+    try { hasPane = (panes() ?? []).some((x) => x.terminal === po); } catch {}
+    if (!hasPane) return `PO(${po})의 터미널 칸이 화면에 열려 있지 않아`;
+    const term = this.liveTerms().find((x) => x.address === po);
+    if (!term || isBusy(term)) return `PO(${po})가 일하는 중이거나 질문 중이라`;
+    return "";
+  }
+
+  // Reads the PO's screen (and the clipboard text, to give it back after the paste) and calls `go(cx, clip)` only when the PO is idle at an EMPTY input
+  // box; every other outcome calls `fail(why, cx)`. The read is capped at BANG_READ_MS: a stalled `hc read` fails instead of holding the busy flag forever.
+  // Used by the first send and by a bubble's resend, so both go through the same guard.
+  bangCheck(c, po, fail, go) {
+    const spawn = (cx) => (async () => {
+      const work = Promise.all([
+        Promise.resolve().then(() => hc(["read", po, "--lines", String(PROMPT_LINES)])).catch(() => null),
+        this.clipText(),
+      ]);
+      const limit = new Promise((res) => { try { cx.timer.after(BANG_READ_MS, () => res(null)); } catch {} });
+      const got = await Promise.race([work, limit]);
+      if (!got) { fail(`PO(${po})의 화면 읽기가 ${Math.round(BANG_READ_MS / 1000)}초 안에 끝나지 않아`, cx); return; }
+      const [r, clip] = got;
+      if (!(r && r.code === 0)) { fail(`PO(${po})의 화면을 읽지 못해`, cx); return; }
+      const inp = promptInput(String(r.stdout ?? ""));
+      if (inp === null) { fail(`PO(${po})의 입력창을 화면에서 찾지 못해`, cx); return; }
+      if (inp !== "") { fail(`PO(${po})의 입력창이 비어 있지 않아`, cx); return; }
+      const t2 = this.liveTerms().find((x) => x.address === po);
+      if (!t2 || isBusy(t2)) { fail(`PO(${po})가 그 사이 일하거나 질문 중이 되어`, cx); return; }
+      go(cx, clip);
+    })().catch((e) => { try { fail(String(e?.message ?? e).slice(0, 80), cx); } catch {} });
+    try { c.spawn(spawn); } catch (e) { fail(String(e?.message ?? e).slice(0, 80), c); }
+  }
+
+  // The clipboard's TEXT (null when it holds none or cannot be read: a picture is not restored). Never throws.
+  async clipText() {
+    try {
+      const r = await exec("node", [HELPER(), "cliptext"], { timeout: 4000 });
+      if (r.code !== 0) return null;
+      const o = JSON.parse(r.stdout);
+      return typeof o?.text === "string" && o.text !== "" ? o.text : null;
+    } catch { return null; }
+  }
+
+  // After the '!' line was pasted (the paste itself runs inside deliver), the clipboard gets back what it held before. Not when the delivery is still
+  // waiting for a pane ("opening": that paste needs the clipboard later) or failed.
+  bangClipBack(cx, clip, res) {
+    if (typeof clip !== "string" || clip === "" || (res !== "sent" && res !== "held")) return;
+    try { cx.write_to_clipboard(clip); } catch {}
+  }
+
   sendChat(c) {
     this.sentAt = Date.now();
     this.heldAt = 0;
@@ -2838,6 +3124,7 @@ export default class Inbox extends View {
       return;
     }
     const po = tgt.po;
+    if (bangCommand(p.text) !== null) { this.sendBang(c, po, p, pics); return; }
     try {
       // The PO reads a picture from its file: each path goes in the message as a line it can open with the Read tool.
       const line = [p.text, ...pics.map((x) => imgLine(x.path))].filter(Boolean).join("\n");
@@ -3288,6 +3575,8 @@ export default class Inbox extends View {
     // follow key, not the spot map).
     const hn = v.pick ? this.rs.get(v.pick)?.note : null; // the handoff note of a restart, as the PO's own bubble
     if (hn?.text) blocks.push(this.entryRow(t, { key: `rs-note-${hn.ms}`, who: "po", head: true, ms: hn.ms, ts: "", text: `**인수인계 노트**\n\n${hn.text}`, to: "" }, v, cx));
+    const rn = v.pick ? this.remoteNoteRow(t, v.pick) : null; // the last "원격 연결 켜기" result, a system note
+    if (rn) blocks.push(rn);
     for (const x of this.typing(v)) blocks.push(this.typingRow(t, x));
     // The END SENTINEL: an 8px row (the list's bottom padding) as the LAST direct child. Every "go to the newest" is scroll_to_item(this sentinel):
     // the smallest scroll that reveals a thin row at the very end is the exact bottom, whatever the height of the last bubble. scroll_to_item on
@@ -3340,12 +3629,16 @@ export default class Inbox extends View {
     const bar = this.filterBar(t, v);
     const lbar = this.leaderBar(t, v);
     const rrow = this.restartRow(t, v, cx); // "PO 새로 시작": the button, its confirm line or its steps (null in the other-PO room)
+    const rpo = v.pick && v.pick !== PO_OTHER ? chatTarget(v.terms, [], v.pick).po ?? "" : "";
+    const rcb = rpo ? this.remoteButton(t, v.pick, rpo, String(v.terms.find((x) => x.address === rpo)?.status ?? "")) : null; // "원격 연결 켜기" (#79): in the room header
     const usage = this.usageLine(t, v.pick); // null before the first read (and when there is no cost to show either)
     const panel = this.promptPanel(t, v, cx); // a blocked PO's screen + its keys (null while the room's PO is not waiting on a prompt)
     const room = v_flex().flex_1().min_w(0).min_h(0).when(!strip, (el) => el.h_full()) // beside the rooms the column must fill the row (h_flex centers children)
       .when(!strip && Boolean(head), (el) => el.child(h_flex().flex_none().h(fz(30)).px(14).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().min_w(0).truncate().text_size(fz(13)).font_semibold().text_color(t.foreground).child(head))
-        .child(div().flex_none().text_size(fz(10.5)).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : `리더 ${v.choices?.length ?? 0}명`))))
+        .child(div().flex_none().text_size(fz(10.5)).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : `리더 ${v.choices?.length ?? 0}명`))
+        .when(Boolean(rcb), (el) => el.child(rcb))))
+      .when(strip && Boolean(rcb), (el) => el.child(h_flex().flex_none().min_w(0).px(14).pb(4).justify_end().child(rcb))) // the picker layout has no room header
       .when(Boolean(usage), (el) => el.child(usage))
       .when(Boolean(bar), (el) => el.child(bar))
       .when(Boolean(lbar), (el) => el.child(lbar))
@@ -3353,7 +3646,7 @@ export default class Inbox extends View {
       .when(Boolean(panel), (el) => el.child(panel))
       .when(Boolean(rrow), (el) => el.child(rrow))
       .child(this.chatBox(t, v));
-    return v_flex().size_full().min_h(0).bg(t.chrome).text_size(fz(13))
+    return v_flex().size_full().min_h(0).relative().bg(t.chrome).text_size(fz(13))
       .on_window_mouse_move((e, c) => this.pointer(e, c))
       .on_window_mouse_up("left", (e, c) => this.pointerUp(c, e))
       .on_size_change((size, c) => this.onSize(size.width, c))
@@ -3362,7 +3655,7 @@ export default class Inbox extends View {
           .when(!this.paned || this.mained, (el) => el.child(div().text_size(fz(15)).font_semibold().text_color(t.foreground).child("UI 모드"))) // a pane's own header already says it
           .when(!this.windowed && waiting > 0, (el) => el.child(this.tag(t, `대기 ${waiting}`, "blocked")))
           .child(div().id("inbox-refresh").p(3).rounded(5).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
-            .on_mouse_down("left", stop).on_click((_e, c) => { this.gen++; this.busy = false; this.load(c); }).tooltip("새로고침")
+            .on_mouse_down("left", stop).on_click((_e, c) => { this.gen++; this.busy = false; this.remoteRestore(c, true); this.load(c); }).tooltip("새로고침")
             .child(this.busy ? svg(ICON("spinner")).size(13).spin(900) : div().text_size(fz(14)).child("↻"))))
         .child(h_flex().gap(8).items_center()
           .child(div().text_size(fz(11)).text_color(t.dim).child(this.data ? ago(this.data.at) : ""))
@@ -3375,8 +3668,10 @@ export default class Inbox extends View {
       .when(strip, (el) => el.child(this.picker(t, v)))
       .when(!strip && !v.tabs.some((x) => x.id !== PO_OTHER), (el) => el.child(this.poHint(t)))
       .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(fz(11)).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
-      .when(Boolean(this.msg), (el) => el.child(div().id("inbox-msg").px(14).pb(6).text_size(fz(11.5)).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
-        .on_mouse_down("left", stop).on_click((_e, c) => { this.msg = null; c.notify(); }).child(this.msg.text)))
-      .child(strip ? room : h_flex().flex_1().min_h(0).items_stretch().child(this.narrow ? this.slimRooms(t, v) : this.roomList(t, v)).child(room));
+      .child(strip ? room : h_flex().flex_1().min_h(0).items_stretch().child(this.narrow ? this.slimRooms(t, v) : this.roomList(t, v)).child(room))
+      // The notice floats over the top of the room: absolute, so it takes no layout space and the chat never moves when it comes or goes.
+      .when(Boolean(this.msg), (el) => el.child(h_flex().id("inbox-msg-layer").absolute().top(NOTICE_TOP).left(0).right(0).px(14).justify_center()
+        .child(div().id("inbox-msg").max_w(NOTICE_MAX_W).px(12).py(5).rounded(6).bg(t.chrome).shadow_md().text_size(fz(11.5)).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
+          .on_mouse_down("left", stop).on_click((_e, c) => { this.msg = null; c.notify(); }).tooltip("눌러서 닫기").child(this.msg.text))));
   }
 }

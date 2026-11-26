@@ -1250,3 +1250,9 @@ test("#74 R4 mdText: the first line '[ ] 할 일' / '[x] 끝' is a checkbox line
   assert.ok(I.mdText("[x1] 확인 요청\n본문").startsWith("**[x1]"), "a tag that merely starts with x is a tag");
   assert.ok(I.mdText("[ok] 완료 보고\n본문").startsWith("**[ok]"));
 });
+
+test("#74 sendBang: the box is cleared through wipe() (draft mirror dropped), so guard() cannot restore the sent '!cmd'", () => {
+  const body = MAIN.slice(MAIN.indexOf("  sendBang(c, po, p, pics) {"), MAIN.indexOf("  bangGate(po) {"));
+  assert.match(body, /this\.wipe\("chat", this\.chat\)/);
+  assert.doesNotMatch(body, /this\.chat\.set_value\(/);
+});
