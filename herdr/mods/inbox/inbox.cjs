@@ -1531,62 +1531,53 @@ function clipLong(text) {
   return { text: s.slice(0, end).trimEnd(), cut: true, more: s.length - end };
 }
 const moreLabel = (more) => `더 보기 · ${String(Math.max(0, Number(more) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}자 더`;
-// Where the **bold** runs of a Markdown text (the string given to TextView.markdown) sit, as [{start,end}] UTF-16 offsets into that same string,
-// markers included. The TextView draws no heavier weight for them (it ignores bold), so main.js paints a tint behind these ranges instead.
-// Fenced blocks and `code spans` are skipped, a \\* is not a marker, an opening ** must be followed and a closing ** preceded by a non-blank.
-// Bounded: a line over 2000 chars, work past 20000 chars or more than 100 ranges is left plain. Pure.
-function boldRanges(md) {
-  const out = [];
-  let fence = false, pos = 0, work = 0;
-  for (const ln of String(md ?? "").split("\n")) {
-    const at = pos;
-    pos += ln.length + 1;
-    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; continue; }
-    if (fence || ln.length > 2000 || !ln.includes("**")) continue;
-    work += ln.length;
-    if (work > 20000 || out.length >= 100) break;
-    let m = ln, i = 0;
-    while (i < m.length) { // blank out the code spans (same length, so the offsets stay)
-      if (m[i] === "\\") { i += 2; continue; }
-      if (m[i] !== "`") { i++; continue; }
-      let n = 1;
-      while (m[i + n] === "`") n++;
-      const run = "`".repeat(n);
-      let j = m.indexOf(run, i + n);
-      while (j !== -1 && m[j + n] === "`") j = m.indexOf(run, j + n + 1);
-      if (j === -1) { i += n; continue; }
-      m = m.slice(0, i) + " ".repeat(j + n - i) + m.slice(j + n);
-      i = j + n;
-    }
-    i = 0;
-    while (i < m.length - 1 && out.length < 100) {
-      if (m[i] === "\\") { i += 2; continue; }
-      if (m[i] === "*" && m[i + 1] === "*" && i + 2 < m.length && !/[\s*]/.test(m[i + 2])) {
-        let j = m.indexOf("**", i + 2);
-        while (j !== -1 && (/\s/.test(m[j - 1]) || m[j - 1] === "\\" || m[j + 2] === "*")) j = m.indexOf("**", j + 1);
-        if (j !== -1) { out.push({ start: at + i, end: at + j + 2 }); i = j + 2; continue; }
-        i += 2; continue;
-      }
-      i++;
-    }
-  }
-  return out;
-}
+// A list item line of a Markdown source: "-", "*" or "+", or "1." / "1)", then a blank and some text.
+const MD_ITEM = /^\s*(?:[-*+]|(\d{1,9})[.)])\s+\S/;
 // A message text as Markdown for a TextView.markdown(...).raw_html(false): wrapper tags removed first (they would print literally), a line that
-// is only 【...】 made bold, images switched off (![x](y) -> a plain link), and single line breaks kept as line breaks (Markdown would join them).
-// Code fences are left as written. Never produces HTML: the view shows tags as text. Pure.
+// is only 【...】 made bold, images switched off (![x](y) -> a plain link), single line breaks kept as line breaks (Markdown would join them), and
+// the list marks people type ("•", "1)") written as real Markdown items with a blank line before the list and after it (#66), so the view draws
+// them as a list whose wrapped lines sit under the item text. The words themselves are never changed. Code fences are left as written.
+// Never produces HTML: the view shows tags as text. Pure.
 function mdText(text) { return tlMemoGet("m", text, mdTextRaw); }
 function mdTextRaw(text) {
   const src = unwrapTags(text).replace(/\r\n?/g, "\n").split("\n");
-  let fence = false;
-  const rows = src.map((ln) => {
-    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; return { s: ln, flow: false }; }
-    if (fence) return { s: ln, flow: false };
-    let s = ln.replace(/!\[/g, "!\\[");
+  let fence = false, inList = false;
+  const rows = [];
+  for (const ln of src) {
+    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; inList = false; rows.push({ s: ln, flow: false }); continue; }
+    if (fence) { rows.push({ s: ln, flow: false }); continue; }
+    let s = ln.replace(/!\[/g, "!\\[").replace(/^(\s*)[•‣▪◦●・]\s+/, "$1- ").replace(/^(\s*)(\d{1,3})[)）]\s+/, "$1$2. ");
     if (/^\s*【[^】\n]*】[:：]?\s*$/.test(s)) s = `**${s.trim()}**`;
-    return { s, flow: true };
-  });
-  return rows.map((r, i) => (r.flow && r.s.trim() && rows[i + 1]?.flow && rows[i + 1].s.trim() && !/ {2}$/.test(r.s) ? r.s + "  " : r.s)).join("\n");
+    const m = MD_ITEM.exec(s);
+    const item = Boolean(m) && (inList || m[1] === undefined || m[1] === "1"); // a "2025. 11" line is text, not a list that starts at 2025
+    const prev = rows[rows.length - 1];
+    const blank = !s.trim();
+    // a list needs a blank line before it to be one, and the line after it a blank line to be out of it again
+    if (prev?.flow && prev.s.trim() && ((item && !inList) || (!item && !blank && inList && !/^\s/.test(s)))) rows.push({ s: "", flow: true });
+    if (blank) inList = false;
+    else if (item) inList = true;
+    else if (!/^\s{2,}/.test(s)) inList = false;
+    rows.push({ s, flow: true, item });
+  }
+  return rows.map((r, i) => (r.flow && r.s.trim() && rows[i + 1]?.flow && rows[i + 1].s.trim() && !rows[i + 1].item && !/ {2}$/.test(r.s) ? r.s + "  " : r.s)).join("\n");
+}
+// A whole line that is only **bold** text.
+const BOLD_LINE = /^\*\*(\S(?:(?:(?!\*\*).)*?\S)?)\*\*[ \t]*$/;
+// The mdText source cut into what is drawn as its own TextView: [{s, bold}]. A line that is only **bold** text is its own block (bold: true, the
+// ** removed), because the TextView draws no heavier weight inside a text but the whole view can be given one. Everything between stays
+// Markdown as one block. A **bold** run inside a sentence is shown at the normal weight, without markers. Fences are skipped. Pure.
+function mdBlocks(md) {
+  const out = [];
+  let cur = [], fence = false;
+  const flush = () => { const s = cur.join("\n").replace(/^\n+|\n+$/g, ""); if (s.trim()) out.push({ s, bold: false }); cur = []; };
+  for (const ln of String(md ?? "").split("\n")) {
+    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; cur.push(ln); continue; }
+    const m = fence ? null : BOLD_LINE.exec(ln);
+    if (m) { flush(); out.push({ s: m[1], bold: true }); continue; }
+    cur.push(ln);
+  }
+  flush();
+  return out;
 }
 // A message text -> {text without its "[image: ...]" lines, imgs: the paths those lines named}.
 function splitImgs(text) { return tlMemoGet("s", unwrapTags(text), splitImgsRaw); }
@@ -1663,43 +1654,6 @@ const SEL_HOLD_MS = 120000, PRESS_HOLD_MS = 8000;
 // st = {sel: a selection is settled, selAt, press: the pointer is down in the list, pressAt}. While true, background redraws wait.
 const quietNow = (st, now) => Boolean((st?.sel && now - (st.selAt || 0) < SEL_HOLD_MS) || (st?.press && now - (st.pressAt || 0) < PRESS_HOLD_MS));
 
-// ---- highlight colours: the band behind **bold** runs, from the theme's own tokens.
-// A colour is "#rrggbb" + an alpha byte. The alpha starts strong (so the area is clearly visible) and steps down only while the text colour
-// would stop being readable on the blended result (contrast < HL_MIN_CONTRAST), so it holds on a light and a dark theme alike.
-const HL_MIN_CONTRAST = 3.5;
-const HL_KINDS = {
-  bold: { alpha: 0x73, floor: 0x40, tokens: ["accent", "ansi4", "foreground"] }, // about 45%
-};
-const HEX6 = /^#[0-9a-f]{6}$/i;
-// A theme colour as "#rrggbb": "#rgb" is expanded and "#rrggbbaa" loses its alpha (the tint sets its own); anything else -> null.
-const hex6 = (c) => {
-  if (typeof c !== "string") return null;
-  if (HEX6.test(c)) return c.toLowerCase();
-  if (/^#[0-9a-f]{3}$/i.test(c)) return "#" + [...c.slice(1)].map((x) => x + x).join("").toLowerCase();
-  if (/^#[0-9a-f]{8}$/i.test(c)) return c.slice(0, 7).toLowerCase();
-  return null;
-};
-const rgbOf = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
-const lumOf = (h) => {
-  const [r, g, b] = rgbOf(h).map((v) => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-};
-const contrastOf = (a, b) => { const x = lumOf(a), y = lumOf(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
-const blendHex = (top, under, a) => { const u = rgbOf(under); return "#" + rgbOf(top).map((v, i) => Math.round(v * a + u[i] * (1 - a)).toString(16).padStart(2, "0")).join(""); };
-// kind -> "#rrggbbaa", or null when the theme has no usable token (the caller then paints nothing and logs it once, see tintMiss).
-function tintHex(t, kind) {
-  const k = HL_KINDS[kind];
-  const base = k && k.tokens.map((n) => hex6(t?.[n])).find(Boolean);
-  if (!base) return null;
-  let a = k.alpha;
-  const bg = hex6(t.background), fg = hex6(t.foreground);
-  if (bg && fg) {
-    while (a > k.floor && contrastOf(fg, blendHex(base, bg, a / 255)) < HL_MIN_CONTRAST) a = Math.max(k.floor, a - 8);
-  }
-  return base + a.toString(16).padStart(2, "0");
-}
-// Why tintHex gave nothing: the tokens it looked at and what they held (colours only), for one diag line.
-const tintMiss = (t, kind) => `highlight ${kind}: no usable theme token (${(HL_KINDS[kind]?.tokens ?? []).map((n) => `${n}=${JSON.stringify(t?.[n] ?? null)}`).join(" ")}); nothing painted`;
 // A TextView selection event -> {start, end} (UTF-16 offsets into the Markdown source), or null when it carries no usable range.
 // `len` is the length of the string the view was given: a range past it belongs to an older text and is dropped.
 function selRangeOf(sel, len) {
@@ -1874,7 +1828,7 @@ function readHandoff(dir = inboxDir(), id = "") {
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries};
+module.exports = { COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries};
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)

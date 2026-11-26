@@ -99,6 +99,43 @@ test("D: mdText leaves code fences as written", () => {
   assert.ok(out.includes("line a\nline b"));
 });
 
+test("#66 mdText: typed list marks become Markdown items with a blank line around the list; the words stay", () => {
+  const out = I.mdText("요약입니다\n• 첫째\n• 둘째 **굵게**\n1) 하나\n2) 둘\n마무리");
+  assert.equal(out, "요약입니다\n\n- 첫째\n- 둘째 **굵게**\n1. 하나\n2. 둘\n\n마무리");
+  // a list written with "-" already: only the blank lines are added
+  assert.equal(I.mdText("a\n- x\n- y\nb"), "a\n\n- x\n- y\n\nb");
+  // an indented line under an item stays inside it (a break, no blank line)
+  assert.equal(I.mdText("- x\n  more\n- y"), "- x  \n  more\n- y");
+  // a number that does not start at 1 in the middle of a text is text, not a list
+  assert.equal(I.mdText("날짜\n2025. 11. 26 에"), "날짜  \n2025. 11. 26 에");
+  // **bold** and *italic* at the start of a line are not bullets
+  assert.equal(I.mdText("**a** b\n*c* d"), "**a** b  \n*c* d");
+  // fences are never touched, a bullet inside one stays
+  assert.equal(I.mdText("```\n• x\n1) y\n```"), "```\n• x\n1) y\n```");
+  // the text a person copies is the original: only the drawn source changes
+  assert.ok(!I.mdText("• x").includes("•"));
+});
+
+test("#66 mdBlocks: a line of only **bold** text is its own bold block (markers removed); the rest stays Markdown", () => {
+  assert.deepEqual(I.mdBlocks("**제목**  \n본문  \n끝"), [{ s: "제목", bold: true }, { s: "본문  \n끝", bold: false }]);
+  assert.deepEqual(I.mdBlocks(I.mdText("【결과】\nplain **b**")), [{ s: "【결과】", bold: true }, { s: "plain **b**", bold: false }]);
+  assert.deepEqual(I.mdBlocks("a **b** c"), [{ s: "a **b** c", bold: false }]);
+  assert.deepEqual(I.mdBlocks("**a** and **b**"), [{ s: "**a** and **b**", bold: false }]);
+  assert.deepEqual(I.mdBlocks("```\n**in fence**\n```"), [{ s: "```\n**in fence**\n```", bold: false }]);
+  assert.deepEqual(I.mdBlocks("**`code` 제목**"), [{ s: "`code` 제목", bold: true }]);
+  assert.deepEqual(I.mdBlocks("** lone **"), [{ s: "** lone **", bold: false }]);
+  assert.deepEqual(I.mdBlocks(""), []);
+  // blank lines around a bold line are dropped (the screen spaces the blocks)
+  assert.deepEqual(I.mdBlocks("a\n\n**b**\n\nc"), [{ s: "a", bold: false }, { s: "b", bold: true }, { s: "c", bold: false }]);
+});
+
+test("#66 mdText/mdBlocks are linear on long input", () => {
+  const t0 = process.hrtime.bigint();
+  I.mdBlocks(I.mdText("• **a** b\n".repeat(5000)));
+  I.mdBlocks(I.mdText("**" + "x ".repeat(20000) + "**"));
+  assert.ok(Number(process.hrtime.bigint() - t0) / 1e6 < 800);
+});
+
 test("D: toParts gives each prose part its Markdown source (bold markers kept)", () => {
   const parts = I.toParts(I.parseBody("**중요** 안내\n- 하나\n- 둘 `x`"));
   const prose = parts.find((p) => p.t === "prose");
@@ -110,9 +147,9 @@ test("D: toParts gives each prose part its Markdown source (bold markers kept)",
 test("B/D: the code draws a thumbnail from the app-relative path, and bubbles use the Markdown view with raw_html(false)", () => {
   assert.match(MAIN, /thumb\(t, x\) \{[\s\S]*?imgRel\(this\.data\?\.root \?\? "", x\.path\)/);
   assert.ok(!/image\(x\.path\)/.test(MAIN), "the chip must not pass an absolute path to image()");
-  assert.match(MAIN, /TextView\.markdown\(id, m\)\.raw_html\(false\)\.selectable\(true\)\.on_link_click/);
+  assert.match(MAIN, /TextView\.markdown\(vid, s\)\.raw_html\(false\)\.selectable\(true\)\.on_link_click/);
   assert.match(MAIN, /this\.mdFolded\(id, e\.text, t\)/);
-  assert.match(MAIN, /this\.md\(id, open \? src : lc\.text, t\)/); // #47: a long PO message is folded, still through md()
+  assert.match(MAIN, /this\.md\(id, open \? src : lc\.text\)/); // #47: a long PO message is folded, still through md()
 });
 
 // ---- E: the "···" rows (round 14)
@@ -327,59 +364,6 @@ test("R16: a late clear removes only what was sent, not words or pictures added 
 });
 
 // ---- Round 17: bold that shows, diag that is always flushed, copy fallback, drag hardening
-const ranges = (s) => I.boldRanges(s).map((r) => s.slice(r.start, r.end));
-
-test("R17: boldRanges finds **bold** runs as UTF-16 source offsets, skipping code, fences and escapes", () => {
-  assert.deepEqual(ranges("a **b** c **d e** end"), ["**b**", "**d e**"]);
-  assert.deepEqual(ranges("`**x**` and ``**y** ` **z**`` then **w**"), ["**w**"]);
-  assert.deepEqual(ranges("```\n**in fence**\n```\n**out**"), ["**out**"]);
-  assert.deepEqual(ranges("\\**not** and **yes**"), ["**yes**"]);
-  assert.deepEqual(ranges("** lone ** and **w **"), []);
-  assert.deepEqual(ranges("**unterminated"), []);
-  // offsets count UTF-16 units: Korean is one unit, an emoji two - the slice above is the proof, and so is the exact number here
-  const s = "😀한글 **굵게😀** 끝";
-  const [r] = I.boldRanges(s);
-  assert.deepEqual([r.start, r.end], [s.indexOf("**"), s.lastIndexOf("**") + 2]);
-  assert.equal(s.slice(r.start, r.end), "**굵게😀**");
-  // the ranges are computed on the very string given to markdown (a 【...】 line is made bold by mdText)
-  assert.deepEqual(ranges(I.mdText("【결과】\nplain **b**")), ["**【결과】**", "**b**"]);
-});
-
-test("R17: boldRanges is bounded (long lines, many markers)", () => {
-  const t0 = process.hrtime.bigint();
-  assert.deepEqual(I.boldRanges("**a** ".repeat(5000)).length <= 100, true);
-  I.boldRanges("`".repeat(1999) + "**x**");
-  I.boldRanges("** ".repeat(600));
-  I.boldRanges(("`a ".repeat(600) + "\n").repeat(20));
-  assert.ok(Number(process.hrtime.bigint() - t0) / 1e6 < 500);
-});
-
-test("R17: the mod copy of boldRanges is the same code, and md() paints a tint behind each run of the same string", () => {
-  const grab = (src) => src.slice(src.indexOf("function boldRanges(md)"), src.indexOf("// A message text as Markdown for a TextView"));
-  const CJS = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8").replace(/\r\n/g, "\n");
-  assert.equal(grab(MAIN), grab(CJS));
-  const md = MAIN.slice(MAIN.indexOf("  md(id, src, t) {"), MAIN.indexOf("  text(id, html) {"));
-  assert.match(md, /const m = mdText\(src\);/);
-  assert.match(md, /TextView\.markdown\(id, m\)/);
-  assert.match(md, /const bc = tintHex\(t, "bold"\)/);
-  assert.match(md, /for \(const r of boldRanges\(m\)\) tv = tv\.highlight_range\(r\.start, r\.end, bc\)/);
-  assert.match(MAIN, /this\.md\(key, p\.md, t\)/);
-});
-
-test("R17: md() really calls highlight_range once per bold run (stub TextView)", () => {
-  const body = MAIN.slice(MAIN.indexOf("  md(id, src, t) {"), MAIN.indexOf("  text(id, html) {"));
-  const calls = [];
-  const tv = { raw_html() { return this; }, selectable() { return this; }, on_link_click() { return this; }, on_selection_change() { return this; }, highlight_range(a, b, c) { calls.push([a, b, c]); return this; } };
-  const make = new Function("TextView", "mdText", "boldRanges", "openUrl", "tintHex", "selRangeOf", `return class D { ${body} }`);
-  const d = new (make({ markdown: () => tv }, I.mdText, I.boldRanges, () => {}, I.tintHex, I.selRangeOf))();
-  const th = { foreground: "#aabbcc", background: "#101010", accent: "#3366ff" };
-  const bc = I.tintHex(th, "bold");
-  d.md("x", "a **b** c **d**", th);
-  assert.deepEqual(calls, [[2, 7, bc], [10, 15, bc]]);
-  calls.length = 0;
-  d.md("x", "a **b**"); // no theme: nothing painted
-  assert.equal(calls.length, 0);
-});
 
 test("R17: pruneReply also empties the reply text of a leader that is gone", () => {
   const d = replyDesk();
@@ -485,18 +469,21 @@ test("R18: main.js loads and init() runs to the end: the flush timer is set and 
   assert.match(d.diagQ[0], /init: window$/);
 });
 
-test("R18: the tint constants are defined as numbers/hex alpha, and md() paints with them (no stub injects them)", () => {
+test("R18: md() paints nothing behind bold (no highlight_range), and a line of only bold text gets the bold weight (#66)", () => {
   assert.match(MAIN, /^const DIAG_FLUSH_MS = \d+/m);
-  assert.doesNotMatch(MAIN, /BOLD_TINT/, "the fixed 20% foreground tint is gone");
-  assert.doesNotMatch(MAIN, /HL_ECHO_MS/, "R21: the echo guard is gone");
-  const calls = [];
-  const tv = { raw_html() { return this; }, selectable() { return this; }, on_link_click() { return this; }, on_selection_change() { return this; }, highlight_range(a, b, c) { calls.push([a, b, c]); return this; } };
-  const Inbox = loadInbox({ base: { TextView: { markdown: () => tv } } });
+  assert.doesNotMatch(MAIN, /highlight_range|tintHex|boldRanges|BOLD_TINT|HL_ECHO_MS/, "no tint machinery is left");
+  const views = [];
+  const mk = (id, s) => { const v = { id, s, w: 0, raw_html() { return this; }, selectable() { return this; }, on_link_click() { return this; }, on_selection_change() { return this; }, font_weight(n) { this.w = n; return this; } }; views.push(v); return v; };
+  const Inbox = loadInbox({ base: { TextView: { markdown: mk } } });
   const d = new Inbox();
-  d.md("x", "a **b** c", { foreground: "#112233", background: "#ffffff", accent: "#2255cc" });
-  assert.equal(calls.length, 1, "a ReferenceError inside md() would have been swallowed and painted nothing");
-  assert.deepEqual(calls[0].slice(0, 2), [2, 7]);
-  assert.match(calls[0][2], /^#2255cc[0-9a-f]{2}$/);
+  d.md("x", "plain with **inline bold** only");
+  assert.equal(views.length, 1);
+  assert.equal(views[0].id, "x");
+  assert.equal(views[0].w, 0, "an inline run keeps the normal weight");
+  assert.equal(views[0].s, "plain with **inline bold** only");
+  views.length = 0;
+  d.md("y", "【결과】\nfirst\n- a\n- b\n**끝**");
+  assert.deepEqual(views.map((v) => [v.id, v.w, v.s]), [["y-0", 700, "【결과】"], ["y-1", 0, "first\n\n- a\n- b"], ["y-2", 700, "끝"]]);
 });
 
 test("R18: pinTick keeps the pin when a scroll is held back, so the view goes to the bottom after the release", () => {
@@ -681,34 +668,6 @@ function recTv(calls) {
 const freshUi = () => ({ sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0 });
 const r20Desk = (calls) => { const d = new (loadInbox({ base: { TextView: recTv(calls) } }))(); d.ui = freshUi(); return d; };
 
-test("R20: tintHex takes the theme accent at a strong alpha on a dark and a light theme, and the text stays readable on it", () => {
-  for (const th of [DARK, LIGHT]) {
-    const bold = I.tintHex(th, "bold");
-    assert.match(bold, /^#[0-9a-f]{6}[0-9a-f]{2}$/);
-    assert.equal(bold.slice(0, 7), th.accent, "the accent token, no hard-coded colour");
-    assert.ok(alphaOf(bold) >= 0x40, "not fainter than 25% (the old tint was 20%)");
-    for (const c of [bold]) {
-      const under = (() => { const a = alphaOf(c) / 255; const u = [1, 3, 5].map((i) => parseInt(th.background.slice(i, i + 2), 16)); return "#" + [1, 3, 5].map((i, k) => Math.round(parseInt(c.slice(i, i + 2), 16) * a + u[k] * (1 - a)).toString(16).padStart(2, "0")).join(""); })();
-      const lum = (h) => { const [r, g, b] = [1, 3, 5].map((i) => { const v = parseInt(h.slice(i, i + 2), 16) / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
-      const x = lum(th.foreground), y = lum(under);
-      assert.ok((Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05) >= I.HL_MIN_CONTRAST - 0.05, `text readable on ${c}`);
-    }
-  }
-});
-
-test("R20: tintHex lowers the alpha when a bright accent would hide the text, and falls back / gives up cleanly", () => {
-  const bright = { foreground: "#f0f0f0", background: "#202020", accent: "#ffff00" }; // light text on strong yellow would be unreadable
-  assert.ok(alphaOf(I.tintHex(bright, "bold")) < 0x73, "stepped down");
-  assert.ok(alphaOf(I.tintHex(bright, "bold")) >= 0x40, "but not below the floor");
-  assert.equal(I.tintHex({ foreground: "#e6e6e6", background: "#1e1e1e" }, "bold").slice(0, 7), "#e6e6e6", "no accent: the foreground colour");
-  assert.match(I.tintHex({ accent: "#3b82f680", foreground: "#e6e6e6" }, "bold"), /^#3b82f6[0-9a-f]{2}$/, "R21: #rrggbbaa is normalized (its own alpha dropped)");
-  assert.equal(I.tintHex({ accent: "oops", foreground: "#e6e6e6" }, "bold").slice(0, 7), "#e6e6e6", "an unusable accent falls to the next token");
-  assert.equal(I.tintHex({ accent: "#3b82f6" }, "sel"), null, "R22: the selection tint is gone");
-  assert.equal(I.tintHex({}, "bold"), null);
-  assert.equal(I.tintHex(undefined, "bold"), null);
-  assert.match(I.tintHex({ accent: "#3b82f6" }, "bold"), /^#3b82f673$/, "no background known: the starting alpha");
-});
-
 test("R20: selRangeOf accepts sel.range or a bare range and refuses nonsense", () => {
   assert.deepEqual(I.selRangeOf({ range: { start: 1, end: 4 }, text: "x" }, 10), { start: 1, end: 4 });
   assert.deepEqual(I.selRangeOf({ start: 0, end: 3 }, 10), { start: 0, end: 3 });
@@ -725,26 +684,6 @@ function selDesk() {
   d.text("h1", "<p>plain</p>");
   return { d, cx, calls, notes: () => notes };
 }
-
-test("R21: bold alpha never drops below its floor, even for white text on white", () => {
-  for (const c of ["#ffffff", "#000000", "#808080"]) {
-    const a = alphaOf(I.tintHex({ foreground: c, background: c, accent: c }, "bold"));
-    assert.ok(a >= 0x40, `${c}: ${a.toString(16)}`);
-  }
-});
-
-test("R21: hex6 / tintHex normalize #rgb and #rrggbbaa; tintMiss and tintWarn say once when no token is usable", () => {
-  assert.equal(I.tintHex({ accent: "#38f" }, "bold").slice(0, 7), "#3388ff");
-  assert.equal(I.tintHex({ accent: "#3B82F6CC" }, "bold").slice(0, 7), "#3b82f6");
-  assert.equal(I.tintHex({ accent: "blue", ansi4: "rgb(1,2,3)", foreground: 5 }, "bold"), null);
-  assert.match(I.tintMiss({ accent: "blue" }, "bold"), /^highlight bold: no usable theme token \(accent="blue" ansi4=null foreground=null\); nothing painted$/);
-  const calls = [];
-  const d = r20Desk(calls);
-  d.md("x", "a **b**", { accent: "blue" });
-  d.md("x", "a **b**", { accent: "blue" });
-  assert.equal(calls.length, 0);
-  assert.equal(d.diagQ.filter((l) => /highlight bold: no usable theme token/.test(l)).length, 1, "one line, not one per redraw");
-});
 
 // ---- R21: a short status label (5 chars at most) beside the "···" bubble, from hc status only
 const labelOf = (terms, track = null, now = 0) => I.typingNow(terms, "pa", {}, track, now).find((x) => x.who === "l:lead-po-inbox")?.label;
@@ -858,18 +797,18 @@ test("R21 layout: my bubble is pinned right and capped; the PO and leader bubble
   assert.match(sz, /this\.onSize\(size\.width, c\)/, "the size event goes to onSize");
 });
 
-test("R22 layout: the cap sits on the box only; the Markdown given to a TextView is the same string, so the bold band offsets do not move on a resize", () => {
-  const calls = [];
-  const d = r20Desk(calls);
+test("R22 layout: the cap sits on the box only; the Markdown given to a TextView is the same string on a resize", () => {
+  const seen = [];
+  const mk = (id, s) => { const v = { raw_html() { return this; }, selectable() { return this; }, on_link_click() { return this; }, on_selection_change() { return this; }, font_weight() { return this; } }; seen.push([id, s]); return v; };
+  const d = new (loadInbox({ base: { TextView: { markdown: mk } } }))();
+  d.ui = freshUi();
   d.winW = 400; d.narrow = false; d.windowed = true;
   const src = "a long message with **bold words** that will wrap inside the cap";
-  const before = I.boldRanges(I.mdText(src));
-  d.md("w", src, DARK);
+  d.md("w", src);
+  const first = seen.splice(0);
   d.winW = 1200; // resized: only the box width changes
-  const calls2 = calls.splice(0);
-  d.md("w", src, DARK);
-  assert.deepEqual(calls.map((c) => [c[0], c[1]]), calls2.map((c) => [c[0], c[1]]));
-  assert.deepEqual(calls2.map((c) => [c[0], c[1]]), before.map((r) => [r.start, r.end]));
+  d.md("w", src);
+  assert.deepEqual(seen, first);
 });
 
 // ---- R22: the resize redraw path (onSize) is tested directly
@@ -957,10 +896,7 @@ test("R22: no selection overlay machinery is left in main.js or inbox.cjs; the p
   const CJS = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8").replace(/\r\n/g, "\n");
   for (const [name, src] of [["main.js", MAIN], ["inbox.cjs", CJS]]) {
     assert.doesNotMatch(src, /hlSkip|dropHl|mdSeen|ui\.hl\b|HL_ECHO_MS/, `${name}: no overlay state`);
-    assert.doesNotMatch(src, /tintHex\([^)]*"sel"\)|tintWarn\([^)]*"sel"\)/, `${name}: no selection tint call`);
-  }
-  assert.equal(I.tintHex(DARK, "sel"), null, "the selection tint kind is gone");
-  assert.ok(I.tintHex(DARK, "bold"), "the bold band stays");
+    }
   assert.match(MAIN, /on_mouse_down_out\(\(_e, c\) => \{ this\.ui\.press = false; if \(this\.ui\.sel\) this\.dropSel\(\);/);
 });
 
