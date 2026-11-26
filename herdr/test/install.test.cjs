@@ -641,11 +641,11 @@ test("--add gh-accounts는 오른쪽 패널에 accounts-board를 더하고, 제�
   assert.ok(!fs.existsSync(path.join(home, "mods", "gh-accounts")));
 });
 
-// UI 모드(#59): 기본 레이아웃(터미널 모드)에서 main 칸만 PO 데스크로 바꾼 `<이름>-ui` 레이아웃.
+// UI 모드(#59): 기본 레이아웃(터미널 모드)에서 main 칸만 UI 모드로 바꾼 `<이름>-ui` 레이아웃.
 const uiFile = (home) => path.join(home, "layouts", inst.LAYOUT_NAME + "-ui.json");
 const findNode = (n, id) => (n.id === id ? n : (n.children || []).map((c) => findNode(c, id)).find(Boolean));
 
-test("UI 모드: inbox를 설치하면 main 칸만 PO 데스크(mode main)로 바뀐 -ui 레이아웃을 만든다", () => {
+test("UI 모드: inbox를 설치하면 main 칸만 UI 모드(mode main)로 바뀐 -ui 레이아웃을 만든다", () => {
   const home = tempHome();
   quiet(() => inst.installMods(home, { add: ["inbox"] }));
   const base = cloneInto(home, inst.LAYOUT_NAME);

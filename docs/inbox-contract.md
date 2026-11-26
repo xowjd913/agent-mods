@@ -1,6 +1,6 @@
 # 인박스 계약 v1
 
-PO 데스크(`inbox` 모드)가 읽는 파일의 규칙입니다. **이 규칙대로 파일을 쓰면 어떤 AI·스크립트든 데스크에 보고를 올리고 답을 받을 수 있습니다.** 특정 작업 방식(PO·리더 체계)을 따르지 않아도 됩니다. 이 문서만으로 쓰는 쪽을 만들 수 있게 썼습니다.
+UI 모드(`inbox` 모드)가 읽는 파일의 규칙입니다. **이 규칙대로 파일을 쓰면 어떤 AI·스크립트든 데스크에 보고를 올리고 답을 받을 수 있습니다.** 특정 작업 방식(PO·리더 체계)을 따르지 않아도 됩니다. 이 문서만으로 쓰는 쪽을 만들 수 있게 썼습니다.
 
 - 쓰는 도구: [`herdr/tools/inbox-write.cjs`](../herdr/tools/inbox-write.cjs) (의존성 없는 Node 스크립트, 파일 쓰기는 Windows 포함 — `hc label` 호출은 Windows 미검증)
 - 읽는 쪽(데스크): [`docs/mods/inbox.md`](mods/inbox.md)
@@ -12,7 +12,7 @@ PO 데스크(`inbox` 모드)가 읽는 파일의 규칙입니다. **이 규칙�
 |---|---|---|
 | **에이전트** | 일을 하고 보고를 올리는 터미널(AI 세션). 파일 하나가 에이전트 하나입니다. | 리더 (`lead-<작업>` 이름) |
 | **허브** | 에이전트의 보고를 받고 사람의 답을 전달받는 터미널. 사람이 데스크에서 고른 답이 이 터미널 입력창으로 들어갑니다. | PO (`role=po`, `po=<id>` 라벨) |
-| **데스크** | 보고를 모아 보여 주고 답을 허브로 보내는 herdr 모드 | PO 데스크 (`inbox`) |
+| **데스크** | 보고를 모아 보여 주고 답을 허브로 보내는 herdr 모드 | UI 모드 (`inbox`) |
 
 흐름: 에이전트가 보고를 **파일에 한 줄 추가** → 데스크가 읽어 화면에 보임 → 결정·확인이 필요한 보고면 사람이 답 → 데스크가 **답 줄**을 허브 터미널에 입력 → 허브(AI)가 에이전트에게 전하고 → 에이전트가 `answered` 줄을 추가해 질문을 닫습니다.
 
@@ -152,7 +152,7 @@ node herdr/tools/inbox-write.cjs report --kind decision --agent lead-demo \
 # $'...'는 bash/zsh 전용입니다. 다른 쉘(PowerShell, cmd, sh)에서는 아래처럼 파일이나 표준 입력으로 줍니다.
 printf '어느 쪽으로?\n1안: 지금\n2안: 나중\n추천: 2안\n' > card.txt
 node herdr/tools/inbox-write.cjs report --kind decision --agent lead-demo --title "[lead-demo] 결정" --file card.txt
-printf '어느 쪽으로?\n1안: 지금\n2안: 나중\n' | node herdr/tools/inbox-write.cjs report --kind decision --agent lead-demo --title "[lead-demo] 결정" --body -
+printf '어느 쪽으로?\n1안: 지금\n2안: 나중\n' | node herdr/tools/inbox-write.cjs report --kind decision --agent lead-demo --title "[lead-demo] 결정" --file -
 
 # 긴 본문은 파일이나 표준 입력(-)으로
 node herdr/tools/inbox-write.cjs report --kind done --agent lead-demo --file report.md
