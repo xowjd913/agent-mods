@@ -1327,13 +1327,19 @@ function restartClearCheck(recs, since) {
   return (recs ?? []).some((x) => x && Number(x.ms) >= Number(since)) ? "text" : "clean";
 }
 // chat:end
-// What claude-account.cjs needs of a terminal (`hc get <t> --json`): the env part of its argv and the pid of its claude. null when unreadable.
+// What claude-account.cjs needs of a terminal (`hc get <t> --json`): the single CLAUDE_CONFIG_DIR= token of its argv env part (nothing else of
+// the argv) and the pid of its claude. null when unreadable.
 function acctInfo(r) {
   if (!r || Number(r.code) !== 0) return null;
   let j = null;
   try { j = JSON.parse(String(r.stdout ?? "")); } catch { return null; }
   if (!j || typeof j !== "object" || j.state !== "live") return null;
-  const argv = Array.isArray(j.argv) ? j.argv.slice(0, 12).map((x) => String(x).slice(0, 600)) : [];
+  const argv = [];
+  for (const t of Array.isArray(j.argv) ? j.argv : []) {
+    if (typeof t !== "string") continue;
+    if (t === "claude" || t.startsWith("-")) break; // the env part ends at the program
+    if (t.startsWith("CLAUDE_CONFIG_DIR=")) { argv.push(t.slice(0, 600)); break; }
+  }
   const f = j.foreground, pid = Number(f?.pid);
   return { argv, pid: Number.isInteger(pid) && pid > 1 ? pid : null };
 }

@@ -36,6 +36,9 @@ const base = (p) => String(p ?? "").replace(/[\\/]+$/, "").split(/[\\/]/).pop();
 const lines = (r) => [...String(r.stdout || "").split("\n"), ...String(r.stderr || "").split("\n")].map((l) => l.trim()).filter(Boolean);
 const parse = (s) => { try { return JSON.parse(s); } catch { return null; } };
 
+const CL_WIN_NOTE = "Windows에서는 아직 지원하지 않습니다(이슈 #121 후속)";
+const isWin = () => window()?.platform === "windows"; // Claude 계정 전환·추가는 macOS·Linux 에서만(반쪽 경로를 내보내지 않는다)
+
 function openUrl(url) {
   const p = window()?.platform;
   if (p === "macos") return exec("open", [url]);
@@ -445,11 +448,15 @@ export default class Accounts extends View {
   }
 
   selectClaude(cx, id) {
-    this.claudeRun(cx, ["select", ...(id ? ["--id", id] : [])], { ok: "새로 여는 세션부터 이 계정을 씁니다. 지금 돌고 있는 세션은 그대로입니다." });
+    if (id && isWin()) { this.note = { text: CL_WIN_NOTE, bad: true }; cx.notify(); return; }
+    const ok = "새로 여는 세션부터 이 계정을 씁니다. 지금 돌고 있는 세션은 그대로입니다.";
+    // 아직 로그인이 안 된 계정이면 고르는 것은 되지만 새 세션이 로그인 화면에서 멈출 수 있으니 바로 알린다.
+    this.claudeRun(cx, ["select", ...(id ? ["--id", id] : [])], { ok, after: (_r, j) => { if (j?.ok && j.warning) this.note = { text: `${ok} ${j.warning}`, bad: true }; } });
   }
 
   // 이름을 받아 계정 폴더를 만들고 바로 로그인 터미널을 연다. 로그인을 시작하지 못해도 계정은 목록에 남아 "로그인" 단추로 다시 시도할 수 있다.
   addClaude(cx) {
+    if (isWin()) { this.note = { text: CL_WIN_NOTE, bad: true }; cx.notify(); return; }
     const label = this.clInput.value().trim();
     if (!label) { this.note = { text: "계정 이름을 적으세요.", bad: true }; cx.notify(); return; }
     this.claudeRun(cx, ["add", "--label", label], {
@@ -501,7 +508,7 @@ export default class Accounts extends View {
     const running = Boolean(this.clLogin && RUNNING.has(this.clLogin.state));
     return v_flex().flex_none().px(8).py(4).gap(3).rounded(6)
       .child(h_flex().id(`cl-pick-${key}`).gap(8).items_center().cursor_pointer()
-        .on_click((_e, cx) => { if (!on && !this.saving) this.selectClaude(cx, a.id); })
+        .on_click((_e, cx) => { if (!on && !this.saving && !(a.id && isWin())) this.selectClaude(cx, a.id); })
         .child(div().flex_none().size(14).rounded(7).border(1).border_color(on ? t.accent : t.input).flex().items_center().justify_center()
           .when(on, (e) => e.child(div().size(8).rounded(4).bg(t.accent))))
         .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(a.label))
@@ -513,7 +520,7 @@ export default class Accounts extends View {
           .when(a.status?.loggedIn !== true, (x) => x.child(this.button(t, `cl-login-${key}`, "로그인", (cx) => this.claudeRun(cx, ["login", "start", "--id", a.id], {
             ok: "로그인 주소를 기다리는 중입니다.",
             after: async (_r, j) => { if (j?.ok) this.clLogin = j.login; },
-          }), { disabled: !canAct || running })))
+          }), { disabled: !canAct || running || isWin() })))
           .when(a.status?.loggedIn === true, (x) => x.child(this.button(t, `cl-logout-${key}`, "로그아웃", (cx) => { this.clConfirm = { id: a.id, label: a.label, kind: "logout" }; cx.notify(); }, { disabled: !canAct })))
           .child(this.button(t, `cl-remove-${key}`, "목록에서 빼기", (cx) => { this.clConfirm = { id: a.id, label: a.label, kind: "remove" }; cx.notify(); }, { disabled: !canAct })))));
   }
@@ -553,7 +560,8 @@ export default class Accounts extends View {
     const out = [];
     const canAct = Boolean(this.cl);
     out.push(this.heading(t, "Claude 계정", false, "새로 여는 세션이 쓸 Claude 계정을 고릅니다. 지금 돌고 있는 세션은 그대로이고, 새로 여는 세션부터 적용됩니다. 한도가 차도 저절로 바꾸지 않습니다.",
-      this.button(t, "cl-add", "계정 추가…", (cx) => { this.clAsk = true; cx.notify(); }, { disabled: !canAct || this.clAsk || Boolean(this.clLogin) })));
+      this.button(t, "cl-add", "계정 추가…", (cx) => { this.clAsk = true; cx.notify(); }, { disabled: !canAct || this.clAsk || Boolean(this.clLogin) || isWin() })));
+    if (isWin()) out.push(div().px(8).text_size(11.5).text_color(t.idle ?? t.dim).child(CL_WIN_NOTE));
     if (this.clMissing) { out.push(div().px(8).text_size(11.5).text_color(t.idle ?? t.dim).child(MISSING_HINT.replace("gh-account.cjs", "claude-account.cjs"))); return out; }
     if (!this.cl) { out.push(div().px(8).text_size(11.5).text_color(t.dim).child("불러오는 중…")); return out; }
     for (const a of this.cl.accounts) out.push(this.claudeRow(t, a, canAct));
@@ -562,7 +570,7 @@ export default class Accounts extends View {
     else if (this.clAsk) {
       out.push(v_flex().mx(8).my(4).p(8).gap(6).rounded(8).border(1).border_color(t.idle ?? t.accent).bg(t.background)
         .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child("Claude 계정 추가"))
-        .child(div().text_size(11).text_color(t.muted).child("계정 이름을 적고 시작을 누르면 이 계정 전용 폴더를 만들고 로그인 주소를 보여 줍니다. 설정·스킬·훅은 기본 계정과 같은 것을 씁니다. 토큰은 Claude 가 보관하고 이 패널은 보지 않습니다."))
+        .child(div().text_size(11).text_color(t.muted).child("계정 이름을 적고 시작을 누르면 이 계정 전용 폴더를 만들고 로그인 주소를 보여 줍니다. 설정·스킬·훅은 기본 계정과 같은 것을 씁니다. 토큰은 Claude 가 보관하고 이 패널은 보지 않습니다. 같은 계정으로 또 로그인하지 않았는지 확인하려고 계정 ID를 읽어 해시로만 비교합니다. 저장하거나 보여 주지 않습니다."))
         .child(this.textInput(t, this.clInput))
         .child(h_flex().pt(2).gap(6)
           .child(this.button(t, "cl-add-go", "시작", (cx) => this.addClaude(cx), { primary: true }))

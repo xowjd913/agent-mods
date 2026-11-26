@@ -171,15 +171,6 @@ test("claudeEnv: 부르는 쪽의 CLAUDE_CONFIG_DIR 를 비우고 계정 폴더�
   assert.equal(ctx.env.CLAUDE_CONFIG_DIR, "/other", "원래 환경은 바꾸지 않는다");
 });
 
-test("followDir: 리더 자신의 CLAUDE_CONFIG_DIR 가 먼저, 없으면 책상에서 고른 계정, 둘 다 없으면 null", () => {
-  const { ctx } = mk();
-  const a = ca.add(ctx, "A");
-  assert.equal(ca.followDir(ctx, undefined), null);
-  ca.select(ctx, a.id);
-  assert.equal(ca.followDir(ctx, ""), ca.dirFor(ctx, a.id));
-  assert.equal(ca.followDir(ctx, "/leader/own/"), "/leader/own");
-});
-
 test("schedules launchArgs: claude 프로그램에만 책상에서 고른 계정을 넣고, 기본 계정이면 넣지 않는다", () => {
   const a = { program: "claude", prompt: "x" };
   const withDir = sch.launchArgs(a, "n", "/w", {}, "/h/.claude-accounts/w");
@@ -187,6 +178,52 @@ test("schedules launchArgs: claude 프로그램에만 책상에서 고른 계정
   assert.ok(withDir.indexOf("CLAUDE_CONFIG_DIR=/h/.claude-accounts/w") < withDir.indexOf("claude"));
   assert.ok(!sch.launchArgs(a, "n", "/w", {}, null).some((t) => String(t).startsWith("CLAUDE_CONFIG_DIR=")));
   assert.ok(!sch.launchArgs({ ...a, program: "codex" }, "n", "/w", {}, "/h/.claude-accounts/w").some((t) => String(t).startsWith("CLAUDE_CONFIG_DIR=")));
+});
+
+test("schedules launchArgs: Windows 에서는 적용하지 못하는 계정을 인자에 넣지 않는다(env 도, 변수도 없다)", () => {
+  const args = sch.launchArgs({ program: "claude", prompt: "x" }, "n", "C:\\w", {}, "C:\\Users\\u\\.claude-accounts\\w", true);
+  assert.ok(!args.some((t) => String(t).includes("CLAUDE_CONFIG_DIR")));
+  assert.ok(!args.includes("env"));
+});
+
+test("schedules claudeAccountDir: 읽기 실패는 경고, Windows 에서 고른 계정은 적용하지 않고 경고, 기본 계정은 조용히 null", () => {
+  const { ctx } = mk();
+  const a = ca.add(ctx, "A");
+  const home = { ...process.env };
+  const saved = process.env.HOME, savedInbox = process.env.HERDR_INBOX_DIR;
+  try {
+    process.env.HOME = ctx.home; process.env.USERPROFILE = ctx.home; delete process.env.HERDR_INBOX_DIR;
+    assert.deepEqual(sch.claudeAccountDir(false), { dir: null, warning: null }); // 아직 고른 계정 없음
+    ca.select(ctx, a.id);
+    assert.deepEqual(sch.claudeAccountDir(false), { dir: ca.dirFor(ctx, a.id), warning: null });
+    assert.deepEqual(sch.claudeAccountDir(true), { dir: null, warning: "Windows에서는 아직 지원하지 않습니다(이슈 #121 후속)" });
+  } finally { process.env.HOME = saved; if (savedInbox !== undefined) process.env.HERDR_INBOX_DIR = savedInbox; }
+  assert.ok(home);
+});
+
+test("select: 캐시에 '로그인 안 됨'으로 남은 계정을 고르면 경고를 돌려주고, 로그인된 계정·기본 계정은 경고가 없다", () => {
+  const { ctx } = mk();
+  const a = ca.add(ctx, "A");
+  const b = ca.add(ctx, "B");
+  fs.writeFileSync(path.join(ctx.home, ".herdr-inbox", "claude-accounts-cache.json"), JSON.stringify({ [a.id]: { loggedIn: false, authMethod: null, at: ctx.now }, [b.id]: { loggedIn: true, authMethod: "claude.ai", at: ctx.now } }));
+  const ra = ca.select(ctx, a.id);
+  assert.equal(ra.ok, true);
+  assert.match(ra.warning, /로그인되지 않은/);
+  assert.equal(ca.select(ctx, b.id).warning, undefined);
+  assert.equal(ca.select(ctx, null).warning, undefined);
+});
+
+test("Windows: Claude 계정 추가·새 세션 선택·로그인은 안내만 하고 아무것도 바꾸지 않는다(기본 계정으로 되돌리기는 된다)", () => {
+  const { ctx: mac } = mk();
+  const a = ca.add(mac, "A");
+  const { ctx } = mk({ platform: "win32" });
+  const note = "Windows에서는 아직 지원하지 않습니다(이슈 #121 후속)";
+  assert.deepEqual(ca.add(ctx, "B"), { ok: false, message: note });
+  assert.deepEqual(ca.select(ctx, "x"), { ok: false, message: note });
+  assert.deepEqual(ca.loginStart(ctx, "x"), { ok: false, message: note });
+  assert.equal(ca.select(ctx, null).ok, true);
+  assert.ok(!fs.existsSync(path.join(ctx.home, ".claude-accounts")));
+  assert.ok(a.ok);
 });
 
 // ---- label resolution ----
@@ -435,4 +472,30 @@ test("CLI: main 은 JSON 한 줄을 stdout 에 쓰고, label --info 는 값 하�
     assert.equal(code, 0);
   } finally { process.stdout.write = write; }
   assert.deepEqual(JSON.parse(out), { label: "dirname" });
+});
+
+test("psConfigDir: 공백이 든 경로도 통째로 읽고, 다음 변수나 줄 끝에서 멈춘다", () => {
+  const out = (stdout) => mk({ run: () => ({ status: 0, stdout, stderr: "" }) }).ctx;
+  assert.equal(ca.psConfigDir(out("claude --x HOME=/h CLAUDE_CONFIG_DIR=/Users/a b/.claude-accounts/w-1 PATH=/bin TERM=x\n"), 123), "/Users/a b/.claude-accounts/w-1");
+  assert.equal(ca.psConfigDir(out("claude CLAUDE_CONFIG_DIR=/Users/a b/c\n"), 123), "/Users/a b/c");
+  assert.equal(ca.psConfigDir(out("claude HOME=/h PATH=/bin\n"), 123), null);
+  assert.equal(ca.psConfigDir(out("claude XCLAUDE_CONFIG_DIR=/no\n"), 123), null);
+});
+
+test("fingerprint: accountUuid 한 칸만 읽어 해시로 비교하고, 값도 해시도 저장·출력 파일에 남지 않는다", () => {
+  const { home, ctx } = mk();
+  const a = ca.add(ctx, "A");
+  fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ oauthAccount: { accountUuid: "SECRET-UUID-1", emailAddress: "me@example.org" }, other: "x" }));
+  fs.writeFileSync(path.join(ca.dirFor(ctx, a.id), ".claude.json"), JSON.stringify({ oauthAccount: { accountUuid: "SECRET-UUID-1" } }));
+  assert.deepEqual(ca.sameAs(ctx, ca.readStore(ctx), a.id), ["default"]);
+  const hash = crypto.createHash("sha256").update("SECRET-UUID-1").digest("hex");
+  const reads = [];
+  const orig = fs.readFileSync;
+  fs.readFileSync = function (f, ...r) { reads.push(String(f)); return orig.call(this, f, ...r); };
+  try { ca.sameAs(ctx, ca.readStore(ctx), a.id); } finally { fs.readFileSync = orig; }
+  assert.ok(reads.filter((f) => f.endsWith(".claude.json")).every((f) => f === path.join(home, ".claude.json") || f === path.join(ca.dirFor(ctx, a.id), ".claude.json")), ".claude.json 외 파일은 읽지 않는다");
+  for (const dir of [path.join(home, ".herdr-inbox")]) for (const n of fs.readdirSync(dir)) {
+    const body = fs.readFileSync(path.join(dir, n), "utf8");
+    assert.ok(!body.includes("SECRET-UUID-1") && !body.includes(hash) && !body.includes("example.org"), `${n} 에 계정 식별값이 없다`);
+  }
 });

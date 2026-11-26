@@ -21,7 +21,7 @@ const stub = "const h = () => globalThis.__herdr;" +
   "export const checking = () => false;" +
   "export const spaces = () => h().spaces;" +
   "export const panes = () => h().panes;" +
-  "export const window = () => ({ platform: 'macos' });" +
+  "export const window = () => ({ platform: h().platform || 'macos' });" +
   // gh-account 호출이면 cli 경로 뒤의 인자만 reply 에 넘긴다(PATH= 인자가 끼어도 같다). 다른 명령(open, sh)은 기록만 한다.
   "export const exec = (cmd, args) => { const x = h(); x.calls.push([cmd, ...args]);" +
   "  const i = args.indexOf('node'); if (cmd !== 'env' || i < 0) return Promise.resolve({ code: 0, stdout: '', stderr: '' });" +
@@ -529,4 +529,36 @@ test("Claude 계정: 도구 파일이 없으면 설치 안내, 로그인 안 된
   o.h.clicks["cl-login-spare"]({}, o.cx);
   await o.cx.settle();
   assert.deepEqual(claudeChanges(o.h), [["login", "start", "--id", "spare"]]);
+});
+
+test("Claude 계정: 고른 계정이 아직 로그인되지 않았다면 select 뒤에 경고를 함께 보여 준다", async () => {
+  const warn = "아직 로그인되지 않은 계정입니다. 새 세션이 로그인 화면에서 멈출 수 있습니다.";
+  const { h, cx, v } = await open({ claude: (a) => (a[0] === "select" ? ok({ ok: true, selected: "spare", warning: warn }) : claudeBase(a)) });
+  v.render(cx);
+  h.clicks["cl-pick-spare"]({}, cx);
+  await cx.settle();
+  assert.deepEqual(claudeChanges(h), [["select", "--id", "spare"]]);
+  assert.ok(v.note.text.includes(warn));
+  assert.equal(v.note.bad, true);
+});
+
+test("Claude 계정: Windows 에서는 새 세션 선택·계정 추가·로그인을 막고 안내 문구를 보인다(기본 계정으로 되돌리기만 된다)", async () => {
+  const note = "Windows에서는 아직 지원하지 않습니다(이슈 #121 후속)";
+  const { h, cx, v } = await open({ platform: "windows" });
+  v.render(cx);
+  assert.ok(h.texts.some((s) => s.includes(note)));
+  h.clicks["cl-pick-work"]({}, cx);
+  h.clicks["cl-add"]?.({}, cx);
+  h.clicks["cl-login-spare"]?.({}, cx);
+  await cx.settle();
+  assert.deepEqual(claudeChanges(h), []);
+  v.addClaude(cx);
+  await cx.settle();
+  assert.deepEqual(claudeChanges(h), []);
+  assert.equal(v.note.text, note);
+  v.cl.accounts[0].selected = false;
+  v.render(cx);
+  h.clicks["cl-pick-default"]({}, cx);
+  await cx.settle();
+  assert.deepEqual(claudeChanges(h).at(-1), ["select"]);
 });

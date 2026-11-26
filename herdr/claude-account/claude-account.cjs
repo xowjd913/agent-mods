@@ -15,6 +15,7 @@ const ROOT_NAME = ".claude-accounts";
 const STORE_NAME = "claude-accounts.json";
 const CACHE_NAME = "claude-accounts-cache.json";
 const LOGIN_NAME = "claude-login.json";
+const WIN_NOTE = "Windows에서는 아직 지원하지 않습니다(이슈 #121 후속)";
 const ID_RE = /^[a-z0-9][a-z0-9-]{0,18}$/;
 const LABEL_MAX = 40;
 const DEFAULT_LABEL = "기본";
@@ -127,11 +128,6 @@ function seed(ctx, dir, opts = {}) {
 // ---- argv / env ----
 // The env part of an `env ... claude ...` argv for the account selected on the desk (or for an explicit dir): [] for the default account.
 function envArgs(dir) { return dir ? [`CLAUDE_CONFIG_DIR=${normDir(dir)}`] : []; }
-// A spawned member follows its leader: the caller's own CLAUDE_CONFIG_DIR when set, else the desk selection.
-function followDir(ctx, callerDir) {
-  const own = typeof callerDir === "string" && callerDir.trim() ? normDir(callerDir.trim()) : null;
-  return own || selectedDir(ctx);
-}
 // The login command the desk starts in a background terminal (macOS/Linux: env carries the dir; hc run has no --env).
 function loginArgv(ctx, dir) {
   return ["env", `PATH=${ctx.env.PATH || ""}`, ...envArgs(dir), "claude", "auth", "login", "--claudeai"];
@@ -153,13 +149,14 @@ function envTokenDir(argv) {
   }
   return null;
 }
-// One variable of `ps eww` output (the process env), nothing else of the line.
+// One variable of `ps eww` output (the process env), nothing else of the line. A path may hold spaces, so the value runs up to the
+// next ` NAME=` token (or the end), never up to the next space.
 function psConfigDir(ctx, pid) {
   if (!Number.isInteger(pid) || pid <= 0 || ctx.platform === "win32") return undefined;
   const r = ctx.run("ps", ["eww", "-p", String(pid), "-o", "command="]);
   if (r.status !== 0) return undefined;
-  const m = r.stdout.split(/\s+/).find((t) => t.startsWith("CLAUDE_CONFIG_DIR="));
-  return m ? m.slice("CLAUDE_CONFIG_DIR=".length) : null;
+  const m = /(?:^|\s)CLAUDE_CONFIG_DIR=(.*?)(?=\s+[A-Za-z_][A-Za-z0-9_]*=|\s*$)/.exec(r.stdout.replace(/\r?\n/g, " "));
+  return m ? m[1] : null;
 }
 // The label of a dir: "기본" for none, the account's label, else the folder name (never anything of the contents).
 function labelForDir(store, dir) {
@@ -205,7 +202,9 @@ function refreshStatus(ctx, key, dir) {
 }
 function dropCache(ctx, key) { const c = readCache(ctx); if (key in c) { delete c[key]; writeCache(ctx, c); } }
 
-// A hash of the account id (the accountUuid of <dir>/.claude.json, or of ~/.claude.json for the default). Only compared, never stored or shown.
+// Same-account check. To tell whether two folders hold the same Claude account, this reads ONE field, oauthAccount.accountUuid, of
+// <dir>/.claude.json (~/.claude.json for the default) and hashes it at once. The id and the hash live only in this call: they are
+// never stored, logged, printed or sent anywhere, and nothing else of the file is read.
 function fingerprint(ctx, dir) {
   const file = dir ? path.join(dir, ".claude.json") : path.join(homeDir(ctx), ".claude.json");
   try {
@@ -257,6 +256,7 @@ function status(ctx, id, force) {
   return { ok: true, ...refreshStatus(ctx, key, a ? a.dir : null) };
 }
 function add(ctx, label) {
+  if (ctx.platform === "win32") return { ok: false, message: WIN_NOTE };
   const l = validLabel(label);
   if (!l.ok) return { ok: false, message: l.message };
   const store = readStore(ctx);
@@ -269,11 +269,14 @@ function add(ctx, label) {
   return { ok: true, id, label: l.label, seed: report };
 }
 function select(ctx, id) {
+  if (id && ctx.platform === "win32") return { ok: false, message: WIN_NOTE }; // no half path: a Windows session would not get the account
   const store = readStore(ctx);
   if (id && !findAccount(store, id)) return { ok: false, message: "목록에 없는 계정입니다." };
   store.selected = id || null;
   writeStore(ctx, store);
-  return { ok: true, selected: store.selected };
+  // A selected account that is known not to be logged in: new sessions would start at the login screen.
+  const c = id ? cachedStatus(ctx, id) : null;
+  return c && c.loggedIn === false ? { ok: true, selected: store.selected, warning: "아직 로그인되지 않은 계정입니다. 새 세션이 로그인 화면에서 멈출 수 있습니다." } : { ok: true, selected: store.selected };
 }
 function remove(ctx, id) {
   const store = readStore(ctx);
@@ -320,7 +323,7 @@ function hcJson(ctx, args) {
   try { return JSON.parse(r.stdout); } catch { return null; }
 }
 function loginStart(ctx, id) {
-  if (ctx.platform === "win32") return { ok: false, message: "Windows 에서는 아직 책상에서 로그인을 시작할 수 없습니다." };
+  if (ctx.platform === "win32") return { ok: false, message: WIN_NOTE };
   const store = readStore(ctx);
   const a = findAccount(store, id);
   if (!a) return { ok: false, message: "목록에 없는 계정입니다." };
@@ -397,7 +400,6 @@ function main(argv, over = {}) {
       if (sub === "cancel") return out(loginCancel(ctx));
       break;
     }
-    case "dir": process.stdout.write(JSON.stringify({ dir: followDir(ctx, flag(rest, "--inherit")) }) + "\n"); return 0;
     case "label": {
       // `label --info <json>`: {argv, pid} of a terminal (from `hc get --json`; the desk reads it, this tool has no hc). The account its claude runs on, or null.
       let info = null;
@@ -407,13 +409,13 @@ function main(argv, over = {}) {
     }
     default: break;
   }
-  process.stderr.write("usage: claude-account list|status|add|select|remove|logout|login start|status|cancel|dir|label --info <json>\n");
+  process.stderr.write("usage: claude-account list|status|add|select|remove|logout|login start|status|cancel|label --info <json>\n");
   return 2;
 }
 
 module.exports = {
-  SHARED, ID_RE, DEFAULT_LABEL, normDir, dirFor, validLabel, cleanAccounts, readStore, writeStore, selectedDir, newId,
-  seed, envArgs, followDir, loginArgv, claudeEnv, envTokenDir, psConfigDir, labelForDir, sessionLabel, reduceStatus, fingerprint, sameAs,
+  SHARED, WIN_NOTE, ID_RE, DEFAULT_LABEL, normDir, dirFor, validLabel, cleanAccounts, readStore, writeStore, selectedDir, newId,
+  seed, envArgs, loginArgv, claudeEnv, envTokenDir, psConfigDir, labelForDir, sessionLabel, reduceStatus, fingerprint, sameAs,
   parseUsage, usageOf, parseLoginUrl, list, status, add, select, remove, logout, loginStart, loginStatus, loginCancel, makeCtx, main,
 };
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
