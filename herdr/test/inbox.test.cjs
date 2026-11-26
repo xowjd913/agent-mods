@@ -1422,6 +1422,7 @@ test("chatRecord·timeline: gone 상태가 있고, 내 글에 시각(at)이 실�
 // main.js 메서드를 가짜 this·전역으로 돌린다(런타임 없이 흐름만 본다).
 const runMethod = (src, head, next, globals) => {
   const m = methodOf(src, head, next);
+  globals = { cutHead: I.cutHead, wellFormed: I.wellFormed, initial: I.initial, ...globals }; // the shared text-cut helpers of the chat block (#113)
   const names = Object.keys(globals);
   return new Function(...names, `return ({ ${m.replace(/\n\s*\/\/[^\n]*\s*$/g, "")} });`)(...names.map((k) => globals[k]));
 };

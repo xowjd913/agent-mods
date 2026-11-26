@@ -190,12 +190,12 @@ function pictureDesk(execImpl) {
   const b = MAIN.indexOf("  // The thumbnail chips of a box");
   assert.ok(a > 0 && b > a, "the picture methods are found");
   const body = MAIN.slice(a, b);
-  const make = new Function("exec", "HELPER", "MAX_IMGS", "pickFiles", `return class Desk {
+  const make = new Function("exec", "HELPER", "MAX_IMGS", "pickFiles", "cutHead", `return class Desk {
     constructor() { this.pics = []; this.picBusy = 0; this.picBusyBy = new Map(); this.draftRoom = null; this.roomDrafts = new Map(); this.replyPics = new Map(); this.replyBusy = new Map(); this.imgd = new Map(); this.msg = "x"; this.said = []; }
     say(m, bad) { this.said.push([m, Boolean(bad)]); }
     ${body}
   }`);
-  return new (make(execImpl, () => "helper.cjs", 4, async () => ["/f/a.png"]))();
+  return new (make(execImpl, () => "helper.cjs", 4, async () => ["/f/a.png"], I.cutHead))();
 }
 const fakeCx = () => ({ notify() {} });
 const okExec = async (_cmd, args) => ({ code: 0, stdout: JSON.stringify({ path: `data/inbox/img/${args[args.length - 1].replace(/\W/g, "")}.png`, w: 10, h: 20 }), stderr: "" });
