@@ -377,7 +377,7 @@ test("main.js: 오른쪽 칸(Dock)도 창과 같은 메신저 화면이다: 좁�
   assert.match(slim, /\.tooltip\(/); // 프로젝트 이름은 툴팁
   assert.match(slim, /\.on_click\(\(_e, c\) => this\.pickPo\(x\.id, c\)\)/);
   assert.match(src, /this\.button\(t, "inbox-open", "창 열기"/); // Dock 머리줄의 창 열기
-  assert.match(src, /\.when\(!this\.windowed, \(el\) => el\.child\(this\.button\(t, "inbox-open"/);
+  assert.match(src, /\.when\(!this\.windowed && !this\.mained, \(el\) => el\.child\(this\.button\(t, "inbox-open"/);
   assert.match(src, /markSeen\(\) \{\s*if \(!this\.drawnAt \|\| !this\.drawing\(\)\) return;/);
   assert.match(src, /대기 \$\{waiting\}/); // 머리줄의 대기 수 표시
   // Dock이 방을 보여 주는 동안 읽은 것으로 친다(그려지지 않는 동안은 아니다)
@@ -427,7 +427,7 @@ test("main.js: 페인 모드: 같은 메신저 화면, 자기 제목줄을 쓰�
   assert.match(open, /if \(this\.windowed\) \{ try \{ closeOverlay/); // 창에서 열면 창을 닫는다
   assert.ok(!/hc send|hc\(/.test(open));
   // 머리줄: 페인은 제목·옆에 열기가 없고(페인 머리줄·이미 페인), 닫기 버튼도 만들지 않는다
-  assert.match(src, /\.when\(!this\.paned, \(el\) => el\.child\(div\(\)\.text_size\(15\)[^\n]*PO 데스크/);
+  assert.match(src, /\.when\(!this\.paned \|\| this\.mained, \(el\) => el\.child\(div\(\)\.text_size\(15\)[^\n]*PO 데스크/); // 페인은 자기 제목줄이 있고, UI 모드 main 칸은 없어서 제목을 그린다
   assert.match(src, /\.when\(!this\.paned, \(el\) => el\.child\(this\.button\(t, "inbox-beside", "옆에 열기"/);
   assert.match(src, /\.when\(this\.windowed, \(el\) => el\.child\(div\(\)\.id\("inbox-close"\)/);
   // 갱신·뱃지: 창과 페인은 5초(페인은 그려지는 동안만), Dock만 30초, 뱃지는 창만 건너뛴다
@@ -2453,4 +2453,16 @@ test("restartDraft: 이 방에 데스크가 붙여 넣기만 한 글(held/noente
   assert.equal(I.restartDraft([m({ at: now - I.RESTART_DRAFT_MS - 1 })], "r", now), "");
   assert.equal(I.restartDraft(null, "r", now), "");
   assert.match(I.restartConfirm(0, 0), /입력칸은 비어 있어야/);
+});
+
+test('UI 모드(#59): inbox mode "main"은 페인처럼 전체 메신저 화면이고, 터미널 모드로 돌아가는 버튼은 <기본>-ui에서만 기본 레이아웃으로 바꾼다', () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8");
+  assert.match(src, /this\.mained = mode === "main";/);
+  assert.match(src, /this\.paned = mode === "pane" \|\| this\.mained;/);
+  assert.match(src, /cur\.endsWith\("-ui"\) \? cur\.slice\(0, -3\)/);
+  assert.match(src, /run\("layout\.switch", \{ name: base \}\)/);
+  assert.match(src, /"inbox-terminal-mode"/);
+  const tabs = fs.readFileSync(path.join(__dirname, "..", "mods", "tabs-mine", "main.js"), "utf8");
+  assert.match(tabs, /"mode-switch"/);
+  assert.match(tabs, /layout\.switch/);
 });

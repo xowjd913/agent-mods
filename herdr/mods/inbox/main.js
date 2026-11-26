@@ -19,7 +19,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, ScrollHandle } from "gpui-base";
-import { theme, exec, appHome, checking, window, run, hc, terminals, panes, focused, setBadge, shared, setShared, props, openOverlay, closeOverlay, watchFolder, pickFiles, home, readTextFile } from "herdr";
+import { theme, exec, appHome, checking, window, run, hc, terminals, panes, focused, setBadge, shared, layouts, setShared, props, openOverlay, closeOverlay, watchFolder, pickFiles, home, readTextFile } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
 const ICON = (name) => `mods/workspace-chrome/${name}.svg`;
@@ -1139,7 +1139,8 @@ export default class Inbox extends View {
   init(_props, cx) {
     const mode = safeProps().mode;
     this.windowed = mode === "window"; // the floating window
-    this.paned = mode === "pane"; // a pane of its own; neither is the Dock (no props), which owns the app-icon badge and the slow refresh
+    this.mained = mode === "main"; // the UI-mode layout's main area (`<layout>-ui`, props {mode: "main"}): the whole desk where the terminal would be
+    this.paned = mode === "pane" || this.mained; // a pane of its own; neither is the Dock (no props), which owns the app-icon badge and the slow refresh
     this.badged = ""; // what this app's icon badge shows: only changes are sent, and a 0 at start leaves other mods' badges alone
     this.data = null;
     this.error = null;
@@ -1234,7 +1235,7 @@ export default class Inbox extends View {
     this.usageSig = "";
     this.loadUsage(cx);
     cx.timer.every(USAGE_REFRESH_MS, (cx) => this.loadUsage(cx));
-    this.diag(`init: ${this.windowed ? "window" : this.paned ? "pane" : "dock"}`);
+    this.diag(`init: ${this.windowed ? "window" : this.mained ? "main" : this.paned ? "pane" : "dock"}`);
   }
 
   // Reads the usage file (a file read only) and redraws only when what the line shows (the rows or the tooltip text) changed: a redraw drops a drag-select.
@@ -1611,6 +1612,17 @@ export default class Inbox extends View {
       else run("pane.split", { direction: "right", mod: "inbox", props: { mode: "pane" }, ...(d.pane ? { pane: d.pane } : {}) });
       if (this.windowed) { try { closeOverlay(safeProps().overlay); } catch {} }
     } catch (e) { this.say(`옆에 열지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); }
+  }
+
+  // UI mode -> terminal mode: the layout this `<name>-ui` was made from (the terminals stay alive in the core; only the main area changes).
+  toTerminalMode() {
+    this.msg = null;
+    try {
+      const cur = String(shared("layout") ?? "");
+      const base = cur.endsWith("-ui") ? cur.slice(0, -3) : "";
+      if (!base || !(layouts() ?? []).includes(base)) { this.say("돌아갈 터미널 모드 레이아웃을 찾지 못했습니다.", true); return; }
+      run("layout.switch", { name: base });
+    } catch (e) { this.say(`터미널 모드로 바꾸지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); }
   }
 
   openWindow() {
@@ -2854,7 +2866,7 @@ export default class Inbox extends View {
       .on_size_change((size, c) => this.onSize(size.width, c))
       .child(h_flex().h(38).px(this.compact ? 10 : 14).flex_none().items_center().justify_between()
         .child(h_flex().gap(6).items_center()
-          .when(!this.paned, (el) => el.child(div().text_size(15).font_semibold().text_color(t.foreground).child("PO 데스크"))) // a pane's own header already says it
+          .when(!this.paned || this.mained, (el) => el.child(div().text_size(15).font_semibold().text_color(t.foreground).child("PO 데스크"))) // a pane's own header already says it
           .when(!this.windowed && waiting > 0, (el) => el.child(this.tag(t, `대기 ${waiting}`, "blocked")))
           .child(div().id("inbox-refresh").p(3).rounded(5).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
             .on_mouse_down("left", stop).on_click((_e, c) => { this.gen++; this.busy = false; this.load(c); }).tooltip("새로고침")
@@ -2862,7 +2874,8 @@ export default class Inbox extends View {
         .child(h_flex().gap(8).items_center()
           .child(div().text_size(11).text_color(t.dim).child(this.data ? ago(this.data.at) : ""))
           .when(!this.paned, (el) => el.child(this.button(t, "inbox-beside", "옆에 열기", (c) => { this.openBeside(); c.notify(); }, { tip: "리더 옆 창(페인)으로 엽니다. 리더가 없으면 지금 터미널 옆, 이 탭에 이미 있으면 그쪽으로 갑니다" })))
-          .when(!this.windowed, (el) => el.child(this.button(t, "inbox-open", "창 열기", (c) => { this.openWindow(); c.notify(); }, { tip: "PO 데스크 창을 엽니다" })))
+          .when(this.mained, (el) => el.child(this.button(t, "inbox-terminal-mode", "터미널 모드", (c) => { this.toTerminalMode(); c.notify(); }, { tip: "터미널 화면으로 돌아갑니다. 터미널은 꺼지지 않고 그대로 있습니다" })))
+          .when(!this.windowed && !this.mained, (el) => el.child(this.button(t, "inbox-open", "창 열기", (c) => { this.openWindow(); c.notify(); }, { tip: "PO 데스크 창을 엽니다" })))
           .when(this.windowed, (el) => el.child(div().id("inbox-close").p(4).rounded(5).text_color(t.dim).cursor_pointer().hover((x) => x.bg(t.hover).text_color(t.foreground))
             .on_mouse_down("left", stop).on_click((_e, c) => { try { closeOverlay(safeProps().overlay); } catch {} c.notify(); }).tooltip("닫기")
             .child(svg("mods/pane/close.svg").size(13))))))
