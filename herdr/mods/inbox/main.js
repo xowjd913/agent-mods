@@ -346,7 +346,7 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
       const t = full(x.text), c = core(x.text), p = cut(x.text);
       const i = sentBy.findIndex((m, j) => !taken.has(j) && (x.ms - (Number(m.ms) || 0)) >= -60000 && (x.ms - (Number(m.ms) || 0)) <= 11 * 60000 && (full(m.line) === t || full(m.text) === t || (c.length > 1 && (core(m.line) === c || core(m.text) === c)) || (p && (full(m.line).startsWith(p) || full(m.text).startsWith(p)))));
       if (i >= 0) { taken.add(i); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); continue; }
-      out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
+      out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}), ...(x.fwd?.length ? { fwd: x.fwd } : {}) });
       continue;
     }
     out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: x.to || "", ...(!x.to && x.pid && about.get(x.pid) ? { about: about.get(x.pid) } : {}) });
@@ -509,9 +509,12 @@ const settleLeader = (choices, leader) => (leader && (choices ?? []).length >= 2
 // terminal carries its hc name, or sits at the address its summary recorded. `sums` = [{leader, terminal}].
 const aliveLeaders = (choices, terms, sums) => (choices ?? []).filter((c) => (terms ?? []).some((t) => t.name === c.id || (t.address && (sums ?? []).some((s) => s.leader === c.id && s.terminal === t.address))));
 // Attributed by a field only, never by guessing from the text: the person's line whose `to` / `tos` names the leader (a chat with @lead-x, an
-// answer button of its card), and the PO's line whose `to` names it or whose `about` does (its reply to a prompt the desk sent to that leader).
+// answer button of its card, or a line the PO forwarded to it: `fwd`, #82), and the PO's line whose `to` names it or whose `about` does (its reply to a prompt the desk sent to that leader).
 const leaderEntries = (entries, leader) => (leader ? (entries ?? []).filter((e) => entryLeader(e) === leader
-  || (e?.who === "me" && (e.to === leader || (e.tos ?? []).includes(leader))) || (e?.who === "po" && (e.to === leader || e.about === leader))) : entries ?? []);
+  || (e?.who === "me" && (e.to === leader || (e.tos ?? []).includes(leader) || (e.fwd ?? []).some((x) => x.to === leader))) || (e?.who === "po" && (e.to === leader || e.about === leader))) : entries ?? []);
+// The small line over a bubble of the person's words that the PO passed on (#82): "→ x 그대로 전달" (the same words) or "→ x 다듬어 전달" (reworded). In
+// one leader's 1:1 view (`leader`) only that leader's mark shows; in 전체 every leader it went to. `label` = the shown name of a leader. [] when none.
+const fwdMarks = (e, leader = "", label = (n) => n) => (e?.who === "me" ? (e.fwd ?? []) : []).filter((x) => !leader || x.to === leader).map((x) => `→ ${label(x.to)} ${x.exact ? "그대로" : "다듬어"} 전달`);
 // The "안 읽은 것" base, shared by every copy of the mod (Dock, window, pane): {<room>: {seen, ts}}. The first copy to draw a room takes the room's
 // last-opened marker before it moves, and the others use that same value for SNAP_TTL_MS after it was last drawn (each draw renews it).
 const SNAP_TTL_MS = 30000;
@@ -2909,6 +2912,7 @@ export default class Inbox extends View {
       const width = Math.min(Math.max(bubbleWidth(words), pics, 64), cap ?? Infinity);
       return v_flex().id(id).flex_none().px(10).pt(top).gap(2).items_end()
         .when(Boolean(e.to), (el) => el.child(div().max_w("85%").min_w(0).truncate().text_size(10).text_color(t.dim).child(`→ ${shortName(e.to)}`)))
+        .children(fwdMarks(e, v.who, (n) => shortName(n)).map((x, i) => div().id(`${id}-fwd${i}`).max_w("85%").min_w(0).truncate().text_size(10).text_color(t.dim).child(x))) // #82: the PO passed these words on (only the picked leader's mark in its 1:1 view)
         .child(h_flex().w_full().min_w(0).gap(6).items_end().justify_end() // always the right edge: the chip and the time are left of the bubble
           .child(this.sideTools(t, id, e.text, e.ms))
           .child(v_flex().flex_none().w(width).max_w(cap ?? "75%").min_w(0).px(12).py(9).gap(6).rounded(12).bg(t.working + "33").border(1).border_color((bad ? t.blocked : t.working) + "66").text_size(12.5).text_color(t.foreground)
