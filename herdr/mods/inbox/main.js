@@ -193,6 +193,24 @@ function choosePick(pos, last, hasOther) {
   const best = (pos ?? []).map((p, i) => ({ p, i })).sort((a, b) => b.p.n - a.p.n || a.i - b.i)[0];
   return best ? best.p.id : hasOther ? PO_OTHER : "";
 }
+
+// #57: the room the person picked stays until they pick another. The PO list comes from `terminals()`, which can miss a PO for a moment
+// (a redraw, a restart of its pane): `choosePick` would then fall to another room, and the chat box would aim at that PO. A picked room
+// that was live within PICK_GRACE_MS is held as a "ghost" room (no PO to send to, but the pick, the draft and the room list stay).
+// `liveAt` = the last time `last` was seen live (ms, 0 = unknown). -> {pick, ghost}
+const PICK_GRACE_MS = 30000;
+function settlePick(pos, last, hasOther, liveAt, now) {
+  const l = String(last ?? "");
+  const pick = choosePick(pos, last, hasOther);
+  if (pick === l || !l || !(liveAt > 0) || now - liveAt >= PICK_GRACE_MS) return { pick, ghost: false };
+  return { pick: l, ghost: true };
+}
+// #57: an answer-box draft of a leader that stopped waiting is cleared only after the leader has been gone for DRAFT_GRACE_MS (a leader
+// missing from one poll must not wipe what the person was typing). `seen`: leader -> last ms it was waiting. -> the leaders to clear.
+const DRAFT_GRACE_MS = 60000;
+function staleDrafts(keys, live, seen, now) {
+  return [...keys].filter((k) => !live.has(k) && !(now - (seen.get(k) ?? 0) < DRAFT_GRACE_MS));
+}
 // The "@" menu: "@here" first, then the live leaders of the picked PO (`pick`, a PO id; none for PO_OTHER), by shown name. `query`
 // filters by hc name or shown name.
 function leaderMenu(terms, memo, query = "", limit = 8, pick = "") {
@@ -274,17 +292,20 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
   // start of that send: a line ending in "…" also matches a record whose text starts with what is left (at least TL_CUT_MIN characters after
   // whitespace is squeezed, so a short line that merely ends in "…" does not hide a longer send). "" when the line is not such a cut.
   const cut = (v) => { const s = String(v ?? ""); if (!s.endsWith("…")) return ""; const p = full(s.slice(0, -1)); return p.length >= TL_CUT_MIN ? p : ""; };
+  // The PO's reply to a line the desk sent to a leader (#58): the hook gives a prompt and its reply the same pid, and the prompt matched a desk
+  // record that has a `to`. Only the 1:1 view reads it (`about`); the bubble does not say "→ leader", since the reply is to the person.
+  const about = new Map();
   if (room && room !== PO_OTHER) for (const x of says ?? []) {
     if (x.me) {
       const t = full(x.text), c = core(x.text), p = cut(x.text);
       const i = sentBy.findIndex((m, j) => !taken.has(j) && (x.ms - (Number(m.ms) || 0)) >= -60000 && (x.ms - (Number(m.ms) || 0)) <= 11 * 60000 && (full(m.line) === t || full(m.text) === t || (c.length > 1 && (core(m.line) === c || core(m.text) === c)) || (p && (full(m.line).startsWith(p) || full(m.text).startsWith(p)))));
-      if (i >= 0) { taken.add(i); continue; }
+      if (i >= 0) { taken.add(i); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); continue; }
       out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
       continue;
     }
-    out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: x.to || "" });
+    out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: x.to || "", ...(!x.to && x.pid && about.get(x.pid) ? { about: about.get(x.pid) } : {}) });
   }
-  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
+  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", ...(x.tos?.length ? { tos: x.tos } : {}), kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
   // Two entries with the same key (the same text at the same ms) would share one element id: the later ones get a #n suffix.
   const used = new Map();
   for (const e of out) {
@@ -312,7 +333,8 @@ function chatRecord(rec, status, now = 0, seq = "") {
   const imgs = (Array.isArray(rec?.imgs) ? rec.imgs : []).filter((x) => typeof x === "string" && x).slice(0, 4);
   if ((!text && !imgs.length) || !rec?.po) return null;
   const ms = Number(now) || 0;
-  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, ...(imgs.length ? { imgs } : {}), line: cleanText(rec.line ?? text).slice(0, 4000), to: String(rec.to ?? ""), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", ak: String(rec.ak ?? ""), status: CHAT_STATUS.includes(status) ? status : "failed" };
+  const tos = [...new Set((Array.isArray(rec?.tos) ? rec.tos : []).map((x) => String(x ?? "")).filter(Boolean))].slice(0, 8); // every leader the line names (#58); `to` stays the first
+  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, ...(imgs.length ? { imgs } : {}), line: cleanText(rec.line ?? text).slice(0, 4000), to: String(rec.to ?? ""), ...(tos.length > 1 ? { tos } : {}), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", ak: String(rec.ak ?? ""), status: CHAT_STATUS.includes(status) ? status : "failed" };
 }
 // The list with record `id` set to `status` at `now` (null when there is no such record or it already has it).
 function setChatStatus(list, id, status, now = 0) {
@@ -420,6 +442,30 @@ function keepWaiting(raw, shown) {
   const have = new Set(shown ?? []);
   return (raw ?? []).filter((e) => have.has(e) || e.waiting);
 }
+// #58: "특정 리더만" — the 1:1 view of one leader inside the picked room, on top of the chips (the chip then filters that leader's entries).
+// A leader's entries are its reports (who "l:<leader>", also the made-up waiting one) and the person's lines to it (who "me", `to` = the leader).
+const entryLeader = (e) => (String(e?.who ?? "").startsWith("l:") ? String(e.who).slice(2) : "");
+// The leaders that have an entry in the room, by shown name: [{id, label, waiting}] (waiting = one of its entries waits on the person).
+function roomLeaders(entries, label = (id) => id) {
+  const out = [];
+  for (const e of entries ?? []) {
+    const id = entryLeader(e);
+    if (!id) continue;
+    const had = out.find((x) => x.id === id);
+    if (had) had.waiting = had.waiting || Boolean(e.waiting);
+    else out.push({ id, label: String(label(id) ?? id), waiting: Boolean(e.waiting) });
+  }
+  return out.sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
+}
+// The leader to filter by: `leader` while the room still has it, else "" (= everyone; a leader that left the room goes back to 전체).
+const settleLeader = (choices, leader) => (leader && (choices ?? []).length >= 2 && (choices ?? []).some((x) => x.id === leader) ? String(leader) : "");
+// Only the leaders whose terminal is open now stay as choices (a closed leader's session is gone: its history stays under "전체"). A leader is live when a
+// terminal carries its hc name, or sits at the address its summary recorded. `sums` = [{leader, terminal}].
+const aliveLeaders = (choices, terms, sums) => (choices ?? []).filter((c) => (terms ?? []).some((t) => t.name === c.id || (t.address && (sums ?? []).some((s) => s.leader === c.id && s.terminal === t.address))));
+// Attributed by a field only, never by guessing from the text: the person's line whose `to` / `tos` names the leader (a chat with @lead-x, an
+// answer button of its card), and the PO's line whose `to` names it or whose `about` does (its reply to a prompt the desk sent to that leader).
+const leaderEntries = (entries, leader) => (leader ? (entries ?? []).filter((e) => entryLeader(e) === leader
+  || (e?.who === "me" && (e.to === leader || (e.tos ?? []).includes(leader))) || (e?.who === "po" && (e.to === leader || e.about === leader))) : entries ?? []);
 // The "안 읽은 것" base, shared by every copy of the mod (Dock, window, pane): {<room>: {seen, ts}}. The first copy to draw a room takes the room's
 // last-opened marker before it moves, and the others use that same value for SNAP_TTL_MS after it was last drawn (each draw renews it).
 const SNAP_TTL_MS = 30000;
@@ -499,6 +545,32 @@ function decisionOptions(body) {
   const options = [...nums].sort((x, y) => x - y);
   if (options.length < 2) return { options: [], recommended: 0 };
   return { options, recommended: options.includes(rec) ? rec : 0 };
+}
+// What a decision report offers when it has no "N안:" lines (#62): its "추천: ..." and "답: ..." lines, shown on the card without opening it,
+// and the quoted answers after "답:" ("둘 다 진행" / "#59만" / "보류", also “…” and 「…」) as answer buttons when there are at least two.
+// Read strictly from the body; "답" must start a word (not "정답:" / "답변:"). The "추천" line may carry the "답:" part after it on the same line.
+// -> { lines: ["추천: ...", "답: ..."], answers: ["둘 다 진행", ...], recommended: "<the answer the 추천 text names>" | "" }
+function decisionHints(body) {
+  const lines = [];
+  let answers = [];
+  let rec = "";
+  const cut = (s) => (s.length > 160 ? `${s.slice(0, 159)}…` : s);
+  for (const raw of String(body ?? "").split(/\r?\n/)) {
+    const line = raw.replace(/^\s*(?:[-*]\s*)?/, "").trim();
+    const r = line.match(/^추천\s*[:：]\s*(.*?)(?:\s*[.。]?\s+답\s*[:：].*)?$/);
+    if (r && r[1] && !rec) { rec = r[1].trim(); lines.push(cut(`추천: ${rec}`)); }
+    const a = line.match(/(?:^|[\s.。,)])답\s*[:：]\s*(\S.*)$/);
+    if (a && !answers.length && !lines.some((x) => x.startsWith("답:"))) {
+      const got = [];
+      for (const m of a[1].matchAll(/"([^"\n]{1,40})"|“([^”\n]{1,40})”|「([^」\n]{1,40})」/g)) {
+        const w = (m[1] ?? m[2] ?? m[3]).trim();
+        if (w && !got.includes(w)) got.push(w);
+      }
+      answers = got.length >= 2 && got.length <= 6 ? got : [];
+      lines.push(cut(`답: ${a[1].trim()}`));
+    }
+  }
+  return { lines, answers, recommended: rec ? (answers.find((w) => rec.includes(w)) ?? "") : "" };
 }
 // Who is writing right now: the room's PO (its own terminal is working) and its leaders that have work going on -> [{who, name}] (PO first,
 // then the leaders by shown name). `who` is the timeline owner key ("po" or "l:<hc name>"), the same the entries use. Pure; the dots
@@ -1151,6 +1223,8 @@ export default class Inbox extends View {
     this.narrow = !this.windowed; // narrower than WIDE_MIN (until the first size report: the dock and a pane start narrow, the window wide)
     this.writing = null; // leader whose answer box is open
     this.inputs = new Map(); // leader -> InputState
+    this.inputSeen = new Map(); // leader -> last ms its answer box was wanted (a draft is cleared only after DRAFT_GRACE_MS without it)
+    this.pickLive = { id: "", at: 0, label: "" }; // the picked room, the last time it was live (a PO missing from one poll keeps its room: #57)
     this.msg = null; // {text, bad}
     this.copied = null; // key of the command whose 복사 button just ran
     this.more = new Set(); // bubble ids the person opened with "더 보기" (#47: long messages start folded)
@@ -1168,6 +1242,7 @@ export default class Inbox extends View {
     this.promptBusyAt = 0;
     this.promptGen = 0;
     this.promptChain = 0; // the newest scheduled re-read of the screen; an older one does nothing
+    this.who = new Map(); // room -> the leader the room is narrowed to (#58, "특정 리더만"); like `filt`, not saved
     this.rs = new Map(); // room -> the state of its "PO 새로 시작" (see restartOpen)
     this.rgen = 0; // numbers a restart run: a timer of an older run does nothing
     this.filt = new Map(); // room -> the chat filter chip picked there (전체 when missing); not saved: a restart shows every message again
@@ -1560,7 +1635,12 @@ export default class Inbox extends View {
   pruneReply(asks) {
     const live = new Set(asks.map((a) => a.s.leader));
     for (const m of [this.replyPics, this.replyBusy]) for (const k of [...m.keys()]) if (!live.has(k)) m.delete(k);
-    for (const [k, st] of [...this.inputs]) if (!live.has(k)) { try { if (String(st.value() ?? "") !== "") st.set_value(""); } catch {} } // an old draft must not reappear on the leader's next card
+    const now = Date.now();
+    for (const k of live) this.inputSeen.set(k, now);
+    for (const k of staleDrafts(this.inputs.keys(), live, this.inputSeen, now)) { // an old draft must not reappear on the leader's next card (but one missing poll must not wipe it: #57)
+      try { const st = this.inputs.get(k); if (String(st.value() ?? "") !== "") st.set_value(""); } catch {}
+      this.inputSeen.delete(k);
+    }
   }
   pruneSent(asks) {
     try {
@@ -1717,16 +1797,22 @@ export default class Inbox extends View {
     const hasOther = all.some((a) => a.owner === PO_OTHER) || reps.some((r) => r.owner === PO_OTHER);
     let last = "";
     try { last = shared(PICK_KEY) ?? ""; } catch {}
-    const pick = choosePick(pos, last, hasOther);
+    const now = Date.now();
+    const settled = settlePick(pos, last, hasOther, this.pickLive.id === last ? this.pickLive.at : 0, now);
+    const pick = settled.pick;
+    if (!settled.ghost) {
+      if (last && (pos.some((p) => p.id === last) || (last === PO_OTHER && hasOther))) this.pickLive = { id: last, at: now, label: last === PO_OTHER ? OTHER_LABEL : pos.find((p) => p.id === last)?.label ?? last };
+      if (pick && pick !== last) { try { setShared(PICK_KEY, pick); } catch {} } // the room shown is the room kept: an automatic pick no longer floats with the leader counts
+    }
     let mine = [], seen = {};
     try { mine = shared(CHAT_KEY) ?? []; } catch {}
     try { seen = shared(SEEN_KEY) ?? {}; } catch {}
     const leaders = (this.data?.leaders ?? []).map((s) => ({ s, owner: leaderOwner(terms, s.leader, s.terminal, s.po) }));
-    const now = Date.now();
     const waits = (id) => all.filter((a) => a.owner === id).map((a) => ({ leader: a.s.leader, ts: a.item?.ts ?? "", kind: a.kind }));
     const room = (id) => timeline(id, leaders, id === PO_OTHER ? [] : this.data?.po?.[id] ?? [], mine, waits(id), now);
     const rooms = pos.map((p) => ({ id: p.id, label: p.label, title: p.title, blocked: this.isBlocked(p.address) }));
     if (hasOther) rooms.push({ id: PO_OTHER, label: OTHER_LABEL, title: "", blocked: false });
+    if (settled.ghost && !rooms.some((r) => r.id === pick)) rooms.push({ id: pick, label: this.pickLive.label, title: "", blocked: false, ghost: true }); // held for a moment: the room list does not lose it
     let raw = [];
     const tabs = rooms.map((r) => {
       const entries = room(r.id);
@@ -1734,13 +1820,16 @@ export default class Inbox extends View {
       return { ...r, n: all.filter((a) => a.owner === r.id).length, unread: r.id === pick ? 0 : unreadCount(entries, seen[r.id]) };
     });
     const filter = pick ? this.filt.get(pick) ?? "all" : "all";
+    const choices = aliveLeaders(roomLeaders(raw, (n) => shortName(n)), terms, this.data?.leaders); // #58: the live leaders of the picked room (follows the room; a closed session is dropped, its history stays under 전체)
+    const who = pick ? settleLeader(choices, this.who.get(pick)) : "";
+    const scope = leaderEntries(raw, who); // the 1:1 view of one leader (all of the room when none): the chips work on this
     let snaps = {};
     try { snaps = shared(SNAP_KEY) ?? {}; } catch {}
     const base = snapBase(snaps, pick, seen, now); // opening a room moves `seen` to now: filter by the marker from before (the same one in every copy)
-    const shown = filterEntries(raw, filter, base);
-    const keep = keepWaiting(raw, shown); // a leader still waiting on the person stays visible under any chip
+    const shown = filterEntries(scope, filter, base);
+    const keep = keepWaiting(scope, shown); // a leader still waiting on the person stays visible under any chip
     const entries = groupTimeline(keep.filter((e, i) => i >= keep.length - MAX_ENTRIES || e.waiting));
-    return { terms, tabs, pick, raw, shown, filter, counts: filterCounts(raw, base), entries, asks: all.filter((a) => a.owner === pick), reports: reps.filter((r) => r.owner === pick) };
+    return { terms, tabs, pick, raw, shown, filter, who, choices, counts: filterCounts(scope, base), entries, asks: all.filter((a) => a.owner === pick), reports: reps.filter((r) => r.owner === pick) };
   }
 
   // Remembers that the person has the picked room's newest message on screen. Both the window and the dock show a room, so both
@@ -1761,7 +1850,6 @@ export default class Inbox extends View {
     this.filt.set(room, key);
     c.notify();
   }
-
   // The chips above a room's timeline: 전체 | 안 읽은 것 | 결정 필요 | 최종 확인 요청 | 결과 | 멈춤, each with its count (0 = dim, still pressable).
   filterBar(t, v) {
     if (!v.pick || !v.raw.length) return null;
@@ -1781,6 +1869,25 @@ export default class Inbox extends View {
     this.menu = null;
     this.markSeen();
     c.notify();
+  }
+
+  setWho(room, leader, c) {
+    if (!room) return;
+    if (leader) this.who.set(room, leader); else this.who.delete(room);
+    c.notify();
+  }
+
+  // #58: the leader row under the chips — 전체 | one chip per leader of the room. It works together with the chips (the chip filters that leader's
+  // entries). Shown when the room has two or more leaders (with one there is nothing to choose); a leader that waits on the person is marked.
+  leaderBar(t, v) {
+    if (!v.pick || (v.choices?.length ?? 0) < 2) return null;
+    const chip = (id, label, on, mark, tip) => div().id(`who-${id || "all"}`).flex_none().h(22).px(8).rounded(11).flex().items_center().cursor_pointer().text_size(11).on_mouse_down("left", stop)
+      .bg(on ? t.selected : t.raised).border(1).border_color(on ? t.foreground + "40" : t.border).text_color(on ? t.foreground : t.muted)
+      .hover((x) => x.bg(t.hover).text_color(t.foreground)).on_click((_e, c) => this.setWho(v.pick, id, c)).tooltip(tip).child(mark ? `${label} ●` : label);
+    return h_flex().flex_none().min_w(0).px(10).py(5).gap(5).items_center().flex_wrap().border_b(1).border_color(t.border)
+      .child(div().flex_none().text_size(10.5).text_color(t.dim).child("리더"))
+      .child(chip("", "전체", !v.who, false, "이 방의 모든 리더"))
+      .children(v.choices.map((x) => chip(x.id, x.label, v.who === x.id, x.waiting, `${x.label}와 주고받은 글만(● = 나의 답을 기다림)`)));
   }
 
   peek(s) {
@@ -2411,7 +2518,7 @@ export default class Inbox extends View {
     try {
       // The PO reads a picture from its file: each path goes in the message as a line it can open with the Read tool.
       const line = [p.text, ...pics.map((x) => imgLine(x.path))].filter(Boolean).join("\n");
-      const r = this.deliver(po, line, c, { text: p.text, imgs: pics.map((x) => x.path), to: p.to[0] ?? "", po: v.pick, kind: "chat" });
+      const r = this.deliver(po, line, c, { text: p.text, imgs: pics.map((x) => x.path), to: p.to[0] ?? "", tos: p.to, po: v.pick, kind: "chat" });
       if (r === "sent" || r === "held" || r === "opening") { // opening: the bubble holds the text and sends it by itself once the pane opens
         this.sentAt2 = Date.now(); // the draw that shows the new bubble goes to the end once (sendFollow)
         this.chat.set_value("");
@@ -2434,14 +2541,15 @@ export default class Inbox extends View {
         .on_mouse_down("left", stop).on_click((_e, c) => this.pickMenu(i, c))
         .child(div().text_size(12.5).font_semibold().text_color(it.id === "here" ? t.muted : tint(t, it.id)).child(`@${it.label}`))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(it.id === "here" ? "PO에게 그냥 보내기" : it.sub))));
-    const target = v.tabs.find((x) => x.id === v.pick && x.id !== PO_OTHER);
+    const ghost = v.tabs.some((x) => x.id === v.pick && x.ghost);
+    const target = v.tabs.find((x) => x.id === v.pick && x.id !== PO_OTHER && !x.ghost);
     const chip = (ctx) => div().h(ctx.line_height).px(5).rounded(5).flex().items_center().bg(t.working + "26").text_color(t.working).text_size(12.5).font_semibold()
       .child(ctx.token.label ?? ctx.token.text.trim());
     return v_flex().flex_none().px(10).pb(10).pt(6).gap(6).border_t(1).border_color(t.border)
       .on_key_down((e, c) => this.inputKey(e, c))
       .when(Boolean(menu), (el) => el.child(menu))
       .when(holdShown(this.changedAt, this.heldAt), (el) => el.child(div().text_size(11).text_color(t.working).child("한 번 더 Enter로 보냅니다")))
-      .child(div().truncate().text_size(10.5).text_color(t.dim).child(target ? `받는 PO: ${target.label}` : "받는 PO가 없습니다 — PO를 고르세요"))
+      .child(div().truncate().text_size(10.5).text_color(t.dim).child(target ? `받는 PO: ${target.label}` : ghost ? "PO 터미널을 다시 찾는 중입니다 — 쓰던 글은 그대로 있습니다" : "받는 PO가 없습니다 — PO를 고르세요"))
       .when(this.pics.length > 0 || this.picBusy > 0, (el) => el.child(this.picRow(t, null)))
       .child(h_flex().gap(6).items_center()
         .on_drop((ev, c) => this.dropPics(ev?.paths, c))
@@ -2682,10 +2790,14 @@ export default class Inbox extends View {
     const writing = this.writing === s.leader;
     const done = this.sentOf(a);
     const opts = kind === "decision" ? decisionOptions(item?.body) : { options: [], recommended: 0 }; // once: the chips and the recommended one read the same list
+    // Without "N안:" lines the card still shows what the report offers (#62): its 추천 / 답 lines and the quoted answers as buttons.
+    const hint = kind === "decision" && opts.options.length < 2 ? decisionHints(item?.body) : { lines: [], answers: [], recommended: "" };
     const box = v_flex().min_w(0).gap(6)
+      .children(hint.lines.map((x, i) => div().id(`hint-${s.leader}-${i}`).min_w(0).text_size(12).text_color(t.foreground).child(x)))
       .child(h_flex().gap(6).items_center().flex_wrap()
         .when(Boolean(link) && link !== item?.link, (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", (c) => openUrl(link, c))))
         .children(kind === "decision" ? opts.options.map((n) => this.button(t, `opt-${s.leader}-${n}`, `${n}안 선택`, (c) => this.send(a, `${n}안 선택`, c, "choice"), { primary: n === opts.recommended, disabled: a.po ? "" : NO_PO, tip: CLIP })) : [])
+        .children(hint.answers.map((w, i) => this.button(t, `ans-${s.leader}-${i}`, w, (c) => this.send(a, w, c, "choice"), { primary: w === hint.recommended, disabled: a.po ? "" : NO_PO, tip: CLIP })))
         .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c, "verify"), { primary: true, disabled: a.po ? "" : NO_PO, tip: CLIP })))
         .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); this.reveal(this.spot(s, item)); c.notify(); }, { disabled: a.po ? "" : NO_PO }))
         .child(div().text_size(11).text_color(done === "sent" ? t.working : done === "held" ? t.blocked : t.dim).child(done === "sent" ? "PO에 보냄 — 리더가 받으면 사라집니다" : done === "held" ? (this.isBlocked(a.po) ? "PO에 넣음 — PO가 질문 중입니다. 방의 질문에 먼저 답하세요" : "PO에 넣음 — 말풍선의 'Enter 누르기'로 보내세요") : "누르면 PO에 바로 보내고, 리더가 받으면 사라집니다")));
@@ -2827,10 +2939,10 @@ export default class Inbox extends View {
       }
       blocks.push(this.entryRow(t, e, v, cx));
     });
-    if (!blocks.length && v.pick && v.filter !== "all" && v.raw.length) {
+    if (!blocks.length && v.pick && (v.filter !== "all" || v.who) && v.raw.length) {
       blocks.push(h_flex().flex_none().p(14).gap(8).items_center()
         .child(div().text_size(12).text_color(t.dim).child("해당 메시지 없음 —"))
-        .child(this.button(t, "flt-reset", "전체 보기", (c) => this.setFilter(v.pick, "all", c), { primary: true })));
+        .child(this.button(t, "flt-reset", "전체 보기", (c) => { this.setWho(v.pick, "", c); this.setFilter(v.pick, "all", c); }, { primary: true })));
     }
     if (!blocks.length) {
       blocks.push(div().flex_none().p(14).text_size(12).text_color(t.dim)
@@ -2848,7 +2960,7 @@ export default class Inbox extends View {
     blocks.push(div().id("inbox-end").flex_none().h(8));
     // Follow the newest: a new message scrolls to the bottom when the room just opened or the person already was at the bottom;
     // a person who scrolled up keeps their place. The handle's numbers are those of the last layout.
-    const key = tlKey(`${v.pick}~${v.filter}`, v.shown); // a new filter scrolls to the newest like a new room
+    const key = tlKey(`${v.pick}~${v.filter}~${v.who}`, v.shown); // a new filter scrolls to the newest like a new room
     this.lastIdx = Math.max(0, blocks.length - 1);
     if (this.scroll) {
       let atEnd = true;
@@ -2882,6 +2994,7 @@ export default class Inbox extends View {
       .on_mouse_down_out((_e, c) => { this.ui.press = false; if (this.ui.sel) this.dropSel(); if (this.dirty) this.softNotify(c); })
       .when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks);
     const bar = this.filterBar(t, v);
+    const lbar = this.leaderBar(t, v);
     const rrow = this.restartRow(t, v, cx); // "PO 새로 시작": the button, its confirm line or its steps (null in the other-PO room)
     const usage = this.usageLine(t, v.pick); // null before the first read (and when there is no cost to show either)
     const panel = this.promptPanel(t, v, cx); // a blocked PO's screen + its keys (null while the room's PO is not waiting on a prompt)
@@ -2891,6 +3004,7 @@ export default class Inbox extends View {
         .child(div().flex_none().text_size(10.5).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : `리더 ${new Set(v.raw.filter((e) => e.leader).map((e) => e.leader)).size}명`))))
       .when(Boolean(usage), (el) => el.child(usage))
       .when(Boolean(bar), (el) => el.child(bar))
+      .when(Boolean(lbar), (el) => el.child(lbar))
       .child(lines)
       .when(Boolean(panel), (el) => el.child(panel))
       .when(Boolean(rrow), (el) => el.child(rrow))
