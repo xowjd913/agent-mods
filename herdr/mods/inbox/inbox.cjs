@@ -1217,7 +1217,8 @@ const promptFooter = (l) => /^[^\p{L}\p{N}]*$/u.test(l) || (l.length <= 140 && /
 // number): those belong to the choice above and do not break the run. The tab bar ("← ☐ Scope  ☐ Priority  ✔ Submit →") is the line with arrows and
 // checkbox marks somewhere above the choices; it is kept so the desk can offer the tab keys.
 const promptCol = (l) => l.length - l.replace(/^[\s│┃|]*/, "").length;
-const PROMPT_TABS = /[←→].*[☐☒☑✔✓□■]|[☐☒☑✔✓□■].*[←→]/;
+const PROMPT_TABS = /←.*→|→.*←/; // the bar has both arrows (and a checkbox mark, below)
+const PROMPT_MARK = /[☐☒☑✔✓□■]/;
 function promptParse(text) {
   const lines = promptTail(text, 24);
   const num = lines.map((l) => PROMPT_NUM.exec(l));
@@ -1227,7 +1228,7 @@ function promptParse(text) {
     for (let j = i; j >= 0 && i - j <= 4; j--) {
       if (!num[j]) continue;
       const col = lines[j].search(/\d/);
-      for (let k = j + 1; k <= i; k++) if (promptCol(lines[k]) <= col) return -1;
+      for (let k = j + 1; k <= i; k++) if (promptCol(lines[k]) <= col && !/^[^\p{L}\p{N}]*$/u.test(lines[k])) return -1; // a rule line (no letters or digits) between choices is skipped
       return j;
     }
     return -1;
@@ -1247,7 +1248,7 @@ function promptParse(text) {
   const options = rows.map((j) => { const m = num[j]; return { key: m[2], label: m[3].trim().slice(0, 80), on: m[1] === "❯" || m[1] === "›" }; });
   if (options.length < 2 || !options.every((o, i) => Number(o.key) === i + 1)) return none;
   const start = rows[0];
-  const tabs = lines.slice(0, start).reverse().find((l) => PROMPT_TABS.test(l)) ?? "";
+  const tabs = lines.slice(Math.max(0, start - 5), start).reverse().find((l) => PROMPT_TABS.test(l) && PROMPT_MARK.test(l)) ?? ""; // only near the question: an arrow line far up is output
   return { options: options.slice(0, 8), head: lines.slice(Math.max(0, start - 2), start), tabs: tabs.replace(/[│┃|]/g, " ").replace(/\s+/g, " ").trim() };
 }
 const promptOptions = (text) => promptParse(text).options;

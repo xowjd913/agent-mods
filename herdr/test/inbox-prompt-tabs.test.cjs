@@ -178,3 +178,40 @@ test("#92 promptPanel: 막다른 길이 없다 — 터미널 열기(terminal.pee
   const rp = methodOf(src, "  readPrompt(po, cx) {", "  // A key press from the question panel");
   assert.ok(!/"keys"/.test(rp));
 });
+
+// ---- review round 1
+test("#92 promptParse: 선택지 사이에 구분선(글자·숫자 없는 줄)이 끼어도 선택지와 탭 줄을 읽는다(│ 테두리가 있어도)", () => {
+  const rule = "────────────────────────────────";
+  const screen = (wrap) => [" ← ☒ Scope  ☐ Priority  ✔ Submit →", "", " Which scope?", "", " ❯ 1. A", "      about A", "   2. B", "      about B", "   3. Type something.", `   ${rule}`, "   4. Chat about this", "", " Enter to select · Esc to cancel"].map(wrap).join("\n");
+  for (const wrap of [(l) => l, (l) => `│${l}│`]) {
+    const p = I.promptParse(screen(wrap));
+    assert.deepEqual(p.options.map((o) => o.key), ["1", "2", "3", "4"]);
+    assert.equal(p.tabs, "← ☒ Scope ☐ Priority ✔ Submit →");
+  }
+  assert.equal(I.promptOptions(" Q?\n 1. a\n 2. b\n").length, 2); // without a rule line nothing changed
+});
+
+test("#92 promptParse: 질문 위 먼 곳의 화살표·체크 글자 줄은 탭 줄이 아니고, ←와 →가 함께 있어야 탭 줄이다", () => {
+  const perm = (top) => `${top}\nout 1\nout 2\nout 3\nout 4\nDo you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again\n   3. No\n`;
+  assert.equal(I.promptParse(perm("✔ tests pass → deploying")).tabs, "");
+  assert.equal(I.promptParse(perm("Done ✔ → next")).tabs, "");
+  assert.equal(I.promptParse("Done ✔ → next\nout\nout\nout\nout\nDo you want to proceed?\n ❯ 1. Yes\n   2. No\n").tabs, "");
+  assert.equal(I.promptParse(" ✔ Scope → Submit\n\n Which?\n ❯ 1. A\n   2. B\n").tabs, ""); // one arrow only
+  assert.equal(I.promptParse(" ← ☒ Scope ✔ Submit →\n\n Which?\n ❯ 1. A\n   2. B\n").tabs, "← ☒ Scope ✔ Submit →");
+});
+
+test("#92 pressPrompt: 화면을 한 번도 못 본 상태(읽기 실패·빈 화면)에서는 빈 재읽기가 같아 보여도 키를 보내지 않는다", async () => {
+  for (const shown of [{ po: "t9", at: 0, text: "", failed: true }, { po: "t9", at: 0, text: "", failed: false }]) {
+    const calls = [];
+    const say = [];
+    const m = runMethod(mainSrc(), "  pressPrompt(po, key, c) {", "  promptPanel(t, v, cx) {", {
+      hc: (a) => { calls.push(a); return { code: 0, stdout: "" }; }, promptSig: I.promptSig, PROMPT_LINES: 40,
+    });
+    const self = { prompt: shown, isBlocked: () => true, say: (t, bad) => say.push({ t, bad }) };
+    for (const key of ["enter", "esc", "left", "right", "1"]) m.pressPrompt.call(self, "t9", key, { notify() {} });
+    await tick(); await tick();
+    assert.deepEqual(calls, [], "no read and no key");
+    assert.equal(say.length, 5);
+    assert.ok(say.every((s) => s.bad && /읽지 못해/.test(s.t)));
+  }
+});
