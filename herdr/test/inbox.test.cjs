@@ -1439,7 +1439,7 @@ test("resend: 붙여 넣기 전에 sending으로 바꾸고, sending 중의 두 �
     markAsk: (r, how) => log.push(["ask", how]),
   };
   self.recordActs = runMethod(src, "  recordActs(r, po", "  // The bubble's \"다시 보내기\"", mkGlobals()).recordActs.bind(self);
-  const { resend } = runMethod(src, "  resend(id, c) {", "  // The bubble's \"Enter 누르기\"", mkGlobals());
+  const { resend } = runMethod(src, "  resend(id, c) {", "  // A '!' bubble's resend goes through", mkGlobals({ bangCommand: I.bangCommand }));
   const c = { notify() {} };
   resend.call(self, "1-a", c);
   assert.deepEqual(log.filter((x) => x[0] === "mark" || x[0] === "deliver").map((x) => x[0] === "deliver" ? `deliver:${x[3]}` : `mark:${x[1]}`), ["mark:sending", "deliver:sending"]); // deliver가 시작될 때 이미 sending
