@@ -9,7 +9,7 @@
 // It also records the session's transcript path in <inbox dir>/po-session/<po id>.json (the desk sums that session's cost from it).
 // appended to <inbox dir>/po/<po id>.jsonl (HERDR_INBOX_DIR, else ~/.herdr-inbox). Installed by `install.cjs hook`.
 // Rules: exit 0 always and print nothing (the hook must never change, block or slow a session); do nothing unless the terminal
-// is a PO (labels role=po and a valid po id) - leaders, workers and plain sessions are never written for.
+// is a PO (labels role=po and a valid po id; the names come from the profile, docs/inbox-contract.md §9, default as here) - leaders, workers and plain sessions are never written for.
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -95,9 +95,10 @@ function run(env = process.env, payload = readPayload(), I = require("./inbox.cj
   // The cheap checks come before the `hc` call: most hook runs are other events or lines with nothing to write.
   const line = I.hookLine(payload, now);
   if (!line) return null;
+  if (I.loadNames(env)) { I.setNames(null); return null; } // the profile (docs/inbox-contract.md §9) names the agent, the hub role and its folder; a broken one writes nothing
   const t = get(id);
-  if (!t || /^lead-/.test(String(t.name ?? "")) || t.parent) return null; // a PO has no name of a leader and no parent terminal
-  const po = I.poId(t); // role=po and a valid po=<id> label
+  if (!t || I.isAgentName(t.name) || t.parent) return null; // a hub terminal has no name of an agent and no parent terminal
+  const po = I.poId(t); // the hub role label and a valid hub id label (po=<id> by default)
   const file = po ? I.poFile(I.inboxDir(), po) : null;
   if (!file) return null;
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });

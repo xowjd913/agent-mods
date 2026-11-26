@@ -41,30 +41,83 @@ const PROMPT_REFRESH_MS = 3000, PROMPT_LINES = 40; // a blocked PO's screen is r
 const BADGE_KEY = "inbox.badge"; // {id, ts}: the copy (dock / pane) that writes the app icon badge
 const OPEN_KEY = "inbox.expanded"; // cards the person opened ("자세히"), shared so they stay open across re-renders and window reopens
 const MAX_OPEN = 60;
-const NO_PO = "이 리더의 PO 터미널을 찾지 못했습니다(리더 터미널의 부모가 role=po 라벨이어야 합니다).";
+// The labels that make a hub terminal (profile: labels.role = hub.role, hub.idLabel = <id>); text built when shown, since the profile loads after the module.
+const hubTag = () => `${NAMES.labelRole}=${NAMES.hubRole}`;
+const NO_PO = () => `이 리더의 PO 터미널을 찾지 못했습니다(리더 터미널의 부모가 ${hubTag()} 라벨이어야 합니다).`;
 const OTHER_LABEL = "PO 모름";
 const OTHER_TIP = "PO를 알 수 없는 리더와 보고: 이미 닫힌 리더인데 보고 줄에 po가 없고 그 PO도 지금 없는 것(이 변경 전에 쓴 보고 줄 등). 여기서는 채팅을 보낼 수 없습니다";
 const CLIP = "답을 클립보드에 담아 PO 터미널에 붙여 넣고 Enter까지 눌러 보냅니다(PO가 질문 중이면 붙여 넣기만 합니다). 클립보드 내용이 바뀝니다.";
 
+// names:begin
+// The names this desk recognizes: which terminals are reporting agents and hubs, the labels it reads, the answer line (the profile, docs/inbox-contract.md
+// §9-§10). The defaults are today's behavior; `node inbox.cjs` prints the loaded profile as `names` (profile.cjs namesOf) and the desk applies it
+// with setNames(). The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js and every other mod that reads names
+// (leader-tabs, agent-groups, work, tabs-mine, prs; a test keeps them identical and checks DEFAULT_NAMES against profile.cjs).
+const DEFAULT_NAMES = Object.freeze({
+  agentName: "^lead-[a-z0-9_-]+$", agentRole: "leader", titlePrefix: "^\\s*리더\\s*·\\s*", titlePrefixText: "리더 · ", strip: "^lead-", // a reporting agent: its name, its `role` label value, what is cut off a title (pattern + the literal text to put back) / a name
+  hubRole: "po", hubIdLabel: "po", hubId: "^[a-z0-9-]{1,40}$", hubDir: "po", // the hub (PO): its `role` value, id label, id pattern, folder
+  labelRole: "role", labelWait: "wait", labelWaitLink: "wait-link", labelSession: "session",
+  answerLine: 'Panel answer ({kind}) for {agent}: "{text}".{ Target: {link}}',
+});
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // a hub id becomes a file name whatever its pattern says
+function compileNames(n) {
+  const re = (s) => { try { return new RegExp(s); } catch { return null; } };
+  const c = { ...n, agentRe: re(n.agentName), stripRe: n.strip ? re(n.strip) : null, prefixRe: n.titlePrefix ? re(n.titlePrefix) : null, hubIdRe: re(n.hubId) };
+  return c.agentRe && c.hubIdRe && (!n.strip || c.stripRe) && (!n.titlePrefix || c.prefixRe) ? c : null;
+}
+let NAMES = compileNames(DEFAULT_NAMES);
+let NAMES_JSON = "";
+// Applies the names the profile gave (null = defaults). Compiles only when they changed (the mods call this on every render); true when they did.
+const setNames = (n) => {
+  const key = JSON.stringify(n ?? null);
+  if (key === NAMES_JSON && NAMES) return false;
+  NAMES_JSON = key;
+  NAMES = compileNames({ ...DEFAULT_NAMES, ...(n && typeof n === "object" ? n : {}) }) ?? compileNames(DEFAULT_NAMES);
+  return true;
+};
+// Sharing: the desk and the work board load the profile (their helper prints `names`) and publish it; every other mod follows what is shared. In the helper
+// (node) there is no `shared`, so both are inert there.
+const NAMES_SHARED = "inbox.names";
+const adoptNames = (n) => {
+  const changed = setNames(n);
+  try { if (typeof setShared === "function" && JSON.stringify(shared(NAMES_SHARED) ?? {}) !== JSON.stringify(n ?? {})) setShared(NAMES_SHARED, n ?? {}); } catch {}
+  return changed;
+};
+const syncNames = () => { try { return typeof shared === "function" ? setNames(shared(NAMES_SHARED)) : false; } catch { return false; } };
+const isAgentName = (v) => NAMES.agentRe.test(String(v ?? ""));
+const labelOf = (t, key) => String(t?.labels?.[NAMES[key]] ?? "").trim(); // key: labelRole | labelWait | labelWaitLink | labelSession | hubIdLabel
+const roleIs = (t, role) => Boolean(role) && labelOf(t, "labelRole").toLowerCase() === String(role).toLowerCase();
+const isHubTerm = (t) => roleIs(t, NAMES.hubRole);
+const isAgentTerm = (t) => roleIs(t, NAMES.agentRole);
+const cleanPoId = (v) => { const s = String(v ?? "").trim(); return SAFE_ID.test(s) && NAMES.hubIdRe.test(s) ? s : ""; };
+const poId = (t) => (isHubTerm(t) ? cleanPoId(labelOf(t, "hubIdLabel")) : "");
+// The line pasted into the hub terminal. One line (newlines folded to spaces) so the submit keeps it as a single user message. A `{… {link} …}`
+// group of the template is kept (without its braces) only when there is a link.
+function answerLine(kind, leader, text, link) {
+  const body = String(text ?? "").replace(/\s*\n\s*/g, " ").trim();
+  const vals = { kind: String(kind ?? ""), agent: String(leader ?? ""), text: body, link: String(link ?? "") };
+  return NAMES.answerLine.replace(/\{([^{}]*)\{link\}([^{}]*)\}/g, (_, a, b) => (vals.link ? `${a}{link}${b}` : "")).replace(/\{(kind|agent|text|link)\}/g, (_, k) => vals[k]);
+}
+// names:end
+
 // Which terminal is a waiting leader. Copied verbatim from inbox.cjs (a test keeps them identical); tabs-mine uses the same line.
-const waitingKind = (t) => (/^lead-/.test(String(t?.name ?? "")) ? (["decision", "verify"].find((k) => k === String(t.labels?.wait ?? "").trim().toLowerCase()) ?? "") : "");
+const waitingKind = (t) => (isAgentName(t?.name) ? (["decision", "verify"].find((k) => k === labelOf(t, "labelWait").toLowerCase()) ?? "") : "");
 
 // leaderName:begin
 // The name a person knows a leader by: its Herdr session name. ONE rule for the inbox (cards, rows), agent-groups (leader headers), leader-tabs (tab text) and work (session rows).
-// The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js and agent-groups/main.js
+// The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js, agent-groups, leader-tabs and work
 // (a test keeps them identical). Order: the live terminal title -> the `session` label -> the last name remembered for that leader
 // (`memo`, {<hc name>: name}) -> the hc name ("lead-po-inbox" -> "po inbox"). The "리더 · " prefix is dropped: the place already says
 // it is a leader, and the name then reads as its task.
-const LEADER_PREFIX = /^\s*리더\s*·\s*/;
-const sessionName = (s) => String(s ?? "").replace(/^[^\p{L}\p{N}\p{Ps}\p{Pi}]+/u, "").replace(LEADER_PREFIX, "").trim();
-const liveName = (term) => [term?.title, term?.labels?.session].map(sessionName).find((n) => n && n !== term?.name && n !== term?.address && n.toLowerCase() !== "claude") ?? "";
-const leaderName = (leader, term, memo) => liveName(term) || sessionName(memo?.[leader]) || String(leader ?? "").replace(/^lead-/, "").replace(/-/g, " ").trim() || String(term?.address ?? "");
+const sessionName = (s) => String(s ?? "").replace(/^[^\p{L}\p{N}\p{Ps}\p{Pi}]+/u, "").replace(NAMES.prefixRe ?? /$^/, "").trim();
+const liveName = (term) => [term?.title, labelOf(term, "labelSession")].map(sessionName).find((n) => n && n !== term?.name && n !== term?.address && n.toLowerCase() !== "claude") ?? "";
+const leaderName = (leader, term, memo) => liveName(term) || sessionName(memo?.[leader]) || String(leader ?? "").replace(NAMES.stripRe ?? /$^/, "").replace(/-/g, " ").trim() || String(term?.address ?? "");
 // The memo with the live names of `terms` merged in; null when nothing changed. At most `max` leaders are kept (oldest dropped).
 function rememberNames(memo, terms, max = 60) {
   const next = { ...(memo ?? {}) };
   let changed = false;
   for (const t of terms ?? []) {
-    const n = /^lead-/.test(String(t?.name ?? "")) ? liveName(t) : "";
+    const n = isAgentName(t?.name) ? liveName(t) : "";
     if (!n || next[t.name] === n) continue;
     delete next[t.name]; // re-added last: the newest stay when the cap drops the oldest
     next[t.name] = n;
@@ -82,19 +135,16 @@ function findPo(terms, leaderName, address) {
   const list = terms ?? [];
   const leader = (leaderName && list.find((t) => t.name === leaderName)) || (address && list.find((t) => t.address === address)) || null;
   const parent = leader?.parent ? list.find((t) => t.address === leader.parent) : null;
-  return parent && String(parent.labels?.role ?? "").trim().toLowerCase() === "po" ? parent.address : null;
+  return parent && isHubTerm(parent) ? parent.address : null;
 }
 
-function answerLine(kind, leader, text, link) {
-  const body = String(text ?? "").replace(/\s*\n\s*/g, " ").trim();
-  return `Panel answer (${kind}) for ${leader}: "${body}".${link ? ` Target: ${link}` : ""}`;
-}
 
 // chat:begin
 // The chat box of the window: "@" mentions, the menu of live leaders and which PO a line goes to. Pure. The mods cannot require a
 // .cjs file, so this block is copied verbatim between the markers into inbox/main.js (a test keeps them identical).
 const MENTION_END = "(?=$|[\\s.,!?:;)])";
-const MENTION = new RegExp(`(^|\\s)@(here|lead-[A-Za-z0-9_-]+)${MENTION_END}`, "g");
+// The agent pattern without its anchors, for finding "@<name>" inside a text.
+const mentionRe = () => new RegExp(`(^|\\s)@(here|(?:${NAMES.agentName.replace(/^\^/, "").replace(/(?<!\\)\$$/, "")}))${MENTION_END}`, "g");
 const HERE = new RegExp(`(^|\\s)@here${MENTION_END}`, "g");
 const HERE_PUNCT = /(^|\s)@here(?=[.,!?:;)])/g; // "@here" before punctuation takes its leading space with it: "hi @here, ok" -> "hi, ok"
 // The box text with each mention chip written out as its text ("@lead-x"), whether or not the chip's range already holds that text.
@@ -110,7 +160,7 @@ function parseMention(raw, known = []) {
   const flat = String(raw ?? "").replace(/\r\n?/g, "\n").replace(/[ \t\f\v]+/g, " ").replace(/ ?\n ?/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   const to = [];
   let here = false;
-  const empty = flat.replace(MENTION, (m, pre, name) => {
+  const empty = flat.replace(mentionRe(), (m, pre, name) => {
     if (name === "here") here = true;
     else if (known.includes(name)) { if (!to.includes(name)) to.push(name); } else return m;
     return pre;
@@ -176,11 +226,7 @@ function mentionQuery(text, cursor, tokens = []) {
 }
 // ---- The PO picker. A PO terminal carries the labels role=po and po=<id>; the id is lowercase [a-z0-9-], 1-40 long (never the terminal
 // address, which changes on a restart). Everything in the window is for the one picked PO.
-const PO_ID = /^[a-z0-9-]{1,40}$/;
 const PO_OTHER = "~"; // the pick that holds leaders and reports no live PO owns ("PO 모름"); not a valid id, so it never clashes
-const cleanPoId = (v) => { const s = String(v ?? "").trim(); return PO_ID.test(s) ? s : ""; };
-const isPoTerm = (t) => String(t?.labels?.role ?? "").trim().toLowerCase() === "po";
-const poId = (t) => (isPoTerm(t) ? cleanPoId(t?.labels?.po) : "");
 // The project a PO terminal is for: its tab's name "PO · <project>" (`where` is "<space> / <tab>"), else "" (the caller falls back to the id).
 const poProject = (t) => {
   const tab = String(t?.where ?? "").split(" / ").slice(1).join(" / ").trim();
@@ -196,7 +242,7 @@ function poList(terms) {
     const id = poId(t);
     if (!id || out.some((p) => p.id === id)) continue;
     const title = String(t.title ?? "").trim();
-    out.push({ id, address: t.address, label: poProject(t) || id, title: title && title !== t.name && title !== t.address ? title : "", n: list.filter((x) => /^lead-/.test(String(x?.name ?? "")) && x.parent === t.address).length });
+    out.push({ id, address: t.address, label: poProject(t) || id, title: title && title !== t.name && title !== t.address ? title : "", n: list.filter((x) => isAgentName(x?.name) && x.parent === t.address).length });
   }
   return out;
 }
@@ -259,7 +305,7 @@ function swapDraft(map, from, to, cur) {
 function leaderMenu(terms, memo, query = "", limit = 8, pick = "") {
   const list = terms ?? [];
   const q = String(query ?? "").trim().toLowerCase();
-  const leaders = list.filter((t) => pick && pick !== PO_OTHER && /^lead-/.test(String(t?.name ?? "")) && findPo(list, t.name, t.address) && leaderOwner(list, t.name, t.address) === pick)
+  const leaders = list.filter((t) => pick && pick !== PO_OTHER && isAgentName(t?.name) && findPo(list, t.name, t.address) && leaderOwner(list, t.name, t.address) === pick)
     .map((t) => ({ id: t.name, label: leaderName(t.name, t, memo), sub: t.name }))
     .filter((x, i, a) => a.findIndex((y) => y.id === x.id) === i)
     .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0)); // code-unit order: the same on every platform
@@ -565,7 +611,7 @@ function chatHtmlRaw(text) {
 function dockTarget(here, f, terms) {
   const list = Array.isArray(here) ? here : [];
   const byAddr = new Map((Array.isArray(terms) ? terms : []).map((t) => [t.address, t]));
-  const leaders = list.filter((p) => p.terminal && String(byAddr.get(p.terminal)?.labels?.role ?? "").trim().toLowerCase() === "leader");
+  const leaders = list.filter((p) => p.terminal && isAgentTerm(byAddr.get(p.terminal)));
   const age = (p) => { const ms = Number(byAddr.get(p.terminal)?.created_ms); return Number.isFinite(ms) ? ms : parseInt(String(p.terminal).replace(/^t/, ""), 36) || 0; };
   const leader = leaders.find((p) => p.pane === f?.pane) ?? [...leaders].sort((a, b) => age(b) - age(a))[0];
   const beside = leader ?? list.find((p) => p.pane === f?.pane) ?? list.find((p) => p.focused && p.terminal) ?? list.find((p) => p.focused);
@@ -704,7 +750,7 @@ function typingSync(track, terms, said, now) {
   const busy = new Set(), live = new Set();
   for (const t of list) {
     const n = String(t?.name ?? "");
-    if (!/^lead-/.test(n)) continue;
+    if (!isAgentName(n)) continue;
     live.add(n);
     if (hot.has(t.address)) busy.add(n);
   }
@@ -744,13 +790,27 @@ function typingNow(terms, room, memo, track = null, now = 0) {
   const leaders = [];
   for (const t of list) {
     const n = String(t?.name ?? "");
-    if (!/^lead-/.test(n) || seen.has(n) || leaderOwner(list, n, t.address) !== room) continue;
+    if (!isAgentName(n) || seen.has(n) || leaderOwner(list, n, t.address) !== room) continue;
     if (!hot.has(t.address) && !typingGrace(track?.get(n), now)) continue;
     seen.add(n);
     leaders.push({ who: `l:${n}`, name: leaderName(n, t, memo), label: typingLabel(states, t.address) });
   }
   leaders.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return [...out, ...leaders];
+}
+// #69: the rooms with work going on, as a Set of room ids (a PO's id, or PO_OTHER): a room is working when its PO, a leader of it, or a team
+// member below them is "working" right now. Status only (the terminals the poll already reads), no grace: it goes out as soon as all stop.
+// Waiting for an approval ("blocked") is not working: the room's red count / "질문" chip says that.
+function roomWorking(terms) {
+  const list = terms ?? [];
+  const out = new Set();
+  const states = workStates(list);
+  for (const p of poList(list)) if (states.get(p.address)?.work) out.add(p.id);
+  for (const t of list) {
+    if (!isAgentName(t?.name) || !states.get(t.address)?.work) continue;
+    if (leaderOwner(list, t.name, t.address) === PO_OTHER) { out.add(PO_OTHER); break; }
+  }
+  return out;
 }
 // A short text that changes exactly when something the desk shows from the terminals changes: the status, the wait label and the shown
 // name of every PO and leader, and whether a leader has work below it (a team member working). The 1.5 s poll redraws a copy only when this
@@ -759,11 +819,12 @@ function statusSig(terms) {
   const rows = [];
   const hot = busyAddrs(terms), states = workStates(terms);
   for (const t of terms ?? []) {
-    const lead = /^lead-/.test(String(t?.name ?? ""));
+    const lead = isAgentName(t?.name);
     if (!lead && !poId(t)) continue;
     rows.push(`${t.address}|${String(t.status ?? "")}|${lead ? waitingKind(t) : ""}|${lead ? liveName(t) : ""}|${lead && hot.has(t.address) ? 1 : 0}|${lead && hot.has(t.address) ? typingLabel(states, t.address) : ""}`);
   }
-  return rows.sort().join("\n");
+  const w = [...roomWorking(terms)].sort().join(",");
+  return rows.sort().join("\n") + (w ? `\n#w:${w}` : ""); // #69: a working terminal that is no PO/leader (a member right under a PO) still moves a room dot
 }
 // ---- images (pasted, picked or dropped in the box; or pasted in the PO terminal and read back by the hook)
 // A picture lives in <app root>/data/inbox/img/ (0600, written by this helper); a line of the desk's message names it as "[image: <path> — ...]"
@@ -1876,14 +1937,16 @@ export default class Inbox extends View {
         if (r.code !== 0) throw new Error(`수집기 종료 코드 ${r.code} ${(r.stderr || "").trim()}`);
         const d = JSON.parse(r.stdout);
         if (gen !== this.gen) return;
+        adoptNames(d?.names); // the profile of the inbox folder (names, labels, answer line); the defaults when the collector sends none
         // The cost enters the signature as what is drawn (label + tooltip, whole cents), never the raw numbers, so a working PO's tokens do not redraw the desk.
         const shown = {};
         for (const [po, c] of Object.entries(d?.cost ?? {})) shown[po] = [costLabel(c), costTip(c)];
         const sig = JSON.stringify({ ...d, cost: shown, at: 0 });
-        this.changed = sig !== this.sigData || Boolean(this.error) || !this.data || Date.now() - this.drawnAt > LOAD_REDRAW_MS;
+        const err = d?.profileError ? `프로필을 읽지 못해 기본 이름으로 보여 줍니다: ${String(d.profileError).slice(0, 160)}` : null; // kept shown, but only a change of it redraws
+        this.changed = sig !== this.sigData || err !== this.error || !this.data || Date.now() - this.drawnAt > LOAD_REDRAW_MS;
         this.sigData = sig;
         this.data = d;
-        this.error = null;
+        this.error = err;
         rememberLeaders();
         this.markSeen();
         if (this.drawing()) this.startWatch(cx);
@@ -1918,7 +1981,7 @@ export default class Inbox extends View {
       const s = (this.data?.leaders ?? []).find((l) => l.leader === term.name) ?? (this.data?.leaders ?? []).find((l) => l.terminal === term.address)
         ?? { leader: term.name, terminal: term.address, open: null, ask: null, items: [], last: null };
       const item = s.ask ?? s.open;
-      out.push({ s, term, kind, item, po: findPo(list, term.name, term.address), owner: leaderOwner(list, term.name, term.address, s.po), link: String(term?.labels?.["wait-link"] ?? "").trim() || item?.link || "" });
+      out.push({ s, term, kind, item, po: findPo(list, term.name, term.address), owner: leaderOwner(list, term.name, term.address, s.po), link: labelOf(term, "labelWaitLink") || item?.link || "" });
     }
     return out.sort((a, b) => (b.item?.ms ?? 0) - (a.item?.ms ?? 0));
   }
@@ -1964,8 +2027,9 @@ export default class Inbox extends View {
     const leaders = (this.data?.leaders ?? []).map((s) => ({ s, owner: leaderOwner(terms, s.leader, s.terminal, s.po) }));
     const waits = (id) => all.filter((a) => a.owner === id).map((a) => ({ leader: a.s.leader, ts: a.item?.ts ?? "", kind: a.kind }));
     const room = (id) => timeline(id, leaders, id === PO_OTHER ? [] : this.data?.po?.[id] ?? [], mine, waits(id), now);
-    const rooms = pos.map((p) => ({ id: p.id, label: p.label, title: p.title, blocked: this.isBlocked(p.address) }));
-    if (hasOther) rooms.push({ id: PO_OTHER, label: OTHER_LABEL, title: "", blocked: false });
+    const busy = roomWorking(terms); // #69: the rooms with work going on (a dot beside the name)
+    const rooms = pos.map((p) => ({ id: p.id, label: p.label, title: p.title, blocked: this.isBlocked(p.address), working: busy.has(p.id) }));
+    if (hasOther) rooms.push({ id: PO_OTHER, label: OTHER_LABEL, title: "", blocked: false, working: busy.has(PO_OTHER) });
     if (settled.ghost && !rooms.some((r) => r.id === pick)) rooms.push({ id: pick, label: this.pickLive.label, title: "", blocked: false, ghost: true }); // held for a moment: the room list does not lose it
     let raw = [];
     const tabs = rooms.map((r) => {
@@ -2205,7 +2269,7 @@ export default class Inbox extends View {
     if (!r) return;
     const po = this.recordPo(r);
     if (!this.recordActs(r, po).includes("resend")) return;
-    if (!po) { this.say(NO_PO, true); c.notify(); return; }
+    if (!po) { this.say(NO_PO(), true); c.notify(); return; }
     const before = r.status;
     this.mark(id, "sending");
     try {
@@ -2223,7 +2287,7 @@ export default class Inbox extends View {
     if (!r) return;
     const po = this.recordPo(r);
     if (!this.recordActs(r, po).includes("enter")) return;
-    if (!po) { this.say(NO_PO, true); c.notify(); return; }
+    if (!po) { this.say(NO_PO(), true); c.notify(); return; }
     if (this.isBlocked(po)) { this.say(`PO(${po})가 지금 질문 중이라 Enter를 누르지 않았습니다. 질문에 먼저 답하세요.`, true); c.notify(); return; }
     const before = r.status;
     const back = (st, msg) => { this.mark(id, st); if (msg) this.say(msg, true); try { c.notify(); } catch {} };
@@ -2401,7 +2465,7 @@ export default class Inbox extends View {
     // Step 1: ask for the note.
     const note0 = await this.handoffRead(id);
     if (!alive()) return;
-    const path = note0.path || `~/.herdr-inbox/po/${id}.handoff.md`;
+    const path = note0.path || `~/.herdr-inbox/${NAMES.hubDir}/${id}.handoff.md`;
     this.restartSet(room, g, { path, since: Date.now() }, cx);
     const askText = handoffAsk(path);
     const ask = await this.sendLine(po, askText, alive, room);
@@ -2509,7 +2573,7 @@ export default class Inbox extends View {
     if (kind === "answer" && this.busyOf(a.s.leader)) { this.say("그림을 읽는 중입니다. 잠시 뒤에 다시 보내세요.", true); cx.notify(); return; }
     if (!body && !pics.length) { this.say("답을 먼저 적어 주세요.", true); cx.notify(); return; }
     const po = a.po;
-    if (!po) { this.say(NO_PO, true); cx.notify(); return; }
+    if (!po) { this.say(NO_PO(), true); cx.notify(); return; }
     try {
       // The PO reads a picture from its file: each path goes in the answer as a line it can open with the Read tool (as the PO box does).
       const line = [answerLine(a.kind, a.s.leader, body || "(picture only)", a.link), ...pics.map((x) => imgLine(x.path))].join("\n");
@@ -2703,7 +2767,7 @@ export default class Inbox extends View {
     this.heldAt = 0;
     const v = this.view();
     const terms = v.terms;
-    const known = v.pick === PO_OTHER ? [] : terms.filter((t) => /^lead-/.test(String(t.name ?? "")) && leaderOwner(terms, t.name, t.address) === v.pick).map((t) => t.name);
+    const known = v.pick === PO_OTHER ? [] : terms.filter((t) => isAgentName(t?.name) && leaderOwner(terms, t.name, t.address) === v.pick).map((t) => t.name);
     let p;
     try { p = parseMention(composeChat(this.chat.content()), known); } catch { p = { empty: true }; }
     const pics = this.pics.slice(0, MAX_IMGS);
@@ -2713,8 +2777,8 @@ export default class Inbox extends View {
     p.to = p.to ?? [];
     const tgt = chatTarget(terms, p.to, v.pick);
     if (!tgt.po) {
-      this.say(tgt.why === "many" ? "부른 리더들의 PO가 서로 다릅니다. 한 PO의 리더만 함께 부르세요." : tgt.why === "orphan" ? NO_PO
-        : "받을 PO를 먼저 고르세요(role=po, po=<id> 라벨이 붙은 PO 터미널만 고를 수 있습니다).", true);
+      this.say(tgt.why === "many" ? "부른 리더들의 PO가 서로 다릅니다. 한 PO의 리더만 함께 부르세요." : tgt.why === "orphan" ? NO_PO()
+        : `받을 PO를 먼저 고르세요(${hubTag()}, ${NAMES.hubIdLabel}=<id> 라벨이 붙은 PO 터미널만 고를 수 있습니다).`, true);
       c.notify();
       return;
     }
@@ -2764,7 +2828,13 @@ export default class Inbox extends View {
 
   poHint(t) {
     return div().id("po-hint").flex_none().px(this.compact ? 10 : 14).pb(6).text_size(11).text_color(t.muted)
-      .child("PO 터미널에 role=po, po=<id> 라벨을 달면 PO별로 나뉩니다. 지금은 PO가 없어 채팅을 보낼 수 없습니다.");
+      .child(`PO 터미널에 ${hubTag()}, ${NAMES.hubIdLabel}=<id> 라벨을 달면 PO별로 나뉩니다. 지금은 PO가 없어 채팅을 보낼 수 없습니다.`);
+  }
+
+  // #69: the "working" dot of a room: a small accent dot, always in the layout (clear when idle) so the name does not move when it comes and goes.
+  roomDot(t, x) {
+    const d = div().flex_none().size(6).rounded(3);
+    return x.working ? d.bg(t.working).tooltip("작업 중") : d;
   }
 
   // The count badges of a room: unread (green) and waiting leaders (red).
@@ -2788,6 +2858,7 @@ export default class Inbox extends View {
           .hover((s) => s.bg(on ? t.selected : t.hover)).on_click((_e, c) => this.pickPo(x.id, c))
           .tooltip(x.id === PO_OTHER ? OTHER_TIP : `po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
           .child(div().max_w(150).truncate().text_size(11.5).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
+          .child(this.roomDot(t, x))
           .children(this.roomBadges(t, x));
       }));
   }
@@ -2803,7 +2874,9 @@ export default class Inbox extends View {
           .bg(on ? t.selected : t.chrome).hover((s) => s.bg(on ? t.selected : t.hover)).on_click((_e, c) => this.pickPo(x.id, c))
           .tooltip(x.id === PO_OTHER ? OTHER_TIP : `${x.label} · po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
           .child(this.circle(t, color, x.id === PO_OTHER ? "?" : String(x.label).slice(0, 1).toUpperCase()))
-          .child(div().w(SLIM_W - 10).truncate().text_center().text_size(9.5).text_color(on ? t.foreground : t.dim).child(x.label))
+          .child(h_flex().w(SLIM_W - 10).gap(3).items_center().justify_center()
+            .child(div().min_w(0).truncate().text_center().text_size(9.5).text_color(on ? t.foreground : t.dim).child(x.label))
+            .child(this.roomDot(t, x)))
           .when(badges.length > 0, (el) => el.child(h_flex().gap(3).items_center().children(badges)));
       }));
   }
@@ -2821,6 +2894,7 @@ export default class Inbox extends View {
           .child(v_flex().flex_1().min_w(0)
             .child(div().min_w(0).truncate().text_size(12.5).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
             .child(div().min_w(0).truncate().text_size(10).text_color(t.dim).child(x.id === PO_OTHER ? "채팅 없음" : "PO")))
+          .child(this.roomDot(t, x))
           .children(this.roomBadges(t, x));
       }));
   }
@@ -2998,12 +3072,12 @@ export default class Inbox extends View {
       .children(hint.lines.map((x, i) => div().id(`hint-${s.leader}-${i}`).min_w(0).text_size(12).text_color(t.foreground).child(x)))
       .child(h_flex().gap(6).items_center().flex_wrap()
         .when(Boolean(link) && link !== item?.link, (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", (c) => openUrl(link, c))))
-        .children(kind === "decision" ? opts.options.map((n) => this.button(t, `opt-${s.leader}-${n}`, `${n}안 선택${n === opts.recommended ? " (추천)" : ""}`, (c) => this.send(a, `${n}안 선택`, c, "choice"), { primary: n === opts.recommended, disabled: a.po ? "" : NO_PO, tip: CLIP })) : [])
-        .children(hint.answers.map((w, i) => this.button(t, `ans-${s.leader}-${i}`, w, (c) => this.send(a, w, c, "choice"), { primary: w === hint.recommended, disabled: a.po ? "" : NO_PO, tip: CLIP })))
-        .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c, "verify"), { primary: true, disabled: a.po ? "" : NO_PO, tip: CLIP })))
-        .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); this.reveal(this.spot(s, item)); c.notify(); }, { disabled: a.po ? "" : NO_PO }))
+        .children(kind === "decision" ? opts.options.map((n) => this.button(t, `opt-${s.leader}-${n}`, `${n}안 선택${n === opts.recommended ? " (추천)" : ""}`, (c) => this.send(a, `${n}안 선택`, c, "choice"), { primary: n === opts.recommended, disabled: a.po ? "" : NO_PO(), tip: CLIP })) : [])
+        .children(hint.answers.map((w, i) => this.button(t, `ans-${s.leader}-${i}`, w, (c) => this.send(a, w, c, "choice"), { primary: w === hint.recommended, disabled: a.po ? "" : NO_PO(), tip: CLIP })))
+        .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c, "verify"), { primary: true, disabled: a.po ? "" : NO_PO(), tip: CLIP })))
+        .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); this.reveal(this.spot(s, item)); c.notify(); }, { disabled: a.po ? "" : NO_PO() }))
         .child(div().text_size(11).text_color(done === "sent" ? t.working : done === "held" ? t.blocked : t.dim).child(done === "sent" ? "PO에 보냄 — 리더가 받으면 사라집니다" : done === "held" ? (this.isBlocked(a.po) ? "PO에 넣음 — PO가 질문 중입니다. 방의 질문에 먼저 답하세요" : "PO에 넣음 — 말풍선의 'Enter 누르기'로 보내세요") : "누르면 PO에 바로 보내고, 리더가 받으면 사라집니다")));
-    if (!a.po) box.child(div().text_size(11).text_color(t.dim).child(NO_PO));
+    if (!a.po) box.child(div().text_size(11).text_color(t.dim).child(NO_PO()));
     if (writing) {
       const input = this.box(s.leader, cx);
       const row = this.picRow(t, s.leader);
@@ -3013,7 +3087,7 @@ export default class Inbox extends View {
         .on_drop((ev, c) => this.dropPics(ev?.paths, c, s.leader))
         .child(this.button(t, `attach-${s.leader}`, "그림", (c) => { this.pickPics(c, s.leader); }, { tip: "그림 파일을 골라 붙입니다(Cmd+V로 붙여넣거나 파일을 끌어다 놓아도 됩니다). 보내면 PO가 파일을 열어 봅니다" }))
         .child(div().flex_1().min_w(0).on_mouse_down("left", stop).child(Input.new(input).h(30).px(10).items_center().rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
-        .child(this.button(t, `send-${s.leader}`, "보내기", (c) => this.send(a, input.value(), c), { primary: true, disabled: a.po ? "" : NO_PO, tip: CLIP })));
+        .child(this.button(t, `send-${s.leader}`, "보내기", (c) => this.send(a, input.value(), c), { primary: true, disabled: a.po ? "" : NO_PO(), tip: CLIP })));
     }
     return box;
   }

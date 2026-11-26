@@ -6,7 +6,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { theme, exec, appHome, checking, window, openOverlay, run, panes, props, focused, terminals, readTextFile, writeTextFile } from "herdr";
+import { theme, exec, appHome, checking, window, openOverlay, run, panes, props, focused, terminals, readTextFile, writeTextFile, shared, setShared } from "herdr";
 
 const COLLECT = () => `${appHome()}/mods/work/collect.cjs`;
 const LOAD_TIMEOUT = 90000, LOAD_STALL_MS = 100000;
@@ -54,11 +54,64 @@ function publishPanes(cx) {
 // The leader to open beside: the focused pane if it is a leader, else the newest leader in the tab (created_ms,
 // else the higher base-36 address). Leaders carry the role=leader label that `spawn --leader` sets.
 function leaderPane(here, f) {
+  syncNames();
   const byAddr = new Map((terminals() ?? []).map((t) => [t.address, t]));
-  const leaders = here.filter((p) => p.terminal && String(byAddr.get(p.terminal)?.labels?.role ?? "").trim().toLowerCase() === "leader");
+  const leaders = here.filter((p) => p.terminal && isAgentTerm(byAddr.get(p.terminal)));
   const age = (p) => { const ms = Number(byAddr.get(p.terminal)?.created_ms); return Number.isFinite(ms) ? ms : parseInt(String(p.terminal).replace(/^t/, ""), 36) || 0; };
   return leaders.find((p) => p.pane === f?.pane) ?? leaders.sort((a, b) => age(b) - age(a))[0];
 }
+
+// names:begin
+// The names this desk recognizes: which terminals are reporting agents and hubs, the labels it reads, the answer line (the profile, docs/inbox-contract.md
+// §9-§10). The defaults are today's behavior; `node inbox.cjs` prints the loaded profile as `names` (profile.cjs namesOf) and the desk applies it
+// with setNames(). The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js and every other mod that reads names
+// (leader-tabs, agent-groups, work, tabs-mine, prs; a test keeps them identical and checks DEFAULT_NAMES against profile.cjs).
+const DEFAULT_NAMES = Object.freeze({
+  agentName: "^lead-[a-z0-9_-]+$", agentRole: "leader", titlePrefix: "^\\s*리더\\s*·\\s*", titlePrefixText: "리더 · ", strip: "^lead-", // a reporting agent: its name, its `role` label value, what is cut off a title (pattern + the literal text to put back) / a name
+  hubRole: "po", hubIdLabel: "po", hubId: "^[a-z0-9-]{1,40}$", hubDir: "po", // the hub (PO): its `role` value, id label, id pattern, folder
+  labelRole: "role", labelWait: "wait", labelWaitLink: "wait-link", labelSession: "session",
+  answerLine: 'Panel answer ({kind}) for {agent}: "{text}".{ Target: {link}}',
+});
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // a hub id becomes a file name whatever its pattern says
+function compileNames(n) {
+  const re = (s) => { try { return new RegExp(s); } catch { return null; } };
+  const c = { ...n, agentRe: re(n.agentName), stripRe: n.strip ? re(n.strip) : null, prefixRe: n.titlePrefix ? re(n.titlePrefix) : null, hubIdRe: re(n.hubId) };
+  return c.agentRe && c.hubIdRe && (!n.strip || c.stripRe) && (!n.titlePrefix || c.prefixRe) ? c : null;
+}
+let NAMES = compileNames(DEFAULT_NAMES);
+let NAMES_JSON = "";
+// Applies the names the profile gave (null = defaults). Compiles only when they changed (the mods call this on every render); true when they did.
+const setNames = (n) => {
+  const key = JSON.stringify(n ?? null);
+  if (key === NAMES_JSON && NAMES) return false;
+  NAMES_JSON = key;
+  NAMES = compileNames({ ...DEFAULT_NAMES, ...(n && typeof n === "object" ? n : {}) }) ?? compileNames(DEFAULT_NAMES);
+  return true;
+};
+// Sharing: the desk and the work board load the profile (their helper prints `names`) and publish it; every other mod follows what is shared. In the helper
+// (node) there is no `shared`, so both are inert there.
+const NAMES_SHARED = "inbox.names";
+const adoptNames = (n) => {
+  const changed = setNames(n);
+  try { if (typeof setShared === "function" && JSON.stringify(shared(NAMES_SHARED) ?? {}) !== JSON.stringify(n ?? {})) setShared(NAMES_SHARED, n ?? {}); } catch {}
+  return changed;
+};
+const syncNames = () => { try { return typeof shared === "function" ? setNames(shared(NAMES_SHARED)) : false; } catch { return false; } };
+const isAgentName = (v) => NAMES.agentRe.test(String(v ?? ""));
+const labelOf = (t, key) => String(t?.labels?.[NAMES[key]] ?? "").trim(); // key: labelRole | labelWait | labelWaitLink | labelSession | hubIdLabel
+const roleIs = (t, role) => Boolean(role) && labelOf(t, "labelRole").toLowerCase() === String(role).toLowerCase();
+const isHubTerm = (t) => roleIs(t, NAMES.hubRole);
+const isAgentTerm = (t) => roleIs(t, NAMES.agentRole);
+const cleanPoId = (v) => { const s = String(v ?? "").trim(); return SAFE_ID.test(s) && NAMES.hubIdRe.test(s) ? s : ""; };
+const poId = (t) => (isHubTerm(t) ? cleanPoId(labelOf(t, "hubIdLabel")) : "");
+// The line pasted into the hub terminal. One line (newlines folded to spaces) so the submit keeps it as a single user message. A `{… {link} …}`
+// group of the template is kept (without its braces) only when there is a link.
+function answerLine(kind, leader, text, link) {
+  const body = String(text ?? "").replace(/\s*\n\s*/g, " ").trim();
+  const vals = { kind: String(kind ?? ""), agent: String(leader ?? ""), text: body, link: String(link ?? "") };
+  return NAMES.answerLine.replace(/\{([^{}]*)\{link\}([^{}]*)\}/g, (_, a, b) => (vals.link ? `${a}{link}${b}` : "")).replace(/\{(kind|agent|text|link)\}/g, (_, k) => vals[k]);
+}
+// names:end
 
 const read = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } };
 const write = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} };
@@ -99,7 +152,8 @@ export default class Prs extends View {
         const d = JSON.parse(r.stdout);
         if (gen !== this.gen) return;
         this.data = d;
-        this.error = d.errors?.length ? d.errors.join(" / ") : null;
+        adoptNames(d.names); // the profile the collector loaded; shared with the other mods
+        this.error = [...(d.errors ?? []), ...(d.profileError ? [`프로필을 읽지 못해 기본 이름으로 보여 줍니다: ${d.profileError}`] : [])].join(" / ") || null;
       } catch (e) { if (gen === this.gen) this.error = `새로고침 실패: ${String(e?.message ?? e).slice(0, 180)}`; }
       finally {
         if (gen === this.gen) {

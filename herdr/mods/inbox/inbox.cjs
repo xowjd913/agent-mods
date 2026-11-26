@@ -292,7 +292,7 @@ function readTail(file) {
 }
 
 const OLD_PO_FILE = "po.jsonl"; // the old single PO file: dropped, never read (and never shown as a leader)
-const PO_DIR = "po"; // ~/.herdr-inbox/po/<po id>.jsonl: one file per PO, keyed by its id label (never by terminal address)
+// The hub folder (profile hub.dir, default "po"): ~/.herdr-inbox/po/<po id>.jsonl: one file per PO, keyed by its id label (never by terminal address)
 const MAX_PO = 100; // newest PO lines kept
 const MAX_PO_TEXT = 2000;
 
@@ -537,13 +537,13 @@ function hookLine(payload, now = Date.now()) {
 }
 
 // The file of one PO's lines, or null when `id` is not a valid PO id (so a label can never reach outside the folder).
-const poFile = (dir, id) => (cleanPoId(id) ? path.join(dir, PO_DIR, `${cleanPoId(id)}.jsonl`) : null);
+const poFile = (dir, id) => (cleanPoId(id) ? path.join(dir, NAMES.hubDir, `${cleanPoId(id)}.jsonl`) : null);
 
 // Every PO's lines: {<po id>: [lines]}. A missing folder, an unreadable or empty file, or a file not named <valid id>.jsonl is no replies.
 function readPo(dir = inboxDir()) {
   const out = {};
   let names = [];
-  try { names = fs.readdirSync(path.join(dir, PO_DIR)); } catch { return out; }
+  try { names = fs.readdirSync(path.join(dir, NAMES.hubDir)); } catch { return out; }
   for (const n of names) {
     const id = n.endsWith(".jsonl") ? n.slice(0, -6) : "";
     const file = poFile(dir, id);
@@ -739,7 +739,7 @@ function poCosts(dir = inboxDir(), cacheDir = dir) {
 
 function collect(dir = inboxDir()) {
   let names = [];
-  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== OLD_PO_FILE); } catch { return { at: new Date().toISOString(), dir, leaders: [], po: {}, imgd: {}, cost: {}, root: appRoot() }; }
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== OLD_PO_FILE); } catch { return { at: new Date().toISOString(), dir, leaders: [], po: {}, imgd: {}, cost: {}, root: appRoot(), names: plainNames(), profileError: PROFILE_ERROR }; }
   const leaders = [];
   for (const n of names) {
     try {
@@ -750,30 +750,92 @@ function collect(dir = inboxDir()) {
   leaders.sort((a, b) => (b.last?.ms ?? 0) - (a.last?.ms ?? 0));
   let cost = {};
   try { cost = poCosts(dir, path.join(appRoot(), "data", "inbox")); } catch {} // a failed cost read never takes the desk's data down
-  return { at: new Date().toISOString(), dir, root: appRoot(), leaders, po: readPo(dir), imgd: imageDims(), cost };
+  return { at: new Date().toISOString(), dir, root: appRoot(), leaders, po: readPo(dir), imgd: imageDims(), cost, names: plainNames(), profileError: PROFILE_ERROR };
 }
 
-// Which terminal is a waiting leader: a terminal named lead-* with the wait label decision|verify; returns that kind or "".
+// names:begin
+// The names this desk recognizes: which terminals are reporting agents and hubs, the labels it reads, the answer line (the profile, docs/inbox-contract.md
+// §9-§10). The defaults are today's behavior; `node inbox.cjs` prints the loaded profile as `names` (profile.cjs namesOf) and the desk applies it
+// with setNames(). The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js and every other mod that reads names
+// (leader-tabs, agent-groups, work, tabs-mine, prs; a test keeps them identical and checks DEFAULT_NAMES against profile.cjs).
+const DEFAULT_NAMES = Object.freeze({
+  agentName: "^lead-[a-z0-9_-]+$", agentRole: "leader", titlePrefix: "^\\s*리더\\s*·\\s*", titlePrefixText: "리더 · ", strip: "^lead-", // a reporting agent: its name, its `role` label value, what is cut off a title (pattern + the literal text to put back) / a name
+  hubRole: "po", hubIdLabel: "po", hubId: "^[a-z0-9-]{1,40}$", hubDir: "po", // the hub (PO): its `role` value, id label, id pattern, folder
+  labelRole: "role", labelWait: "wait", labelWaitLink: "wait-link", labelSession: "session",
+  answerLine: 'Panel answer ({kind}) for {agent}: "{text}".{ Target: {link}}',
+});
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // a hub id becomes a file name whatever its pattern says
+function compileNames(n) {
+  const re = (s) => { try { return new RegExp(s); } catch { return null; } };
+  const c = { ...n, agentRe: re(n.agentName), stripRe: n.strip ? re(n.strip) : null, prefixRe: n.titlePrefix ? re(n.titlePrefix) : null, hubIdRe: re(n.hubId) };
+  return c.agentRe && c.hubIdRe && (!n.strip || c.stripRe) && (!n.titlePrefix || c.prefixRe) ? c : null;
+}
+let NAMES = compileNames(DEFAULT_NAMES);
+let NAMES_JSON = "";
+// Applies the names the profile gave (null = defaults). Compiles only when they changed (the mods call this on every render); true when they did.
+const setNames = (n) => {
+  const key = JSON.stringify(n ?? null);
+  if (key === NAMES_JSON && NAMES) return false;
+  NAMES_JSON = key;
+  NAMES = compileNames({ ...DEFAULT_NAMES, ...(n && typeof n === "object" ? n : {}) }) ?? compileNames(DEFAULT_NAMES);
+  return true;
+};
+// Sharing: the desk and the work board load the profile (their helper prints `names`) and publish it; every other mod follows what is shared. In the helper
+// (node) there is no `shared`, so both are inert there.
+const NAMES_SHARED = "inbox.names";
+const adoptNames = (n) => {
+  const changed = setNames(n);
+  try { if (typeof setShared === "function" && JSON.stringify(shared(NAMES_SHARED) ?? {}) !== JSON.stringify(n ?? {})) setShared(NAMES_SHARED, n ?? {}); } catch {}
+  return changed;
+};
+const syncNames = () => { try { return typeof shared === "function" ? setNames(shared(NAMES_SHARED)) : false; } catch { return false; } };
+const isAgentName = (v) => NAMES.agentRe.test(String(v ?? ""));
+const labelOf = (t, key) => String(t?.labels?.[NAMES[key]] ?? "").trim(); // key: labelRole | labelWait | labelWaitLink | labelSession | hubIdLabel
+const roleIs = (t, role) => Boolean(role) && labelOf(t, "labelRole").toLowerCase() === String(role).toLowerCase();
+const isHubTerm = (t) => roleIs(t, NAMES.hubRole);
+const isAgentTerm = (t) => roleIs(t, NAMES.agentRole);
+const cleanPoId = (v) => { const s = String(v ?? "").trim(); return SAFE_ID.test(s) && NAMES.hubIdRe.test(s) ? s : ""; };
+const poId = (t) => (isHubTerm(t) ? cleanPoId(labelOf(t, "hubIdLabel")) : "");
+// The line pasted into the hub terminal. One line (newlines folded to spaces) so the submit keeps it as a single user message. A `{… {link} …}`
+// group of the template is kept (without its braces) only when there is a link.
+function answerLine(kind, leader, text, link) {
+  const body = String(text ?? "").replace(/\s*\n\s*/g, " ").trim();
+  const vals = { kind: String(kind ?? ""), agent: String(leader ?? ""), text: body, link: String(link ?? "") };
+  return NAMES.answerLine.replace(/\{([^{}]*)\{link\}([^{}]*)\}/g, (_, a, b) => (vals.link ? `${a}{link}${b}` : "")).replace(/\{(kind|agent|text|link)\}/g, (_, k) => vals[k]);
+}
+// names:end
+
+// What the desk is told about the names: the loaded profile as plain JSON (`names`), and why a profile could not be read (`profileError`).
+let PROFILE_ERROR = "";
+const plainNames = () => Object.fromEntries(Object.keys(DEFAULT_NAMES).map((k) => [k, NAMES[k]]));
+// Loads the profile (profile.cjs) into NAMES. A broken profile file leaves the defaults and is reported, never silently ignored.
+function loadNames(env = process.env) {
+  const P = require("./profile.cjs");
+  PROFILE_ERROR = "";
+  try { setNames(P.namesOf(P.loadProfile(env))); } catch (e) { setNames(null); PROFILE_ERROR = String(e?.message ?? e); }
+  return PROFILE_ERROR;
+}
+
+// Which terminal is a waiting leader: an agent terminal (profile agent.name, default lead-*) with the wait label decision|verify; returns that kind or "".
 // ONE rule for the tab-row count (tabs-mine), the summary pane and the Dock badge. The two mods cannot require a .cjs file, so the
 // line below is copied verbatim into inbox/main.js and tabs-mine/main.js and a test checks that all three stay identical.
-const waitingKind = (t) => (/^lead-/.test(String(t?.name ?? "")) ? (["decision", "verify"].find((k) => k === String(t.labels?.wait ?? "").trim().toLowerCase()) ?? "") : "");
+const waitingKind = (t) => (isAgentName(t?.name) ? (["decision", "verify"].find((k) => k === labelOf(t, "labelWait").toLowerCase()) ?? "") : "");
 
 // leaderName:begin
 // The name a person knows a leader by: its Herdr session name. ONE rule for the inbox (cards, rows), agent-groups (leader headers), leader-tabs (tab text) and work (session rows).
-// The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js and agent-groups/main.js
+// The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js, agent-groups, leader-tabs and work
 // (a test keeps them identical). Order: the live terminal title -> the `session` label -> the last name remembered for that leader
 // (`memo`, {<hc name>: name}) -> the hc name ("lead-po-inbox" -> "po inbox"). The "리더 · " prefix is dropped: the place already says
 // it is a leader, and the name then reads as its task.
-const LEADER_PREFIX = /^\s*리더\s*·\s*/;
-const sessionName = (s) => String(s ?? "").replace(/^[^\p{L}\p{N}\p{Ps}\p{Pi}]+/u, "").replace(LEADER_PREFIX, "").trim();
-const liveName = (term) => [term?.title, term?.labels?.session].map(sessionName).find((n) => n && n !== term?.name && n !== term?.address && n.toLowerCase() !== "claude") ?? "";
-const leaderName = (leader, term, memo) => liveName(term) || sessionName(memo?.[leader]) || String(leader ?? "").replace(/^lead-/, "").replace(/-/g, " ").trim() || String(term?.address ?? "");
+const sessionName = (s) => String(s ?? "").replace(/^[^\p{L}\p{N}\p{Ps}\p{Pi}]+/u, "").replace(NAMES.prefixRe ?? /$^/, "").trim();
+const liveName = (term) => [term?.title, labelOf(term, "labelSession")].map(sessionName).find((n) => n && n !== term?.name && n !== term?.address && n.toLowerCase() !== "claude") ?? "";
+const leaderName = (leader, term, memo) => liveName(term) || sessionName(memo?.[leader]) || String(leader ?? "").replace(NAMES.stripRe ?? /$^/, "").replace(/-/g, " ").trim() || String(term?.address ?? "");
 // The memo with the live names of `terms` merged in; null when nothing changed. At most `max` leaders are kept (oldest dropped).
 function rememberNames(memo, terms, max = 60) {
   const next = { ...(memo ?? {}) };
   let changed = false;
   for (const t of terms ?? []) {
-    const n = /^lead-/.test(String(t?.name ?? "")) ? liveName(t) : "";
+    const n = isAgentName(t?.name) ? liveName(t) : "";
     if (!n || next[t.name] === n) continue;
     delete next[t.name]; // re-added last: the newest stay when the cap drops the oldest
     next[t.name] = n;
@@ -859,20 +921,16 @@ function findPo(terms, leaderName, address) {
   const list = terms ?? [];
   const leader = (leaderName && list.find((t) => t.name === leaderName)) || (address && list.find((t) => t.address === address)) || null;
   const parent = leader?.parent ? list.find((t) => t.address === leader.parent) : null;
-  return parent && String(parent.labels?.role ?? "").trim().toLowerCase() === "po" ? parent.address : null;
+  return parent && isHubTerm(parent) ? parent.address : null;
 }
 
-// The line pasted into the PO terminal. One line (newlines folded to spaces) so the submit keeps it as a single user message.
-function answerLine(kind, leader, text, link) {
-  const body = String(text ?? "").replace(/\s*\n\s*/g, " ").trim();
-  return `Panel answer (${kind}) for ${leader}: "${body}".${link ? ` Target: ${link}` : ""}`;
-}
 
 // chat:begin
 // The chat box of the window: "@" mentions, the menu of live leaders and which PO a line goes to. Pure. The mods cannot require a
 // .cjs file, so this block is copied verbatim between the markers into inbox/main.js (a test keeps them identical).
 const MENTION_END = "(?=$|[\\s.,!?:;)])";
-const MENTION = new RegExp(`(^|\\s)@(here|lead-[A-Za-z0-9_-]+)${MENTION_END}`, "g");
+// The agent pattern without its anchors, for finding "@<name>" inside a text.
+const mentionRe = () => new RegExp(`(^|\\s)@(here|(?:${NAMES.agentName.replace(/^\^/, "").replace(/(?<!\\)\$$/, "")}))${MENTION_END}`, "g");
 const HERE = new RegExp(`(^|\\s)@here${MENTION_END}`, "g");
 const HERE_PUNCT = /(^|\s)@here(?=[.,!?:;)])/g; // "@here" before punctuation takes its leading space with it: "hi @here, ok" -> "hi, ok"
 // The box text with each mention chip written out as its text ("@lead-x"), whether or not the chip's range already holds that text.
@@ -888,7 +946,7 @@ function parseMention(raw, known = []) {
   const flat = String(raw ?? "").replace(/\r\n?/g, "\n").replace(/[ \t\f\v]+/g, " ").replace(/ ?\n ?/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   const to = [];
   let here = false;
-  const empty = flat.replace(MENTION, (m, pre, name) => {
+  const empty = flat.replace(mentionRe(), (m, pre, name) => {
     if (name === "here") here = true;
     else if (known.includes(name)) { if (!to.includes(name)) to.push(name); } else return m;
     return pre;
@@ -954,11 +1012,7 @@ function mentionQuery(text, cursor, tokens = []) {
 }
 // ---- The PO picker. A PO terminal carries the labels role=po and po=<id>; the id is lowercase [a-z0-9-], 1-40 long (never the terminal
 // address, which changes on a restart). Everything in the window is for the one picked PO.
-const PO_ID = /^[a-z0-9-]{1,40}$/;
 const PO_OTHER = "~"; // the pick that holds leaders and reports no live PO owns ("PO 모름"); not a valid id, so it never clashes
-const cleanPoId = (v) => { const s = String(v ?? "").trim(); return PO_ID.test(s) ? s : ""; };
-const isPoTerm = (t) => String(t?.labels?.role ?? "").trim().toLowerCase() === "po";
-const poId = (t) => (isPoTerm(t) ? cleanPoId(t?.labels?.po) : "");
 // The project a PO terminal is for: its tab's name "PO · <project>" (`where` is "<space> / <tab>"), else "" (the caller falls back to the id).
 const poProject = (t) => {
   const tab = String(t?.where ?? "").split(" / ").slice(1).join(" / ").trim();
@@ -974,7 +1028,7 @@ function poList(terms) {
     const id = poId(t);
     if (!id || out.some((p) => p.id === id)) continue;
     const title = String(t.title ?? "").trim();
-    out.push({ id, address: t.address, label: poProject(t) || id, title: title && title !== t.name && title !== t.address ? title : "", n: list.filter((x) => /^lead-/.test(String(x?.name ?? "")) && x.parent === t.address).length });
+    out.push({ id, address: t.address, label: poProject(t) || id, title: title && title !== t.name && title !== t.address ? title : "", n: list.filter((x) => isAgentName(x?.name) && x.parent === t.address).length });
   }
   return out;
 }
@@ -1037,7 +1091,7 @@ function swapDraft(map, from, to, cur) {
 function leaderMenu(terms, memo, query = "", limit = 8, pick = "") {
   const list = terms ?? [];
   const q = String(query ?? "").trim().toLowerCase();
-  const leaders = list.filter((t) => pick && pick !== PO_OTHER && /^lead-/.test(String(t?.name ?? "")) && findPo(list, t.name, t.address) && leaderOwner(list, t.name, t.address) === pick)
+  const leaders = list.filter((t) => pick && pick !== PO_OTHER && isAgentName(t?.name) && findPo(list, t.name, t.address) && leaderOwner(list, t.name, t.address) === pick)
     .map((t) => ({ id: t.name, label: leaderName(t.name, t, memo), sub: t.name }))
     .filter((x, i, a) => a.findIndex((y) => y.id === x.id) === i)
     .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0)); // code-unit order: the same on every platform
@@ -1343,7 +1397,7 @@ function chatHtmlRaw(text) {
 function dockTarget(here, f, terms) {
   const list = Array.isArray(here) ? here : [];
   const byAddr = new Map((Array.isArray(terms) ? terms : []).map((t) => [t.address, t]));
-  const leaders = list.filter((p) => p.terminal && String(byAddr.get(p.terminal)?.labels?.role ?? "").trim().toLowerCase() === "leader");
+  const leaders = list.filter((p) => p.terminal && isAgentTerm(byAddr.get(p.terminal)));
   const age = (p) => { const ms = Number(byAddr.get(p.terminal)?.created_ms); return Number.isFinite(ms) ? ms : parseInt(String(p.terminal).replace(/^t/, ""), 36) || 0; };
   const leader = leaders.find((p) => p.pane === f?.pane) ?? [...leaders].sort((a, b) => age(b) - age(a))[0];
   const beside = leader ?? list.find((p) => p.pane === f?.pane) ?? list.find((p) => p.focused && p.terminal) ?? list.find((p) => p.focused);
@@ -1482,7 +1536,7 @@ function typingSync(track, terms, said, now) {
   const busy = new Set(), live = new Set();
   for (const t of list) {
     const n = String(t?.name ?? "");
-    if (!/^lead-/.test(n)) continue;
+    if (!isAgentName(n)) continue;
     live.add(n);
     if (hot.has(t.address)) busy.add(n);
   }
@@ -1522,13 +1576,27 @@ function typingNow(terms, room, memo, track = null, now = 0) {
   const leaders = [];
   for (const t of list) {
     const n = String(t?.name ?? "");
-    if (!/^lead-/.test(n) || seen.has(n) || leaderOwner(list, n, t.address) !== room) continue;
+    if (!isAgentName(n) || seen.has(n) || leaderOwner(list, n, t.address) !== room) continue;
     if (!hot.has(t.address) && !typingGrace(track?.get(n), now)) continue;
     seen.add(n);
     leaders.push({ who: `l:${n}`, name: leaderName(n, t, memo), label: typingLabel(states, t.address) });
   }
   leaders.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return [...out, ...leaders];
+}
+// #69: the rooms with work going on, as a Set of room ids (a PO's id, or PO_OTHER): a room is working when its PO, a leader of it, or a team
+// member below them is "working" right now. Status only (the terminals the poll already reads), no grace: it goes out as soon as all stop.
+// Waiting for an approval ("blocked") is not working: the room's red count / "질문" chip says that.
+function roomWorking(terms) {
+  const list = terms ?? [];
+  const out = new Set();
+  const states = workStates(list);
+  for (const p of poList(list)) if (states.get(p.address)?.work) out.add(p.id);
+  for (const t of list) {
+    if (!isAgentName(t?.name) || !states.get(t.address)?.work) continue;
+    if (leaderOwner(list, t.name, t.address) === PO_OTHER) { out.add(PO_OTHER); break; }
+  }
+  return out;
 }
 // A short text that changes exactly when something the desk shows from the terminals changes: the status, the wait label and the shown
 // name of every PO and leader, and whether a leader has work below it (a team member working). The 1.5 s poll redraws a copy only when this
@@ -1537,11 +1605,12 @@ function statusSig(terms) {
   const rows = [];
   const hot = busyAddrs(terms), states = workStates(terms);
   for (const t of terms ?? []) {
-    const lead = /^lead-/.test(String(t?.name ?? ""));
+    const lead = isAgentName(t?.name);
     if (!lead && !poId(t)) continue;
     rows.push(`${t.address}|${String(t.status ?? "")}|${lead ? waitingKind(t) : ""}|${lead ? liveName(t) : ""}|${lead && hot.has(t.address) ? 1 : 0}|${lead && hot.has(t.address) ? typingLabel(states, t.address) : ""}`);
   }
-  return rows.sort().join("\n");
+  const w = [...roomWorking(terms)].sort().join(",");
+  return rows.sort().join("\n") + (w ? `\n#w:${w}` : ""); // #69: a working terminal that is no PO/leader (a member right under a PO) still moves a room dot
 }
 // ---- images (pasted, picked or dropped in the box; or pasted in the PO terminal and read back by the hook)
 // A picture lives in <app root>/data/inbox/img/ (0600, written by this helper); a line of the desk's message names it as "[image: <path> — ...]"
@@ -1900,7 +1969,7 @@ function diagAppend(lines, root = appRoot()) {
   return f;
 }
 // The handoff note of a PO (the PO writes it when the desk restarts it): <inbox>/po/<po id>.handoff.md, or null for an invalid id.
-const handoffFile = (dir, id) => (cleanPoId(id) ? path.join(dir, PO_DIR, `${cleanPoId(id)}.handoff.md`) : null);
+const handoffFile = (dir, id) => (cleanPoId(id) ? path.join(dir, NAMES.hubDir, `${cleanPoId(id)}.handoff.md`) : null);
 const HANDOFF_MAX = 20000;
 // {path (as the PO is told: ~ for the home folder), exists, ms (mtime), size, text (the first HANDOFF_MAX characters, control characters out)}.
 // A missing, unreadable or invalid one is {exists: false}. The caller decides whether it is new enough (restartNoteFresh).
@@ -1916,7 +1985,7 @@ function readHandoff(dir = inboxDir(), id = "") {
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries};
+module.exports = { DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, roomWorking};
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)
@@ -1924,6 +1993,7 @@ if (require.main === module) {
   // `node inbox.cjs handoff <po id>` -> {path, exists, ms, size, text} of that PO's handoff note
   // `node inbox.cjs addimg <f>` -> {"path": <saved copy of the picture file f>|null}
   const [cmd, arg] = process.argv.slice(2);
+  loadNames(); // every subcommand reads the profile (hub folder, id pattern); a broken one is reported in the data (`profileError`)
   const shown = (p) => { let d = null; try { const buf = fs.readFileSync(p).subarray(0, 65536); d = imgSize(buf); } catch {} return { path: p || null, ...(d ? { w: d[0], h: d[1] } : {}) }; };
   if (cmd === "clipimg") process.stdout.write(JSON.stringify(shown(clipImage())));
   else if (cmd === "diag") { try { diagAppend(JSON.parse(arg)); } catch {} process.stdout.write("{}"); }

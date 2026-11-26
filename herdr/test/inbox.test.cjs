@@ -201,7 +201,7 @@ test("waitingKind: 탭 줄(tabs-mine)·요약 칸(inbox/main.js)·inbox.cjs가 �
   const a = line("../mods/inbox/inbox.cjs");
   assert.ok(a);
   assert.equal(line("../mods/inbox/main.js"), a);
-  assert.equal(line("../mods/tabs-mine/main.js"), a);
+  // tabs-mine still has the old line (default names only) until #60 step B part 2 moves it to the profile too.
 });
 
 test("main.js: 보고 기록이 없어도 라벨만으로 카드를 만들고 보낸 표시는 공유 상태에 둔다", () => {
@@ -584,9 +584,7 @@ test("leaderName: 받은편지함·에이전트 목록·inbox.cjs가 같은 블�
   };
   const ref = block("../mods/inbox/inbox.cjs");
   assert.equal(block("../mods/inbox/main.js"), ref);
-  assert.equal(block("../mods/agent-groups/main.js"), ref);
-  assert.equal(block("../mods/leader-tabs/main.js"), ref);
-  assert.equal(block("../mods/work/main.js"), ref);
+  // agent-groups, leader-tabs and work still copy the old (default-name) block until #60 step B part 2 moves them to the profile.
 });
 
 test("leader-tabs·work: 리더 이름을 hc 이름(lead-x) 그대로 그리지 않는다", () => {
@@ -879,7 +877,7 @@ test("collect: po/<id>.jsonl을 PO별로 읽고, 옛 po.jsonl과 잘못된 파�
   assert.deepEqual(d.po.devnotes.map((x) => [x.text, x.to]), [["안녕하세요", "here"]]);
   assert.deepEqual(d.po.mascoz.map((x) => x.text), ["마스코즈"]);
   assert.deepEqual(I.readPo(dir), d.po);
-  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, dir: path.join(dir, "none"), root: I.appRoot(), leaders: [], po: {}, imgd: {}, cost: {} });
+  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, dir: path.join(dir, "none"), root: I.appRoot(), leaders: [], po: {}, imgd: {}, cost: {}, names: I.plainNames(), profileError: "" });
 });
 
 test("chat 블록: main.js가 inbox.cjs와 한 글자도 다르지 않은 같은 블록을 쓴다", () => {
@@ -1154,7 +1152,7 @@ test("main.js: 칩은 대기 중인 결정(decision) 말풍선에만, 같은 sen
   assert.match(body, /`\$\{n\}안 선택`/);
   assert.match(body, /this\.send\(a, `\$\{n\}안 선택`, c, "choice"\)/);
   assert.match(body, /primary: n === opts\.recommended/);
-  assert.match(body, /disabled: a\.po \? "" : NO_PO, tip: CLIP/);
+  assert.match(body, /disabled: a\.po \? "" : NO_PO\(\), tip: CLIP/);
   assert.ok(body.indexOf("opt-") < body.indexOf("`ok-${s.leader}`") && body.indexOf("`ok-${s.leader}`") < body.indexOf("`write-${s.leader}`")); // 칩 → 확인 완료 → 답 쓰기
   // verify에는 칩이 없다(확인 완료만): 칩은 kind === "decision" 안에서만 만든다
   assert.equal((body.match(/decisionOptions\(/g) ?? []).length, 1);
@@ -1896,15 +1894,16 @@ test("timeline: me 줄이 아닌 say는 왼쪽 PO 말풍선 그대로다", () =>
 });
 
 // po-hook.cjs: `hc get`은 주입한 get으로 바꾸고 HERDR_INBOX_DIR은 임시 폴더로 돌려, 진짜 터미널과 홈은 건드리지 않는다.
-function hookRun(env, payload, term) {
+function hookRun(env0, payload, term) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "po-hook-"));
+  const env = { ...env0, HERDR_INBOX_DIR: dir }; // the hook also reads the profile from this dir (never the real home)
   const prev = process.env.HERDR_INBOX_DIR;
   process.env.HERDR_INBOX_DIR = dir;
   let calls = 0;
   try {
     const r = HOOK.run(env, payload, I, () => { calls++; return term; }, Date.UTC(2026, 0, 1));
     return { r, dir, calls, files: fs.existsSync(path.join(dir, "po")) ? fs.readdirSync(path.join(dir, "po")) : [] };
-  } finally { if (prev === undefined) delete process.env.HERDR_INBOX_DIR; else process.env.HERDR_INBOX_DIR = prev; }
+  } finally { I.setNames(null); if (prev === undefined) delete process.env.HERDR_INBOX_DIR; else process.env.HERDR_INBOX_DIR = prev; }
 }
 const PO_TERM = { id: "t5", labels: { role: "po", po: "devnotes" } };
 const STOP = { hook_event_name: "Stop", last_assistant_message: "다 했습니다" };
@@ -2067,6 +2066,38 @@ test("po-hook: 쓰는 파일은 0600이고(이미 있던 파일도 조인다), 1
 const tm = (o) => ({ address: "t1", name: "", labels: {}, status: "idle", parent: "", where: "", title: "", ...o });
 const poT = (o = {}) => tm({ address: "tp", name: "po-a", labels: { role: "po", po: "pa" }, where: "공간 / PO · 데스크", ...o });
 const leadT = (n, o = {}) => tm({ address: `t-${n}`, name: n, parent: "tp", ...o });
+
+test("roomWorking(#69): PO·리더·팀원 중 working이 있는 방만 낸다 — 승인 대기만이면 아니다", () => {
+  const po2 = (o = {}) => tm({ address: "tq", name: "po-b", labels: { role: "po", po: "pb" }, where: "공간 / PO · 둘째", ...o });
+  const none = I.roomWorking([poT(), po2(), leadT("lead-a")]);
+  assert.deepEqual([...none], []); // 모두 쉬면 아무 방도 아니다
+  assert.deepEqual([...I.roomWorking([poT({ status: "working" }), po2()])], ["pa"]); // PO 자신
+  assert.deepEqual([...I.roomWorking([poT(), po2(), leadT("lead-a", { status: "working" })])], ["pa"]); // 리더
+  const member = tm({ address: "m1", name: "worker", parent: "t-lead-a", status: "working" });
+  assert.deepEqual([...I.roomWorking([poT(), po2(), leadT("lead-a"), member])], ["pa"]); // 리더 밑 팀원
+  const other = leadT("lead-x", { parent: "", status: "working" });
+  assert.deepEqual([...I.roomWorking([poT(), other])], [I.PO_OTHER]); // 주인 없는 리더 → "PO 모름"
+  assert.deepEqual([...I.roomWorking([poT({ status: "blocked" }), leadT("lead-a", { status: "blocked" })])], []); // 승인 대기는 일하는 중이 아니다
+  assert.deepEqual([...I.roomWorking([poT({ status: "working" }), po2({ status: "working" })])].sort(), ["pa", "pb"]);
+  assert.deepEqual([...I.roomWorking(null)], []);
+});
+
+test("statusSig(#69): PO 바로 밑 일반 터미널이 일하기 시작해도 값이 달라진다", () => {
+  const w = tm({ address: "w1", name: "worker", parent: "tp" });
+  assert.notEqual(I.statusSig([poT(), w]), I.statusSig([poT(), { ...w, status: "working" }]));
+});
+
+test("main.js: 방 목록 작업 중 점(#69) — 세 보기가 같은 점을 쓰고, 자리는 늘 잡아 둔다", () => {
+  const src = mainSrc();
+  const dot = methodOf(src, "  roomDot(t, x) {", "\n  }\n");
+  assert.match(dot, /x\.working/);
+  assert.match(dot, /t\.working/); // 테마 강조색
+  assert.match(dot, /작업 중/);
+  assert.equal((src.match(/this\.roomDot\(t, x\)/g) ?? []).length, 3); // 고르개·좁은 목록·방 칸
+  assert.match(src, /working: busy\.has\(p\.id\)/);
+  assert.match(src, /working: busy\.has\(PO_OTHER\)/);
+  assert.match(src, /roomWorking\(terms\)/);
+});
 
 test("typingNow: 방의 PO와 그 방 리더 중 working인 것만, 이름순으로 낸다", () => {
   const terms = [poT({ status: "working" }), leadT("lead-b", { status: "working", title: "베타 작업" }), leadT("lead-a", { status: "working", title: "알파 작업" }), leadT("lead-c", { status: "idle" }), leadT("lead-d", { status: "blocked" })];
@@ -2736,4 +2767,131 @@ test("#74 R4 decisionOptions: '(비추천)'·'추천하지 않음'·'not recomme
   assert.equal(rec("1안: 가\n2안: 나 (권장)"), 2);
   assert.equal(rec("1안: 가\n2안: 나 (recommended)"), 2);
   assert.deepEqual(I.decisionOptions("1안(비추천): 가\n2안: 나").options, [1, 2], "still two options");
+});
+
+// ---- #60 step B (part 1): the desk, the writer's reader and the PO hook read the profile (docs/inbox-contract.md §9-§10)
+const blockOf = (f, name) => {
+  const src = fs.readFileSync(path.join(__dirname, f), "utf8").replace(/\r\n/g, "\n");
+  const a = src.indexOf(`// ${name}:begin`), b = src.indexOf(`// ${name}:end`);
+  assert.ok(a >= 0 && b > a, f);
+  return src.slice(a, b);
+};
+const PROFILE = require("../mods/inbox/profile.cjs");
+const BOT = { v: 1, agent: { name: "^bot-[a-z0-9]+$", role: "agentx", titlePrefix: "봇 · ", strip: "^bot-" }, hub: { role: "desk", idLabel: "room", id: "^[a-z0-9]{1,12}$", dir: "rooms" }, labels: { role: "kind", wait: "needs", waitLink: "needs-url", session: "title" }, answerLine: "Reply [{kind}] -> {agent}: {text}{ ({link})}" };
+const botDir = (profile = BOT) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "inbox-bot-"));
+  fs.writeFileSync(path.join(dir, "profile.json"), typeof profile === "string" ? profile : JSON.stringify(profile));
+  return dir;
+};
+
+test("names 블록: inbox.cjs와 main.js가 한 글자도 다르지 않고, 기본값은 기본 프로필과 같다", () => {
+  assert.equal(blockOf("../mods/inbox/main.js", "names"), blockOf("../mods/inbox/inbox.cjs", "names"));
+  assert.deepEqual({ ...I.DEFAULT_NAMES }, PROFILE.namesOf(PROFILE.loadProfile({ HERDR_INBOX_DIR: path.join(os.tmpdir(), "inbox-no-profile-dir") })));
+  assert.deepEqual(I.plainNames(), { ...I.DEFAULT_NAMES }); // nothing loaded: the defaults
+});
+
+test("names 블록(main.js 사본)은 그대로 실행되고 inbox.cjs와 같은 답을 한다", () => {
+  const B = new Function(`${blockOf("../mods/inbox/main.js", "names")}\nreturn { setNames, isAgentName, labelOf, answerLine, poId, isHubTerm };`)();
+  assert.equal(B.isAgentName("lead-x"), true);
+  assert.equal(B.answerLine("decision", "lead-a", "A로 가자\n서둘러", "https://x/1"), I.answerLine("decision", "lead-a", "A로 가자\n서둘러", "https://x/1"));
+  assert.equal(B.poId({ labels: { role: "po", po: "devnotes" } }), "devnotes");
+  const n = PROFILE.namesOf(PROFILE.loadProfile({ HERDR_INBOX_DIR: botDir() }));
+  B.setNames(n);
+  assert.equal(B.isAgentName("lead-x"), false);
+  assert.equal(B.isAgentName("bot-x"), true);
+  assert.equal(B.labelOf({ labels: { needs: " decision " } }, "labelWait"), "decision");
+  assert.equal(B.poId({ labels: { kind: "desk", room: "team1" } }), "team1");
+  assert.equal(B.poId({ labels: { role: "po", po: "devnotes" } }), ""); // the default labels mean nothing now
+  assert.equal(B.poId({ labels: { kind: "desk", room: "TOO-LONG-ID-XXXXXXXX" } }), ""); // the profile's id pattern
+  assert.equal(B.answerLine("decision", "bot-x", "A", "https://x/1"), "Reply [decision] -> bot-x: A (https://x/1)");
+  assert.equal(B.answerLine("decision", "bot-x", "A", ""), "Reply [decision] -> bot-x: A");
+  B.setNames({ hubId: "(" }); // an invalid pattern never breaks the desk: back to the defaults
+  assert.equal(B.isAgentName("lead-x"), true);
+});
+
+test("프로필: 에이전트 이름·대기 라벨·세션 이름·답 줄·멘션이 프로필을 따른다(기본 이름은 더 이상 아니다)", () => {
+  const dir = botDir();
+  try {
+    assert.equal(I.loadNames({ HERDR_INBOX_DIR: dir }), "");
+    assert.equal(I.waitingKind({ name: "bot-x", labels: { needs: "decision" } }), "decision");
+    assert.equal(I.waitingKind({ name: "lead-x", labels: { wait: "decision" } }), "");
+    assert.equal(I.waitingKind({ name: "bot-x", labels: { wait: "decision" } }), ""); // the old label name is not read
+    assert.equal(I.leaderName("bot-po-inbox", { name: "bot-po-inbox", address: "t1", title: "봇 · 받은편지함 정리" }, {}), "받은편지함 정리");
+    assert.equal(I.leaderName("bot-po-inbox", { name: "bot-po-inbox", address: "t1", labels: { title: "봇 · 라벨 제목" } }, {}), "라벨 제목");
+    assert.equal(I.leaderName("bot-po-inbox", { name: "bot-po-inbox", address: "t1", title: "bot-po-inbox" }, {}), "po inbox");
+    assert.equal(I.answerLine("verify", "bot-x", "확인 완료", ""), "Reply [verify] -> bot-x: 확인 완료");
+    assert.equal(I.isAgentTerm({ labels: { kind: "agentx" } }), true);
+    assert.equal(I.isHubTerm({ labels: { kind: "desk" } }), true);
+    assert.equal(I.isHubTerm({ labels: { role: "po" } }), false);
+    assert.equal(I.poId({ labels: { kind: "desk", room: "team1" } }), "team1");
+    assert.ok(I.mentionRe().test("@bot-x 해줘"));
+    assert.ok(!I.mentionRe().test("@lead-x 해줘"));
+    const dirs = path.join(dir, "rooms"); // the hub folder is the profile's
+    fs.mkdirSync(dirs);
+    assert.equal(I.poFile(dir, "team1"), path.join(dir, "rooms", "team1.jsonl"));
+    assert.equal(I.handoffFile(dir, "team1"), path.join(dir, "rooms", "team1.handoff.md"));
+  } finally { I.setNames(null); }
+  assert.equal(I.poFile(dir, "team1"), path.join(dir, "po", "team1.jsonl")); // back to the defaults
+});
+
+test("프로필 끝까지: 쓰기 도구 → collect CLI → PO 훅이 lead-/role=po가 아닌 이름으로 돈다", () => {
+  const { spawnSync } = require("child_process");
+  const W = require("../tools/inbox-write.cjs");
+  const dir = botDir();
+  const env = { HERDR_INBOX_DIR: dir };
+  // 1) the writer: a report from bot-x to hub team1, and the hub's own line
+  assert.equal(W.run(["report", "--kind", "decision", "--agent", "bot-x", "--hub", "team1", "--body", "1안: a\n2안: b", "--no-label"], env, () => null).code, 0);
+  assert.equal(W.run(["say", "--hub", "team1", "--text", "안녕하세요"], env, () => null).code, 0);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ["bot-x.jsonl", "profile.json", "rooms"]);
+  // 2) the desk's data: the same CLI the mod runs
+  const cli = path.join(__dirname, "..", "mods", "inbox", "inbox.cjs");
+  const out = spawnSync(process.execPath, [cli], { encoding: "utf8", env: { ...process.env, ...env } });
+  assert.equal(out.status, 0, out.stderr);
+  const d = JSON.parse(out.stdout);
+  assert.equal(d.profileError, "");
+  assert.equal(d.names.hubDir, "rooms");
+  assert.equal(d.names.agentName, "^bot-[a-z0-9]+$");
+  assert.deepEqual(d.leaders.map((x) => [x.leader, x.po, x.open?.kind]), [["bot-x", "team1", "decision"]]);
+  assert.deepEqual(Object.keys(d.po), ["team1"]);
+  assert.equal(d.po.team1[0].text, "안녕하세요");
+  // 3) the PO hook: a hub terminal with the profile's labels writes into the profile's folder; the default labels write nothing
+  const hub = { id: "t5", labels: { kind: "desk", room: "team1" } };
+  const run = (term, payload = STOP) => {
+    const prev = process.env.HERDR_INBOX_DIR;
+    process.env.HERDR_INBOX_DIR = dir;
+    try { return HOOK.run({ HC_TERMINAL_ID: "t5", HERDR_INBOX_DIR: dir }, payload, I, () => term, Date.now() + 60000); } finally { I.setNames(null); if (prev === undefined) delete process.env.HERDR_INBOX_DIR; else process.env.HERDR_INBOX_DIR = prev; }
+  };
+  assert.equal(run({ id: "t5", labels: { role: "po", po: "team1" } }), null);
+  assert.equal(run({ id: "t6", name: "bot-y", labels: { kind: "desk", room: "team1" } }), null); // an agent is never a hub
+  assert.equal(run({ ...hub, labels: { kind: "desk", room: "TOO-LONG-ID-XXXXXXXX" } }), null);
+  assert.equal(fs.existsSync(path.join(dir, "po")), false);
+  assert.equal(run(hub).file, path.join(dir, "rooms", "team1.jsonl"));
+  assert.deepEqual(I.parsePoLines(fs.readFileSync(path.join(dir, "rooms", "team1.jsonl"), "utf8")).map((x) => x.text), ["안녕하세요", "다 했습니다"]);
+});
+
+test("프로필이 깨졌으면 데스크 데이터가 이유를 알리고 기본 이름으로 보이며, 훅은 아무것도 쓰지 않는다", () => {
+  const { spawnSync } = require("child_process");
+  for (const bad of ["{ nope", JSON.stringify({ hub: { dir: "../x" } }), JSON.stringify({ agent: { name: "(" } })]) {
+    const dir = botDir(bad);
+    const out = spawnSync(process.execPath, [path.join(__dirname, "..", "mods", "inbox", "inbox.cjs")], { encoding: "utf8", env: { ...process.env, HERDR_INBOX_DIR: dir } });
+    assert.equal(out.status, 0, out.stderr);
+    const d = JSON.parse(out.stdout);
+    assert.match(d.profileError, /profile/, bad);
+    assert.deepEqual(d.names, { ...I.DEFAULT_NAMES }, bad);
+    const prev = process.env.HERDR_INBOX_DIR;
+    process.env.HERDR_INBOX_DIR = dir;
+    try { assert.equal(HOOK.run({ HC_TERMINAL_ID: "t5", HERDR_INBOX_DIR: dir }, STOP, I, () => PO_TERM, Date.UTC(2026, 0, 1)), null, bad); } finally { I.setNames(null); if (prev === undefined) delete process.env.HERDR_INBOX_DIR; else process.env.HERDR_INBOX_DIR = prev; }
+    assert.equal(fs.existsSync(path.join(dir, "po")), false, bad);
+  }
+});
+
+test("main.js: 프로필을 읽어 온 names를 쓰고, 읽지 못한 이유를 보인다", () => {
+  const src = mainSrc();
+  assert.match(src, /adoptNames\(d\?\.names\)/);
+  assert.match(src, /d\?\.profileError/);
+  assert.match(src, /const NO_PO = \(\) =>/);
+  assert.ok(!/\bPO_DIR\b|\bisPoTerm\b|\/\^lead-\/\.test/.test(src)); // no hard-coded default name left in the desk
+  const cjs = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8");
+  assert.ok(!/\bPO_DIR\b|\bisPoTerm\b|\/\^lead-\/\.test/.test(cjs));
+  assert.ok(!/\/\^lead-\/\.test/.test(fs.readFileSync(path.join(__dirname, "../mods/inbox/po-hook.cjs"), "utf8")));
 });
