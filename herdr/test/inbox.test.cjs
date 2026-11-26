@@ -2933,6 +2933,14 @@ test("원격 연결 켜기: main.js는 /remote-control 한 줄만 sendLine 길�
 const RC_BASE = "● Done\n\n> \n  ? for shortcuts";
 const RC_URL = "https://claude.ai/code/session_abc123";
 const RC_MENU = `  Remote Control\n  This session is connected: ${RC_URL}\n\n  ❯ 1. Disconnect this session\n    2. Show QR code\n    3. Continue\n\n  Enter to select · Esc to cancel`;
+test("원격 연결 켜기 #109: 켜기 버튼의 안내는 다시 켠 뒤 켜져 있어도 이 글자로 보일 수 있는 한계와, 눌러도 안전하다는 점을 알린다", () => {
+  const btn = methodOf(mainSrc(), "  remoteButton(t, room, po, status) {", "  // After a start or a reload of the desk");
+  assert.match(btn, /Herdr를 다시 켠 뒤에는 이미 켜져 있어도 이 글자로 보일 수 있습니다/);
+  assert.match(btn, /이미 켜져 있으면 연결 메뉴를 Esc로 닫기만 합니다/);
+  // the transcript's bridge-session lines are NOT used as an on-signal (not a heartbeat; a stale non-empty line survives an exit or a resume)
+  assert.doesNotMatch(mainSrc(), /bridge-session|bridgeSessionId/);
+});
+
 test("remoteScreen: 연결 메뉴·켜짐 표시·세션 주소를 화면에서 읽는다", () => {
   assert.deepEqual(I.remoteScreen(RC_BASE), { menu: false, active: false, seen: false, url: "" });
   const m = I.remoteScreen(RC_MENU);
