@@ -453,11 +453,24 @@ const promptSame = (a, b) => promptTail(a, 40).map((l) => l.replace(/\s+/g, " ")
 // whitespace ignored), or, for a long / multi-line paste the PO folds into "[Pasted text …]", that marker is.
 function inputHas(screen, line) {
   const squeeze = (s) => s.replace(/[│┃|]/g, " ").replace(/\s+/g, " ").trim();
-  const want = squeeze(cleanText(line));
+  const want = squeeze(cleanText(line)).replace(/^!\s*/, ""); // bash mode draws the "!" apart from the command
   if (!want) return false;
   const hay = squeeze(cleanText(screen).split("\n").filter((l) => l.trim()).slice(-14).join("\n"));
   if (/\n/.test(cleanText(line).trim()) || want.length > 200) return /\[Pasted text/i.test(hay) || hay.includes(want.slice(0, 24)) || hay.includes(want.slice(-24));
   return hay.includes(want.slice(0, 24)) || hay.includes(want.slice(-24));
+}
+// A desk line that is a shell command for the PO's own prompt ("!ls": Claude Code's bash mode starts with "!"). null for any other text,
+// "" for a bare "!"; "!!" is not one. The command is the rest of the line, trimmed.
+const bangCommand = (text) => { const m = /^\s*!(?!!)([\s\S]*)$/.exec(String(text ?? "")); return m ? m[1].trim() : null; };
+// What stands in the PO's input box on its screen: the text after the last prompt mark (❯ > ›) among the last 14 lines (box borders ignored), "" for an empty
+// box, null when no prompt line is there. A dim placeholder hint reads as text (colors are not on the screen), so the desk then refuses: it never types over text.
+function promptInput(screen) {
+  const lines = cleanText(screen).split("\n").filter((l) => l.trim()).slice(-14);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = /^[\s│┃|]*([❯>›])(?:\s+(.*?))?[\s│┃|]*$/.exec(lines[i]);
+    if (m) return (m[2] ?? "").trim();
+  }
+  return null;
 }
 // Slack-style headers: `head` is true for the first entry and whenever the sender changes or the gap to the entry before is over `gap`.
 const groupTimeline = (entries, gap = TL_GAP_MS) => (entries ?? []).map((e, i, a) => ({ ...e, head: i === 0 || a[i - 1].who !== e.who || e.ms - a[i - 1].ms > gap }));
@@ -1281,6 +1294,7 @@ export default class Inbox extends View {
     this.sentAt = 0; // the last send (ms)
     this.uid = Math.random().toString(36).slice(2, 8); // this copy of the desk (the badge lease, record ids)
     this.seq = 0;
+    this.bangBusy = false; // a '!' command is being checked (screen read) before it is pasted
     this.opening = new Set(); // PO terminals a send is waiting on (their pane is opening): one send per PO at a time
     this.backs = new Map(); // record id -> the pane that had the keyboard before the send (given back after Enter)
     this.prompt = null; // {po, at, text}: the screen tail of the picked room's PO while it waits on a prompt
@@ -2542,6 +2556,49 @@ export default class Inbox extends View {
     try { c.timer.after(settle, press); } catch { press(c); }
   }
 
+  // A desk line that starts with "!" goes into the PO's own prompt as the person's raw input (Claude Code's bash mode). `hc send` wraps text in <hc …> and
+  // `hc keys` has no "!", so this is the unwrapped paste path (clipboard + terminal.paste + Enter, keyboard given back). Only when nothing else is in play:
+  // not UI mode (no pane), no @mention or picture, one line, the PO's pane open, the PO idle (not working, not on a question) and its input box empty.
+  // Otherwise nothing is sent, the text stays in the box and the reason is shown. Whether a pasted leading "!" enters bash mode is unverified in the real app.
+  sendBang(c, po, p, pics) {
+    const cmd = bangCommand(p.text);
+    const refuse = (why, cx = c) => { this.bangBusy = false; this.say(`${why} '!' 명령은 보내지 않았고 글은 입력칸에 그대로 있습니다.`, true); try { cx.notify(); } catch {} };
+    if (this.bangBusy) { this.say("앞의 '!' 명령을 확인하는 중입니다. 잠시 뒤에 다시 보내세요.", true); try { c.notify(); } catch {} return; }
+    if (this.mained) { refuse("UI 모드에서는 PO 터미널에 글을 그대로 붙여 넣을 수 없어(보내기는 글을 <hc …>로 감쌉니다)"); return; }
+    if (p.to.length) { refuse("'!' 명령은 PO에게만 보낼 수 있어(@멘션을 빼 주세요)"); return; }
+    if (pics.length) { refuse("'!' 명령은 그림과 함께 보낼 수 없어"); return; }
+    if (!cmd) { refuse("'!' 뒤에 실행할 명령이 없어"); return; }
+    if (/\n/.test(cmd)) { refuse("'!' 명령은 한 줄만 보낼 수 있어"); return; }
+    let hasPane = false;
+    try { hasPane = (panes() ?? []).some((x) => x.terminal === po); } catch {}
+    if (!hasPane) { refuse(`PO(${po})의 터미널 칸이 화면에 열려 있지 않아`); return; }
+    const term = this.liveTerms().find((x) => x.address === po);
+    if (!term || isBusy(term)) { refuse(`PO(${po})가 일하는 중이거나 질문 중이라`); return; }
+    const text = composeChat(this.chat.content());
+    this.bangBusy = true;
+    try {
+      c.spawn(async (cx) => {
+        let r = null;
+        try { r = await hc(["read", po, "--lines", String(PROMPT_LINES)]); } catch { r = null; }
+        if (!(r && r.code === 0)) { refuse(`PO(${po})의 화면을 읽지 못해`, cx); return; }
+        const inp = promptInput(String(r.stdout ?? ""));
+        if (inp === null) { refuse(`PO(${po})의 입력창을 화면에서 찾지 못해`, cx); return; }
+        if (inp !== "") { refuse(`PO(${po})의 입력창이 비어 있지 않아`, cx); return; }
+        const t2 = this.liveTerms().find((x) => x.address === po);
+        if (!t2 || isBusy(t2)) { refuse(`PO(${po})가 그 사이 일하거나 질문 중이 되어`, cx); return; }
+        this.bangBusy = false;
+        try {
+          const res = this.deliver(po, `!${cmd}`, cx, { text: `!${cmd}`, imgs: [], to: "", tos: [], po: this.view().pick, kind: "chat" });
+          if (res === "sent") {
+            this.sentAt2 = Date.now();
+            if (composeChat(this.chat.content()) === text) { this.chat.set_value(""); this.menu = null; }
+          }
+        } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
+        try { cx.notify(); } catch {}
+      });
+    } catch (e) { refuse(String(e?.message ?? e).slice(0, 80)); }
+  }
+
   sendChat(c) {
     this.sentAt = Date.now();
     this.heldAt = 0;
@@ -2563,6 +2620,7 @@ export default class Inbox extends View {
       return;
     }
     const po = tgt.po;
+    if (bangCommand(p.text) !== null) { this.sendBang(c, po, p, pics); return; }
     try {
       // The PO reads a picture from its file: each path goes in the message as a line it can open with the Read tool.
       const line = [p.text, ...pics.map((x) => imgLine(x.path))].filter(Boolean).join("\n");
