@@ -930,6 +930,16 @@ const strayAt = (prev, value) => {
   return b[i] === "\n" && b.slice(0, i) + b.slice(i + 1) === a ? i : -1;
 };
 const withoutAt = (value, i) => String(value ?? "").slice(0, i) + String(value ?? "").slice(i + 1);
+// An Enter pressed with text selected makes the widget REPLACE the selection by "\n" (not insert one): `replacedAt(prev, value)` is {idx, end} when
+// `value` is `prev` with the span [idx, end) (at least one character) swapped for one "\n", else null. The span is the selected text to put back.
+const replacedAt = (prev, value) => {
+  const a = String(prev ?? ""), b = String(value ?? "");
+  for (let i = b.indexOf("\n"); i >= 0; i = b.indexOf("\n", i + 1)) {
+    const end = a.length - (b.length - i - 1);
+    if (end > i && b.slice(0, i) === a.slice(0, i) && b.slice(i + 1) === a.slice(end)) return { idx: i, end };
+  }
+  return null;
+};
 const enterPending = (enterAt, now) => Number(enterAt) > 0 && Number(now) - Number(enterAt) >= -25 && Number(now) - Number(enterAt) < HELD_BREAK_MS;
 const atTextEnd = (value, cursor) => cursor == null || !Number.isFinite(Number(cursor)) || Number(cursor) >= editCore(value).length;
 const holdShown = (changedAt, heldAt) => Number(heldAt) > 0 && Number(changedAt) <= Number(heldAt) + 100; // a held Enter is still waiting for its second one
@@ -1344,7 +1354,11 @@ function dockTarget(here, f, terms) {
 // The options of a decision report, read strictly from its body (the leader report rule: one "N안: ..." line per option, N = 1..3, and
 // optionally a "추천: N안" line). At least two distinct numbers, otherwise none (nothing is guessed: "A:", "1)", "①", "1. step" are not options).
 // -> { options: [1, 2], recommended: 2 | 0 }
+// "추천"/"권장"/"recommend" mark a recommended option, but not when negated: "비추천", "비권장", "추천하지 않", "권장하지 않", "not recommended",
+// "don't recommend" (a negated option is one the report says NOT to pick, so it never gets the "(추천)" mark).
 const REC_MARK = /추천|권장|recommend/i;
+const REC_NEG = /비\s*추천|비\s*권장|(?:추천|권장)\s*(?:하지\s*(?:않|말)|안\s*함|드리지\s*않|할\s*수\s*없)|(?:not|n['’]t|never)\s+(?:be\s+)?recommend|un-?recommend/i;
+const recMarked = (txt) => REC_MARK.test(String(txt ?? "")) && !REC_NEG.test(String(txt ?? ""));
 function decisionOptions(body) {
   const nums = new Set();
   let rec = 0;
@@ -1355,7 +1369,7 @@ function decisionOptions(body) {
       const n = Number(m[1]);
       nums.add(n);
       // the recommendation marked on the option itself: "1안(추천):" or "… (추천)" / "★" at the end of its line
-      if (!rec && (REC_MARK.test(m[2] ?? "") || /[(（\[［][^)）\]］\n]{0,24}(?:추천|권장)[^)）\]］\n]{0,24}[)）\]］]\s*$/.test(line) || /[★⭐]\s*$/.test(line))) rec = n;
+      if (!rec && (recMarked(m[2]) || recMarked(line.match(/[(（\[［]([^)）\]］\n]{0,24})[)）\]］]\s*$/)?.[1]) || /[★⭐]\s*$/.test(line))) rec = n;
       continue;
     }
     m = line.match(/^\s*(?:[-*]\s*)?추천\s*[:：]\s*([1-3])안/);
@@ -1575,7 +1589,7 @@ const moreLabel = (more) => `더 보기 · ${String(Math.max(0, Number(more) || 
 // A list item line of a Markdown source: "-", "*" or "+", or "1." / "1)", then a blank and some text.
 const MD_ITEM = /^\s*(?:[-*+]|(\d{1,9})[.)])\s+\S/;
 // A first line like "[lead-po-inbox] 최종 확인 요청": a [tag], a blank, a short title.
-const MD_HEAD = /^\s*\[[^\]\n]{1,60}\][ \t]+\S[^\n]{0,60}$/;
+const MD_HEAD = /^\s*\[(?![ xX✓✔]?\])[^\]\n]{1,60}\][ \t]+\S[^\n]{0,60}$/; // not a checkbox line: "[ ] 할 일", "[x] 끝"
 // A message text as Markdown for a TextView.markdown(...).raw_html(false): wrapper tags removed first (they would print literally), a line that
 // is only 【...】 made bold, images switched off (![x](y) -> a plain link), single line breaks kept as line breaks (Markdown would join them), and
 // the list marks people type ("•", "1)") written as real Markdown items with a blank line before the list and after it (#66), so the view draws
@@ -1902,7 +1916,7 @@ function readHandoff(dir = inboxDir(), id = "") {
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries};
+module.exports = { COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries};
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)

@@ -12,7 +12,7 @@ const grab = (a, b) => { const i = MAIN.indexOf(a), j = MAIN.indexOf(b, i + a.le
 
 const changeSrc = grab('    this.chat.on("change", (_e, c) => {', "\n    });\n") + "\n    });\n";
 const keysSrc = grab("  // Enter in the box:", "  // Keys the open menu handles");
-const make = new Function("I", "Date", "enterIntent", "needsNewline", "strayBreak", "imeHold", "strayHeld", "editCore", "strayAt", "withoutAt", "enterPending", "atTextEnd", `return class Desk {
+const make = new Function("I", "Date", "enterIntent", "needsNewline", "strayBreak", "imeHold", "strayHeld", "editCore", "strayAt", "withoutAt", "replacedAt", "enterPending", "atTextEnd", `return class Desk {
   constructor(box, clock) {
     this.chat = box; this.sent = []; this.menu = null; this.pickedAt = 0; this.sentAt = -1e6; this.heldAt = 0; this.nlAt = 0; this.changedAt = 0; this.keyAt = 0;
     this.core = ""; this.lastValue = ""; this.enterAt = 0; this.brk = null; this.editAt = 0;
@@ -45,7 +45,7 @@ function room() {
   let clock = 100000;
   const Date_ = { now: () => clock };
   const box = new Box();
-  const D = make(I, Date_, I.enterIntent, I.needsNewline, I.strayBreak, I.imeHold, I.strayHeld, I.editCore, I.strayAt, I.withoutAt, I.enterPending, I.atTextEnd);
+  const D = make(I, Date_, I.enterIntent, I.needsNewline, I.strayBreak, I.imeHold, I.strayHeld, I.editCore, I.strayAt, I.withoutAt, I.replacedAt, I.enterPending, I.atTextEnd);
   const d = new D(box, Date_);
   const timers = [];
   const c = { stop_propagation() {}, notify() {}, timer: { after(ms, f) { timers.push({ at: clock + ms, f }); } } };
@@ -199,8 +199,46 @@ test("main.js 배선(#83): Enter는 커서 위치를 읽어 imeHold에 넘기고
   assert.ok(drop.indexOf("replace(\"\")") > 0 && drop.indexOf("replace(\"\")") < drop.indexOf("set_value"));
   // 순수 함수는 mod 쪽과 시험 쪽 사본이 같다
   const cjs = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8").replace(/\r\n/g, "\n");
-  for (const name of ["strayAt", "withoutAt", "enterPending", "atTextEnd", "imeHold"]) {
+  for (const name of ["strayAt", "withoutAt", "replacedAt", "enterPending", "atTextEnd", "imeHold"]) {
     const a = MAIN.match(new RegExp(`const ${name} = [\\s\\S]*?\\n\\};?\\n|const ${name} = [^\\n]*\\n`))[0];
     assert.ok(cjs.includes(a), name);
   }
+});
+
+test("replacedAt: 글 한 구간이 줄바꿈 하나로 바뀐 자리만 찾고, 그 밖의 바뀜은 null", () => {
+  assert.deepEqual(I.replacedAt("hello world", "\n world"), { idx: 0, end: 5 });
+  assert.deepEqual(I.replacedAt("hello world", "hello \n"), { idx: 6, end: 11 });
+  assert.deepEqual(I.replacedAt("hello world", "he\nrld"), { idx: 2, end: 8 });
+  assert.deepEqual(I.replacedAt("\nab", "\n"), { idx: 0, end: 3 }); // 글 전체를 골랐을 때(글 속 줄바꿈이 있어도)
+  assert.equal(I.replacedAt("hello", "hel\nlo"), null); // 끼워 넣은 것은 strayAt의 몫
+  assert.equal(I.replacedAt("hello", "hello"), null);
+  assert.equal(I.replacedAt("hello", "hexx"), null);
+  assert.equal(I.replacedAt("", "\n"), null);
+});
+
+test("#83: 글 일부를 고른 채 Enter를 쳐도 고른 글이 지워지지 않고 전체가 한 번 보내진다(위젯이 줄바꿈을 먼저·나중 어느 쪽에 넣어도)", () => {
+  for (const [start, end] of [[0, 5], [6, 11], [2, 8], [0, 11]]) {
+    for (const order of ["key", "widget"]) {
+      const r = settled("hello world", 11);
+      r.box.set_selected_range({ start, end });
+      r.wait(2000);
+      r.enter(order);
+      assert.deepEqual(r.d.sent, ["hello world"], `[${start},${end}] ${order}`);
+    }
+  }
+});
+
+test("#83: 한글로 끝나는 글의 앞부분을 골라 Enter를 쳐도 붙들지 않고 전체를 보낸다", () => {
+  const r = settled("안녕 반가워", 6);
+  r.box.set_selected_range({ start: 0, end: 2 });
+  r.wait(2000);
+  r.enter("widget"); // 끝 글자는 한글이지만 커서(선택 끝)가 글 가운데이므로 붙들지 않고 보낸다
+  assert.deepEqual(r.d.sent, ["안녕 반가워"]);
+});
+
+test("main.js 배선(#83): 선택을 바꾼 줄바꿈은 putBack으로 되살리고, 그 한 구간만 되쓴다(칩은 그 구간만 글자로)", () => {
+  assert.match(MAIN, /if \(rep && enterPending\(this\.enterAt, this\.changedAt\)\) \{ this\.putBack\(prev, rep, this\.editAt\); return; \}/);
+  assert.match(MAIN, /if \(b\.rep\) \{/);
+  const put = grab("  putBack(prev, rep, editAt) {", "  // Takes the one trailing line break");
+  assert.ok(put.indexOf("replace(prev.slice") > 0 && put.indexOf("replace(prev.slice") < put.indexOf("set_value"));
 });

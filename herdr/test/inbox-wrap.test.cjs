@@ -191,7 +191,7 @@ function pictureDesk(execImpl) {
   assert.ok(a > 0 && b > a, "the picture methods are found");
   const body = MAIN.slice(a, b);
   const make = new Function("exec", "HELPER", "MAX_IMGS", "pickFiles", `return class Desk {
-    constructor() { this.pics = []; this.picBusy = 0; this.replyPics = new Map(); this.replyBusy = new Map(); this.imgd = new Map(); this.msg = "x"; this.said = []; }
+    constructor() { this.pics = []; this.picBusy = 0; this.picBusyBy = new Map(); this.draftRoom = null; this.roomDrafts = new Map(); this.replyPics = new Map(); this.replyBusy = new Map(); this.imgd = new Map(); this.msg = "x"; this.said = []; }
     say(m, bad) { this.said.push([m, Boolean(bad)]); }
     ${body}
   }`);
@@ -1162,10 +1162,10 @@ test("#74: 소스 — 채팅 상자는 모든 방에서 같은 자리에 그려�
   for (const id of ["chat-box", "chat-target", "chat-row", "chat-input"]) assert.match(box, new RegExp(`id\\("${id}"\\)`));
   assert.match(MAIN, /full\(cx\) \{\n    this\.tvN = 0;\n    this\.noteRedraw\(cx\);\n    this\.guardAll\(\);/);
   assert.match(MAIN, /pinTick\(cx\) \{\n    this\.guardAll\(\);/);
-  // the only places that write into the box: our own clears (wipe), the guard's restore, the "@" pick, the held / stray line break, the room switch (syncRoom, #66)
+  // the only places that write into the box: our own clears (wipe), the guard's restore, the "@" pick, the held / stray line break (dropAt, dropBreak) and the restore of a selection an Enter swapped for a line break (putBack), the room switch (syncRoom, #66)
   const writers = MAIN.split("\n").map((l, i) => [i + 1, l]).filter(([, l]) => /this\.chat\.(set_value|replace)\(/.test(l));
   const where = (n) => { const head = MAIN.slice(0, MAIN.split("\n").slice(0, n).join("\n").length); return head.slice(head.lastIndexOf("\n  ") + 1).split("\n")[0]; };
-  for (const [n] of writers) assert.match(MAIN.split("\n").slice(0, n).reverse().find((l) => /^  [a-zA-Z]+\(.*\) \{$/.test(l)), /pickMenu|enterBox|dropBreak|dropAt|syncRoom/, `line ${n}`);
+  for (const [n] of writers) assert.match(MAIN.split("\n").slice(0, n).reverse().find((l) => /^  [a-zA-Z]+\(.*\) \{$/.test(l)), /pickMenu|enterBox|dropBreak|dropAt|putBack|syncRoom/, `line ${n}`);
 });
 
 test("#66 mdText: a numbered list stays compact even when the source has blank lines between its items, like the '-' list", () => {
@@ -1195,4 +1195,58 @@ test("#66 the person's own bubble draws through the same Markdown path as the PO
 
 test("#66 the recommended option's button says so, and still sends the plain '<N>안 선택'", () => {
   assert.match(MAIN, /`\$\{n\}안 선택\$\{n === opts\.recommended \? " \(추천\)" : ""\}`, \(c\) => this\.send\(a, `\$\{n\}안 선택`, c, "choice"\)/);
+});
+
+// ---- #74 R4: a picture read that finishes after a room switch belongs to the room it started in.
+test("#74 R4: a picture read that ends after the room changed lands in the room it started in, and the room shown is not blocked meanwhile", async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const d = pictureDesk(async () => { await gate; return { code: 0, stdout: JSON.stringify({ path: "data/inbox/img/late.png", w: 4, h: 5 }), stderr: "" }; });
+  d.draftRoom = "lead-a";
+  const p = d.addPic(["clipimg"], fakeCx());
+  assert.equal(d.picBusy, 1, "room A shows the read");
+  d.draftRoom = "lead-b"; // the person clicked room B (syncRoom also sets picBusy from the room's own count)
+  d.picBusy = d.picBusyBy.get("lead-b") ?? 0;
+  assert.equal(d.picBusy, 0, "room B is not blocked by A's read");
+  release();
+  await p;
+  assert.equal(d.pics.length, 0, "B's picture list stays empty");
+  assert.equal(d.picBusy, 0);
+  assert.deepEqual(d.roomDrafts.get("lead-a").pics.map((x) => x.path), ["data/inbox/img/late.png"], "the picture is in A's saved draft");
+  assert.equal(d.picBusyBy.size, 0, "A's count is released");
+});
+
+test("#74 R4: a picture read for the room still shown goes to the box as before", async () => {
+  const d = pictureDesk(okExec);
+  d.draftRoom = "lead-a";
+  await d.addPic(["clipimg"], fakeCx());
+  assert.equal(d.pics.length, 1);
+  assert.equal(d.roomDrafts.size, 0);
+});
+
+test("#74 R4: the file button remembers the room it was pressed in, so a slow picker does not move the picture", async () => {
+  const d = pictureDesk(okExec);
+  d.draftRoom = "lead-a";
+  const p = d.pickPics(fakeCx());
+  d.draftRoom = "lead-b";
+  await p;
+  assert.equal(d.pics.length, 0);
+  assert.equal(d.roomDrafts.get("lead-a").pics.length, 1);
+});
+
+test("#74 R4: a draft slot made only of a late picture comes back with the room (swapDraft keeps it)", () => {
+  const slots = new Map([["lead-a", { text: "", pics: [{ path: "p.png", w: 1, h: 1 }] }]]);
+  const r = I.swapDraft(slots, "lead-b", "lead-a", { text: "", content: null, range: null, pics: [] });
+  assert.deepEqual(r.load?.pics, [{ path: "p.png", w: 1, h: 1 }]);
+});
+
+// ---- #74 R4: a checkbox line is not a [tag] headline.
+test("#74 R4 mdText: the first line '[ ] 할 일' / '[x] 끝' is a checkbox line, not a bold [tag] headline; a real [tag] headline still is", () => {
+  for (const first of ["[ ] 하나 해야 함", "[x] 다 했음", "[X] 다 했음", "[✓] 확인", "[] 비어 있음"]) {
+    const out = I.mdText(`${first}\n본문`);
+    assert.ok(!out.startsWith("**"), first);
+  }
+  assert.ok(I.mdText("[lead-po] 확인 요청\n본문").startsWith("**[lead-po] 확인 요청**"));
+  assert.ok(I.mdText("[x1] 확인 요청\n본문").startsWith("**[x1]"), "a tag that merely starts with x is a tag");
+  assert.ok(I.mdText("[ok] 완료 보고\n본문").startsWith("**[ok]"));
 });

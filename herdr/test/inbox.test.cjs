@@ -2721,3 +2721,19 @@ test("main.js: UI 모드(mained)의 deliver는 칸·포커스·클립보드 없�
   assert.match(by, /this\.opening\.delete\(po\)[\s\S]*?this\.mark\(id, "failed"\)/);
   assert.match(by, /return "opening"/);
 });
+
+test("#74 R4 decisionOptions: '(비추천)'·'추천하지 않음'·'not recommended' 같은 부정 표시는 추천으로 세지 않는다", () => {
+  const rec = (body) => I.decisionOptions(body).recommended;
+  assert.equal(rec("1안(비추천): 가\n2안: 나"), 0);
+  assert.equal(rec("1안 (비권장): 가\n2안: 나"), 0);
+  assert.equal(rec("1안: 가 (추천하지 않음)\n2안: 나"), 0);
+  assert.equal(rec("1안: 가 (권장하지 않습니다)\n2안: 나"), 0);
+  assert.equal(rec("1안: 가 (not recommended)\n2안: 나"), 0);
+  assert.equal(rec("1안: 가 (don't recommend)\n2안: 나"), 0);
+  assert.equal(rec("1안(비추천): 가\n2안(추천): 나"), 2); // the negated one never takes the mark, the plain one does
+  assert.equal(rec("1안(추천): 가\n2안(비추천): 나"), 1);
+  assert.equal(rec("1안: 가\n2안: 나 (추천)"), 2);
+  assert.equal(rec("1안: 가\n2안: 나 (권장)"), 2);
+  assert.equal(rec("1안: 가\n2안: 나 (recommended)"), 2);
+  assert.deepEqual(I.decisionOptions("1안(비추천): 가\n2안: 나").options, [1, 2], "still two options");
+});

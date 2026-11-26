@@ -95,7 +95,7 @@ const keepSrc = grab(MAIN, "  keep(key, st, value) {", "  // #66: the chat box h
 const syncSrc = grab(MAIN, "  syncRoom(pick) {", "  wipe(key, st) {");
 const wipeSrc = grab(MAIN, "  wipe(key, st) {", "  guard(key, st, value) {");
 const DeskClass = new Function("swapDraft", "editCore", `return class Desk {
-  constructor(box) { this.chat = box; this.mirror = new Map(); this.roomDrafts = new Map(); this.draftRoom = null; this.pics = []; this.menu = null; this.heldAt = 0; this.lastValue = ""; this.core = ""; this.brk = null; this.log = []; }
+  constructor(box) { this.chat = box; this.mirror = new Map(); this.roomDrafts = new Map(); this.picBusyBy = new Map(); this.picBusy = 0; this.draftRoom = null; this.pics = []; this.menu = null; this.heldAt = 0; this.lastValue = ""; this.core = ""; this.brk = null; this.log = []; }
   diag(m) { this.log.push(m); }
   ${keepSrc}
   ${syncSrc}

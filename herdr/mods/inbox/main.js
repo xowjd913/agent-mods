@@ -152,6 +152,16 @@ const strayAt = (prev, value) => {
   return b[i] === "\n" && b.slice(0, i) + b.slice(i + 1) === a ? i : -1;
 };
 const withoutAt = (value, i) => String(value ?? "").slice(0, i) + String(value ?? "").slice(i + 1);
+// An Enter pressed with text selected makes the widget REPLACE the selection by "\n" (not insert one): `replacedAt(prev, value)` is {idx, end} when
+// `value` is `prev` with the span [idx, end) (at least one character) swapped for one "\n", else null. The span is the selected text to put back.
+const replacedAt = (prev, value) => {
+  const a = String(prev ?? ""), b = String(value ?? "");
+  for (let i = b.indexOf("\n"); i >= 0; i = b.indexOf("\n", i + 1)) {
+    const end = a.length - (b.length - i - 1);
+    if (end > i && b.slice(0, i) === a.slice(0, i) && b.slice(i + 1) === a.slice(end)) return { idx: i, end };
+  }
+  return null;
+};
 const enterPending = (enterAt, now) => Number(enterAt) > 0 && Number(now) - Number(enterAt) >= -25 && Number(now) - Number(enterAt) < HELD_BREAK_MS;
 const atTextEnd = (value, cursor) => cursor == null || !Number.isFinite(Number(cursor)) || Number(cursor) >= editCore(value).length;
 const holdShown = (changedAt, heldAt) => Number(heldAt) > 0 && Number(changedAt) <= Number(heldAt) + 100; // a held Enter is still waiting for its second one
@@ -566,7 +576,11 @@ function dockTarget(here, f, terms) {
 // The options of a decision report, read strictly from its body (the leader report rule: one "N안: ..." line per option, N = 1..3, and
 // optionally a "추천: N안" line). At least two distinct numbers, otherwise none (nothing is guessed: "A:", "1)", "①", "1. step" are not options).
 // -> { options: [1, 2], recommended: 2 | 0 }
+// "추천"/"권장"/"recommend" mark a recommended option, but not when negated: "비추천", "비권장", "추천하지 않", "권장하지 않", "not recommended",
+// "don't recommend" (a negated option is one the report says NOT to pick, so it never gets the "(추천)" mark).
 const REC_MARK = /추천|권장|recommend/i;
+const REC_NEG = /비\s*추천|비\s*권장|(?:추천|권장)\s*(?:하지\s*(?:않|말)|안\s*함|드리지\s*않|할\s*수\s*없)|(?:not|n['’]t|never)\s+(?:be\s+)?recommend|un-?recommend/i;
+const recMarked = (txt) => REC_MARK.test(String(txt ?? "")) && !REC_NEG.test(String(txt ?? ""));
 function decisionOptions(body) {
   const nums = new Set();
   let rec = 0;
@@ -577,7 +591,7 @@ function decisionOptions(body) {
       const n = Number(m[1]);
       nums.add(n);
       // the recommendation marked on the option itself: "1안(추천):" or "… (추천)" / "★" at the end of its line
-      if (!rec && (REC_MARK.test(m[2] ?? "") || /[(（\[［][^)）\]］\n]{0,24}(?:추천|권장)[^)）\]］\n]{0,24}[)）\]］]\s*$/.test(line) || /[★⭐]\s*$/.test(line))) rec = n;
+      if (!rec && (recMarked(m[2]) || recMarked(line.match(/[(（\[［]([^)）\]］\n]{0,24})[)）\]］]\s*$/)?.[1]) || /[★⭐]\s*$/.test(line))) rec = n;
       continue;
     }
     m = line.match(/^\s*(?:[-*]\s*)?추천\s*[:：]\s*([1-3])안/);
@@ -797,7 +811,7 @@ const moreLabel = (more) => `더 보기 · ${String(Math.max(0, Number(more) || 
 // A list item line of a Markdown source: "-", "*" or "+", or "1." / "1)", then a blank and some text.
 const MD_ITEM = /^\s*(?:[-*+]|(\d{1,9})[.)])\s+\S/;
 // A first line like "[lead-po-inbox] 최종 확인 요청": a [tag], a blank, a short title.
-const MD_HEAD = /^\s*\[[^\]\n]{1,60}\][ \t]+\S[^\n]{0,60}$/;
+const MD_HEAD = /^\s*\[(?![ xX✓✔]?\])[^\]\n]{1,60}\][ \t]+\S[^\n]{0,60}$/; // not a checkbox line: "[ ] 할 일", "[x] 끝"
 // A message text as Markdown for a TextView.markdown(...).raw_html(false): wrapper tags removed first (they would print literally), a line that
 // is only 【...】 made bold, images switched off (![x](y) -> a plain link), single line breaks kept as line breaks (Markdown would join them), and
 // the list marks people type ("•", "1)") written as real Markdown items with a blank line before the list and after it (#66), so the view draws
@@ -1286,7 +1300,8 @@ export default class Inbox extends View {
     this.brk = null; // #83: {idx, at, core, editAt}: the line break the widget last put in the text, and the edit state before it
     this.editAt = 0; // the last time that text changed (ms); the IME hold reads this, not changedAt
     this.pics = []; // pictures waiting in the box: [{path, w, h}] (saved under the inbox's po/img by the helper)
-    this.picBusy = 0; // pictures being read from the clipboard / a file right now
+    this.picBusy = 0; // pictures being read from the clipboard / a file right now FOR THE ROOM SHOWN (picBusyBy: per room)
+    this.picBusyBy = new Map();
     this.replyPics = new Map(); // leader -> pictures waiting in that leader's answer box (same shape as this.pics)
     this.replyBusy = new Map(); // leader -> pictures being read for that answer box
     this.imgd = new Map(); // path -> [w, h] of pictures added here (the helper's list covers the others)
@@ -1307,10 +1322,13 @@ export default class Inbox extends View {
       try { value = this.chat.value(); } catch {}
       if (this.guard("chat", this.chat, value)) return; // the box was emptied behind the person's back: the text is back, nothing else to do
       this.keep("chat", this.chat, value);
-      const brk = strayAt(this.lastValue, value); // #83: the widget put a line break at the cursor
+      const prev = this.lastValue;
+      const brk = strayAt(prev, value); // #83: the widget put a line break at the cursor
+      const rep = brk < 0 ? replacedAt(prev, value) : null; // ... or an Enter over a selection swapped the selected text for one
       this.lastValue = value;
       if (brk >= 0 && enterPending(this.enterAt, this.changedAt)) { this.dropAt(value, brk, this.editAt); return; } // the Enter (sent or held) left it: take it out, wherever it is
-      this.brk = brk >= 0 ? { idx: brk, at: this.changedAt, core: this.core, editAt: this.editAt } : null; // (the key may come after this change: see enterBox)
+      if (rep && enterPending(this.enterAt, this.changedAt)) { this.putBack(prev, rep, this.editAt); return; } // the selected text comes back
+      this.brk = brk >= 0 ? { idx: brk, at: this.changedAt, core: this.core, editAt: this.editAt } : rep ? { idx: rep.idx, at: this.changedAt, core: this.core, editAt: this.editAt, rep, prev } : null; // (the key may come after this change: see enterBox)
       const core = editCore(value); // an edit is a change of the text itself: the widget's own line break for an Enter is not one
       if (core !== this.core) { this.core = core; this.editAt = this.changedAt; }
       this.heldTick(c);
@@ -1529,6 +1547,7 @@ export default class Inbox extends View {
       } else this.chat.set_value("");
     } catch {}
     this.pics = r.load?.pics ?? [];
+    this.picBusy = this.picBusyBy.get(pick) ?? 0;
     try { this.lastValue = this.chat.value(); this.core = editCore(this.lastValue); } catch {}
     this.brk = null;
     this.keep("chat", this.chat);
@@ -1619,13 +1638,21 @@ export default class Inbox extends View {
     else if (list.length) this.replyPics.set(key, list);
     else this.replyPics.delete(key);
   }
-  bumpBusy(key, n) {
-    if (key == null) { this.picBusy = Math.max(0, this.picBusy + n); return; }
+  // The PO box's reads are counted per room (`room` = the room the read started in), and only the room shown sees its own count: a read that
+  // started in another room never blocks sending or shows "reading…" here.
+  bumpBusy(key, n, room = this.draftRoom) {
+    if (key == null) {
+      const v = Math.max(0, (this.picBusyBy.get(room) ?? 0) + n);
+      if (v) this.picBusyBy.set(room, v); else this.picBusyBy.delete(room);
+      this.picBusy = this.picBusyBy.get(this.draftRoom) ?? 0;
+      return;
+    }
     const v = Math.max(0, (this.replyBusy.get(key) ?? 0) + n);
     if (v) this.replyBusy.set(key, v); else this.replyBusy.delete(key);
   }
-  async addPic(args, c, key = null) {
-    this.bumpBusy(key, 1);
+  // A picture for the PO box goes to the room the read STARTED in: when that room is not shown any more it joins that room's saved draft.
+  async addPic(args, c, key = null, room = this.draftRoom) {
+    this.bumpBusy(key, 1, room);
     try { c.notify(); } catch {}
     try {
       const r = await exec("node", [HELPER(), ...args], { timeout: 20000 });
@@ -1633,18 +1660,25 @@ export default class Inbox extends View {
       const o = JSON.parse(r.stdout);
       if (!o?.path) throw new Error("그림이 없습니다");
       if (o.w > 0 && o.h > 0) this.imgd.set(o.path, [o.w, o.h]);
-      const cur = this.picsOf(key);
+      const away = key == null && room !== this.draftRoom;
+      const slot = away ? this.roomDrafts.get(room) : null;
+      const cur = away ? (slot?.pics ?? []) : this.picsOf(key);
+      const pic = { path: o.path, w: o.w ?? 0, h: o.h ?? 0 };
       if (cur.length >= MAX_IMGS) this.say(`그림은 한 번에 ${MAX_IMGS}장까지 붙일 수 있습니다.`, true);
-      else if (!cur.some((x) => x.path === o.path)) this.setPics(key, [...cur, { path: o.path, w: o.w ?? 0, h: o.h ?? 0 }]);
+      else if (!cur.some((x) => x.path === o.path)) {
+        if (away) this.roomDrafts.set(room, { text: "", ...(slot ?? {}), pics: [...cur, pic] });
+        else this.setPics(key, [...cur, pic]);
+      }
       this.msg = null;
     } catch (e) { this.say(`그림을 붙이지 못했습니다: ${String(e?.message ?? e).slice(0, 140)}`, true); }
-    finally { this.bumpBusy(key, -1); try { c.notify(); } catch {} }
+    finally { this.bumpBusy(key, -1, room); try { c.notify(); } catch {} }
   }
   pastePic(c, key = null) { return this.addPic(["clipimg"], c, key); }
   async pickPics(c, key = null) {
+    const room = this.draftRoom; // the room the file button was pressed in
     let files = null;
     try { files = await pickFiles({ prompt: "그림 붙이기", multiple: true }); } catch (e) { this.say(`파일을 고르지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); try { c.notify(); } catch {} return; }
-    for (const f of (files ?? []).slice(0, MAX_IMGS)) await this.addPic(["addimg", f], c, key);
+    for (const f of (files ?? []).slice(0, MAX_IMGS)) await this.addPic(["addimg", f], c, key, room);
   }
   dropPics(paths, c, key = null) { for (const f of (paths ?? []).slice(0, MAX_IMGS)) this.addPic(["addimg", f], c, key); }
   removePic(i, c, key = null) { this.setPics(key, this.picsOf(key).filter((_x, k) => k !== i)); try { c.notify(); } catch {} }
@@ -2557,9 +2591,15 @@ export default class Inbox extends View {
       try { cur = this.chat.selected_range().end; } catch {}
       const b = this.brk;
       if (b && now - b.at <= 25 && value[b.idx] === "\n") { // the widget's line break at the cursor came before this key: it is not the person's text
-        value = withoutAt(value, b.idx);
-        cur = b.idx;
-        this.dropAt(this.chat.value(), b.idx, b.editAt);
+        if (b.rep) { // it replaced a selection: the selected text is the person's text and comes back
+          value = b.prev;
+          cur = b.rep.end;
+          this.putBack(b.prev, b.rep, b.editAt);
+        } else {
+          value = withoutAt(value, b.idx);
+          cur = b.idx;
+          this.dropAt(this.chat.value(), b.idx, b.editAt);
+        }
         this.core = b.core;
       }
       if (value.trim() && imeHold(value, this.editAt, this.heldAt, now, atTextEnd(value, cur))) { // maybe the IME's confirming Enter: only this once
@@ -2587,6 +2627,21 @@ export default class Inbox extends View {
       this.chat.replace("");
       if (this.chat.value() !== next) this.chat.set_value(next); // the widget would not replace with nothing: plain text instead
       this.chat.set_selected_range({ start: idx, end: idx });
+    } catch {}
+  }
+
+  // #83: an Enter over a selection made the widget swap the selected text for a line break: the text of `prev` comes back (chips of the selected span
+  // become plain text) with its selection, and the Enter then sends it whole.
+  putBack(prev, rep, editAt) {
+    this.lastValue = prev;
+    this.core = editCore(prev);
+    this.editAt = editAt;
+    this.brk = null;
+    try {
+      this.chat.set_selected_range({ start: rep.idx, end: rep.idx + 1 });
+      this.chat.replace(prev.slice(rep.idx, rep.end));
+      if (this.chat.value() !== prev) this.chat.set_value(prev);
+      this.chat.set_selected_range({ start: rep.idx, end: rep.end });
     } catch {}
   }
 
