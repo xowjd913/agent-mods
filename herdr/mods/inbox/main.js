@@ -917,10 +917,17 @@ function roomWorking(terms) {
   }
   return out;
 }
+// #119: the rooms whose PO has remote on, as a Set of room ids, from the desk's remote states (room -> {phase}). Only "on" / "already" count: sending, failed and
+// unknown (and a room with no state yet) are off, so the mark never claims more than the last screen check or restore saw.
+function remoteRooms(rc) {
+  const out = new Set();
+  for (const [room, r] of rc ?? []) if (r && (r.phase === "on" || r.phase === "already")) out.add(room);
+  return out;
+}
 // A short text that changes exactly when something the desk shows from the terminals changes: the status, the wait label and the shown
 // name of every PO and leader, and whether a leader has work below it (a team member working). The 1.5 s poll redraws a copy only when this
 // differs from the last one (no redraw on a quiet second).
-function statusSig(terms) {
+function statusSig(terms, remote) {
   const rows = [];
   const hot = busyAddrs(terms), states = workStates(terms);
   for (const t of terms ?? []) {
@@ -929,7 +936,8 @@ function statusSig(terms) {
     rows.push(`${t.address}|${String(t.status ?? "")}|${lead ? waitingKind(t) : ""}|${lead ? liveName(t) : ""}|${lead && hot.has(t.address) ? 1 : 0}|${lead && hot.has(t.address) ? typingLabel(states, t.address) : ""}`);
   }
   const w = [...roomWorking(terms)].sort().join(",");
-  return rows.sort().join("\n") + (w ? `\n#w:${w}` : ""); // #69: a working terminal that is no PO/leader (a member right under a PO) still moves a room dot
+  const r = [...(remote ?? [])].sort().join(","); // #119: a room's remote mark comes and goes with the desk's own state, not with a terminal
+  return rows.sort().join("\n") + (w ? `\n#w:${w}` : "") + (r ? `\n#r:${r}` : ""); // #69: a working terminal that is no PO/leader (a member right under a PO) still moves a room dot
 }
 // ---- images (pasted, picked or dropped in the box; or pasted in the PO terminal and read back by the hook)
 // A picture lives in <app root>/data/inbox/img/ (0600, written by this helper); a line of the desk's message names it as "[image: <path> — ...]"
@@ -1961,7 +1969,7 @@ export default class Inbox extends View {
     try {
       const terms = this.liveTerms(), now = Date.now();
       this.syncTyping(terms, now);
-      sig = `${statusSig(terms)}\n~${graceKey(this.typingAt, now)}`; // the grace running out changes this, so the dots are redrawn away
+      sig = `${statusSig(terms, remoteRooms(this.rc))}\n~${graceKey(this.typingAt, now)}`; // the grace running out changes this, so the dots are redrawn away
     } catch { return; }
     if (sig === this.sig) return;
     const first = this.sig === null;
@@ -2190,7 +2198,8 @@ export default class Inbox extends View {
     const waits = (id) => all.filter((a) => a.owner === id).map((a) => ({ leader: a.s.leader, ts: a.item?.ts ?? "", kind: a.kind }));
     const room = (id) => timeline(id, leaders, id === PO_OTHER ? [] : this.data?.po?.[id] ?? [], mine, waits(id), now);
     const busy = roomWorking(terms); // #69: the rooms with work going on (a dot beside the name)
-    const rooms = pos.map((p) => ({ id: p.id, label: p.label, title: p.title, blocked: this.isBlocked(p.address), working: busy.has(p.id) }));
+    const remote = remoteRooms(this.rc); // #119: the rooms whose PO has remote on (the subtitle under the name)
+    const rooms = pos.map((p) => ({ id: p.id, label: p.label, title: p.title, blocked: this.isBlocked(p.address), working: busy.has(p.id), remote: remote.has(p.id) }));
     if (hasOther) rooms.push({ id: PO_OTHER, label: OTHER_LABEL, title: "", blocked: false, working: busy.has(PO_OTHER) });
     if (settled.ghost && !rooms.some((r) => r.id === pick)) rooms.push({ id: pick, label: this.pickLive.label, title: "", blocked: false, ghost: true }); // held for a moment: the room list does not lose it
     let raw = [];
@@ -3373,6 +3382,18 @@ export default class Inbox extends View {
     return x.working ? d.bg(t.working).tooltip("작업 중") : d;
   }
 
+  // #119: the remote mark of a room, in the accent colour with the "원격 연결 켜짐" tip: null unless the room's PO has remote on (an unknown or never-checked state is off).
+  // Text, not a dot, so it is not mistaken for #69's "working" dot. Every room view takes it from here (the wide list shows it as "PO · 원격", the narrow ones as "원격").
+  roomRemote(t, x, text) {
+    return x.remote ? div().flex_none().text_size(10).text_color(t.working).tooltip("원격 연결 켜짐").child(text) : null;
+  }
+
+  // The small line under a room's name in the wide room list: "PO", and "PO · 원격" while its PO has remote on.
+  roomSub(t, x) {
+    if (x.id === PO_OTHER) return div().min_w(0).truncate().text_size(10).text_color(t.dim).child("채팅 없음");
+    return this.roomRemote(t, x, "PO · 원격") ?? div().min_w(0).truncate().text_size(10).text_color(t.dim).child("PO");
+  }
+
   // The count badges of a room: unread (green) and waiting leaders (red).
   roomBadges(t, x) {
     return [
@@ -3395,7 +3416,7 @@ export default class Inbox extends View {
           .tooltip(x.id === PO_OTHER ? OTHER_TIP : `po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
           .child(div().max_w(150).truncate().text_size(11.5).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
           .child(this.roomDot(t, x))
-          .children(this.roomBadges(t, x));
+          .children([this.roomRemote(t, x, "원격"), ...this.roomBadges(t, x)].filter(Boolean));
       }));
   }
 
@@ -3405,7 +3426,7 @@ export default class Inbox extends View {
       .children(v.tabs.map((x) => {
         const on = x.id === v.pick;
         const color = x.id === PO_OTHER ? t.dim : tint(t, x.id);
-        const badges = this.roomBadges(t, x);
+        const badges = [this.roomRemote(t, x, "원격"), ...this.roomBadges(t, x)].filter(Boolean);
         return v_flex().id(`po-${x.id}`).flex_none().items_center().py(5).gap(3).rounded(8).cursor_pointer().on_mouse_down("left", stop)
           .bg(on ? t.selected : t.chrome).hover((s) => s.bg(on ? t.selected : t.hover)).on_click((_e, c) => this.pickPo(x.id, c))
           .tooltip(x.id === PO_OTHER ? OTHER_TIP : `${x.label} · po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
@@ -3429,7 +3450,7 @@ export default class Inbox extends View {
           .child(this.circle(t, color, x.id === PO_OTHER ? "?" : initial(x.label)))
           .child(v_flex().flex_1().min_w(0)
             .child(div().min_w(0).truncate().text_size(12.5).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
-            .child(div().min_w(0).truncate().text_size(10).text_color(t.dim).child(x.id === PO_OTHER ? "채팅 없음" : "PO")))
+            .child(this.roomSub(t, x)))
           .child(this.roomDot(t, x))
           .children(this.roomBadges(t, x));
       }));
