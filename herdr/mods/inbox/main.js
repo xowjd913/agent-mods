@@ -359,6 +359,15 @@ const noticeText = (name, kind, it) => [name, kind, String(it?.head || it?.lead 
 // hc name ("lead-x", the last word of `from`), "" when the line is not such a message.
 const hcSender = (text) => { const m = /^\s*<hc\s+from="([^"]*)"/.exec(String(text ?? "")); return m ? (m[1].trim().split(/\s+/).pop() ?? "") : ""; };
 const HC_REPORT_MS = 5 * 60 * 1000; // an hc line and the report it carries are written within this gap
+// Is this <hc> line a copy of that report? Its words (wrapper and a leading "[leader]" tag removed, spaces squeezed, case ignored) must overlap the
+// report's title / head / lead (one contains the other, at least 3 characters): the same leader within 5 minutes is not enough, since an unrelated
+// message of that leader (a question, say) must stay on the desk.
+const hcSame = (text, it) => {
+  const sq = (v) => String(v ?? "").replace(/\s+/g, " ").trim().toLowerCase().replace(/^\[[^\]]*\]\s*/, "");
+  const body = sq(unwrapTags(text));
+  if (body.length < 3) return false;
+  return [it?.title, it?.head, it?.lead].map(sq).some((r) => r.length >= 3 && (body.includes(r) || r.includes(body)));
+};
 function timeline(room, leaders, says, mine, waits = [], now = 0) {
   const out = [];
   const seen = new Set();
@@ -400,7 +409,7 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
       // #87: the PO hook also records a leader's report that arrived as `<hc from=...>`; the report is already on the desk (card or notice), so that copy is not a bubble of the person. One report covers one such line.
       const from = hcSender(x.text);
       if (from) {
-        const r = out.findIndex((e, k) => e.leader === from && e.it && !coveredReports.has(k) && Math.abs(x.ms - e.ms) <= HC_REPORT_MS);
+        const r = out.findIndex((e, k) => e.leader === from && e.it && !coveredReports.has(k) && Math.abs(x.ms - e.ms) <= HC_REPORT_MS && hcSame(x.text, e.it));
         if (r >= 0) { coveredReports.add(r); continue; }
       }
       const t = full(x.text), c = core(x.text), p = cut(x.text);

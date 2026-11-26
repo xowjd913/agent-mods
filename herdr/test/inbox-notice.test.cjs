@@ -33,8 +33,8 @@ test("hcSender: <hc from=\"t1 lead-x\">의 마지막 낱말이 보낸 리더이�
   assert.equal(I.hcSender(undefined), "");
 });
 
-const leaders = (ms = ms0) => [{ owner: "p1", s: { leader: "lead-a", items: [{ kind: "done", title: "t", ts: new Date(ms).toISOString(), ms }] } }];
-const hook = (ms, from = "t1 lead-a", text = "[lead-a] 완료") => ({ ts: new Date(ms).toISOString(), ms, text: `<hc from="${from}">${text}</hc>`, me: true });
+const leaders = (ms = ms0) => [{ owner: "p1", s: { leader: "lead-a", items: [{ kind: "done", title: "[lead-a] 설치 완료", head: "설치 완료", ts: new Date(ms).toISOString(), ms }] } }];
+const hook = (ms, from = "t1 lead-a", text = "[lead-a] 설치 완료: 확인해 주세요") => ({ ts: new Date(ms).toISOString(), ms, text: `<hc from="${from}">${text}</hc>`, me: true });
 const meCount = (tl) => tl.filter((e) => e.who === "me").length;
 
 test("timeline: 보고가 있으면 같은 리더의 <hc> 복사본은 내 말풍선으로 나오지 않는다", () => {
@@ -70,4 +70,21 @@ test("main.js: 알림 줄은 가운데 붉은 한 줄이고 눌러야 전체 보
   assert.match(blk, /\.when\(open, /);
   assert.match(blk, /this\.body\(t, e\.it, id\)/);
   assert.ok(MAIN.indexOf("const a = e.waiting ?") > i); // 알림은 대기 처리보다 앞에서 갈라진다
+});
+
+test("timeline: 같은 리더가 보고 근처에 보낸 다른 내용의 <hc> 글(질문 등)은 덮이지 않고 남는다", () => {
+  const q = hook(ms0 + 60000, "t1 lead-a", "[lead-a] 질문: 배포 순서를 바꿔도 되나요?");
+  const tl = I.timeline("p1", leaders(), [q], [], [], ms0 + 9e5);
+  assert.equal(meCount(tl), 1);
+  // 질문이 남아도 같은 보고의 복사본은 계속 덮인다
+  assert.equal(meCount(I.timeline("p1", leaders(), [q, hook(ms0 + 2000)], [], [], ms0 + 9e5)), 1);
+});
+
+test("hcSame: 감싸개·[이름] 머리표·대소문자·공백을 무시하고 제목·머리줄·요약과 겹칠 때만 같은 보고다", () => {
+  const it = { title: "[lead-a] 설치 완료", head: "설치 완료", lead: "inbox 모드를 깔았습니다" };
+  assert.equal(I.hcSame('<hc from="t1 lead-a">[lead-a]  설치   완료: 확인</hc>', it), true);
+  assert.equal(I.hcSame("INBOX 모드를 깔았습니다", it), true);
+  assert.equal(I.hcSame("[lead-a] 다른 이야기", it), false);
+  assert.equal(I.hcSame("네", it), false); // 너무 짧은 글은 겹침으로 치지 않는다
+  assert.equal(I.hcSame("설치 완료", { title: "", head: "", lead: "" }), false);
 });
