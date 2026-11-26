@@ -1029,10 +1029,30 @@ function restartBlock({ po = "", status = "", running = false } = {}) {
 // ---- "원격 연결 켜기" (#79): one click sends `/remote-control` to the room's terminal through the same `hc send` path as 새로 시작 (sendLine). The desk cannot
 // press it for the person any other way (a skill cannot run the command). Pure part: why it cannot be pressed now ("" when it can).
 const REMOTE_CMD = "/remote-control";
-const REMOTE_SHOW_MS = 30 * 1000; // how long "보냈습니다" stays beside the button
 function remoteBlock({ po = "", status = "", running = false, sending = false } = {}) {
   if (sending) return "원격 연결 명령을 보내는 중입니다";
   return restartBlock({ po, status, running });
+}
+const REMOTE_POLLS = 5, REMOTE_POLL_MS = 1000; // after the send: this many screen reads, this far apart (~5 s)
+const REMOTE_URL = /https:\/\/claude\.ai\/code\/[^\s)\]>"'`]+/g;
+// What the PO's screen says about Remote Control. `menu` = Claude Code's "already connected" menu (Disconnect this session / Show QR code / Continue), `active` = the
+// footer says it is on, `url` = the last session link on screen. Text copied from Claude Code's UI and NOT verified against a real terminal (UNVERIFIED).
+function remoteScreen(text) {
+  const clean = cleanText(text);
+  const lines = clean.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim());
+  const tail = lines.slice(-14).join("\n");
+  const menu = /Disconnect this session/i.test(tail) && (/Show QR code/i.test(tail) || /\bContinue\b/.test(tail));
+  const active = menu || /Remote Control (is )?(active|connected)/i.test(lines.slice(-8).join("\n"));
+  const urls = clean.match(REMOTE_URL) ?? [];
+  return { menu, active, url: urls.length ? urls[urls.length - 1].replace(/[.,;:]+$/, "") : "" };
+}
+// The one-line system note for the room's chat. kind: on | already | fail | unknown.
+function remoteNote(kind, { url = "", why = "" } = {}) {
+  const u = url ? ` — ${url}` : "";
+  if (kind === "on") return `원격 연결 켜짐${u}`;
+  if (kind === "already") return `이미 켜져 있음${u}`;
+  if (kind === "unknown") return "원격 연결 명령을 보냈지만 5초 안에 화면에서 결과를 확인하지 못했습니다. 터미널에서 확인하세요";
+  return `켜지 못함: ${why || "알 수 없는 이유"}`;
 }
 // The line pasted into the PO (English: it is read by an agent). `file` is where the note goes (shown with ~).
 function handoffAsk(file) {
@@ -1313,7 +1333,7 @@ export default class Inbox extends View {
     this.promptChain = 0; // the newest scheduled re-read of the screen; an older one does nothing
     this.who = new Map(); // room -> the leader the room is narrowed to (#58, "특정 리더만"); like `filt`, not saved
     this.rs = new Map(); // room -> the state of its "PO 새로 시작" (see restartOpen)
-    this.rc = new Map(); // room -> the state of its "원격 연결 켜기" {phase: send | sent | fail, at, why} (see remoteOn)
+    this.rc = new Map(); // room -> the state of its "원격 연결 켜기" {phase: send | on | already | unknown | fail, at, url, why, note {text, ms, bad}} (see remoteOn)
     this.rgen = 0; // numbers a restart run: a timer of an older run does nothing
     this.filt = new Map(); // room -> the chat filter chip picked there (전체 when missing); not saved: a restart shows every message again
     this.heldAt = 0; // the last Enter held back as a possible IME confirm (ms)
@@ -2416,34 +2436,92 @@ export default class Inbox extends View {
         .child(this.button(t, "rs-close", r.phase === "run" || r.phase === "clear" || r.phase === "timeout" ? "취소" : "닫기", (c) => this.restartClose(room, c), { tip: r.phase === "run" || r.phase === "clear" ? "기다리기를 멈춥니다(이미 보낸 요청은 그대로입니다)" : "" })));
   }
 
-  // ---- "원격 연결 켜기" (#79), per terminal: `target` = {room (the key of the state), po (the terminal address), status}. A room of any kind can use it (PO room now,
-  // a solo room later): it only needs the terminal's address and its hc status. Sends the one line /remote-control; nothing else is read or promised about the result.
+  // ---- "원격 연결 켜기" (#79), per terminal: `room` = the key of the state, `po` = the terminal address, `status` = its hc status. A room of any kind can use it (PO room
+  // now, a solo room later): it needs only the terminal's address. The flow: read the screen (already on? the "already connected" menu open? then no send), send the one line
+  // /remote-control, read the screen again a few times (~5 s) to see what it did, and close the "already connected" menu with Esc only (never Disconnect, never Enter) after
+  // checking it is still on screen. The result is a system note in the room's chat (rc.note) and a small mark by the button. What the screen looks like is UNVERIFIED.
+  async remoteRead(po) {
+    try {
+      const o = await hc(["read", po, "--lines", String(PROMPT_LINES)]);
+      return o && o.code === 0 ? String(o.stdout ?? "") : null;
+    } catch { return null; }
+  }
+  // Esc closes the menu; checked on the screen right before each press and again after it (a press never goes on a screen without the menu, nor while the PO works: Esc
+  // would stop its turn). true = the menu is gone.
+  async remoteClose(po, cx) {
+    for (let i = 0; i < 2; i++) {
+      const t = await this.remoteRead(po);
+      if (t === null) return false;
+      if (!remoteScreen(t).menu) return true;
+      if (String(this.liveTerms().find((x) => x.address === po)?.status ?? "") === "working") return false;
+      let k = null; try { k = await hc(["keys", po, "esc"]); } catch {}
+      if (!(k && k.code === 0)) return false;
+      await this.sleepOn(cx, 600);
+    }
+    const t = await this.remoteRead(po);
+    return t !== null && !remoteScreen(t).menu;
+  }
+  remoteSet(room, patch, c) {
+    const r = { ...(this.rc.get(room) ?? {}), at: Date.now(), ...patch };
+    if (patch.kind) { const ms = Date.now(); r.note = { text: remoteNote(patch.kind, r), ms, bad: patch.kind === "fail" || patch.kind === "unknown" }; delete r.kind; }
+    this.rc.set(room, r);
+    if (r.note && patch.phase !== "send") this.say(r.note.text, r.note.bad);
+    try { c.notify(); } catch {}
+  }
   remoteOn(room, po, c) {
     const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "");
     const r0 = this.rc.get(room);
     const rs = this.rs.get(room);
     const why = remoteBlock({ po, status: st, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")), sending: r0?.phase === "send" });
     if (why) { this.say(why, true); try { c.notify(); } catch {} return; }
-    this.rc.set(room, { phase: "send", at: Date.now(), why: "" });
-    try { c.notify(); } catch {}
+    this.remoteSet(room, { phase: "send", why: "" }, c);
     c.spawn(async (cx) => {
-      let res = { ok: false, why: "보내지 못했습니다" };
-      try { res = await this.sendLine(po, REMOTE_CMD, () => true, room); } catch (e) { res = { ok: false, why: String(e?.message ?? e).slice(0, 100) }; }
-      this.rc.set(room, { phase: res.ok ? "sent" : "fail", at: Date.now(), why: res.ok ? "" : res.why });
-      if (res.ok) this.say("원격 연결 명령(/remote-control)을 보냈습니다. 터미널에서 이어서 확인하세요.");
-      else this.say(`원격 연결을 켜지 못했습니다: ${res.why}`, true);
-      try { cx.notify(); } catch {}
+      const done = (phase, kind, extra = {}) => this.remoteSet(room, { phase, kind, why: "", url: "", ...extra }, cx);
+      try {
+        const pre0 = await this.remoteRead(po);
+        const pre = pre0 === null ? null : remoteScreen(pre0);
+        if (pre && pre.active) { // already on (or its menu is open and the person is stuck in it): no send
+          if (pre.menu && !(await this.remoteClose(po, cx))) { done("fail", "fail", { why: "이미 켜져 있고 터미널에 연결 메뉴가 열려 있습니다. 닫지 못했습니다 — 터미널에서 Continue를 고르세요(Disconnect는 고르지 마세요)" }); return; }
+          done("already", "already", { url: pre.url });
+          return;
+        }
+        const res = await this.sendLine(po, REMOTE_CMD, () => true, room);
+        if (!res.ok) { done("fail", "fail", { why: res.why }); return; }
+        if (pre === null) { done("unknown", "unknown"); return; }
+        for (let i = 0; i < REMOTE_POLLS; i++) {
+          await this.sleepOn(cx, REMOTE_POLL_MS);
+          const txt = await this.remoteRead(po);
+          if (txt === null) continue;
+          const now = remoteScreen(txt);
+          if (now.menu) { // it was already connected: the command opened Claude Code's menu
+            if (await this.remoteClose(po, cx)) done("already", "already", { url: now.url });
+            else done("fail", "fail", { why: "이미 켜져 있어 연결 메뉴가 열렸고 닫지 못했습니다 — 터미널에서 Continue를 고르세요(Disconnect는 고르지 마세요)" });
+            return;
+          }
+          if (now.active || (now.url && now.url !== pre.url)) { done("on", "on", { url: now.url }); return; }
+        }
+        done("unknown", "unknown");
+      } catch (e) { done("fail", "fail", { why: String(e?.message ?? e).slice(0, 100) }); }
     });
   }
-  // The button (and the reason / result beside it). Header area only, so it can sit in any room's header.
+  // The button and, beside it, the last known state ("● 켜짐" = the last screen check saw it on; it is not watched, so a disconnect made in the terminal shows only after the next check).
   remoteButton(t, room, po, status) {
     const r = this.rc.get(room);
     const rs = this.rs.get(room);
     const why = remoteBlock({ po, status, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")), sending: r?.phase === "send" });
-    const note = r && r.phase === "sent" && Date.now() - r.at < REMOTE_SHOW_MS ? "명령을 보냈습니다" : r && r.phase === "fail" && Date.now() - r.at < REMOTE_SHOW_MS ? r.why : "";
+    const on = r && (r.phase === "on" || r.phase === "already");
+    const at = on ? new Date(r.at).toTimeString().slice(0, 5) : "";
     return h_flex().id(`rc-${room}`).flex_none().min_w(0).gap(6).items_center()
-      .when(Boolean(note), (el) => el.child(div().min_w(0).truncate().text_size(10.5).text_color(r.phase === "fail" ? t.blocked : t.working).child(note)))
-      .child(this.button(t, "rc-on", "원격 연결 켜기", (c) => this.remoteOn(room, po, c), { disabled: why, tip: why || "이 PO 터미널에 /remote-control을 보내 원격 연결(Remote Control)을 켭니다" }));
+      .when(Boolean(on), (el) => el.child(div().id(`rc-mark-${room}`).flex_none().text_size(10.5).text_color(t.working).tooltip(`${at}에 화면으로 확인한 상태입니다. 그 뒤 터미널에서 끊었는지는 보지 않습니다`).child("● 켜짐")))
+      .when(r?.phase === "send", (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child("확인 중…")))
+      .child(this.button(t, "rc-on", "원격 연결 켜기", (c) => this.remoteOn(room, po, c), { disabled: why, tip: why || "이 PO 터미널에 /remote-control을 보내 원격 연결(Remote Control)을 켭니다. 이미 켜져 있으면 보내지 않습니다" }));
+  }
+  // The system note of the last 원격 연결 try, as a quiet line at the end of the room's chat.
+  remoteNoteRow(t, room) {
+    const n = this.rc.get(room)?.note;
+    if (!n) return null;
+    return h_flex().id(`rc-note-${room}`).flex_none().min_w(0).px(14).py(4).gap(6).justify_center().items_center()
+      .child(div().min_w(0).text_size(11).text_color(n.bad ? t.blocked : t.dim).child(this.text(`rc-note-t-${room}`, chatHtml(`원격 연결 · ${new Date(n.ms).toTimeString().slice(0, 5)} · ${n.text}`))));
   }
 
   // A panel answer: the answer line goes through deliver(). The box is cleared and the ask marked once it reached the PO (or, when the PO had
@@ -3066,6 +3144,8 @@ export default class Inbox extends View {
     // follow key, not the spot map).
     const hn = v.pick ? this.rs.get(v.pick)?.note : null; // the handoff note of a restart, as the PO's own bubble
     if (hn?.text) blocks.push(this.entryRow(t, { key: `rs-note-${hn.ms}`, who: "po", head: true, ms: hn.ms, ts: "", text: `**인수인계 노트**\n\n${hn.text}`, to: "" }, v, cx));
+    const rn = v.pick ? this.remoteNoteRow(t, v.pick) : null; // the last "원격 연결 켜기" result, a system note
+    if (rn) blocks.push(rn);
     for (const x of this.typing(v)) blocks.push(this.typingRow(t, x));
     // The END SENTINEL: an 8px row (the list's bottom padding) as the LAST direct child. Every "go to the newest" is scroll_to_item(this sentinel):
     // the smallest scroll that reveals a thin row at the very end is the exact bottom, whatever the height of the last bubble. scroll_to_item on
