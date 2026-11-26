@@ -2596,11 +2596,12 @@ export default class Inbox extends View {
     const gate = this.bangGate(po);
     if (gate) { refuse(gate); return; }
     const text = composeChat(this.chat.content());
+    const room = this.view().pick; // the room it is sent from: the screen read below can end after another room was picked
     this.bangBusy = true;
     this.bangCheck(c, po, refuse, (cx, clip) => {
       this.bangBusy = false;
       try {
-        const res = this.deliver(po, `!${cmd}`, cx, { text: `!${cmd}`, imgs: [], to: "", tos: [], po: this.view().pick, kind: "chat" });
+        const res = this.deliver(po, `!${cmd}`, cx, { text: `!${cmd}`, imgs: [], to: "", tos: [], po: room, kind: "chat" });
         this.bangClipBack(cx, clip, res);
         if (res === "sent") {
           this.sentAt2 = Date.now();

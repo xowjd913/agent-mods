@@ -69,7 +69,7 @@ const mk = ({ screen = IDLE, status = "idle", panes = [{ terminal: "t1" }], main
     mained, bangBusy: false, menu: "x", sentAt2: 0,
     chat: { content: () => text, set_value: (v) => log.set.push(v) },
     liveTerms: () => [{ address: "t1", status }],
-    view: () => ({ pick: "po-room" }),
+    view: () => ({ pick: log.pick ?? "po-room" }),
     say: (t, bad) => log.say.push({ t, bad: Boolean(bad) }),
     deliver: (po, line, cx, r) => { log.deliver.push({ po, line, rec: r }); return deliverRes; },
     mark: (id, st) => { log.marks.push([id, st]); rec.status = st; },
@@ -294,5 +294,23 @@ test("inbox.cjs clipText: 글자를 돌려주거나 null 이고 던지지 않는
   assert.equal(typeof I.clipText, "function");
   const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8");
   assert.match(src, /cmd === "cliptext"/);
-  assert.match(src, /slice\(0, 200000\)/);
+  // over the cap the helper hands back NO text (a cut copy would be restored shorter than the original), never a sliced one
+  assert.equal(I.CLIP_TEXT_MAX, 200000);
+  assert.match(src, /x\.length <= CLIP_TEXT_MAX \? x : null/);
+  assert.doesNotMatch(src, /x\.slice\(0, 200000\)/);
+});
+test("#93 클립보드: 헬퍼가 글 없음(null, 상한 초과 포함)을 돌려주면 되돌리지 않는다", async () => {
+  const { go, log } = mk({ clip: null });
+  await go();
+  assert.equal(log.deliver.length, 1);
+  assert.deepEqual(log.clip, []);
+});
+test("#93 보내기: 화면을 읽는 동안 다른 방으로 바꿔도 말풍선 기록은 보낸 방에 붙는다", async () => {
+  const { self, log } = mk();
+  log.pick = "room-A";
+  self.sendBang({ notify() {}, spawn(fn) { Promise.resolve().then(() => fn({ notify() {}, timer: { after() {} }, write_to_clipboard() {} })); } }, "t1", { text: "!ls -la", to: [] }, []);
+  log.pick = "room-B"; // the person switched rooms before the read came back
+  await tick(); await tick(); await tick();
+  assert.equal(log.deliver.length, 1);
+  assert.equal(log.deliver[0].rec.po, "room-A");
 });
