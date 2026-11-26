@@ -143,7 +143,7 @@ test("main.js: deliver — 막힌 PO(blocked)는 붙여넣기만, 칸 없는 PO�
   assert.match(send, /\(r2\) => \{ this\.clearBox\(a, r2, sent\); \}/);
 });
 
-test("main.js: 보내도 PO 데스크는 닫히지 않고(Dock·창·페인), 페인이면 Enter 뒤에 키보드를 돌려준다", () => {
+test("main.js: 보내도 UI 모드는 닫히지 않고(Dock·창·페인), 페인이면 Enter 뒤에 키보드를 돌려준다", () => {
   const src = mainSrc();
   const send = methodOf(src, "  send(a, text, cx, kind = \"answer\") {", "  clearBox(a");
   const chat = methodOf(src, "  sendChat(c) {", "  // The chat footer");
@@ -403,11 +403,11 @@ test("dockTarget: 포커스가 리더면 그 옆, 아니면 탭의 가장 새 �
   assert.deepEqual(I.dockTarget(here.filter((p) => p.pane === "p3"), { pane: "p3" }, terms), { action: "split", pane: "p3" }); // 리더 없음
   assert.deepEqual(I.dockTarget([{ pane: "p9", mod: "x", focused: true }], { pane: "p9" }, []), { action: "split", pane: "p9" }); // 터미널 아닌 페인도 마지막 후보
   assert.deepEqual(I.dockTarget([], null, terms), { action: "split" }); // 기준이 없으면 인자 없이
-  // 이 탭에 이미 PO 데스크 페인이 있으면 새로 만들지 않고 그쪽으로
+  // 이 탭에 이미 UI 모드 페인이 있으면 새로 만들지 않고 그쪽으로
   const had = [...here, { pane: "p7", mod: "inbox", terminal: null, focused: false }];
   assert.deepEqual(I.dockTarget(had, { pane: "p3" }, terms), { action: "focus", pane: "p7" });
   assert.deepEqual(I.dockTarget(had.concat({ pane: "p8", mod: "prs" }), { pane: "p1" }, terms), { action: "focus", pane: "p7" });
-  // 다른 mod 페인(prs)은 PO 데스크로 세지 않는다
+  // 다른 mod 페인(prs)은 UI 모드로 세지 않는다
   assert.deepEqual(I.dockTarget([...here, { pane: "p8", mod: "prs" }], { pane: "p3" }, terms), { action: "split", pane: "p2" });
   // 잘못된 입력도 던지지 않는다
   assert.deepEqual(I.dockTarget(null, undefined, null), { action: "split" });
@@ -427,7 +427,7 @@ test("main.js: 페인 모드: 같은 메신저 화면, 자기 제목줄을 쓰�
   assert.match(open, /if \(this\.windowed\) \{ try \{ closeOverlay/); // 창에서 열면 창을 닫는다
   assert.ok(!/hc send|hc\(/.test(open));
   // 머리줄: 페인은 제목·옆에 열기가 없고(페인 머리줄·이미 페인), 닫기 버튼도 만들지 않는다
-  assert.match(src, /\.when\(!this\.paned \|\| this\.mained, \(el\) => el\.child\(div\(\)\.text_size\(15\)[^\n]*PO 데스크/); // 페인은 자기 제목줄이 있고, UI 모드 main 칸은 없어서 제목을 그린다
+  assert.match(src, /\.when\(!this\.paned \|\| this\.mained, \(el\) => el\.child\(div\(\)\.text_size\(15\)[^\n]*UI 모드/); // 페인은 자기 제목줄이 있고, UI 모드 main 칸은 없어서 제목을 그린다
   assert.match(src, /\.when\(!this\.paned, \(el\) => el\.child\(this\.button\(t, "inbox-beside", "옆에 열기"/);
   assert.match(src, /\.when\(this\.windowed, \(el\) => el\.child\(div\(\)\.id\("inbox-close"\)/);
   // 갱신·뱃지: 창과 페인은 5초(페인은 그려지는 동안만), Dock만 30초, 뱃지는 창만 건너뛴다
@@ -1046,7 +1046,7 @@ test("main.js: 채팅 입력은 Textarea, Enter는 붙여넣고 hc keys enter까
   assert.match(src, /import \{[^}]*\bhc\b[^}]*\} from "herdr"/);
 });
 
-test("main.js: 창은 고른 PO 하나만 보이고(카드·보고·@ 목록·채팅 대상·PO 답글), 이름은 'PO 데스크'다", () => {
+test("main.js: 창은 고른 PO 하나만 보이고(카드·보고·@ 목록·채팅 대상·PO 답글), 이름은 'UI 모드'다", () => {
   const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /const PICK_KEY = "inbox\.po"/);
   assert.match(src, /choosePick\(pos, last, hasOther\)/);
@@ -1056,7 +1056,7 @@ test("main.js: 창은 고른 PO 하나만 보이고(카드·보고·@ 목록·�
   assert.match(src, /this\.data\?\.po\?\.\[id\]/); // PO 답글도 그 방의 것만
   assert.match(src, /po: v\.pick, kind: "chat" \}/); // 보낸 글에 PO를 적어 둔다
   assert.match(src, /setShared\(PICK_KEY, id\)/);
-  assert.match(src, /child\("PO 데스크"\)/);
+  assert.match(src, /child\("UI 모드"\)/);
   assert.ok(!/받은편지함/.test(src));
   // 배지·탭 개수는 PO와 상관없이 기다리는 리더 전부
   const badge = src.slice(src.indexOf("  badge() {"), src.indexOf("  // The \"pasted into the PO\""));
@@ -2663,6 +2663,15 @@ test('UI 모드(#59): inbox mode "main"은 페인처럼 전체 메신저 화면�
   const tabs = fs.readFileSync(path.join(__dirname, "..", "mods", "tabs-mine", "main.js"), "utf8");
   assert.match(tabs, /"mode-switch"/);
   assert.match(tabs, /layout\.switch/);
+});
+
+test('UI 모드 전환 버튼: 터미널 모드에서는 "전체 화면", 전체 화면에서는 "터미널 모드"이고, 패널을 여는 탭만 "UI 모드"다(#77)', () => {
+  const tabs = fs.readFileSync(path.join(__dirname, "..", "mods", "tabs-mine", "main.js"), "utf8");
+  assert.match(tabs, /\.child\(modeTarget\(\)\?\.ui \? "터미널 모드" : "전체 화면"\)/);
+  assert.match(tabs, /panelButton\("inbox-board", "UI 모드"/);
+  assert.equal((tabs.match(/"UI 모드"/g) || []).length, 1); // 같은 이름의 버튼이 둘이 되지 않게
+  assert.match(tabs, /UI 모드를 전체 화면으로 씁니다/);
+  assert.match(tabs, /"mode-switch"/); // id는 그대로
 });
 
 // ---- UI 모드(main): 터미널 칸이 없으므로 PO 터미널 주소로 보낸다 (review-59 R1 P2)
