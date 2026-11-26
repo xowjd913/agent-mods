@@ -2873,9 +2873,10 @@ test("원격 연결 켜기: main.js는 /remote-control 한 줄만 sendLine 길�
   assert.match(on, /remoteBlock\(/);
   assert.doesNotMatch(on, /hc\(\["send"/);
   assert.doesNotMatch(methodOf(src, "  async remoteClose(po, cx) {", "  remoteSet(room"), /"enter"|"down"|"up"/); // the menu is closed with Esc only: never Enter on an option (Disconnect) // only through sendLine (its checks: running, not on a prompt, no held draft)
-  const btn = methodOf(src, "  remoteButton(t, room, po, status) {", "  // A panel answer: the answer line");
+  const btn = methodOf(src, "  remoteButton(t, room, po, status) {", "  // After a start or a reload of the desk");
   assert.match(btn, /원격 연결 켜기/);
-  assert.match(btn, /on \? "● 원격 연결 켜짐" : "원격 연결 켜기"/); // the button itself shows the on-state once the last check saw it on
+  assert.match(btn, /on \? h_flex\(\)[^;]*"원격 연결 켜짐"\) : "원격 연결 켜기"/); // the button itself shows the on-state once the last check saw it on
+  assert.match(btn, /\.bg\(t\.working\)/); // its dot has the theme's "on" colour, not the button's grey text
   assert.doesNotMatch(btn, /rc-mark/); // no second "켜짐" mark beside a button that still says 켜기
   assert.match(btn, /disabled: why/);
   assert.doesNotMatch(btn, /chatTarget|poList|PO_OTHER/); // knows no PO rules: a solo room can pass its own terminal
@@ -2892,7 +2893,7 @@ const RC_BASE = "● Done\n\n> \n  ? for shortcuts";
 const RC_URL = "https://claude.ai/code/session_abc123";
 const RC_MENU = `  Remote Control\n  This session is connected: ${RC_URL}\n\n  ❯ 1. Disconnect this session\n    2. Show QR code\n    3. Continue\n\n  Enter to select · Esc to cancel`;
 test("remoteScreen: 연결 메뉴·켜짐 표시·세션 주소를 화면에서 읽는다", () => {
-  assert.deepEqual(I.remoteScreen(RC_BASE), { menu: false, active: false, url: "" });
+  assert.deepEqual(I.remoteScreen(RC_BASE), { menu: false, active: false, seen: false, url: "" });
   const m = I.remoteScreen(RC_MENU);
   assert.equal(m.menu, true); assert.equal(m.active, true); assert.equal(m.url, RC_URL);
   const a = I.remoteScreen(`${RC_BASE}\n  Remote Control active`);
@@ -2961,7 +2962,8 @@ test("원격 연결 켜기: 작업 중인 PO에는 Esc를 누르지 않는다(�
   const w = await rcRun({ pre: RC_BASE, afterSend: [RC_MENU], statusAfterSend: "working" }); // the PO started a turn after the send
   assert.equal(w.rc.phase, "fail"); assert.deepEqual(w.log.keys, []);
   const blocked = await rcRun({ pre: RC_BASE, status: "working" }); // a working PO takes no command at all
-  assert.equal(blocked.rc?.phase, undefined); assert.deepEqual(blocked.log.sends, []);
+  assert.equal(blocked.rc?.phase, "fail"); assert.deepEqual(blocked.log.sends, []); // nothing sent; the reason is a note in the chat, no toast row
+  assert.match(blocked.rc.note.text, /^켜지 못함: /); assert.deepEqual(blocked.log.says, []);
 });
 test("원격 연결 켜기: 켜짐(새 세션 주소)·결과 모름·보내기 실패를 각각 알려 준다", async () => {
   const on = await rcRun({ pre: RC_BASE, afterSend: [RC_BASE, `${RC_BASE}\n  Remote Control active\n  ${RC_URL}`] });
@@ -2970,5 +2972,41 @@ test("원격 연결 켜기: 켜짐(새 세션 주소)·결과 모름·보내기 
   assert.equal(stale.rc.phase, "unknown"); assert.equal(stale.rc.note.bad, true);
   const bad = await rcRun({ pre: RC_BASE, send: { ok: false, why: "PO 입력칸에 글이 있습니다" } });
   assert.equal(bad.rc.phase, "fail"); assert.equal(bad.rc.note.text, "켜지 못함: PO 입력칸에 글이 있습니다");
-  assert.equal(bad.log.says.at(-1).bad, true);
+  assert.deepEqual(bad.log.says, []); // the result is the chat note only: a toast row above the room came and went and moved the whole chat
+  assert.doesNotMatch(methodOf(mainSrc(), "  remoteSet(room, patch, c) {", "  remoteOn(room"), /this\.say\(/);
+});
+
+// ---- #79: the on-state after a start / reload of the desk is read from the PO's screen (read only)
+const RC_LINE = `❯ /remote-control\n\n  /remote-control is active · Continue here, on your phone, or at\n  ${RC_URL}\n`;
+test("remoteScreen: 켜짐 안내 줄(실제 화면 문구)은 seen, 그 뒤에 끊김 줄이 있거나 줄이 사라졌으면 seen이 아니다", () => {
+  const s = I.remoteScreen(`${RC_LINE}\n${RC_BASE}`);
+  assert.equal(s.seen, true); assert.equal(s.url, RC_URL); assert.equal(s.menu, false);
+  assert.equal(I.remoteScreen(RC_BASE).seen, false);
+  assert.equal(I.remoteScreen(`${RC_LINE}\n  Remote Control disconnected\n${RC_BASE}`).seen, false);
+  assert.equal(I.remoteScreen(`  Remote Control disconnected\n${RC_LINE}\n${RC_BASE}`).seen, true); // the later line wins
+  assert.equal(I.remoteScreen("I will run /remote-control later\n> \n").seen, false);
+});
+test("remoteRestore: 시작·새로고침 때 PO마다 화면을 한 번만 읽어(보내거나 누르지 않음) 켜짐이면 안내 줄 없이 켜짐 상태로 맞춘다", async () => {
+  const src = mainSrc();
+  const reads = [], other = [];
+  const screens = { t1: `${RC_LINE}\n${RC_BASE}`, t2: RC_BASE, t3: null };
+  const g = { hc: async (a) => { if (a[0] === "read") { reads.push(a[1]); return screens[a[1]] === null ? { code: 1, stdout: "" } : { code: 0, stdout: screens[a[1]] }; } other.push(a); return { code: 0, stdout: "" }; },
+    PROMPT_LINES: 40, remoteScreen: I.remoteScreen, poList: (terms) => terms.map((t) => ({ id: t.id, address: t.address })) };
+  const self = { rc: new Map(), rcChecked: new Set(), say: () => { throw new Error("no toast"); }, liveTerms: () => [{ id: "a", address: "t1" }, { id: "b", address: "t2" }, { id: "c", address: "t3" }] };
+  Object.assign(self, runMethod(src, "  async remoteRead(po) {", "  // Esc closes the menu", g), runMethod(src, "  remoteRestore(cx, force = false) {", "  // A panel answer: the answer line", g));
+  let notified = 0; const spawned = [];
+  const cx = { spawn: (fn) => spawned.push(fn(cx)), notify: () => { notified++; } };
+  self.remoteRestore(cx); await Promise.all(spawned); await tick();
+  assert.equal(self.rc.get("a").phase, "on"); assert.equal(self.rc.get("a").url, RC_URL); assert.equal(self.rc.get("a").note, undefined);
+  assert.equal(self.rc.has("b"), false); // not seen: stays "켜기"
+  assert.deepEqual(other, []); // read only
+  const n = reads.length; spawned.length = 0;
+  self.remoteRestore(cx); await Promise.all(spawned);
+  assert.deepEqual(reads.slice(n), ["t3"]); // t1/t2 were read already; t3 could not be read, so it is tried again
+  spawned.length = 0; self.rc.set("b", { phase: "fail", at: 1, why: "x" }); screens.t2 = `${RC_LINE}\n${RC_BASE}`;
+  self.remoteRestore(cx, true); await Promise.all(spawned);
+  assert.equal(self.rc.get("b").phase, "fail"); // a try of this session is newer than the screen
+  const m = mainSrc();
+  assert.match(m, /this\.remoteRestore\(cx\);/); // after a load
+  assert.match(m, /this\.remoteRestore\(c, true\); this\.load\(c\);/); // the refresh button
 });

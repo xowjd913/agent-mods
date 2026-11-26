@@ -1085,8 +1085,12 @@ function remoteScreen(text) {
   const opt = (n, re) => new RegExp(`^\\s*(?:[❯>›▶]\\s*)?${n}[.)]\\s*${re}\\s*$`, "im").test(tail);
   const menu = opt(1, "Disconnect this session") && opt(2, "Show QR code") && opt(3, "Continue");
   const active = menu || /Remote Control (is )?(active|connected)/i.test(lines.slice(-8).join("\n"));
+  // `seen` = the transcript line Claude Code prints when it turned on ("/remote-control is active · Continue here, on your phone, or at <url>", copied from a real
+  // screen) is on screen and no later line says it was turned off. Weaker than `active`: that line scrolls away, and a disconnect line's wording is UNVERIFIED.
+  let on = -1, off = -1;
+  lines.forEach((l, i) => { if (/\/?remote[- ]control (is )?(active|connected)/i.test(l)) on = i; if (/remote[- ]control (is )?(disconnected|off|stopped|inactive)|disconnected (this )?session/i.test(l)) off = i; });
   const urls = clean.match(REMOTE_URL) ?? [];
-  return { menu, active, url: urls.length ? urls[urls.length - 1].replace(/[.,;:]+$/, "") : "" };
+  return { menu, active, seen: active || (on >= 0 && on > off), url: urls.length ? urls[urls.length - 1].replace(/[.,;:]+$/, "") : "" };
 }
 // The one-line system note for the room's chat. kind: on | already | fail | unknown.
 function remoteNote(kind, { url = "", why = "" } = {}) {
@@ -1376,6 +1380,7 @@ export default class Inbox extends View {
     this.promptChain = 0; // the newest scheduled re-read of the screen; an older one does nothing
     this.who = new Map(); // room -> the leader the room is narrowed to (#58, "특정 리더만"); like `filt`, not saved
     this.rs = new Map(); // room -> the state of its "PO 새로 시작" (see restartOpen)
+    this.rcChecked = new Set(); // PO terminal addresses whose screen was read for the on-state (see remoteRestore)
     this.rc = new Map(); // room -> the state of its "원격 연결 켜기" {phase: send | on | already | unknown | fail, at, url, why, note {text, ms, bad}} (see remoteOn)
     this.rgen = 0; // numbers a restart run: a timer of an older run does nothing
     this.filt = new Map(); // room -> the chat filter chip picked there (전체 when missing); not saved: a restart shows every message again
@@ -1867,6 +1872,7 @@ export default class Inbox extends View {
         this.error = err;
         rememberLeaders();
         this.markSeen();
+        this.remoteRestore(cx);
         if (this.drawing()) this.startWatch(cx);
       } catch (e) { if (gen === this.gen) { this.error = `불러오기 실패: ${String(e?.message ?? e).slice(0, 180)}`; this.changed = true; } }
       finally {
@@ -2397,7 +2403,7 @@ export default class Inbox extends View {
   restartRun(room, po, id, c) {
     const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "");
     const why = restartBlock({ po, status: st });
-    if (why) { this.say(why, true); try { c.notify(); } catch {} return; }
+    if (why) { this.remoteSet(room, { phase: "fail", kind: "fail", why }, c); return; }
     const g = ++this.rgen;
     this.rs.set(room, { phase: "run", n: 0, gen: g, po, id, since: 0, path: "", note: null, quiet: 0, why: "" });
     try { c.notify(); } catch {}
@@ -2539,15 +2545,14 @@ export default class Inbox extends View {
     const r = { ...(this.rc.get(room) ?? {}), at: Date.now(), ...patch };
     if (patch.kind) { const ms = Date.now(); r.note = { text: remoteNote(patch.kind, r), ms, bad: patch.kind === "fail" || patch.kind === "unknown" }; delete r.kind; }
     this.rc.set(room, r);
-    if (r.note && patch.phase !== "send") this.say(r.note.text, r.note.bad);
-    try { c.notify(); } catch {}
+    try { c.notify(); } catch {} // the result is the system note at the end of the chat: no toast row above the room (it came and went and moved the whole chat)
   }
   remoteOn(room, po, c) {
     const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "");
     const r0 = this.rc.get(room);
     const rs = this.rs.get(room);
     const why = remoteBlock({ po, status: st, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")), sending: r0?.phase === "send" });
-    if (why) { this.say(why, true); try { c.notify(); } catch {} return; }
+    if (why) { this.remoteSet(room, { phase: "fail", kind: "fail", why }, c); return; }
     this.remoteSet(room, { phase: "send", why: "" }, c);
     c.spawn(async (cx) => {
       const done = (phase, kind, extra = {}) => this.remoteSet(room, { phase, kind, why: "", url: "", ...extra }, cx);
@@ -2587,7 +2592,7 @@ export default class Inbox extends View {
     const at = on ? new Date(r.at).toTimeString().slice(0, 5) : "";
     return h_flex().id(`rc-${room}`).flex_none().min_w(0).gap(6).items_center()
       .when(r?.phase === "send", (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child("확인 중…")))
-      .child(this.button(t, on ? "rc-on-done" : "rc-on", on ? "● 원격 연결 켜짐" : "원격 연결 켜기", (c) => this.remoteOn(room, po, c), { disabled: why, tip: why || (on ? `${at}에 화면으로 확인한 상태입니다. 그 뒤 터미널에서 끊었는지는 보지 않습니다. 누르면 화면을 다시 확인하고, 꺼져 있을 때만 /remote-control을 보냅니다` : "이 PO 터미널에 /remote-control을 보내 원격 연결(Remote Control)을 켭니다. 이미 켜져 있으면 보내지 않습니다") }));
+      .child(this.button(t, on ? "rc-on-done" : "rc-on", on ? h_flex().items_center().gap(6).child(div().flex_none().w(8).h(8).rounded(4).bg(t.working)).child("원격 연결 켜짐") : "원격 연결 켜기", (c) => this.remoteOn(room, po, c), { disabled: why, tip: why || (on ? `${at}에 화면으로 확인한 상태입니다. 그 뒤 터미널에서 끊었는지는 보지 않습니다. 누르면 화면을 다시 확인하고, 꺼져 있을 때만 /remote-control을 보냅니다` : "이 PO 터미널에 /remote-control을 보내 원격 연결(Remote Control)을 켭니다. 이미 켜져 있으면 보내지 않습니다") }));
   }
   // The system note of the last 원격 연결 try, as a quiet line at the end of the room's chat.
   remoteNoteRow(t, room) {
@@ -2597,6 +2602,26 @@ export default class Inbox extends View {
       .child(div().min_w(0).text_size(11).text_color(n.bad ? t.blocked : t.dim).child(this.text(`rc-note-t-${room}`, chatHtml(`원격 연결 · ${new Date(n.ms).toTimeString().slice(0, 5)} · ${n.text}`))));
   }
 
+  // After a start or a reload of the desk the in-memory state is gone, so every PO terminal's screen is read ONCE (read only, nothing is sent or pressed) and a room whose
+  // screen still shows Claude Code's "/remote-control is active" line gets the on-state without a chat note. The screen is the only source: when that line has scrolled away
+  // it is not seen and the button stays "켜기" (a click then checks again). A state is only ever set here, never cleared. `force` (the refresh button) checks again.
+  remoteRestore(cx, force = false) {
+    if (force) this.rcChecked.clear();
+    const pos = poList(this.liveTerms()).filter((p) => !this.rcChecked.has(p.address));
+    for (const p of pos) {
+      this.rcChecked.add(p.address);
+      cx.spawn(async (c) => {
+        const txt = await this.remoteRead(p.address);
+        if (txt === null) { this.rcChecked.delete(p.address); return; } // could not read: try again at the next load
+        const r = this.rc.get(p.id);
+        if (r && r.phase !== "on" && r.phase !== "already") return; // a try of this session (sending, failed, unknown) is newer than the screen
+        const sc = remoteScreen(txt);
+        if (!sc.seen) return;
+        this.rc.set(p.id, { ...(r ?? {}), phase: "on", at: Date.now(), url: sc.url || r?.url || "", why: "" });
+        try { c.notify(); } catch {}
+      });
+    }
+  }
   // A panel answer: the answer line goes through deliver(). The box is cleared and the ask marked once it reached the PO (or, when the PO had
   // no pane, once the pane opened and it was delivered).
   send(a, text, cx, kind = "answer") {
@@ -3372,7 +3397,7 @@ export default class Inbox extends View {
           .when(!this.paned || this.mained, (el) => el.child(div().text_size(15).font_semibold().text_color(t.foreground).child("UI 모드"))) // a pane's own header already says it
           .when(!this.windowed && waiting > 0, (el) => el.child(this.tag(t, `대기 ${waiting}`, "blocked")))
           .child(div().id("inbox-refresh").p(3).rounded(5).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
-            .on_mouse_down("left", stop).on_click((_e, c) => { this.gen++; this.busy = false; this.load(c); }).tooltip("새로고침")
+            .on_mouse_down("left", stop).on_click((_e, c) => { this.gen++; this.busy = false; this.remoteRestore(c, true); this.load(c); }).tooltip("새로고침")
             .child(this.busy ? svg(ICON("spinner")).size(13).spin(900) : div().text_size(14).child("↻"))))
         .child(h_flex().gap(8).items_center()
           .child(div().text_size(11).text_color(t.dim).child(this.data ? ago(this.data.at) : ""))

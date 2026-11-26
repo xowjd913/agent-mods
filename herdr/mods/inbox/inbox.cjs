@@ -1884,8 +1884,12 @@ function remoteScreen(text) {
   const opt = (n, re) => new RegExp(`^\\s*(?:[❯>›▶]\\s*)?${n}[.)]\\s*${re}\\s*$`, "im").test(tail);
   const menu = opt(1, "Disconnect this session") && opt(2, "Show QR code") && opt(3, "Continue");
   const active = menu || /Remote Control (is )?(active|connected)/i.test(lines.slice(-8).join("\n"));
+  // `seen` = the transcript line Claude Code prints when it turned on ("/remote-control is active · Continue here, on your phone, or at <url>", copied from a real
+  // screen) is on screen and no later line says it was turned off. Weaker than `active`: that line scrolls away, and a disconnect line's wording is UNVERIFIED.
+  let on = -1, off = -1;
+  lines.forEach((l, i) => { if (/\/?remote[- ]control (is )?(active|connected)/i.test(l)) on = i; if (/remote[- ]control (is )?(disconnected|off|stopped|inactive)|disconnected (this )?session/i.test(l)) off = i; });
   const urls = clean.match(REMOTE_URL) ?? [];
-  return { menu, active, url: urls.length ? urls[urls.length - 1].replace(/[.,;:]+$/, "") : "" };
+  return { menu, active, seen: active || (on >= 0 && on > off), url: urls.length ? urls[urls.length - 1].replace(/[.,;:]+$/, "") : "" };
 }
 // The one-line system note for the room's chat. kind: on | already | fail | unknown.
 function remoteNote(kind, { url = "", why = "" } = {}) {
