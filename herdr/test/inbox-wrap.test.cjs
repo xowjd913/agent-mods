@@ -307,13 +307,14 @@ test("R16: the same closing-tag regex is in the mod copy, and the terminal-line 
 
 function replyDesk(store = {}) {
   const grab = (name, end) => { const a = MAIN.indexOf(name), b = MAIN.indexOf(end, a); assert.ok(a > 0 && b > a, name); return MAIN.slice(a, b); };
-  const body = [grab("  picsOf(key = null)", "  bumpBusy("), grab("  pruneReply(asks)", "  pruneSent(asks)"), grab("  clearBox(a, how", "  box(leader, cx)")].join("\n");
-  const make = new Function("shared", "setShared", "SENT_KEY", "staleDrafts", `return class Desk {
-    constructor() { this.pics = []; this.replyPics = new Map(); this.replyBusy = new Map(); this.inputs = new Map(); this.inputSeen = new Map(); this.writing = null; }
+  const body = [grab("  picsOf(key = null)", "  bumpBusy("), grab("  pruneReply(asks)", "  pruneSent(asks)"), grab("  clearBox(a, how", "  box(leader, cx)"), grab("  // #74: the draft mirror.", "  // A held Enter whose second Enter")].join("\n");
+  const make = new Function("shared", "setShared", "SENT_KEY", "staleDrafts", "draftWiped", `return class Desk {
+    constructor() { this.pics = []; this.replyPics = new Map(); this.replyBusy = new Map(); this.inputs = new Map(); this.inputSeen = new Map(); this.writing = null; this.mirror = new Map(); this.keyAt = 0; this.chat = null; }
+    diag() {}
     askKey(a) { return a.kind + "|" + a.link; }
     ${body}
   }`);
-  return new (make((k) => store[k], (k, v) => { store[k] = v; }, "sent", I.staleDrafts))();
+  return new (make((k) => store[k], (k, v) => { store[k] = v; }, "sent", I.staleDrafts, I.draftWiped))();
 }
 const ASK = (leader) => ({ kind: "decision", link: "l", s: { leader } });
 const fakeInput = (v) => ({ v, value() { return this.v; }, set_value(x) { this.v = x; } });
@@ -492,7 +493,7 @@ test("R18: pinTick keeps the pin when a scroll is held back, so the view goes to
   const jumps = [];
   let ch = 1000;
   d.scroll = { offset: () => ({ y: 600 }), viewport_size: () => ({ height: 400 }), content_size: () => ({ height: ch }), scroll_to_item: (i) => jumps.push(i) };
-  d.drawnAt = 1; d.lastIdx = 7;
+  d.drawnAt = 1; d.lastIdx = 7; d.guardAll = () => {};
   d.pin = { pinned: true, ct: 1000 };
   d.ui = { sels: new Map(), sel: true, selAt: Date.now(), press: false, pressAt: 0 }; // a settled selection holds the scroll
   ch = 1100; // the content grew without a redraw (a late picture, a narrower window)
@@ -516,7 +517,7 @@ test("#72 pinTick: a go tick (pinned, a long new row) does not flash the jump bu
   const d = new Inbox();
   let y = 900, ch = 1400, notified = 0;
   d.scroll = { offset: () => ({ y }), viewport_size: () => ({ height: 500 }), content_size: () => ({ height: ch }), scroll_to_item: () => { y = ch - 500; } };
-  d.drawnAt = 1; d.lastIdx = 7; d.softNotify = () => { notified++; };
+  d.drawnAt = 1; d.lastIdx = 7; d.guardAll = () => {}; d.softNotify = () => { notified++; };
   d.pin = { pinned: true, ct: 1400, vh: 500 };
   ch = 1520; // a 120px row arrived while pinned at the bottom: pinStep goes, the old y against the new height would read as "away"
   d.pinTick({ notify() {} });
@@ -1062,4 +1063,107 @@ test("long message: main.js folds the person's and the PO's bubbles behind 더 �
   assert.match(src, /clipLong\(bp\.text\)/);
   assert.match(src, /mdFolded\(id, e\.text, t\)/);
   assert.match(src, /moreLabel\(lc\.more\)/);
+});
+
+// ---- #74: a draft in the chat box (and the answer boxes) survives every redraw
+
+// A stand-in for the retained text state: text, cursor and tokens are kept; `host` wipes it the way a rebuilt view would.
+function fakeBox(text = "", range = null) {
+  const b = { v: text, r: range ?? { start: text.length, end: text.length }, sets: 0,
+    value() { return this.v; }, content() { return { text: this.v, tokens: [] }; },
+    selected_range() { return this.r; }, set_selected_range(x) { this.r = x; },
+    set_value(x) { this.sets++; this.v = typeof x === "string" ? x : x.text; if (!this.r || this.r.end > this.v.length) this.r = { start: this.v.length, end: this.v.length }; },
+    host() { this.v = ""; this.r = { start: 0, end: 0 }; } };
+  return b;
+}
+function typingDesk(chat) {
+  const d = replyDesk();
+  d.chat = chat;
+  d.mirrorNow = (key, st) => d.keep(key, st, st.value());
+  return d;
+}
+
+test("#74: draftWiped — empty box, text in the mirror, and no key press of the person's just before", () => {
+  const m = { text: "쓰던 글" };
+  assert.equal(I.draftWiped(m, "", 0, 10_000), true);
+  assert.equal(I.draftWiped(m, "", 9_500, 10_000), false); // the person deleted it (a key within DRAFT_KEY_MS)
+  assert.equal(I.draftWiped(m, "쓰던", 0, 10_000), false); // not empty
+  assert.equal(I.draftWiped(null, "", 0, 10_000), false); // nothing was written
+  assert.equal(I.draftWiped({ text: "" }, "", 0, 10_000), false);
+});
+
+// Each path that redraws or rebuilds around the box: new message, room refresh, status/label, counts, typing line, mode switch, pin tick.
+// The box is wiped as a rebuilt view would wipe it; whichever path draws next (all of them go through full() or pinTick()) puts the draft back.
+for (const path of ["새 메시지(말풍선)", "방 목록 새로고침", "상태·라벨·배지 갱신", "개수 갱신", "입력 중 표시줄", "모드 전환(UI 모드·창·도크)", "pinTick 다시 그리기"]) {
+  test(`#74: ${path} 뒤에도 쓰던 글과 커서가 남는다`, () => {
+    const chat = fakeBox("회의 전에 이거 확인해줘", { start: 4, end: 4 });
+    const d = typingDesk(chat);
+    d.keep("chat", chat, chat.value());
+    d.keyAt = Date.now() - 60_000; // typed a minute ago
+    chat.host(); // the redraw path emptied it
+    d.guardAll();
+    assert.equal(chat.v, "회의 전에 이거 확인해줘");
+    assert.deepEqual(chat.r, { start: 4, end: 4 });
+  });
+}
+
+test("#74: change 이벤트로 빈 값이 와도 사람 키 입력이 없었으면 되돌리고, 있었으면 지운 것으로 본다", () => {
+  const chat = fakeBox("abc");
+  const d = typingDesk(chat);
+  d.keep("chat", chat, "abc");
+  d.keyAt = Date.now() - 5000;
+  chat.host();
+  assert.equal(d.guard("chat", chat, ""), true);
+  assert.equal(chat.v, "abc");
+  // the person selects all and deletes: a key press, so the mirror follows the empty box
+  d.keyAt = Date.now();
+  chat.host();
+  assert.equal(d.guard("chat", chat, ""), false);
+  d.keep("chat", chat, "");
+  assert.equal(d.mirror.has("chat"), false);
+  d.keyAt = 0;
+  d.guardAll();
+  assert.equal(chat.v, ""); // and it stays empty afterwards
+});
+
+test("#74: 보내기·낡은 초안 정리는 우리가 비운 것이라 되돌리지 않는다", () => {
+  const chat = fakeBox("보낼 글");
+  const d = typingDesk(chat);
+  d.keep("chat", chat, "보낼 글");
+  d.keyAt = 0;
+  d.wipe("chat", chat); // sendChat
+  d.guardAll();
+  assert.equal(chat.v, "");
+  // an answer box cleared by pruneReply / clearBox stays cleared
+  d.inputs.set("lead-gone", fakeBox("old draft"));
+  d.keep("lead-gone", d.inputs.get("lead-gone"), "old draft");
+  d.pruneReply([ASK("lead-a")]);
+  d.inputSeen.set("lead-gone", 0);
+  d.pruneReply([ASK("lead-a")]);
+  d.guardAll();
+  assert.equal(d.inputs.get("lead-gone").v, "");
+});
+
+test("#74: 답변 상자의 글도 같은 방식으로 지켜진다", () => {
+  const d = typingDesk(fakeBox(""));
+  const box = fakeBox("답: 2안으로");
+  d.inputs.set("lead-a", box);
+  d.keep("lead-a", box, box.value());
+  d.keyAt = 0;
+  box.host();
+  d.guardAll();
+  assert.equal(box.v, "답: 2안으로");
+});
+
+test("#74: 소스 — 채팅 상자는 모든 방에서 같은 자리에 그려지고(id 고정), 상태는 한 번만 만들며, 다시 그리기 경로가 상자를 비우지 않는다", () => {
+  assert.equal((MAIN.match(/TextareaState\.new\(/g) ?? []).length, 1);
+  const box = MAIN.slice(MAIN.indexOf("  chatBox(t, v) {"), MAIN.indexOf("  poHint(t) {"));
+  assert.doesNotMatch(box, /chat-none/); // the "PO 모름" room no longer swaps the box out of the tree
+  for (const id of ["chat-box", "chat-target", "chat-row", "chat-input"]) assert.match(box, new RegExp(`id\\("${id}"\\)`));
+  assert.match(MAIN, /full\(cx\) \{\n    this\.tvN = 0;\n    this\.noteRedraw\(cx\);\n    this\.guardAll\(\);/);
+  assert.match(MAIN, /pinTick\(cx\) \{\n    this\.guardAll\(\);/);
+  // the only places that write into the box: our own clears (wipe), the guard's restore, the "@" pick, the held / stray line break
+  const writers = MAIN.split("\n").map((l, i) => [i + 1, l]).filter(([, l]) => /this\.chat\.(set_value|replace)\(/.test(l));
+  const where = (n) => { const head = MAIN.slice(0, MAIN.split("\n").slice(0, n).join("\n").length); return head.slice(head.lastIndexOf("\n  ") + 1).split("\n")[0]; };
+  for (const [n] of writers) assert.match(MAIN.split("\n").slice(0, n).reverse().find((l) => /^  [a-zA-Z]+\(.*\) \{$/.test(l)), /pickMenu|enterBox|dropBreak/, `line ${n}`);
 });

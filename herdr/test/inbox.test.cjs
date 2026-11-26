@@ -524,7 +524,7 @@ test("메신저 창: 방 목록·타임라인·인라인 버튼·답함 표시 �
   assert.match(src, /e\.who === "me"[\s\S]*items_end\(\)/); // 내 글은 오른쪽
   assert.match(src, /this\.circle\(t, color, letter\)|circle\(t, color, letter\) \{/);
   assert.match(src, /채팅 없음/); // PO 모름 방에는 채팅 상자가 없다
-  assert.match(src, /v\.pick === PO_OTHER[\s\S]*chat-none/);
+  assert.match(src, /const none = v\.pick === PO_OTHER/); // 같은 자리에 그리고 안내 줄만 바뀐다(#74)
 });
 
 // ---- 리더 이름(#33): 받은편지함과 에이전트 목록이 같은 규칙으로 세션 이름을 고른다.

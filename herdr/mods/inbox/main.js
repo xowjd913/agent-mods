@@ -211,6 +211,10 @@ const DRAFT_GRACE_MS = 60000;
 function staleDrafts(keys, live, seen, now) {
   return [...keys].filter((k) => !live.has(k) && !(now - (seen.get(k) ?? 0) < DRAFT_GRACE_MS));
 }
+// #74: a draft mirror. Every change of a text box is copied (`mirror`: {text, content, range}); when the box comes back empty without the
+// person's own key press (`keyAt`, within DRAFT_KEY_MS) and without a clear of ours (which empties the mirror first), the text is put back.
+const DRAFT_KEY_MS = 1000;
+const draftWiped = (mirror, value, keyAt, now) => Boolean(mirror) && String(mirror.text ?? "") !== "" && String(value ?? "") === "" && !(Number(now) - Number(keyAt) < DRAFT_KEY_MS);
 // The "@" menu: "@here" first, then the live leaders of the picked PO (`pick`, a PO id; none for PO_OTHER), by shown name. `query`
 // filters by hc name or shown name.
 function leaderMenu(terms, memo, query = "", limit = 8, pick = "") {
@@ -1197,6 +1201,8 @@ export default class Inbox extends View {
     try { this.chat.set_auto_grow(1, INPUT_MAX_LINES); } catch {}
     this.menu = null; // the open "@" menu: {start, end, query, items, sel}
     this.changedAt = 0; // the last edit of the box (ms)
+    this.mirror = new Map(); // #74: box key ("chat" or a leader) -> {text, content, range}: the last text each box held (see keep / guard)
+    this.keyAt = 0; // the last key press in a box (ms): an emptied box with no key press just before it was wiped, not edited
     this.sentAt = 0; // the last send (ms)
     this.uid = Math.random().toString(36).slice(2, 8); // this copy of the desk (the badge lease, record ids)
     this.seq = 0;
@@ -1235,10 +1241,12 @@ export default class Inbox extends View {
       this.changedAt = Date.now();
       let value = "";
       try { value = this.chat.value(); } catch {}
+      if (this.guard("chat", this.chat, value)) return; // the box was emptied behind the person's back: the text is back, nothing else to do
+      this.keep("chat", this.chat, value);
       const core = editCore(value); // an edit is a change of the text itself: the widget's own line break for an Enter is not one
       if (core !== this.core) { this.core = core; this.editAt = this.changedAt; }
       this.heldTick(c);
-      if (strayBreak(value, this.sentAt, this.changedAt)) { try { this.chat.set_value(""); } catch {} return; } // the Enter that sent left a line break
+      if (strayBreak(value, this.sentAt, this.changedAt)) { this.wipe("chat", this.chat); return; } // the Enter that sent left a line break
       if (strayHeld(value, this.heldAt, this.changedAt)) { this.dropBreak(value); return; } // the held Enter left a line break
       this.syncMenu(c);
     });
@@ -1319,6 +1327,7 @@ export default class Inbox extends View {
 
   // ---- redraw gating (a drag-select must not be rebuilt under the pointer) and the pin to the newest
   pinTick(cx) {
+    this.guardAll();
     if (this.dirty && !quietNow(this.ui, Date.now())) { this.dirty = false; try { cx.notify(); } catch {} }
     if (!this.scroll || !this.drawnAt) return;
     try {
@@ -1417,6 +1426,41 @@ export default class Inbox extends View {
     if (this.selMark) this.selMark.downs++;
     this.diag(`press (list mouse down), click ${e?.click_count ?? "?"}${this.ui.selAt && this.selMark ? `, ${Date.now() - this.ui.selAt}ms after the last settle` : ""}`);
   }
+  // #74: the draft mirror. keep(): copy what a box holds (text, tokens, cursor) after each change. wipe(): the mod's own clear (send, a stale
+  // draft): the mirror is emptied first so the clear is not taken for a loss. guard(): a box that is empty while the mirror holds text and no
+  // key of the person's came just before was emptied by something else (a rebuild of the view): the text and the cursor are put back.
+  keep(key, st, value) {
+    try {
+      const text = value ?? st.value();
+      if (text === "") { this.mirror.delete(key); return; }
+      let content = null, range = null;
+      try { content = st.content(); } catch {}
+      try { range = st.selected_range(); } catch {}
+      this.mirror.set(key, { text, content, range });
+    } catch {}
+  }
+  wipe(key, st) {
+    this.mirror.delete(key);
+    try { st.set_value(""); } catch {}
+  }
+  guard(key, st, value) {
+    const m = this.mirror.get(key);
+    let v = value;
+    if (v === undefined) { try { v = st.value(); } catch { return false; } }
+    if (!draftWiped(m, v, this.keyAt, Date.now())) return false;
+    try {
+      st.set_value(m.content ?? m.text);
+      if (m.range) st.set_selected_range(m.range);
+    } catch { try { st.set_value(m.text); } catch {} }
+    this.diag(`draft restored in ${key === "chat" ? "chat" : "answer box"} (${m.text.length} chars)`);
+    return true;
+  }
+  // Every box is looked at once per draw and once per poll tick, so a loss that raised no change event is mended within a tick.
+  guardAll() {
+    this.guard("chat", this.chat);
+    for (const [k, st] of this.inputs) this.guard(k, st);
+  }
+
   // A held Enter whose second Enter never came (the person kept typing): the "한 번 더 Enter" hint goes away. The redraw respects the selection hold.
   heldTick(c) {
     if (this.heldAt && !holdShown(this.editAt, this.heldAt)) { this.heldAt = 0; this.softNotify(c); }
@@ -1619,7 +1663,7 @@ export default class Inbox extends View {
     const now = Date.now();
     for (const k of live) this.inputSeen.set(k, now);
     for (const k of staleDrafts(this.inputs.keys(), live, this.inputSeen, now)) { // an old draft must not reappear on the leader's next card (but one missing poll must not wipe it: #57)
-      try { const st = this.inputs.get(k); if (String(st.value() ?? "") !== "") st.set_value(""); } catch {}
+      try { const st = this.inputs.get(k); if (String(st.value() ?? "") !== "" || this.mirror.has(k)) this.wipe(k, st); } catch {}
       this.inputSeen.delete(k);
     }
   }
@@ -2352,7 +2396,7 @@ export default class Inbox extends View {
     const leader = a.s.leader;
     try { setShared(SENT_KEY, { ...(shared(SENT_KEY) ?? {}), [leader]: this.askKey(a) + (how === "held" ? "|held" : "") }); } catch {}
     const st = this.inputs.get(leader);
-    if (st && (!sent || String(st.value() ?? "").trim() === sent.text)) st.set_value("");
+    if (st && (!sent || String(st.value() ?? "").trim() === sent.text)) this.wipe(leader, st);
     this.setPics(leader, sent ? this.picsOf(leader).filter((x) => !sent.imgs.includes(x.path)) : []);
     if (this.writing === a.s.leader) this.writing = null;
   }
@@ -2363,6 +2407,7 @@ export default class Inbox extends View {
       s = InputState.new({ value: "", placeholder: "답을 적고 Enter" });
       s.on("submit", (_e, c) => { const a = this.asks().find((x) => x.s.leader === leader); if (a) this.send(a, s.value(), c); });
       s.on("paste_other", (_e, c) => this.pastePic(c, leader)); // Cmd+V found no text: take a picture from the clipboard, as the PO box does
+      s.on("change", () => { let v; try { v = s.value(); } catch { return; } if (!this.guard(leader, s, v)) this.keep(leader, s, v); }); // #74: the draft mirror
       this.inputs.set(leader, s);
     }
     return s;
@@ -2435,6 +2480,7 @@ export default class Inbox extends View {
 
   // Keys of the box: the open menu's keys first, then Enter / Shift+Enter.
   inputKey(e, c) {
+    this.keyAt = Date.now();
     if (this.menu) { this.menuKey(e, c); return; }
     const intent = enterIntent(e?.key, Boolean(e?.modifiers?.shift));
     if (!intent) return;
@@ -2503,7 +2549,7 @@ export default class Inbox extends View {
       const r = this.deliver(po, line, c, { text: p.text, imgs: pics.map((x) => x.path), to: p.to[0] ?? "", tos: p.to, po: v.pick, kind: "chat" });
       if (r === "sent" || r === "held" || r === "opening") { // opening: the bubble holds the text and sends it by itself once the pane opens
         this.sentAt2 = Date.now(); // the draw that shows the new bubble goes to the end once (sendFollow)
-        this.chat.set_value("");
+        this.wipe("chat", this.chat);
         this.pics = [];
         this.menu = null;
       }
@@ -2513,10 +2559,9 @@ export default class Inbox extends View {
 
   // The chat footer: the "@" menu, the input with mention chips, the send button. The room has no box while it is "PO 모름" (no PO to send to).
   chatBox(t, v) {
-    if (v.pick === PO_OTHER) {
-      return div().id("chat-none").flex_none().px(12).py(8).border_t(1).border_color(t.border).text_size(11.5).text_color(t.dim)
-        .child("PO를 알 수 없는 방이라 여기서는 보낼 곳이 없습니다. 왼쪽에서 PO 방을 고르세요.");
-    }
+    // #74: the box is drawn in every room (the "PO 모름" room too, with a note instead of a target), at the same place in the tree with ids on
+    // its parts, so a room switch, a refresh or a hint line coming and going never rebuilds the input the person is typing in.
+    const none = v.pick === PO_OTHER;
     const menu = this.menu && v_flex().id("chat-menu").flex_none().p(4).gap(2).rounded(8).bg(t.raised).border(1).border_color(t.border)
       .children(this.menu.items.map((it, i) => h_flex().id(`mn-${it.id}`).h(26).px(8).gap(8).items_center().rounded(6).cursor_pointer()
         .bg(i === this.menu.sel ? t.selected : t.raised).hover((x) => x.bg(t.hover))
@@ -2527,16 +2572,16 @@ export default class Inbox extends View {
     const target = v.tabs.find((x) => x.id === v.pick && x.id !== PO_OTHER && !x.ghost);
     const chip = (ctx) => div().h(ctx.line_height).px(5).rounded(5).flex().items_center().bg(t.working + "26").text_color(t.working).text_size(12.5).font_semibold()
       .child(ctx.token.label ?? ctx.token.text.trim());
-    return v_flex().flex_none().px(10).pb(10).pt(6).gap(6).border_t(1).border_color(t.border)
+    return v_flex().id("chat-box").flex_none().px(10).pb(10).pt(6).gap(6).border_t(1).border_color(t.border)
       .on_key_down((e, c) => this.inputKey(e, c))
       .when(Boolean(menu), (el) => el.child(menu))
       .when(holdShown(this.changedAt, this.heldAt), (el) => el.child(div().text_size(11).text_color(t.working).child("한 번 더 Enter로 보냅니다")))
-      .child(div().truncate().text_size(10.5).text_color(t.dim).child(target ? `받는 PO: ${target.label}` : ghost ? "PO 터미널을 다시 찾는 중입니다 — 쓰던 글은 그대로 있습니다" : "받는 PO가 없습니다 — PO를 고르세요"))
+      .child(div().id("chat-target").truncate().text_size(10.5).text_color(t.dim).child(none ? "PO를 알 수 없는 방이라 여기서는 보낼 곳이 없습니다 — 왼쪽에서 PO 방을 고르세요(쓰던 글은 그대로 있습니다)" : target ? `받는 PO: ${target.label}` : ghost ? "PO 터미널을 다시 찾는 중입니다 — 쓰던 글은 그대로 있습니다" : "받는 PO가 없습니다 — PO를 고르세요"))
       .when(this.pics.length > 0 || this.picBusy > 0, (el) => el.child(this.picRow(t, null)))
-      .child(h_flex().gap(6).items_center()
+      .child(h_flex().id("chat-row").gap(6).items_center()
         .on_drop((ev, c) => this.dropPics(ev?.paths, c))
         .child(this.button(t, "chat-attach", "그림", (c) => { this.pickPics(c); }, { tip: "그림 파일을 골라 붙입니다(Cmd+V로 붙여넣거나 파일을 끌어다 놓아도 됩니다). 보내면 PO가 파일을 열어 봅니다" }))
-        .child(div().flex_1().min_w(0).on_mouse_down("left", stop)
+        .child(div().id("chat-input").flex_1().min_w(0).on_mouse_down("left", stop)
           .child(Textarea.new(this.chat).token((ctx) => chip(ctx)).min_h(30).px(10).py(5).rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
         .child(this.button(t, "chat-send", "PO에 보내기", (c) => this.sendChat(c), { primary: true, tip: "고른 PO 터미널에 글을 붙여 넣고 Enter까지 눌러 보냅니다(글은 클립보드를 거칩니다). Shift+Enter는 줄바꿈" })));
   }
@@ -2786,7 +2831,8 @@ export default class Inbox extends View {
       const input = this.box(s.leader, cx);
       const row = this.picRow(t, s.leader);
       if (row) box.child(row);
-      box.child(h_flex().gap(6).items_center()
+      box.child(h_flex().id(`reply-${s.leader}`).gap(6).items_center()
+        .on_key_down(() => { this.keyAt = Date.now(); })
         .on_drop((ev, c) => this.dropPics(ev?.paths, c, s.leader))
         .child(this.button(t, `attach-${s.leader}`, "그림", (c) => { this.pickPics(c, s.leader); }, { tip: "그림 파일을 골라 붙입니다(Cmd+V로 붙여넣거나 파일을 끌어다 놓아도 됩니다). 보내면 PO가 파일을 열어 봅니다" }))
         .child(div().flex_1().min_w(0).on_mouse_down("left", stop).child(Input.new(input).h(30).px(10).items_center().rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
@@ -2901,6 +2947,7 @@ export default class Inbox extends View {
   full(cx) {
     this.tvN = 0;
     this.noteRedraw(cx);
+    this.guardAll();
     Promise.resolve().then(() => { // once per draw (only when the count changed or 10s passed, so a busy desk does not flood the file)
       const now = Date.now();
       if (this.tvLast !== this.tvN || now - (this.tvLogAt ?? 0) > 10000) { this.tvLast = this.tvN; this.tvLogAt = now; this.diag(`draw: ${this.tvN} selectable TextView(s)`, cx); }
