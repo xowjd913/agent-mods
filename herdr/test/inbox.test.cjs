@@ -3199,7 +3199,7 @@ test("checkRemote #109: 같은 pid·같은 시작 시각·같은 세션이고 br
   assert.equal(f.mark(), false); // the same record again is not rewritten
   const rec = JSON.parse(fs.readFileSync(path.join(f.dir, "po-remote", "a.json"), "utf8"));
   assert.deepEqual({ on: rec.on, pid: rec.pid, start: rec.start, sid: rec.sid, url: rec.url }, { on: true, pid: 4242, start: "Tue Nov 24 12:31:42 2026", sid: "s1", url: RC_URL });
-  assert.equal((fs.statSync(path.join(f.dir, "po-remote", "a.json")).mode & 0o777), 0o600);
+  if (process.platform !== "win32") assert.equal((fs.statSync(path.join(f.dir, "po-remote", "a.json")).mode & 0o777), 0o600); // Windows has no POSIX modes
   assert.deepEqual(f.check(), { on: true, why: "", url: RC_URL });
   assert.equal(I.readRemoteRec(f.dir, "a").pid, 4242); // a true check keeps the record
 });
