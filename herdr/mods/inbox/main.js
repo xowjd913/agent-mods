@@ -1405,7 +1405,8 @@ export default class Inbox extends View {
     this.compact = false;
     this.narrow = !this.windowed; // narrower than WIDE_MIN (until the first size report: the dock and a pane start narrow, the window wide)
     this.writing = null; // leader whose answer box is open
-    this.inputs = new Map(); // leader -> InputState
+    this.inputs = new Map(); // leader -> TextareaState (the answer box of a card)
+    this.cardK = new Map(); // leader -> the Enter bookkeeping of that answer box (see cardState)
     this.inputSeen = new Map(); // leader -> last ms its answer box was wanted (a draft is cleared only after DRAFT_GRACE_MS without it)
     this.pickLive = { id: "", at: 0, label: "" }; // the picked room, the last time it was live (a PO missing from one poll keeps its room: #57)
     this.msg = null; // {text, bad}
@@ -2835,13 +2836,93 @@ export default class Inbox extends View {
   box(leader, cx) {
     let s = this.inputs.get(leader);
     if (!s) {
-      s = InputState.new({ value: "", placeholder: "답을 적고 Enter" });
-      s.on("submit", (_e, c) => { const a = this.asks().find((x) => x.s.leader === leader); if (a) this.send(a, s.value(), c); });
+      s = TextareaState.new({ value: "", rows: 1, placeholder: "답을 적고 Enter — Shift+Enter로 줄바꿈" }); // #110: the same multi-line box as the PO chat (the single-line Input took neither a second line nor Cmd+A)
+      try { s.set_auto_grow(1, INPUT_MAX_LINES); } catch {}
+      s.on("submit", (e, c) => this.cardEnter(leader, e?.shift ? "newline" : "send", c)); // the widget's own submit event: with Shift a line break, else Enter (the key press below says the same; each handler dedupes)
       s.on("paste_other", (_e, c) => this.pastePic(c, leader)); // Cmd+V found no text: take a picture from the clipboard, as the PO box does
-      s.on("change", () => { let v; try { v = s.value(); } catch { return; } if (!this.guard(leader, s, v)) this.keep(leader, s, v); }); // #74: the draft mirror
+      s.on("change", () => this.cardChange(leader, s)); // #74: the draft mirror, #83: the Enter bookkeeping
       this.inputs.set(leader, s);
     }
     return s;
+  }
+
+  // #110: the answer box of a decision card takes Enter the way the PO chat box does (#83): Enter sends from any cursor position without leaving the
+  // widget's own line break in the text, the first Enter after a Korean/Japanese/Chinese IME edit is held once, Shift+Enter is a line break. The chat box
+  // keeps its own copy of this (it also has the "@" menu and chips); both use the same pure rules (strayAt, imeHold, ...).
+  cardState(leader) {
+    let k = this.cardK.get(leader);
+    if (!k) { k = { lastValue: "", core: "", changedAt: 0, editAt: 0, enterAt: 0, heldAt: 0, nlAt: 0, sentAt: 0, brk: null }; this.cardK.set(leader, k); }
+    return k;
+  }
+
+  cardChange(leader, st) {
+    const k = this.cardState(leader);
+    k.changedAt = Date.now();
+    let value = "";
+    try { value = st.value(); } catch { return; }
+    if (this.guard(leader, st, value)) return; // the box was emptied behind the person's back: the text is back
+    this.keep(leader, st, value);
+    const prev = k.lastValue;
+    const brk = strayAt(prev, value);
+    const rep = brk < 0 ? replacedAt(prev, value) : null;
+    k.lastValue = value;
+    if (brk >= 0 && enterPending(k.enterAt, k.changedAt)) { this.cardEdit(st, k, withoutAt(value, brk), { start: brk, end: brk + 1 }, "", { start: brk, end: brk }, k.editAt); return; }
+    if (rep && enterPending(k.enterAt, k.changedAt)) { this.cardEdit(st, k, prev, { start: rep.idx, end: rep.idx + 1 }, prev.slice(rep.idx, rep.end), { start: rep.idx, end: rep.end }, k.editAt); return; }
+    k.brk = brk >= 0 ? { idx: brk, at: k.changedAt, core: k.core, editAt: k.editAt } : rep ? { idx: rep.idx, at: k.changedAt, core: k.core, editAt: k.editAt, rep, prev } : null;
+    const core = editCore(value);
+    if (core !== k.core) { k.core = core; k.editAt = k.changedAt; }
+    if (strayBreak(value, k.sentAt, k.changedAt)) { this.wipe(leader, st); return; } // the Enter that sent left a line break
+    if (strayHeld(value, k.heldAt, k.changedAt)) this.cardEdit(st, k, editCore(value), null, null, { start: editCore(value).length, end: editCore(value).length }, k.editAt); // the held Enter left a line break
+  }
+
+  // Puts the box back to `next` (the text the person meant): replaces `span` with `text` through the widget (so it stays an edit), plain set_value when
+  // the widget does not give `next`, then the cursor/selection to `range`. `span` null: set_value only.
+  cardEdit(st, k, next, span, text, range, editAt) {
+    k.lastValue = next; k.core = editCore(next); k.editAt = editAt; k.brk = null;
+    try {
+      if (span) { st.set_selected_range(span); st.replace(text); }
+      if (st.value() !== next) st.set_value(next);
+      st.set_selected_range(range);
+    } catch {}
+  }
+
+  cardEnter(leader, intent, c) {
+    const k = this.cardState(leader), st = this.inputs.get(leader), now = Date.now();
+    if (!st) return;
+    if (intent === "send") {
+      k.enterAt = now;
+      if (now - k.sentAt <= 250 || now - k.heldAt < 150) return; // (the key and the submit event of one press are one Enter)
+      let value = "", cur = null;
+      try { value = st.value(); } catch {}
+      try { cur = st.selected_range().end; } catch {}
+      const b = k.brk;
+      if (b && now - b.at <= 25 && value[b.idx] === "\n") { // the widget's line break came before this key: it is not the person's text
+        if (b.rep) { value = b.prev; cur = b.rep.end; this.cardEdit(st, k, b.prev, { start: b.rep.idx, end: b.rep.idx + 1 }, b.prev.slice(b.rep.idx, b.rep.end), { start: b.rep.idx, end: b.rep.end }, b.editAt); }
+        else { value = withoutAt(value, b.idx); cur = b.idx; this.cardEdit(st, k, value, { start: b.idx, end: b.idx + 1 }, "", { start: b.idx, end: b.idx }, b.editAt); }
+        k.core = b.core;
+      }
+      if (value.trim() && imeHold(value, k.editAt, k.heldAt, now, atTextEnd(value, cur))) { // maybe the IME's confirming Enter: only this once
+        k.heldAt = now;
+        if (strayHeld(value, now, now) && now - k.changedAt <= 25) { const n = editCore(value); this.cardEdit(st, k, n, null, null, { start: n.length, end: n.length }, k.editAt); }
+        c.notify();
+        return;
+      }
+      const a = this.asks().find((x) => x.s.leader === leader);
+      if (!a) return;
+      k.sentAt = now;
+      this.send(a, value, c);
+    } else if (intent === "newline" && now - k.nlAt > 80) {
+      k.nlAt = now;
+      try { c.timer.after(40, () => { if (needsNewline(k.changedAt, now)) { try { st.replace("\n"); } catch {} } }); } catch {}
+    }
+  }
+
+  answerKey(leader, e, c) {
+    this.keyAt = Date.now();
+    const intent = enterIntent(e?.key, Boolean(e?.modifiers?.shift));
+    if (!intent) return;
+    if (intent === "send") { try { c.stop_propagation(); } catch {} }
+    this.cardEnter(leader, intent, c);
   }
 
   // ---- PO chat: the text goes to the PO's prompt through deliver(), the same path as a panel answer.
@@ -3404,10 +3485,10 @@ export default class Inbox extends View {
       const row = this.picRow(t, s.leader);
       if (row) box.child(row);
       box.child(h_flex().id(`reply-${s.leader}`).gap(6).items_center()
-        .on_key_down(() => { this.keyAt = Date.now(); })
+        .on_key_down((e, c) => this.answerKey(s.leader, e, c))
         .on_drop((ev, c) => this.dropPics(ev?.paths, c, s.leader))
         .child(this.button(t, `attach-${s.leader}`, "그림", (c) => { this.pickPics(c, s.leader); }, { tip: "그림 파일을 골라 붙입니다(Cmd+V로 붙여넣거나 파일을 끌어다 놓아도 됩니다). 보내면 PO가 파일을 열어 봅니다" }))
-        .child(div().flex_1().min_w(0).on_mouse_down("left", stop).child(Input.new(input).h(30).px(10).items_center().rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
+        .child(div().flex_1().min_w(0).on_mouse_down("left", stop).child(Textarea.new(input).min_h(30).px(10).py(5).rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
         .child(this.button(t, `send-${s.leader}`, "보내기", (c) => this.send(a, input.value(), c), { primary: true, disabled: a.po ? "" : NO_PO(), tip: CLIP })));
     }
     return box;
