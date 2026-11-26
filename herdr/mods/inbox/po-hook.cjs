@@ -9,7 +9,8 @@
 // It also records the session's transcript path in <inbox dir>/po-session/<po id>.json (the desk sums that session's cost from it).
 // appended to <inbox dir>/po/<po id>.jsonl (HERDR_INBOX_DIR, else ~/.herdr-inbox). Installed by `install.cjs hook`.
 // Rules: exit 0 always and print nothing (the hook must never change, block or slow a session); do nothing unless the terminal
-// is a PO (labels role=po and a valid po id; the names come from the profile, docs/inbox-contract.md §9, default as here) - leaders, workers and plain sessions are never written for.
+// is a PO (labels role=po and a valid po id; the names come from the profile, docs/inbox-contract.md §9, default as here) - leaders and workers are never written for.
+// A plain session (no labels) is written to <inbox dir>/solo/<terminal id>.jsonl only when solo mode is on (#90: the flag file <inbox dir>/solo.on, off by default).
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -99,12 +100,14 @@ function run(env = process.env, payload = readPayload(), I = require("./inbox.cj
   const t = get(id);
   if (!t || I.isAgentName(t.name) || t.parent) return null; // a hub terminal has no name of an agent and no parent terminal
   const po = I.poId(t); // the hub role label and a valid hub id label (po=<id> by default)
-  const file = po ? I.poFile(I.inboxDir(), po) : null;
+  // #90: a plain terminal (no PO label) is a solo room, written only while the person has turned solo mode on (the flag file); never for a leader/worker (above).
+  const solo = !po && !t.labels?.role && I.soloEnabled(I.inboxDir());
+  const file = po ? I.poFile(I.inboxDir(), po) : solo ? I.soloFile(I.inboxDir(), id) : null;
   if (!file) return null;
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   appendLine(file, JSON.stringify(line) + "\n");
   // Which transcript this PO's session writes, so the desk can sum its cost (after a /clear the next prompt records the new session).
-  try { I.writePoSession(I.inboxDir(), po, payload, now); } catch {}
+  if (po) { try { I.writePoSession(I.inboxDir(), po, payload, now); } catch {} }
   // A prompt with a picture placeholder gets its pictures from the transcript (a worker, since the transcript may not hold it yet);
   // Stop tries once more for any prompt still without (the hook of this very event has nothing to wait for).
   const tp = typeof payload?.transcript_path === "string" ? payload.transcript_path : "";
