@@ -785,7 +785,7 @@ function poCosts(dir = inboxDir(), cacheDir = dir) {
 
 function collect(dir = inboxDir()) {
   let names = [];
-  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== OLD_PO_FILE); } catch { return { at: new Date().toISOString(), dir, leaders: [], po: {}, solo: {}, imgd: {}, cost: {}, root: appRoot(), names: plainNames(), profileError: PROFILE_ERROR }; }
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== OLD_PO_FILE); } catch { return { at: new Date().toISOString(), dir, leaders: [], po: {}, solo: {}, soloOn: soloEnabled(dir), imgd: {}, cost: {}, root: appRoot(), names: plainNames(), profileError: PROFILE_ERROR }; }
   const leaders = [];
   for (const n of names) {
     try {
@@ -796,7 +796,7 @@ function collect(dir = inboxDir()) {
   leaders.sort((a, b) => (b.last?.ms ?? 0) - (a.last?.ms ?? 0));
   let cost = {};
   try { cost = poCosts(dir, path.join(appRoot(), "data", "inbox")); } catch {} // a failed cost read never takes the desk's data down
-  return { at: new Date().toISOString(), dir, root: appRoot(), leaders, po: readPo(dir), solo: readSolo(dir), imgd: imageDims(), cost, names: plainNames(), profileError: PROFILE_ERROR };
+  return { at: new Date().toISOString(), dir, root: appRoot(), leaders, po: readPo(dir), solo: readSolo(dir), soloOn: soloEnabled(dir), imgd: imageDims(), cost, names: plainNames(), profileError: PROFILE_ERROR };
 }
 
 // names:begin
@@ -2144,6 +2144,8 @@ if (require.main === module) {
   else if (cmd === "cliptext") { const x = clipText(); process.stdout.write(JSON.stringify({ text: typeof x === "string" && x.length <= CLIP_TEXT_MAX ? x : null })); }
   else if (cmd === "diag") { try { diagAppend(JSON.parse(arg)); } catch {} process.stdout.write("{}"); }
   else if (cmd === "po-me") { let me = []; try { const f = poFile(inboxDir(), arg); if (f) me = parsePoLines(readTail(f)).filter((x) => x.me).slice(-20).map((x) => ({ ms: x.ms, text: x.text })); } catch {} process.stdout.write(JSON.stringify(me)); }
+  else if (cmd === "solo-me") { let me = []; try { const f = soloFile(inboxDir(), arg); if (f) me = parsePoLines(readTail(f)).filter((x) => x.me).slice(-20).map((x) => ({ ms: x.ms, text: x.text })); } catch {} process.stdout.write(JSON.stringify(me)); } // a solo terminal's "me" records (what its hook saw submitted)
+  else if (cmd === "solo-on") { let on = false, error = ""; try { on = setSolo(inboxDir(), true); } catch (e) { error = String(e?.message ?? e).slice(0, 120); } process.stdout.write(JSON.stringify({ on, error })); } // the same flag as `install.cjs hook --solo`
   else if (cmd === "handoff") process.stdout.write(JSON.stringify(readHandoff(inboxDir(), arg)));
   else if (cmd === "addimg") process.stdout.write(JSON.stringify(shown(importImage(arg))));
   else process.stdout.write(JSON.stringify(collect()));

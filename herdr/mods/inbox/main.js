@@ -1271,7 +1271,7 @@ function restartClearCheck(recs, since) {
 // the shared blocks use ("PO 터미널", "이 PO를", "PO가").
 const soloWords = (text) => {
   let solo = false; try { solo = soloMode(terminals()); } catch {}
-  return solo ? String(text).replace(/PO\(([^)]*)\)/g, "터미널($1)").replace(/PO 터미널/g, "터미널").replace(/이 PO를/g, "이 터미널을").replace(/PO가/g, "터미널이") : text;
+  return solo ? String(text).replace(/PO\(([^)]*)\)/g, "터미널($1)").replace(/PO 터미널/g, "터미널").replace(/이 PO를/g, "이 터미널을").replace(/PO가/g, "터미널이").replace(/PO 입력칸/g, "터미널 입력칸").replace(/이 PO의/g, "이 터미널의").replace(/PO 화면/g, "터미널 화면") : text;
 };
 // The pending-question card: the screen lines scroll inside it (all options stay reachable), the buttons stay under them.
 const PROMPT_LINES_H = 240, PROMPT_MAX_H = 340;
@@ -1462,6 +1462,8 @@ export default class Inbox extends View {
     this.promptChain = 0; // the newest scheduled re-read of the screen; an older one does nothing
     this.who = new Map(); // room -> the leader the room is narrowed to (#58, "특정 리더만"); like `filt`, not saved
     this.rs = new Map(); // room -> the state of its "PO 새로 시작" (see restartOpen)
+    this.ss = new Map(); // #90: solo room (terminal address) -> the state of its "새로 시작" {phase: confirm | run | done | fail, gen, why} (see soloRow)
+    this.soloAsk = false; // #90: the "혼자 모드 켜기" confirm line is open
     this.rcChecked = new Set(); // PO terminal addresses whose screen was read for the on-state (see remoteRestore)
     this.rc = new Map(); // room -> the state of its "원격 연결 켜기" {phase: send | on | already | unknown | fail, at, url, why, note {text, ms, bad}} (see remoteOn)
     this.rgen = 0; // numbers a restart run: a timer of an older run does nothing
@@ -2516,7 +2518,7 @@ export default class Inbox extends View {
     }).catch(() => say(`PO(${po})에 ${key}를 누르지 못했습니다.`));
   }
   promptPanel(t, v, cx) {
-    const po = !v.solo && v.pick && v.pick !== PO_OTHER ? chatTarget(v.terms, [], v.pick).po : "";
+    const po = v.pick && v.pick !== PO_OTHER ? chatTarget(v.terms, [], v.pick).po : ""; // #90: a solo room works too (the room is its terminal); the same re-read check before every key
     if (!po || !this.isBlocked(po)) { this.prompt = null; return null; }
     try { this.readPrompt(po, cx); } catch { this.promptBusy = false; this.prompt = { po, at: Date.now(), text: "", failed: true }; }
     const shown = this.prompt?.po === po ? this.prompt : null;
@@ -2529,17 +2531,17 @@ export default class Inbox extends View {
       : !lines.length ? "화면을 읽지 못했습니다. '다시 읽기'를 누르거나 '터미널 열기'로 직접 답하세요."
       : !opts.length ? "선택지를 찾지 못했습니다. 아래 화면 그대로를 보고 '터미널 열기'로 직접 답하세요." : "";
     return v_flex().id("po-prompt").flex_none().min_w(0).max_h(PROMPT_MAX_H).mx(10).mb(6).p(10).gap(8).rounded(8).bg(t.blocked + "14").border(1).border_color(t.blocked + "55").on_mouse_down("left", stop)
-      .child(div().min_w(0).truncate().text_size(11).font_semibold().text_color(t.blocked).child("PO가 질문 중입니다 — 화면 끝"))
+      .child(div().min_w(0).truncate().text_size(11).font_semibold().text_color(t.blocked).child(soloWords("PO가 질문 중입니다 — 화면 끝")))
       .when(Boolean(note), (el) => el.child(div().min_w(0).text_size(11).text_color(t.dim).child(note)))
       .child(v_flex().id("po-prompt-lines").min_w(0).min_h(0).max_h(PROMPT_LINES_H).overflow_y_scrollbar().gap(2)
         .children(lines.map((l, i) => div().min_w(0).text_size(11).text_color(t.muted).child(this.text(`pp-l${i}`, chatHtml(l))))))
       .child(h_flex().min_w(0).gap(6).items_center().flex_wrap()
         .children(opts.map((o) => this.button(t, `pp-${o.key}`, `${o.key}. ${o.label.length > 32 ? `${o.label.slice(0, 31)}…` : o.label}`, (c) => this.pressPrompt(po, o.key, c), { primary: o.on, tip: o.label })))
         .when(Boolean(parsed.tabs), (el) => el.child(key("left", "← 이전 질문", `질문 탭을 앞으로(${parsed.tabs})`)).child(key("right", "다음 질문 →", `질문 탭을 뒤로(${parsed.tabs})`)))
-        .child(key("enter", "Enter", "화면에서 강조된 선택지를 확정합니다(PO가 질문 중일 때만)"))
-        .child(key("esc", "Esc", "질문을 취소합니다(PO가 질문 중일 때만)"))
-        .child(this.button(t, "pp-term", "터미널 열기", (c) => { try { run("terminal.peek", { terminal: po }); } catch (e) { this.say(`터미널을 열지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); } c.notify(); }, { tip: "이 PO의 터미널 화면을 엽니다(키는 누르지 않습니다)" }))
-        .child(this.button(t, "pp-reread", "다시 읽기", (c) => { this.prompt = null; this.promptBusy = false; c.notify(); }, { tip: "PO 화면을 다시 읽습니다" })));
+        .child(key("enter", "Enter", soloWords("화면에서 강조된 선택지를 확정합니다(PO가 질문 중일 때만)")))
+        .child(key("esc", "Esc", soloWords("질문을 취소합니다(PO가 질문 중일 때만)")))
+        .child(this.button(t, "pp-term", "터미널 열기", (c) => { try { run("terminal.peek", { terminal: po }); } catch (e) { this.say(`터미널을 열지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); } c.notify(); }, { tip: soloWords("이 PO의 화면을 엽니다(키는 누르지 않습니다)") }))
+        .child(this.button(t, "pp-reread", "다시 읽기", (c) => { this.prompt = null; this.promptBusy = false; c.notify(); }, { tip: soloWords("PO 화면을 다시 읽습니다") })));
   }
 
   // ---- "PO 새로 시작" (per room): ask the PO for a handoff note, wait for it, /clear, /PO. State per room in this.rs[room] =
@@ -2689,7 +2691,8 @@ export default class Inbox extends View {
   }
   // The strip above the chat box: the button (idle), the confirm line, or the four steps of the run.
   restartRow(t, v, cx) {
-    if (v.solo || !v.pick || v.pick === PO_OTHER) return null; // #90: the solo "new start" is a later step
+    if (v.solo) return v.pick ? this.soloRow(t, v) : null; // #90: a solo room has its own, shorter "새로 시작" (just /clear)
+    if (!v.pick || v.pick === PO_OTHER) return null;
     const room = v.pick;
     const po = chatTarget(v.terms, [], room).po ?? "";
     const r = this.rs.get(room);
@@ -2725,6 +2728,98 @@ export default class Inbox extends View {
       .child(h_flex().min_w(0).gap(6).items_center().flex_wrap()
         .when(r.phase === "timeout", (el) => el.child(this.button(t, "rs-retry", "다시", (c) => this.restartRun(room, po, room, c), { primary: true, disabled: why && !running ? why : "", tip: "노트를 다시 요청합니다" })))
         .child(this.button(t, "rs-close", r.phase === "run" || r.phase === "clear" || r.phase === "timeout" ? "취소" : "닫기", (c) => this.restartClose(room, c), { tip: r.phase === "run" || r.phase === "clear" ? "기다리기를 멈춥니다(이미 보낸 요청은 그대로입니다)" : "" })));
+  }
+  // "혼자 모드 켜기": the same flag file as `install.cjs hook --solo` (written by the helper: the desk cannot write files). It does not install the hook itself.
+  soloEnable(c) {
+    this.soloAsk = false;
+    try { c.notify(); } catch {}
+    c.spawn(async (cx) => {
+      let r = { on: false, error: "" };
+      try { const o = await exec("node", [HELPER(), "solo-on"], { timeout: 5000 }); if (o.code === 0) r = JSON.parse(o.stdout); else r.error = "도우미를 실행하지 못했습니다"; } catch (e) { r.error = String(e?.message ?? e).slice(0, 100); }
+      if (r.on) { this.say("혼자 모드 기록을 켰습니다. 터미널에서 프롬프트를 보내면 방으로 나타납니다(PO 훅이 들어 있어야 합니다)."); try { this.load(cx); } catch {} }
+      else this.say(`혼자 모드를 켜지 못했습니다${r.error ? `: ${r.error}` : ""}`, true);
+      try { cx.notify(); } catch {}
+    });
+  }
+  // ---- #90 solo "새로 시작": a solo room's terminal has no handoff note and no /PO, so a new start is the confirm and then ONE line, `/clear`. State in this.ss[room]
+  // (room = the terminal's address). Same safeguards as the PO's /clear: the terminal must be idle (not working, not on a prompt), no held chat line may sit in its input
+  // box, the turn counter must go up, and a fresh "me" record of the terminal's hook (/clear fires none) means it was sent as text, not as the command.
+  soloAlive(room, g) { const r = this.ss.get(room); return Boolean(r) && r.gen === g && r.phase === "run"; }
+  soloEnd(room, g, patch, c) {
+    const r = this.ss.get(room);
+    if (!r || r.gen !== g) return;
+    this.ss.set(room, { ...r, ...patch });
+    try { c.notify(); } catch {}
+    if (patch.phase === "fail") this.say(`새로 시작을 멈췄습니다: ${patch.why}`, true);
+    else if (patch.phase === "done") this.say("대화를 비웠습니다. 방의 기록은 그대로입니다.");
+  }
+  async soloMe(id) {
+    try {
+      const r = await exec("node", [HELPER(), "solo-me", id], { timeout: 5000 });
+      if (r.code === 0) { const j = JSON.parse(r.stdout); if (Array.isArray(j)) return j; }
+    } catch {}
+    return [];
+  }
+  soloClear(room, po, c) {
+    const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "");
+    const why = soloWords(restartBlock({ po, status: st, running: this.ss.get(room)?.phase === "run" }));
+    if (why) { this.ss.set(room, { phase: "fail", gen: ++this.rgen, why }); try { c.notify(); } catch {} return; }
+    const g = ++this.rgen;
+    this.ss.set(room, { phase: "run", gen: g, why: "" });
+    try { c.notify(); } catch {}
+    c.spawn(async (cx) => {
+      try { await this.soloFlow(room, g, po, cx); }
+      catch (e) { this.soloEnd(room, g, { phase: "fail", why: String(e?.message ?? e).slice(0, 100) }, cx); }
+    });
+  }
+  async soloFlow(room, g, po, cx) {
+    const alive = () => this.soloAlive(room, g);
+    const clr = await this.sendLine(po, "/clear", alive, room);
+    if (!alive()) return;
+    if (!clr.ok) { this.soloEnd(room, g, { phase: "fail", why: soloWords(`/clear를 보내지 못했습니다(${clr.why})`) }, cx); return; }
+    const t0 = Date.now();
+    for (;;) {
+      await this.sleepOn(cx, 800);
+      if (!alive()) return;
+      const term = await this.poTerm(po);
+      if (!alive()) return;
+      const stt = restartClearState(clr.turn, term);
+      if (stt === "done") break;
+      if (stt === "gone") { this.soloEnd(room, g, { phase: "fail", why: "/clear를 보낸 뒤 터미널이 실행 중이 아닙니다" }, cx); return; }
+      if (Date.now() - t0 >= RESTART_CLEAR_MS) { this.diag(`solo /clear not confirmed: sent turn ${clr.turn}, now ${JSON.stringify(term)}`); this.soloEnd(room, g, { phase: "fail", why: "/clear가 끝났는지 확인하지 못했습니다" }, cx); return; }
+    }
+    if (restartClearCheck(await this.soloMe(room), clr.at) === "text") { this.diag(`solo: /clear reached the model as text (terminal ${po})`); this.soloEnd(room, g, { phase: "fail", why: "/clear가 명령이 아니라 글로 들어간 것 같습니다. 터미널 입력칸을 비운 뒤 다시 눌러 주세요" }, cx); return; }
+    this.soloEnd(room, g, { phase: "done" }, cx);
+  }
+  soloOpen(room, c) { if (!this.ss.get(room)) this.ss.set(room, { phase: "confirm", gen: ++this.rgen, why: "" }); try { c.notify(); } catch {} }
+  soloClose(room, c) { this.ss.delete(room); this.rgen++; try { c.notify(); } catch {} } // a run in progress stops asking: its checks see the room's state gone
+  // The strip above a solo room's chat box: the button, its confirm line, or the running / result line.
+  soloRow(t, v) {
+    const room = v.pick;
+    const po = chatTarget(v.terms, [], room).po ?? "";
+    if (!po) return null;
+    const r = this.ss.get(room);
+    const st = String(v.terms.find((x) => x.address === po)?.status ?? "");
+    let mineNow = []; try { mineNow = shared(CHAT_KEY) ?? []; } catch {}
+    const why = soloWords(restartBlock({ po, status: st, running: r?.phase === "run" }) || (r?.phase === "confirm" || !r ? restartDraft(mineNow, room, Date.now()) : ""));
+    const box = () => v_flex().id("po-restart").flex_none().min_w(0).mx(10).mb(6).px(10).py(8).gap(6).rounded(8).bg(t.raised).border(1).border_color(t.border).on_mouse_down("left", stop);
+    if (!r) {
+      return h_flex().id("po-restart").flex_none().min_w(0).mx(10).mb(4).gap(8).items_center().justify_end()
+        .when(Boolean(why), (el) => el.child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(why)))
+        .child(this.button(t, "ss-open", "새로 시작", (c) => this.soloOpen(room, c), { disabled: why, tip: "이 터미널에 /clear를 보내 Claude의 대화를 비웁니다(방의 기록은 남습니다)" }));
+    }
+    if (r.phase === "confirm") {
+      return box()
+        .child(div().min_w(0).text_size(11.5).text_color(t.foreground).child("이 터미널에 /clear를 보내 Claude가 지금까지의 대화를 잊게 합니다. 이 방의 기록은 그대로 남습니다."))
+        .child(h_flex().min_w(0).gap(6).items_center().flex_wrap()
+          .child(this.button(t, "ss-go", "비우기", (c) => this.soloClear(room, po, c), { primary: true, disabled: why, tip: "/clear 한 줄만 보냅니다" }))
+          .child(this.button(t, "ss-cancel", "취소", (c) => this.soloClose(room, c)))
+          .when(Boolean(why), (el) => el.child(div().min_w(0).text_size(10.5).text_color(t.blocked).child(why))));
+    }
+    return box()
+      .child(div().min_w(0).text_size(11).text_color(r.phase === "fail" ? t.blocked : r.phase === "done" ? t.working : t.dim)
+        .child(r.phase === "run" ? "/clear를 보내고 끝나기를 기다리는 중입니다…" : r.phase === "done" ? "대화를 비웠습니다. 방의 기록은 그대로입니다." : r.why))
+      .child(h_flex().min_w(0).gap(6).items_center().child(this.button(t, "ss-close", r.phase === "run" ? "취소" : "닫기", (c) => this.soloClose(room, c), { tip: r.phase === "run" ? "기다리기를 멈춥니다(이미 보낸 /clear는 그대로입니다)" : "" })));
   }
 
   // ---- "원격 연결 켜기" (#79), per terminal: `room` = the key of the state, `po` = the terminal address, `status` = its hc status. A room of any kind can use it (PO room
@@ -2763,7 +2858,7 @@ export default class Inbox extends View {
     const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "");
     const r0 = this.rc.get(room);
     const rs = this.rs.get(room);
-    const why = soloWords(remoteBlock({ po, status: st, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")), sending: r0?.phase === "send" }));
+    const why = soloWords(remoteBlock({ po, status: st, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")) || this.ss?.get(room)?.phase === "run", sending: r0?.phase === "send" }));
     if (why) { this.remoteSet(room, { phase: "fail", kind: "fail", why }, c); return; }
     this.remoteSet(room, { phase: "send", why: "" }, c);
     c.spawn(async (cx) => {
@@ -2799,7 +2894,7 @@ export default class Inbox extends View {
   remoteButton(t, room, po, status) {
     const r = this.rc.get(room);
     const rs = this.rs.get(room);
-    const why = soloWords(remoteBlock({ po, status, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")), sending: r?.phase === "send" }));
+    const why = soloWords(remoteBlock({ po, status, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")) || this.ss?.get(room)?.phase === "run", sending: r?.phase === "send" }));
     const on = r && (r.phase === "on" || r.phase === "already");
     const at = on ? new Date(r.at).toTimeString().slice(0, 5) : "";
     return h_flex().id(`rc-${room}`).flex_none().min_w(0).gap(6).items_center()
@@ -3183,8 +3278,19 @@ export default class Inbox extends View {
   }
 
   poHint(t, v = null) {
-    if (v?.solo) return div().id("po-hint").flex_none().px(this.compact ? 10 : 14).pb(6).text_size(11).text_color(t.muted)
-      .child("아직 기록된 Claude 터미널 대화가 없습니다. 혼자 모드가 켜져 있으면 터미널에서 보낸 프롬프트부터 여기에 방으로 나타납니다.");
+    if (v?.solo) {
+      const on = Boolean(this.data?.soloOn);
+      const box = v_flex().id("po-hint").flex_none().min_w(0).px(this.compact ? 10 : 14).pb(6).gap(6);
+      if (on) return box.child(div().min_w(0).text_size(11).text_color(t.muted).child("아직 기록된 Claude 터미널 대화가 없습니다. 터미널에서 프롬프트를 보내면 여기에 방으로 나타납니다(이미 열려 있던 터미널은 다시 시작해야 기록됩니다)."));
+      return box
+        .child(div().min_w(0).text_size(11).text_color(t.muted).child("혼자 모드가 꺼져 있어 Claude 터미널 대화를 기록하지 않습니다."))
+        .when(!this.soloAsk, (el) => el.child(h_flex().child(this.button(t, "solo-ask", "혼자 모드 켜기", (c) => { this.soloAsk = true; try { c.notify(); } catch {} }, { tip: "터미널의 Claude 대화를 이 컴퓨터에 기록해 방으로 보여 줍니다" }))))
+        .when(this.soloAsk, (el) => el
+          .child(div().min_w(0).text_size(11.5).text_color(t.foreground).child("모든 Claude 터미널의 프롬프트가 이 컴퓨터에 저장됩니다. 켤까요?"))
+          .child(h_flex().gap(6).items_center()
+            .child(this.button(t, "solo-go", "켜기", (c) => this.soloEnable(c), { primary: true, tip: "혼자 모드 기록 표시를 켭니다(install.cjs hook --solo 와 같은 표시)" }))
+            .child(this.button(t, "solo-no", "취소", (c) => { this.soloAsk = false; try { c.notify(); } catch {} }))));
+    }
     return div().id("po-hint").flex_none().px(this.compact ? 10 : 14).pb(6).text_size(11).text_color(t.muted)
       .child(`PO 터미널에 ${hubTag()}, ${NAMES.hubIdLabel}=<id> 라벨을 달면 PO별로 나뉩니다. 지금은 PO가 없어 채팅을 보낼 수 없습니다.`);
   }

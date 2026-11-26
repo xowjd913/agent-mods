@@ -171,8 +171,9 @@ test("main.js: solo mode hides every leader part (chips, @ menu, cards, permissi
   assert.match(view, /const asks = solo \? \[\] : all/);
   assert.match(src, /q && !soloMode\(this\.liveTerms\(\)\) \? leaderMenu\(/); // no @ menu
   assert.match(src, /if \(v\.solo \|\| !v\.pick \|\| !v\.raw\.length\) return null;/); // the filter chips
-  assert.match(src, /if \(v\.solo \|\| !v\.pick \|\| v\.pick === PO_OTHER\) return null;/); // the restart row
-  assert.match(src, /const po = !v\.solo && v\.pick && v\.pick !== PO_OTHER \? chatTarget/); // the permission-question panel
+  assert.match(src, /if \(v\.solo\) return v\.pick \? this\.soloRow\(t, v\) : null;/); // the restart row: a solo room gets its own (just /clear)
+  assert.match(src, /const po = v\.pick && v\.pick !== PO_OTHER \? chatTarget\(v\.terms, \[\], v\.pick\)\.po : \"\";/); // the permission-question panel works in a solo room too (the room is its terminal)
+  assert.match(src, /child\(soloWords\(\"PO가 질문 중입니다 — 화면 끝\"\)\)/); // and says 터미널
   assert.match(src, /const rpo = v\.pick && v\.pick !== PO_OTHER \? chatTarget/); // the remote button works in a solo room too (chatTarget gives the room's terminal)
   assert.match(src, /soloWords\(this\.msg\.text\)/); // notices say 터미널, not PO
   assert.equal(/\bsolo\b/.test(src.slice(src.indexOf("  badge() {"), src.indexOf("  // The \"pasted into the PO\""))), false); // the badge counts leaders as before
@@ -191,7 +192,7 @@ test("soloWords: the fixed phrases of the shared blocks read 터미널 in a solo
   const fn = src.slice(src.indexOf("const soloWords = "), src.indexOf("// The pending-question card"));
   const make = (solo) => new Function("soloMode", "terminals", `${fn}; return soloWords;`)(() => solo, () => []);
   const sw = make(true), po = make(false);
-  for (const [a, b] of [["PO 터미널을 찾지 못했습니다", "터미널을 찾지 못했습니다"], ["이 PO를 새로 시작하는 중입니다", "이 터미널을 새로 시작하는 중입니다"], ["PO가 작업 중입니다 — 끝난 뒤에 누르세요", "터미널이 작업 중입니다 — 끝난 뒤에 누르세요"]]) {
+  for (const [a, b] of [["PO 터미널을 찾지 못했습니다", "터미널을 찾지 못했습니다"], ["이 PO를 새로 시작하는 중입니다", "이 터미널을 새로 시작하는 중입니다"], ["PO가 작업 중입니다 — 끝난 뒤에 누르세요", "터미널이 작업 중입니다 — 끝난 뒤에 누르세요"], ["이 PO의 화면을 엽니다", "이 터미널의 화면을 엽니다"], ["PO 화면을 다시 읽습니다", "터미널 화면을 다시 읽습니다"]]) {
     assert.equal(sw(a), b); assert.equal(po(a), a);
   }
 });
@@ -208,4 +209,66 @@ test("remoteRestore: in a solo room it reads the screens of the solo terminals (
   self.remoteRestore.call(o, cx);
   await Promise.all(cxs);
   assert.deepEqual(reads, ["t1"]); // only the terminal with a room
+});
+
+test("hook: a solo room records its session transcript (po-session/<terminal id>.json) so its cost shows", () => {
+  const d = tmp();
+  I.setSolo(d, true);
+  const tp = path.join(d, "t.jsonl");
+  fs.writeFileSync(tp, JSON.stringify({ type: "assistant", message: { id: "m1", model: "claude-sonnet-4-5", usage: { input_tokens: 1000, output_tokens: 1000 } } }) + "\n");
+  const term = { name: "작업", labels: {}, parent: null };
+  assert.ok(hook(d, "t5", term, { ...me, transcript_path: tp, session_id: "s1" }));
+  const rec = JSON.parse(fs.readFileSync(path.join(d, "po-session", "t5.json"), "utf8"));
+  assert.equal(rec.path, tp);
+  assert.ok(I.poCosts(d, d).t5, "the cost of that terminal is summed");
+  // solo off: nothing is written at all
+  const d2 = tmp();
+  assert.equal(hook(d2, "t5", term, { ...me, transcript_path: tp, session_id: "s1" }), null);
+  assert.equal(fs.existsSync(path.join(d2, "po-session")), false);
+});
+
+const cli = (d, ...args) => spawnSync(process.execPath, [path.join(__dirname, "../mods/inbox/inbox.cjs"), ...args], { env: { ...process.env, HERDR_INBOX_DIR: d }, encoding: "utf8" });
+
+test("collect: soloOn follows the flag file (also in the early return of a missing folder)", () => {
+  const d = tmp();
+  assert.equal(I.collect(path.join(d, "none")).soloOn, false);
+  assert.equal(I.collect(d).soloOn, false);
+  I.setSolo(d, true);
+  assert.equal(I.collect(d).soloOn, true);
+  assert.equal(I.collect(path.join(d, "none")).soloOn, false);
+});
+
+test("CLI solo-on sets the same flag as `hook --solo`; solo-me returns the last 'me' records of one terminal", () => {
+  const d = tmp();
+  const r = cli(d, "solo-on");
+  assert.equal(r.status, 0);
+  assert.deepEqual(JSON.parse(r.stdout), { on: true, error: "" });
+  assert.equal(I.soloEnabled(d), true);
+  fs.mkdirSync(path.join(d, "solo"), { recursive: true });
+  const lines = [{ ts: "2026-01-01T00:00:00Z", kind: "me", text: "하나" }, { ts: "2026-01-01T00:00:01Z", kind: "say", text: "답" }, { ts: "2026-01-01T00:00:02Z", kind: "me", text: "/clear" }];
+  fs.writeFileSync(path.join(d, "solo", "t4.jsonl"), lines.map((x) => JSON.stringify(x)).join("\n") + "\n");
+  const me = JSON.parse(cli(d, "solo-me", "t4").stdout);
+  assert.deepEqual(me.map((x) => x.text), ["하나", "/clear"]);
+  assert.ok(me.every((x) => Number.isFinite(x.ms)));
+  assert.deepEqual(JSON.parse(cli(d, "solo-me", "t9").stdout), []); // no file
+  assert.deepEqual(JSON.parse(cli(d, "solo-me", "../x").stdout), []); // never a path outside <dir>/solo
+});
+
+test("main.js: the solo 새로 시작 sends only /clear, the enable button confirms with the stored-prompts warning and sets only the flag", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const flow = src.slice(src.indexOf("  async soloFlow("), src.indexOf("  soloOpen("));
+  assert.match(flow, /sendLine\(po, "\/clear"/);
+  assert.equal(/\/PO|RESTART_MARK|handoff/.test(flow), false, "no note, no /PO");
+  assert.match(flow, /restartClearState\(/);
+  assert.match(flow, /restartClearCheck\(await this\.soloMe\(room\), clr\.at\) === "text"/);
+  const row = src.slice(src.indexOf("  soloRow(t, v) {"), src.indexOf("  // ---- \"원격 연결 켜기\""));
+  assert.match(row, /restartBlock\(\{ po, status: st, running: r\?\.phase === "run" \}\)/); // greyed with a reason while working / blocked
+  assert.match(row, /disabled: why/);
+  assert.match(row, /"ss-go", "비우기"/);
+  const hint = src.slice(src.indexOf("  poHint(t, v = null) {"), src.indexOf("  // #69: the \"working\" dot"));
+  assert.match(hint, /모든 Claude 터미널의 프롬프트가 이 컴퓨터에 저장됩니다/);
+  assert.match(hint, /"solo-go", "켜기", \(c\) => this\.soloEnable\(c\)/);
+  const en = src.slice(src.indexOf("  soloEnable(c) {"), src.indexOf("  // ---- #90 solo \"새로 시작\""));
+  assert.match(en, /"solo-on"/);
+  assert.equal(/hook|install/.test(en.replace(/\/\/.*$/gm, "").replace(/"[^"]*"/g, '""')), false, "the button never installs the hook");
 });

@@ -338,7 +338,7 @@ test("main.js 배선: 고른 PO의 금액만 usage 줄 끝에 '이 세션 $…'�
   // 가격 계산은 헬퍼에서만: main.js는 읽은 결과를 그리기만 한다
   assert.doesNotMatch(src, /costUsd\(|costFold\(|poCosts\(/);
   const hookSrc = fs.readFileSync(path.join(__dirname, "../mods/inbox/po-hook.cjs"), "utf8");
-  assert.match(hookSrc, /I\.writePoSession\(I\.inboxDir\(\), po, payload, now\)/);
+  assert.match(hookSrc, /I\.writePoSession\(I\.inboxDir\(\), po \|\| id, payload, now\)/);
 });
 
 test("훅: PO 터미널이면 줄을 쓴 뒤 세션 기록도 남기고, 기록이 실패해도 줄은 남는다", () => {

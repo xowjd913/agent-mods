@@ -877,7 +877,7 @@ test("collect: po/<id>.jsonl을 PO별로 읽고, 옛 po.jsonl과 잘못된 파�
   assert.deepEqual(d.po.devnotes.map((x) => [x.text, x.to]), [["안녕하세요", "here"]]);
   assert.deepEqual(d.po.mascoz.map((x) => x.text), ["마스코즈"]);
   assert.deepEqual(I.readPo(dir), d.po);
-  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, dir: path.join(dir, "none"), root: I.appRoot(), leaders: [], po: {}, solo: {}, imgd: {}, cost: {}, names: I.plainNames(), profileError: "" });
+  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, dir: path.join(dir, "none"), root: I.appRoot(), leaders: [], po: {}, solo: {}, soloOn: false, imgd: {}, cost: {}, names: I.plainNames(), profileError: "" });
 });
 
 test("chat 블록: main.js가 inbox.cjs와 한 글자도 다르지 않은 같은 블록을 쓴다", () => {
@@ -2498,8 +2498,8 @@ const restartWorld = ({ clearWorks = true, cols = 2, glue = "", noRecs = false, 
     restartDraft: I.restartDraft, restartSubmitCheck: I.restartSubmitCheck, restartClearCheck: I.restartClearCheck, RESTART_MARK: I.RESTART_MARK,
     restartBlock: I.restartBlock, restartPoll: I.restartPoll, restartNoteFresh: I.restartNoteFresh,
     restartSendResult: I.restartSendResult, restartTerm: I.restartTerm, restartSendBlock: I.restartSendBlock, restartClearState: I.restartClearState,
-    handoffAsk: I.handoffAsk, HELPER: () => "h.cjs",
-    exec: async (c, a) => a[1] === "po-me" ? { code: 0, stdout: JSON.stringify(po.recs) } : ({ code: 0, stdout: JSON.stringify({ path: "/n.md", exists: po.noteMs > 0, ms: po.noteMs, size: po.noteMs ? 20 : 0, text: po.noteMs ? "note" : "" }) }),
+    handoffAsk: I.handoffAsk, HELPER: () => "h.cjs", soloWords: (x) => x,
+    exec: async (c, a) => a[1] === "po-me" || a[1] === "solo-me" ? { code: 0, stdout: JSON.stringify(po.recs) } : ({ code: 0, stdout: JSON.stringify({ path: "/n.md", exists: po.noteMs > 0, ms: po.noteMs, size: po.noteMs ? 20 : 0, text: po.noteMs ? "note" : "" }) }),
     hc: async (a) => {
       if (a[0] === "get") {
         if (po.clearPoll >= 0 && ++po.clearPoll >= 3 && clearWorks) { po.status = "idle"; po.turn++; po.clearPoll = -1; }
@@ -2523,7 +2523,7 @@ const restartWorld = ({ clearWorks = true, cols = 2, glue = "", noRecs = false, 
     },
   });
   const self = {
-    rs: new Map(), rgen: 0,
+    rs: new Map(), ss: new Map(), rgen: 0,
     liveTerms: () => [{ address: "t9", status: po.status }], isBlocked: () => po.status === "blocked",
     say: (m) => log.says.push(m), diag: (m) => log.diag.push(m),
   };
@@ -2540,9 +2540,17 @@ const restartWorld = ({ clearWorks = true, cols = 2, glue = "", noRecs = false, 
   grab("  async sendLine(po, text, still", "  // 새로 시작 / 다시");
   grab("  restartRun(room, po, id, c) {", "  // Steps 1-4.");
   grab("  async restartFlow(", "  // The strip above the chat box");
+  grab("  soloAlive(room, g)", "  soloEnd(");
+  grab("  soloEnd(room, g, patch, c)", "  async soloMe(");
+  grab("  async soloMe(id)", "  soloClear(");
+  grab("  soloClear(room, po, c)", "  async soloFlow(");
+  grab("  async soloFlow(", "  soloOpen(");
+  grab("  soloClose(room, c)", "  // The strip above a solo room's chat box");
   const click = () => { const c = strictCx(log); try { self.restartRun("r", "t9", "r", c); } finally { c.valid = false; } };
   const settle = async (ms = 4000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { await tick(); const r = self.rs.get("r"); if (r && (r.phase === "done" || r.phase === "fail" || r.phase === "timeout")) break; } };
-  return { self, po, log, click, settle };
+  const soloClick = (room = "t9") => { const c = strictCx(log); try { self.soloClear(room, "t9", c); } finally { c.valid = false; } };
+  const soloSettle = async (ms = 8000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { await tick(); const r = self.ss.get("t9"); if (r && (r.phase === "done" || r.phase === "fail")) break; } };
+  return { self, po, log, click, settle, soloClick, soloSettle };
 };
 test("새로 시작 전체 흐름(PO 칸 2열): 노트 요청 → 노트 → /clear → /PO가 hc send로만 끝까지 가고, 화면·붙여넣기·키 입력은 한 번도 쓰이지 않는다", async () => {
   const w = restartWorld({ cols: 2 });
@@ -2557,6 +2565,54 @@ test("새로 시작 전체 흐름(PO 칸 2열): 노트 요청 → 노트 → /cl
   assert.deepEqual(w.log.sends.slice(1), ["/clear", "/PO"]);
   assert.deepEqual(w.log.other, [], "only hc get / hc send: no read, no keys");
   assert.equal(w.log.spawned, 1);
+});
+test("혼자 모드 새로 시작: /clear 한 줄만 보내고(노트·/PO 없음) turn이 오르면 끝난다", async () => {
+  const w = restartWorld({ cols: 2 });
+  w.soloClick();
+  assert.equal(w.self.ss.get("t9").phase, "run");
+  await w.soloSettle();
+  assert.deepEqual(w.log.stale, [], "stale cx used");
+  assert.equal(w.self.ss.get("t9").phase, "done", JSON.stringify(w.self.ss.get("t9")) + w.log.diag.join("|"));
+  assert.deepEqual(w.log.sends, ["/clear"]);
+  assert.deepEqual(w.log.other, []);
+  assert.ok(w.log.says.some((m) => /대화를 비웠습니다/.test(m)));
+});
+test("혼자 모드 새로 시작: /clear가 글로 들어갔다는 훅 기록이 있으면 실패로 끝난다", async () => {
+  const w = restartWorld({ clearAsText: true });
+  w.soloClick();
+  await w.soloSettle();
+  const r = w.self.ss.get("t9");
+  assert.equal(r.phase, "fail");
+  assert.match(r.why, /글로 들어간/);
+  assert.ok(w.log.diag.some((d) => /reached the model as text/.test(d)));
+});
+test("혼자 모드 새로 시작: 끝나는 신호(turn)가 없으면 실패로 끝나고 이유를 diag에 남긴다", async () => {
+  const w = restartWorld({ clearWorks: false });
+  w.soloClick();
+  await w.soloSettle(20000);
+  assert.equal(w.self.ss.get("t9").phase, "fail");
+  assert.match(w.self.ss.get("t9").why, /끝났는지 확인하지 못했습니다/);
+  assert.ok(w.log.diag.some((d) => /solo \/clear not confirmed/.test(d)));
+});
+test("혼자 모드 새로 시작: 터미널이 작업 중이거나 질문 중이면 아무것도 보내지 않고 이유를 보인다", async () => {
+  for (const status of ["working", "blocked"]) {
+    const w = restartWorld();
+    w.po.status = status;
+    w.soloClick();
+    const r = w.self.ss.get("t9");
+    assert.equal(r.phase, "fail", status);
+    assert.ok(r.why.length > 0, status);
+    assert.deepEqual(w.log.sends, [], status);
+  }
+});
+test("혼자 모드 새로 시작: 실행 중에 취소(닫기)하면 이어서 아무것도 하지 않는다", async () => {
+  const w = restartWorld();
+  w.soloClick();
+  const c = strictCx(w.log); w.self.soloClose("t9", c); c.valid = false;
+  assert.equal(w.self.ss.get("t9"), undefined);
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal(w.self.ss.get("t9"), undefined, "no state comes back");
+  assert.ok(w.log.sends.length <= 1);
 });
 test("새로 시작: /clear가 끝났다는 신호(turn 증가)가 없으면 /PO를 보내지 않고 멈추며, 이유를 diag에 남긴다", async () => {
   const w = restartWorld({ clearWorks: false });
