@@ -99,6 +99,43 @@ test("D: mdText leaves code fences as written", () => {
   assert.ok(out.includes("line a\nline b"));
 });
 
+test("#66 mdText: typed list marks become Markdown items with a blank line around the list; the words stay", () => {
+  const out = I.mdText("요약입니다\n• 첫째\n• 둘째 **굵게**\n1) 하나\n2) 둘\n마무리");
+  assert.equal(out, "요약입니다\n\n- 첫째\n- 둘째 **굵게**\n1. 하나\n2. 둘\n\n마무리");
+  // a list written with "-" already: only the blank lines are added
+  assert.equal(I.mdText("a\n- x\n- y\nb"), "a\n\n- x\n- y\n\nb");
+  // an indented line under an item stays inside it (a break, no blank line)
+  assert.equal(I.mdText("- x\n  more\n- y"), "- x  \n  more\n- y");
+  // a number that does not start at 1 in the middle of a text is text, not a list
+  assert.equal(I.mdText("날짜\n2025. 11. 26 에"), "날짜  \n2025. 11. 26 에");
+  // **bold** and *italic* at the start of a line are not bullets
+  assert.equal(I.mdText("**a** b\n*c* d"), "**a** b  \n*c* d");
+  // fences are never touched, a bullet inside one stays
+  assert.equal(I.mdText("```\n• x\n1) y\n```"), "```\n• x\n1) y\n```");
+  // the text a person copies is the original: only the drawn source changes
+  assert.ok(!I.mdText("• x").includes("•"));
+});
+
+test("#66 mdBlocks: a line of only **bold** text is its own bold block (markers removed); the rest stays Markdown", () => {
+  assert.deepEqual(I.mdBlocks("**제목**  \n본문  \n끝"), [{ s: "제목", bold: true }, { s: "본문  \n끝", bold: false }]);
+  assert.deepEqual(I.mdBlocks(I.mdText("【결과】\nplain **b**")), [{ s: "【결과】", bold: true }, { s: "plain **b**", bold: false }]);
+  assert.deepEqual(I.mdBlocks("a **b** c"), [{ s: "a **b** c", bold: false }]);
+  assert.deepEqual(I.mdBlocks("**a** and **b**"), [{ s: "**a** and **b**", bold: false }]);
+  assert.deepEqual(I.mdBlocks("```\n**in fence**\n```"), [{ s: "```\n**in fence**\n```", bold: false }]);
+  assert.deepEqual(I.mdBlocks("**`code` 제목**"), [{ s: "`code` 제목", bold: true }]);
+  assert.deepEqual(I.mdBlocks("** lone **"), [{ s: "** lone **", bold: false }]);
+  assert.deepEqual(I.mdBlocks(""), []);
+  // blank lines around a bold line are dropped (the screen spaces the blocks)
+  assert.deepEqual(I.mdBlocks("a\n\n**b**\n\nc"), [{ s: "a", bold: false }, { s: "b", bold: true }, { s: "c", bold: false }]);
+});
+
+test("#66 mdText/mdBlocks are linear on long input", () => {
+  const t0 = process.hrtime.bigint();
+  I.mdBlocks(I.mdText("• **a** b\n".repeat(5000)));
+  I.mdBlocks(I.mdText("**" + "x ".repeat(20000) + "**"));
+  assert.ok(Number(process.hrtime.bigint() - t0) / 1e6 < 800);
+});
+
 test("D: toParts gives each prose part its Markdown source (bold markers kept)", () => {
   const parts = I.toParts(I.parseBody("**중요** 안내\n- 하나\n- 둘 `x`"));
   const prose = parts.find((p) => p.t === "prose");
@@ -110,9 +147,9 @@ test("D: toParts gives each prose part its Markdown source (bold markers kept)",
 test("B/D: the code draws a thumbnail from the app-relative path, and bubbles use the Markdown view with raw_html(false)", () => {
   assert.match(MAIN, /thumb\(t, x\) \{[\s\S]*?imgRel\(this\.data\?\.root \?\? "", x\.path\)/);
   assert.ok(!/image\(x\.path\)/.test(MAIN), "the chip must not pass an absolute path to image()");
-  assert.match(MAIN, /TextView\.markdown\(id, m\)\.raw_html\(false\)\.selectable\(true\)\.on_link_click/);
+  assert.match(MAIN, /TextView\.markdown\(vid, s\)\.raw_html\(false\)\.selectable\(true\)\.on_link_click/);
   assert.match(MAIN, /this\.mdFolded\(id, e\.text, t\)/);
-  assert.match(MAIN, /this\.md\(id, open \? src : lc\.text, t\)/); // #47: a long PO message is folded, still through md()
+  assert.match(MAIN, /this\.md\(id, open \? src : lc\.text\)/); // #47: a long PO message is folded, still through md()
 });
 
 // ---- E: the "···" rows (round 14)
@@ -154,7 +191,7 @@ function pictureDesk(execImpl) {
   assert.ok(a > 0 && b > a, "the picture methods are found");
   const body = MAIN.slice(a, b);
   const make = new Function("exec", "HELPER", "MAX_IMGS", "pickFiles", `return class Desk {
-    constructor() { this.pics = []; this.picBusy = 0; this.replyPics = new Map(); this.replyBusy = new Map(); this.imgd = new Map(); this.msg = "x"; this.said = []; }
+    constructor() { this.pics = []; this.picBusy = 0; this.picBusyBy = new Map(); this.draftRoom = null; this.roomDrafts = new Map(); this.replyPics = new Map(); this.replyBusy = new Map(); this.imgd = new Map(); this.msg = "x"; this.said = []; }
     say(m, bad) { this.said.push([m, Boolean(bad)]); }
     ${body}
   }`);
@@ -270,13 +307,14 @@ test("R16: the same closing-tag regex is in the mod copy, and the terminal-line 
 
 function replyDesk(store = {}) {
   const grab = (name, end) => { const a = MAIN.indexOf(name), b = MAIN.indexOf(end, a); assert.ok(a > 0 && b > a, name); return MAIN.slice(a, b); };
-  const body = [grab("  picsOf(key = null)", "  bumpBusy("), grab("  pruneReply(asks)", "  pruneSent(asks)"), grab("  clearBox(a, how", "  box(leader, cx)")].join("\n");
-  const make = new Function("shared", "setShared", "SENT_KEY", "staleDrafts", `return class Desk {
-    constructor() { this.pics = []; this.replyPics = new Map(); this.replyBusy = new Map(); this.inputs = new Map(); this.inputSeen = new Map(); this.writing = null; }
+  const body = [grab("  picsOf(key = null)", "  bumpBusy("), grab("  pruneReply(asks)", "  pruneSent(asks)"), grab("  clearBox(a, how", "  box(leader, cx)"), grab("  // #74: the draft mirror.", "  // A held Enter whose second Enter")].join("\n");
+  const make = new Function("shared", "setShared", "SENT_KEY", "staleDrafts", "draftWiped", `return class Desk {
+    constructor() { this.pics = []; this.replyPics = new Map(); this.replyBusy = new Map(); this.inputs = new Map(); this.inputSeen = new Map(); this.writing = null; this.mirror = new Map(); this.keyAt = 0; this.chat = null; }
+    diag() {}
     askKey(a) { return a.kind + "|" + a.link; }
     ${body}
   }`);
-  return new (make((k) => store[k], (k, v) => { store[k] = v; }, "sent", I.staleDrafts))();
+  return new (make((k) => store[k], (k, v) => { store[k] = v; }, "sent", I.staleDrafts, I.draftWiped))();
 }
 const ASK = (leader) => ({ kind: "decision", link: "l", s: { leader } });
 const fakeInput = (v) => ({ v, value() { return this.v; }, set_value(x) { this.v = x; } });
@@ -327,59 +365,6 @@ test("R16: a late clear removes only what was sent, not words or pictures added 
 });
 
 // ---- Round 17: bold that shows, diag that is always flushed, copy fallback, drag hardening
-const ranges = (s) => I.boldRanges(s).map((r) => s.slice(r.start, r.end));
-
-test("R17: boldRanges finds **bold** runs as UTF-16 source offsets, skipping code, fences and escapes", () => {
-  assert.deepEqual(ranges("a **b** c **d e** end"), ["**b**", "**d e**"]);
-  assert.deepEqual(ranges("`**x**` and ``**y** ` **z**`` then **w**"), ["**w**"]);
-  assert.deepEqual(ranges("```\n**in fence**\n```\n**out**"), ["**out**"]);
-  assert.deepEqual(ranges("\\**not** and **yes**"), ["**yes**"]);
-  assert.deepEqual(ranges("** lone ** and **w **"), []);
-  assert.deepEqual(ranges("**unterminated"), []);
-  // offsets count UTF-16 units: Korean is one unit, an emoji two - the slice above is the proof, and so is the exact number here
-  const s = "😀한글 **굵게😀** 끝";
-  const [r] = I.boldRanges(s);
-  assert.deepEqual([r.start, r.end], [s.indexOf("**"), s.lastIndexOf("**") + 2]);
-  assert.equal(s.slice(r.start, r.end), "**굵게😀**");
-  // the ranges are computed on the very string given to markdown (a 【...】 line is made bold by mdText)
-  assert.deepEqual(ranges(I.mdText("【결과】\nplain **b**")), ["**【결과】**", "**b**"]);
-});
-
-test("R17: boldRanges is bounded (long lines, many markers)", () => {
-  const t0 = process.hrtime.bigint();
-  assert.deepEqual(I.boldRanges("**a** ".repeat(5000)).length <= 100, true);
-  I.boldRanges("`".repeat(1999) + "**x**");
-  I.boldRanges("** ".repeat(600));
-  I.boldRanges(("`a ".repeat(600) + "\n").repeat(20));
-  assert.ok(Number(process.hrtime.bigint() - t0) / 1e6 < 500);
-});
-
-test("R17: the mod copy of boldRanges is the same code, and md() paints a tint behind each run of the same string", () => {
-  const grab = (src) => src.slice(src.indexOf("function boldRanges(md)"), src.indexOf("// A message text as Markdown for a TextView"));
-  const CJS = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8").replace(/\r\n/g, "\n");
-  assert.equal(grab(MAIN), grab(CJS));
-  const md = MAIN.slice(MAIN.indexOf("  md(id, src, t) {"), MAIN.indexOf("  text(id, html) {"));
-  assert.match(md, /const m = mdText\(src\);/);
-  assert.match(md, /TextView\.markdown\(id, m\)/);
-  assert.match(md, /const bc = tintHex\(t, "bold"\)/);
-  assert.match(md, /for \(const r of boldRanges\(m\)\) tv = tv\.highlight_range\(r\.start, r\.end, bc\)/);
-  assert.match(MAIN, /this\.md\(key, p\.md, t\)/);
-});
-
-test("R17: md() really calls highlight_range once per bold run (stub TextView)", () => {
-  const body = MAIN.slice(MAIN.indexOf("  md(id, src, t) {"), MAIN.indexOf("  text(id, html) {"));
-  const calls = [];
-  const tv = { raw_html() { return this; }, selectable() { return this; }, on_link_click() { return this; }, on_selection_change() { return this; }, highlight_range(a, b, c) { calls.push([a, b, c]); return this; } };
-  const make = new Function("TextView", "mdText", "boldRanges", "openUrl", "tintHex", "selRangeOf", `return class D { ${body} }`);
-  const d = new (make({ markdown: () => tv }, I.mdText, I.boldRanges, () => {}, I.tintHex, I.selRangeOf))();
-  const th = { foreground: "#aabbcc", background: "#101010", accent: "#3366ff" };
-  const bc = I.tintHex(th, "bold");
-  d.md("x", "a **b** c **d**", th);
-  assert.deepEqual(calls, [[2, 7, bc], [10, 15, bc]]);
-  calls.length = 0;
-  d.md("x", "a **b**"); // no theme: nothing painted
-  assert.equal(calls.length, 0);
-});
 
 test("R17: pruneReply also empties the reply text of a leader that is gone", () => {
   const d = replyDesk();
@@ -438,7 +423,7 @@ test("R17: each bubble has a 복사 chip that copies the unwrapped text; backgro
   assert.match(side, /on_mouse_down\("left", stop\)/);
   assert.equal((MAIN.match(/this\.sideTools\(t, id, e\.text, e\.ms\)/g) ?? []).length, 2, "mine and the PO's");
   // every background source goes through softNotify or the quiet check
-  assert.match(MAIN, /if \(!same\) this\.softNotify\(cx\);/);
+  assert.match(MAIN, /if \(!same\) this\.softNotify\(c2\);/);
   assert.match(MAIN, /this\.narrow = n; this\.softNotify\(cx\)/, "a resize redraw goes through softNotify (onSize)");
   assert.match(MAIN, /if \(r\.go && quietNow\(this\.ui, Date\.now\(\)\)\) return;/);
   assert.doesNotMatch(MAIN, /!this\.ui\.press\) this\.scroll/);
@@ -485,18 +470,21 @@ test("R18: main.js loads and init() runs to the end: the flush timer is set and 
   assert.match(d.diagQ[0], /init: window$/);
 });
 
-test("R18: the tint constants are defined as numbers/hex alpha, and md() paints with them (no stub injects them)", () => {
+test("R18: md() paints nothing behind bold (no highlight_range), and a line of only bold text gets the bold weight (#66)", () => {
   assert.match(MAIN, /^const DIAG_FLUSH_MS = \d+/m);
-  assert.doesNotMatch(MAIN, /BOLD_TINT/, "the fixed 20% foreground tint is gone");
-  assert.doesNotMatch(MAIN, /HL_ECHO_MS/, "R21: the echo guard is gone");
-  const calls = [];
-  const tv = { raw_html() { return this; }, selectable() { return this; }, on_link_click() { return this; }, on_selection_change() { return this; }, highlight_range(a, b, c) { calls.push([a, b, c]); return this; } };
-  const Inbox = loadInbox({ base: { TextView: { markdown: () => tv } } });
+  assert.doesNotMatch(MAIN, /highlight_range|tintHex|boldRanges|BOLD_TINT|HL_ECHO_MS/, "no tint machinery is left");
+  const views = [];
+  const mk = (id, s) => { const v = { id, s, w: 0, raw_html() { return this; }, selectable() { return this; }, on_link_click() { return this; }, on_selection_change() { return this; }, font_weight(n) { this.w = n; return this; } }; views.push(v); return v; };
+  const Inbox = loadInbox({ base: { TextView: { markdown: mk } } });
   const d = new Inbox();
-  d.md("x", "a **b** c", { foreground: "#112233", background: "#ffffff", accent: "#2255cc" });
-  assert.equal(calls.length, 1, "a ReferenceError inside md() would have been swallowed and painted nothing");
-  assert.deepEqual(calls[0].slice(0, 2), [2, 7]);
-  assert.match(calls[0][2], /^#2255cc[0-9a-f]{2}$/);
+  d.md("x", "plain with **inline bold** only");
+  assert.equal(views.length, 1);
+  assert.equal(views[0].id, "x");
+  assert.equal(views[0].w, 0, "an inline run keeps the normal weight");
+  assert.equal(views[0].s, "plain with **inline bold** only");
+  views.length = 0;
+  d.md("y", "【결과】\nfirst\n- a\n- b\n**끝**");
+  assert.deepEqual(views.map((v) => [v.id, v.w, v.s]), [["y-0", 700, "【결과】"], ["y-1", 0, "first\n\n- a\n- b"], ["y-2", 700, "끝"]]);
 });
 
 test("R18: pinTick keeps the pin when a scroll is held back, so the view goes to the bottom after the release", () => {
@@ -505,7 +493,7 @@ test("R18: pinTick keeps the pin when a scroll is held back, so the view goes to
   const jumps = [];
   let ch = 1000;
   d.scroll = { offset: () => ({ y: 600 }), viewport_size: () => ({ height: 400 }), content_size: () => ({ height: ch }), scroll_to_item: (i) => jumps.push(i) };
-  d.drawnAt = 1; d.lastIdx = 7;
+  d.drawnAt = 1; d.lastIdx = 7; d.guardAll = () => {};
   d.pin = { pinned: true, ct: 1000 };
   d.ui = { sels: new Map(), sel: true, selAt: Date.now(), press: false, pressAt: 0 }; // a settled selection holds the scroll
   ch = 1100; // the content grew without a redraw (a late picture, a narrower window)
@@ -518,10 +506,32 @@ test("R18: pinTick keeps the pin when a scroll is held back, so the view goes to
   d.ui.sel = false; // released
   d.pinTick({ notify() {} });
   assert.deepEqual(jumps, [7], "the next tick after the release still sees the growth and goes to the bottom");
-  assert.deepEqual(d.pin, { pinned: true, ct: 1100 });
+  assert.deepEqual(d.pin, { pinned: true, ct: 1100, vh: 400 });
   // not held and no growth: the pin is stored as before
   d.pinTick({ notify() {} });
   assert.equal(jumps.length, 1);
+});
+
+test("#72 pinTick: a go tick (pinned, a long new row) does not flash the jump button; a tick scrolled away shows it once", () => {
+  const Inbox = loadInbox();
+  const d = new Inbox();
+  let y = 900, ch = 1400, notified = 0;
+  d.scroll = { offset: () => ({ y }), viewport_size: () => ({ height: 500 }), content_size: () => ({ height: ch }), scroll_to_item: () => { y = ch - 500; } };
+  d.drawnAt = 1; d.lastIdx = 7; d.guardAll = () => {}; d.softNotify = () => { notified++; };
+  d.pin = { pinned: true, ct: 1400, vh: 500 };
+  ch = 1520; // a 120px row arrived while pinned at the bottom: pinStep goes, the old y against the new height would read as "away"
+  d.pinTick({ notify() {} });
+  assert.equal(Boolean(d.jump), false);
+  assert.equal(notified, 0);
+  d.pinTick({ notify() {} }); // the next tick sees the real position (bottom): still hidden
+  assert.equal(Boolean(d.jump), false);
+  assert.equal(notified, 0);
+  y = 100; // the person scrolled far up
+  d.pinTick({ notify() {} });
+  assert.equal(Boolean(d.jump), true);
+  assert.equal(notified, 1);
+  d.pinTick({ notify() {} });
+  assert.equal(notified, 1, "no redraw while the state is unchanged");
 });
 
 test("R18: pruneReply clears only a leader's non-empty draft; copy() redraws through softNotify", () => {
@@ -681,34 +691,6 @@ function recTv(calls) {
 const freshUi = () => ({ sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0 });
 const r20Desk = (calls) => { const d = new (loadInbox({ base: { TextView: recTv(calls) } }))(); d.ui = freshUi(); return d; };
 
-test("R20: tintHex takes the theme accent at a strong alpha on a dark and a light theme, and the text stays readable on it", () => {
-  for (const th of [DARK, LIGHT]) {
-    const bold = I.tintHex(th, "bold");
-    assert.match(bold, /^#[0-9a-f]{6}[0-9a-f]{2}$/);
-    assert.equal(bold.slice(0, 7), th.accent, "the accent token, no hard-coded colour");
-    assert.ok(alphaOf(bold) >= 0x40, "not fainter than 25% (the old tint was 20%)");
-    for (const c of [bold]) {
-      const under = (() => { const a = alphaOf(c) / 255; const u = [1, 3, 5].map((i) => parseInt(th.background.slice(i, i + 2), 16)); return "#" + [1, 3, 5].map((i, k) => Math.round(parseInt(c.slice(i, i + 2), 16) * a + u[k] * (1 - a)).toString(16).padStart(2, "0")).join(""); })();
-      const lum = (h) => { const [r, g, b] = [1, 3, 5].map((i) => { const v = parseInt(h.slice(i, i + 2), 16) / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
-      const x = lum(th.foreground), y = lum(under);
-      assert.ok((Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05) >= I.HL_MIN_CONTRAST - 0.05, `text readable on ${c}`);
-    }
-  }
-});
-
-test("R20: tintHex lowers the alpha when a bright accent would hide the text, and falls back / gives up cleanly", () => {
-  const bright = { foreground: "#f0f0f0", background: "#202020", accent: "#ffff00" }; // light text on strong yellow would be unreadable
-  assert.ok(alphaOf(I.tintHex(bright, "bold")) < 0x73, "stepped down");
-  assert.ok(alphaOf(I.tintHex(bright, "bold")) >= 0x40, "but not below the floor");
-  assert.equal(I.tintHex({ foreground: "#e6e6e6", background: "#1e1e1e" }, "bold").slice(0, 7), "#e6e6e6", "no accent: the foreground colour");
-  assert.match(I.tintHex({ accent: "#3b82f680", foreground: "#e6e6e6" }, "bold"), /^#3b82f6[0-9a-f]{2}$/, "R21: #rrggbbaa is normalized (its own alpha dropped)");
-  assert.equal(I.tintHex({ accent: "oops", foreground: "#e6e6e6" }, "bold").slice(0, 7), "#e6e6e6", "an unusable accent falls to the next token");
-  assert.equal(I.tintHex({ accent: "#3b82f6" }, "sel"), null, "R22: the selection tint is gone");
-  assert.equal(I.tintHex({}, "bold"), null);
-  assert.equal(I.tintHex(undefined, "bold"), null);
-  assert.match(I.tintHex({ accent: "#3b82f6" }, "bold"), /^#3b82f673$/, "no background known: the starting alpha");
-});
-
 test("R20: selRangeOf accepts sel.range or a bare range and refuses nonsense", () => {
   assert.deepEqual(I.selRangeOf({ range: { start: 1, end: 4 }, text: "x" }, 10), { start: 1, end: 4 });
   assert.deepEqual(I.selRangeOf({ start: 0, end: 3 }, 10), { start: 0, end: 3 });
@@ -725,26 +707,6 @@ function selDesk() {
   d.text("h1", "<p>plain</p>");
   return { d, cx, calls, notes: () => notes };
 }
-
-test("R21: bold alpha never drops below its floor, even for white text on white", () => {
-  for (const c of ["#ffffff", "#000000", "#808080"]) {
-    const a = alphaOf(I.tintHex({ foreground: c, background: c, accent: c }, "bold"));
-    assert.ok(a >= 0x40, `${c}: ${a.toString(16)}`);
-  }
-});
-
-test("R21: hex6 / tintHex normalize #rgb and #rrggbbaa; tintMiss and tintWarn say once when no token is usable", () => {
-  assert.equal(I.tintHex({ accent: "#38f" }, "bold").slice(0, 7), "#3388ff");
-  assert.equal(I.tintHex({ accent: "#3B82F6CC" }, "bold").slice(0, 7), "#3b82f6");
-  assert.equal(I.tintHex({ accent: "blue", ansi4: "rgb(1,2,3)", foreground: 5 }, "bold"), null);
-  assert.match(I.tintMiss({ accent: "blue" }, "bold"), /^highlight bold: no usable theme token \(accent="blue" ansi4=null foreground=null\); nothing painted$/);
-  const calls = [];
-  const d = r20Desk(calls);
-  d.md("x", "a **b**", { accent: "blue" });
-  d.md("x", "a **b**", { accent: "blue" });
-  assert.equal(calls.length, 0);
-  assert.equal(d.diagQ.filter((l) => /highlight bold: no usable theme token/.test(l)).length, 1, "one line, not one per redraw");
-});
 
 // ---- R21: a short status label (5 chars at most) beside the "···" bubble, from hc status only
 const labelOf = (terms, track = null, now = 0) => I.typingNow(terms, "pa", {}, track, now).find((x) => x.who === "l:lead-po-inbox")?.label;
@@ -858,18 +820,18 @@ test("R21 layout: my bubble is pinned right and capped; the PO and leader bubble
   assert.match(sz, /this\.onSize\(size\.width, c\)/, "the size event goes to onSize");
 });
 
-test("R22 layout: the cap sits on the box only; the Markdown given to a TextView is the same string, so the bold band offsets do not move on a resize", () => {
-  const calls = [];
-  const d = r20Desk(calls);
+test("R22 layout: the cap sits on the box only; the Markdown given to a TextView is the same string on a resize", () => {
+  const seen = [];
+  const mk = (id, s) => { const v = { raw_html() { return this; }, selectable() { return this; }, on_link_click() { return this; }, on_selection_change() { return this; }, font_weight() { return this; } }; seen.push([id, s]); return v; };
+  const d = new (loadInbox({ base: { TextView: { markdown: mk } } }))();
+  d.ui = freshUi();
   d.winW = 400; d.narrow = false; d.windowed = true;
   const src = "a long message with **bold words** that will wrap inside the cap";
-  const before = I.boldRanges(I.mdText(src));
-  d.md("w", src, DARK);
+  d.md("w", src);
+  const first = seen.splice(0);
   d.winW = 1200; // resized: only the box width changes
-  const calls2 = calls.splice(0);
-  d.md("w", src, DARK);
-  assert.deepEqual(calls.map((c) => [c[0], c[1]]), calls2.map((c) => [c[0], c[1]]));
-  assert.deepEqual(calls2.map((c) => [c[0], c[1]]), before.map((r) => [r.start, r.end]));
+  d.md("w", src);
+  assert.deepEqual(seen, first);
 });
 
 // ---- R22: the resize redraw path (onSize) is tested directly
@@ -957,10 +919,7 @@ test("R22: no selection overlay machinery is left in main.js or inbox.cjs; the p
   const CJS = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8").replace(/\r\n/g, "\n");
   for (const [name, src] of [["main.js", MAIN], ["inbox.cjs", CJS]]) {
     assert.doesNotMatch(src, /hlSkip|dropHl|mdSeen|ui\.hl\b|HL_ECHO_MS/, `${name}: no overlay state`);
-    assert.doesNotMatch(src, /tintHex\([^)]*"sel"\)|tintWarn\([^)]*"sel"\)/, `${name}: no selection tint call`);
-  }
-  assert.equal(I.tintHex(DARK, "sel"), null, "the selection tint kind is gone");
-  assert.ok(I.tintHex(DARK, "bold"), "the bold band stays");
+    }
   assert.match(MAIN, /on_mouse_down_out\(\(_e, c\) => \{ this\.ui\.press = false; if \(this\.ui\.sel\) this\.dropSel\(\);/);
 });
 
@@ -1104,4 +1063,196 @@ test("long message: main.js folds the person's and the PO's bubbles behind 더 �
   assert.match(src, /clipLong\(bp\.text\)/);
   assert.match(src, /mdFolded\(id, e\.text, t\)/);
   assert.match(src, /moreLabel\(lc\.more\)/);
+});
+
+// ---- #74: a draft in the chat box (and the answer boxes) survives every redraw
+
+// A stand-in for the retained text state: text, cursor and tokens are kept; `host` wipes it the way a rebuilt view would.
+function fakeBox(text = "", range = null) {
+  const b = { v: text, r: range ?? { start: text.length, end: text.length }, sets: 0,
+    value() { return this.v; }, content() { return { text: this.v, tokens: [] }; },
+    selected_range() { return this.r; }, set_selected_range(x) { this.r = x; },
+    set_value(x) { this.sets++; this.v = typeof x === "string" ? x : x.text; if (!this.r || this.r.end > this.v.length) this.r = { start: this.v.length, end: this.v.length }; },
+    host() { this.v = ""; this.r = { start: 0, end: 0 }; } };
+  return b;
+}
+function typingDesk(chat) {
+  const d = replyDesk();
+  d.chat = chat;
+  d.mirrorNow = (key, st) => d.keep(key, st, st.value());
+  return d;
+}
+
+test("#74: draftWiped — empty box, text in the mirror, and no key press of the person's just before", () => {
+  const m = { text: "쓰던 글" };
+  assert.equal(I.draftWiped(m, "", 0, 10_000), true);
+  assert.equal(I.draftWiped(m, "", 9_500, 10_000), false); // the person deleted it (a key within DRAFT_KEY_MS)
+  assert.equal(I.draftWiped(m, "쓰던", 0, 10_000), false); // not empty
+  assert.equal(I.draftWiped(null, "", 0, 10_000), false); // nothing was written
+  assert.equal(I.draftWiped({ text: "" }, "", 0, 10_000), false);
+});
+
+// Each path that redraws or rebuilds around the box: new message, room refresh, status/label, counts, typing line, mode switch, pin tick.
+// The box is wiped as a rebuilt view would wipe it; whichever path draws next (all of them go through full() or pinTick()) puts the draft back.
+for (const path of ["새 메시지(말풍선)", "방 목록 새로고침", "상태·라벨·배지 갱신", "개수 갱신", "입력 중 표시줄", "모드 전환(UI 모드·창·도크)", "pinTick 다시 그리기"]) {
+  test(`#74: ${path} 뒤에도 쓰던 글과 커서가 남는다`, () => {
+    const chat = fakeBox("회의 전에 이거 확인해줘", { start: 4, end: 4 });
+    const d = typingDesk(chat);
+    d.keep("chat", chat, chat.value());
+    d.keyAt = Date.now() - 60_000; // typed a minute ago
+    chat.host(); // the redraw path emptied it
+    d.guardAll();
+    assert.equal(chat.v, "회의 전에 이거 확인해줘");
+    assert.deepEqual(chat.r, { start: 4, end: 4 });
+  });
+}
+
+test("#74: change 이벤트로 빈 값이 와도 사람 키 입력이 없었으면 되돌리고, 있었으면 지운 것으로 본다", () => {
+  const chat = fakeBox("abc");
+  const d = typingDesk(chat);
+  d.keep("chat", chat, "abc");
+  d.keyAt = Date.now() - 5000;
+  chat.host();
+  assert.equal(d.guard("chat", chat, ""), true);
+  assert.equal(chat.v, "abc");
+  // the person selects all and deletes: a key press, so the mirror follows the empty box
+  d.keyAt = Date.now();
+  chat.host();
+  assert.equal(d.guard("chat", chat, ""), false);
+  d.keep("chat", chat, "");
+  assert.equal(d.mirror.has("chat"), false);
+  d.keyAt = 0;
+  d.guardAll();
+  assert.equal(chat.v, ""); // and it stays empty afterwards
+});
+
+test("#74: 보내기·낡은 초안 정리는 우리가 비운 것이라 되돌리지 않는다", () => {
+  const chat = fakeBox("보낼 글");
+  const d = typingDesk(chat);
+  d.keep("chat", chat, "보낼 글");
+  d.keyAt = 0;
+  d.wipe("chat", chat); // sendChat
+  d.guardAll();
+  assert.equal(chat.v, "");
+  // an answer box cleared by pruneReply / clearBox stays cleared
+  d.inputs.set("lead-gone", fakeBox("old draft"));
+  d.keep("lead-gone", d.inputs.get("lead-gone"), "old draft");
+  d.pruneReply([ASK("lead-a")]);
+  d.inputSeen.set("lead-gone", 0);
+  d.pruneReply([ASK("lead-a")]);
+  d.guardAll();
+  assert.equal(d.inputs.get("lead-gone").v, "");
+});
+
+test("#74: 답변 상자의 글도 같은 방식으로 지켜진다", () => {
+  const d = typingDesk(fakeBox(""));
+  const box = fakeBox("답: 2안으로");
+  d.inputs.set("lead-a", box);
+  d.keep("lead-a", box, box.value());
+  d.keyAt = 0;
+  box.host();
+  d.guardAll();
+  assert.equal(box.v, "답: 2안으로");
+});
+
+test("#74: 소스 — 채팅 상자는 모든 방에서 같은 자리에 그려지고(id 고정), 상태는 한 번만 만들며, 다시 그리기 경로가 상자를 비우지 않는다", () => {
+  assert.equal((MAIN.match(/TextareaState\.new\(/g) ?? []).length, 1);
+  const box = MAIN.slice(MAIN.indexOf("  chatBox(t, v) {"), MAIN.indexOf("  poHint(t) {"));
+  assert.doesNotMatch(box, /chat-none/); // the "PO 모름" room no longer swaps the box out of the tree
+  for (const id of ["chat-box", "chat-target", "chat-row", "chat-input"]) assert.match(box, new RegExp(`id\\("${id}"\\)`));
+  assert.match(MAIN, /full\(cx\) \{\n    this\.tvN = 0;\n    this\.noteRedraw\(cx\);\n    this\.guardAll\(\);/);
+  assert.match(MAIN, /pinTick\(cx\) \{\n    this\.guardAll\(\);/);
+  // the only places that write into the box: our own clears (wipe), the guard's restore, the "@" pick, the held / stray line break (dropAt, dropBreak) and the restore of a selection an Enter swapped for a line break (putBack), the room switch (syncRoom, #66)
+  const writers = MAIN.split("\n").map((l, i) => [i + 1, l]).filter(([, l]) => /this\.chat\.(set_value|replace)\(/.test(l));
+  const where = (n) => { const head = MAIN.slice(0, MAIN.split("\n").slice(0, n).join("\n").length); return head.slice(head.lastIndexOf("\n  ") + 1).split("\n")[0]; };
+  for (const [n] of writers) assert.match(MAIN.split("\n").slice(0, n).reverse().find((l) => /^  [a-zA-Z]+\(.*\) \{$/.test(l)), /pickMenu|enterBox|dropBreak|dropAt|putBack|syncRoom/, `line ${n}`);
+});
+
+test("#66 mdText: a numbered list stays compact even when the source has blank lines between its items, like the '-' list", () => {
+  assert.equal(I.mdText("앞\n\n1. 하나\n\n2. 둘\n\n3. 셋\n\n뒤"), "앞\n\n1. 하나\n2. 둘\n3. 셋\n\n뒤");
+  assert.equal(I.mdText("- a\n\n- b"), "- a\n- b");
+  assert.equal(I.mdText("1) 하나\n\n\n2) 둘"), "1. 하나\n2. 둘");
+  // a blank line between a list and a real paragraph stays, and so does one between two paragraphs
+  assert.equal(I.mdText("- a\n\n문단\n\n다음 문단"), "- a\n\n문단\n\n다음 문단");
+  assert.equal(I.mdText("- a\n\n```\nx\n```"), "- a\n\n```\nx\n```");
+});
+
+test("#66 mdText: a first line '[이름] 종류' over more text is a bold header; a link, a lone line or a long sentence is not", () => {
+  assert.equal(I.mdText("[lead-po-inbox] 최종 확인 요청\n\n본문"), "**[lead-po-inbox] 최종 확인 요청**\n\n본문");
+  assert.deepEqual(I.mdBlocks(I.mdText("[lead-po-inbox] 최종 확인 요청\n본문\n\n1. 하나\n\n2. 둘")), [{ s: "[lead-po-inbox] 최종 확인 요청", bold: true }, { s: "본문\n\n1. 하나\n2. 둘", bold: false }]);
+  assert.equal(I.mdText("[a] b"), "[a] b"); // nothing under it
+  assert.equal(I.mdText("[링크](http://x) 가\n다"), "[링크](http://x) 가  \n다");
+  assert.equal(I.mdText("[a] " + "긴 ".repeat(40) + "\n다"), "[a] " + "긴 ".repeat(40) + "  \n다");
+  assert.equal(I.mdText("앞 줄\n[a] 둘째 줄\n다"), "앞 줄  \n[a] 둘째 줄  \n다"); // only the first line
+  assert.equal(I.mdText("**[a] 이미 굵게**\n다"), "**[a] 이미 굵게**  \n다");
+});
+
+test("#66 the person's own bubble draws through the same Markdown path as the PO bubbles (list, `code`, bold header)", () => {
+  assert.match(MAIN, /when\(Boolean\(bp\.text\), \(el\) => el\.child\(this\.md\(`\$\{id\}-t`, words\)\)\)/);
+  assert.ok(!/chatHtml\(words\)/.test(MAIN));
+  assert.match(MAIN, /this\.mdFolded\(id, e\.text, t\)/);
+});
+
+test("#66 the recommended option's button says so, and still sends the plain '<N>안 선택'", () => {
+  assert.match(MAIN, /`\$\{n\}안 선택\$\{n === opts\.recommended \? " \(추천\)" : ""\}`, \(c\) => this\.send\(a, `\$\{n\}안 선택`, c, "choice"\)/);
+});
+
+// ---- #74 R4: a picture read that finishes after a room switch belongs to the room it started in.
+test("#74 R4: a picture read that ends after the room changed lands in the room it started in, and the room shown is not blocked meanwhile", async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const d = pictureDesk(async () => { await gate; return { code: 0, stdout: JSON.stringify({ path: "data/inbox/img/late.png", w: 4, h: 5 }), stderr: "" }; });
+  d.draftRoom = "lead-a";
+  const p = d.addPic(["clipimg"], fakeCx());
+  assert.equal(d.picBusy, 1, "room A shows the read");
+  d.draftRoom = "lead-b"; // the person clicked room B (syncRoom also sets picBusy from the room's own count)
+  d.picBusy = d.picBusyBy.get("lead-b") ?? 0;
+  assert.equal(d.picBusy, 0, "room B is not blocked by A's read");
+  release();
+  await p;
+  assert.equal(d.pics.length, 0, "B's picture list stays empty");
+  assert.equal(d.picBusy, 0);
+  assert.deepEqual(d.roomDrafts.get("lead-a").pics.map((x) => x.path), ["data/inbox/img/late.png"], "the picture is in A's saved draft");
+  assert.equal(d.picBusyBy.size, 0, "A's count is released");
+});
+
+test("#74 R4: a picture read for the room still shown goes to the box as before", async () => {
+  const d = pictureDesk(okExec);
+  d.draftRoom = "lead-a";
+  await d.addPic(["clipimg"], fakeCx());
+  assert.equal(d.pics.length, 1);
+  assert.equal(d.roomDrafts.size, 0);
+});
+
+test("#74 R4: the file button remembers the room it was pressed in, so a slow picker does not move the picture", async () => {
+  const d = pictureDesk(okExec);
+  d.draftRoom = "lead-a";
+  const p = d.pickPics(fakeCx());
+  d.draftRoom = "lead-b";
+  await p;
+  assert.equal(d.pics.length, 0);
+  assert.equal(d.roomDrafts.get("lead-a").pics.length, 1);
+});
+
+test("#74 R4: a draft slot made only of a late picture comes back with the room (swapDraft keeps it)", () => {
+  const slots = new Map([["lead-a", { text: "", pics: [{ path: "p.png", w: 1, h: 1 }] }]]);
+  const r = I.swapDraft(slots, "lead-b", "lead-a", { text: "", content: null, range: null, pics: [] });
+  assert.deepEqual(r.load?.pics, [{ path: "p.png", w: 1, h: 1 }]);
+});
+
+// ---- #74 R4: a checkbox line is not a [tag] headline.
+test("#74 R4 mdText: the first line '[ ] 할 일' / '[x] 끝' is a checkbox line, not a bold [tag] headline; a real [tag] headline still is", () => {
+  for (const first of ["[ ] 하나 해야 함", "[x] 다 했음", "[X] 다 했음", "[✓] 확인", "[] 비어 있음"]) {
+    const out = I.mdText(`${first}\n본문`);
+    assert.ok(!out.startsWith("**"), first);
+  }
+  assert.ok(I.mdText("[lead-po] 확인 요청\n본문").startsWith("**[lead-po] 확인 요청**"));
+  assert.ok(I.mdText("[x1] 확인 요청\n본문").startsWith("**[x1]"), "a tag that merely starts with x is a tag");
+  assert.ok(I.mdText("[ok] 완료 보고\n본문").startsWith("**[ok]"));
+});
+
+test("#74 sendBang: the box is cleared through wipe() (draft mirror dropped), so guard() cannot restore the sent '!cmd'", () => {
+  const body = MAIN.slice(MAIN.indexOf("  sendBang(c, po, p, pics) {"), MAIN.indexOf("  bangGate(po) {"));
+  assert.match(body, /this\.wipe\("chat", this\.chat\)/);
+  assert.doesNotMatch(body, /this\.chat\.set_value\(/);
 });
