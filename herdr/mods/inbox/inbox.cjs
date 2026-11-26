@@ -1116,7 +1116,10 @@ function staleDrafts(keys, live, seen, now) {
 // #74: a draft mirror. Every change of a text box is copied (`mirror`: {text, content, range}); when the box comes back empty without the
 // person's own key press (`keyAt`, within DRAFT_KEY_MS) and without a clear of ours (which empties the mirror first), the text is put back.
 const DRAFT_KEY_MS = 1000;
-const draftWiped = (mirror, value, keyAt, now) => Boolean(mirror) && String(mirror.text ?? "") !== "" && String(value ?? "") === "" && !(Number(now) - Number(keyAt) < DRAFT_KEY_MS);
+// #112: a mirror of ONE character is never taken for a wipe. A Korean/Japanese/Chinese IME that is composing takes the Backspace itself (the key press
+// never reaches `keyAt`), so deleting the first, still-composed character empties the box with no key just before it: that is the person's edit, and
+// putting the character back made it impossible to delete. (Losing a one-character draft to a rebuild is cheap.)
+const draftWiped = (mirror, value, keyAt, now) => Boolean(mirror) && [...String(mirror.text ?? "")].length > 1 && String(value ?? "") === "" && !(Number(now) - Number(keyAt) < DRAFT_KEY_MS);
 // #66 (draft per room): the unsent chat text each room holds while another room is shown. `cur` = what the box holds now {text, content, range, pics};
 // leaving `from` stores it there (nothing to keep = the room's entry goes), arriving at `to` takes that room's entry out (it is the box again) and
 // returns it as `load` (null = an empty box). A room that was left empty keeps no entry; the map is capped (oldest dropped). Pure (no mutation of `map`).
