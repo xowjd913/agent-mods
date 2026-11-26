@@ -1152,6 +1152,39 @@ test("decisionOptions: inbox.cjs와 main.js의 chat 블록이 같다", () => {
   assert.equal(cut("../mods/inbox/main.js"), cut("../mods/inbox/inbox.cjs"));
 });
 
+// ---- #62: N안 줄이 없는 결정도 선택지(추천·답 줄, 따옴표 답)를 펼치지 않고 보인다
+test("decisionHints: 추천·답 줄을 그대로 뽑고, 답 뒤 따옴표 둘~여섯 개를 답 버튼으로, 추천이 들어 있는 답이 primary", () => {
+  const body = '결정이 필요합니다.\n추천: 둘 다 진행. 답: "둘 다 진행" / "1번만" / "2번만" / "보류"';
+  assert.deepEqual(I.decisionHints(body), { lines: ["추천: 둘 다 진행", '답: "둘 다 진행" / "1번만" / "2번만" / "보류"'], answers: ["둘 다 진행", "1번만", "2번만", "보류"], recommended: "둘 다 진행" });
+  assert.deepEqual(I.decisionHints("- 추천: 가\n- 답: “가” / “나”"), { lines: ["추천: 가", "답: “가” / “나”"], answers: ["가", "나"], recommended: "가" }); // 글머리·둥근 따옴표
+  assert.deepEqual(I.decisionHints("추천: 1안"), { lines: ["추천: 1안"], answers: [], recommended: "" }); // 답 줄이 없으면 글자만
+});
+test("decisionHints: 다른 형식은 추측하지 않는다(정답:, 답변:, 따옴표 하나, 일곱 개 이상)", () => {
+  assert.deepEqual(I.decisionHints('정답: "가" / "나"'), { lines: [], answers: [], recommended: "" });
+  assert.deepEqual(I.decisionHints('답변: "가" / "나"'), { lines: [], answers: [], recommended: "" });
+  assert.deepEqual(I.decisionHints('답: "가"'), { lines: ['답: "가"'], answers: [], recommended: "" }); // 줄은 보이지만 버튼은 없다
+  assert.deepEqual(I.decisionHints('답: "1" "2" "3" "4" "5" "6" "7"').answers, []);
+  assert.deepEqual(I.decisionHints("그냥 문장입니다"), { lines: [], answers: [], recommended: "" });
+  assert.deepEqual(I.decisionHints(undefined), { lines: [], answers: [], recommended: "" });
+  assert.ok(I.decisionHints(`추천: ${"가".repeat(300)}`).lines[0].length <= 160); // 긴 줄은 자른다
+});
+test("main.js: 추천·답 줄과 답 버튼은 N안 칩이 없는 결정 카드에만, 같은 send() 길로", () => {
+  const src = mainSrc();
+  const a = src.indexOf("  askActions(t, a, cx) {");
+  const body = src.slice(a, src.indexOf("    if (!a.po) box.child", a));
+  assert.match(body, /const hint = kind === "decision" && opts\.options\.length < 2 \? decisionHints\(item\?\.body\)/);
+  assert.match(body, /hint\.lines\.map/);
+  assert.match(body, /hint\.answers\.map/);
+  assert.match(body, /this\.send\(a, w, c, "choice"\)/);
+  assert.match(body, /primary: w === hint\.recommended/);
+  assert.ok(body.indexOf("hint-") < body.indexOf("ans-") && body.indexOf("opt-") < body.indexOf("ans-") && body.indexOf("ans-") < body.indexOf("`ok-${s.leader}`"));
+});
+test("decisionHints: inbox.cjs와 main.js의 chat 블록이 같다", () => {
+  const cut = (f) => { const s = fs.readFileSync(path.join(__dirname, f), "utf8").replace(/\r\n/g, "\n"); const a = s.indexOf("function decisionHints("); return s.slice(a, s.indexOf("\n}\n", a)); };
+  assert.ok(cut("../mods/inbox/main.js").length > 100);
+  assert.equal(cut("../mods/inbox/main.js"), cut("../mods/inbox/inbox.cjs"));
+});
+
 // ---- 내가 보낸 모든 글을 오른쪽 말풍선으로 (deliver 한 곳에서 한 번 기록)
 test("chatRecord: 사람이 쓴 글만 담고(긴 Panel answer 감싸개 없이), 종류·상태는 정해진 값만", () => {
   const r = I.chatRecord({ text: " 확인 완료 ", to: "lead-a", po: "p1", kind: "verify" }, "held", 1700000000000);
@@ -1626,6 +1659,56 @@ test("leaderEntries: 그 리더의 글 + 그 리더에게 보낸 내 글만 — 
   assert.deepEqual(I.filterCounts(scope, 0), { all: 3, unread: 2, decision: 0, verify: 1, done: 1, stop: 0 });
   // 다른 리더가 기다리는 중이어도 1:1 보기에서는 그 리더의 글만 남는다
   assert.deepEqual(keysOf(I.keepWaiting(scope, I.filterEntries(scope, "done", 0))), ["l|lead-a|100"]);
+});
+test("leaderEntries(#58): 한 글에서 부른 모든 리더(tos)와 그 리더 앞으로 쓴 PO 말(to)·그 리더에게 보낸 글의 답(about)도 1:1 에 든다", () => {
+  const room = [
+    LD("lead-a", "done", 100),
+    { key: "me|1", who: "me", ms: 110, text: "t", to: "lead-a", tos: ["lead-a", "lead-b"], status: "sent" }, // 두 리더를 부른 글
+    { key: "me|2", who: "me", ms: 120, text: "t", to: "", status: "sent" }, // 누구에게인지 모른다
+    { key: "po|3", who: "po", ms: 130, text: "p", to: "lead-a" }, // PO가 lead-a 앞으로 쓴 말
+    { key: "po|4", who: "po", ms: 140, text: "p", to: "", about: "lead-b" }, // lead-b 에게 보낸 글에 대한 답
+    { key: "po|5", who: "po", ms: 150, text: "p", to: "" }, // 어디에도 못 묶는다
+  ];
+  assert.deepEqual(keysOf(I.leaderEntries(room, "lead-a")), ["l|lead-a|100", "me|1", "po|3"]);
+  assert.deepEqual(keysOf(I.leaderEntries(room, "lead-b")), ["me|1", "po|4"]);
+  assert.deepEqual(keysOf(I.leaderEntries(room, "lead-z")), []);
+  assert.equal(I.leaderEntries(room, "").length, room.length);
+});
+test("chatRecord(#58): 둘 이상 부른 글은 tos 에 모두 담고(to 는 첫 리더), 한 명이면 tos 를 두지 않는다", () => {
+  const two = I.chatRecord({ text: "봐 줘", to: "lead-a", tos: ["lead-a", "lead-b", "lead-a", ""], po: "p1" }, "sent", 5);
+  assert.deepEqual([two.to, two.tos], ["lead-a", ["lead-a", "lead-b"]]);
+  const one = I.chatRecord({ text: "봐 줘", to: "lead-a", tos: ["lead-a"], po: "p1" }, "sent", 5);
+  assert.equal("tos" in one, false);
+  assert.equal("tos" in I.chatRecord({ text: "봐 줘", po: "p1" }, "sent", 5), false);
+  assert.match(mainSrc(), /to: p\.to\[0\] \?\? "", tos: p\.to, po: v\.pick, kind: "chat"/);
+});
+test("timeline(#58): 데스크에서 리더에게 보낸 글과 같은 prompt id 의 PO 답에 about 을 달고, 묶을 수 없는 것은 달지 않는다", () => {
+  const t0 = Date.parse(T(0));
+  const rec = (ms, text, to, extra = {}) => ({ id: `r${ms}`, ts: T(ms), ms: t0 + ms * 60000, at: t0 + ms * 60000, text, line: text, to, po: "p1", kind: "chat", status: "sent", ...extra });
+  const said = (ms, text, extra = {}) => ({ ts: T(ms), ms: t0 + ms * 60000, text, to: "", ...extra });
+  const mine = [rec(1, "lead-a 확인해 줘", "lead-a", { tos: ["lead-a", "lead-b"] }), rec(5, "그냥 한 마디", "")];
+  const says = [
+    said(1, "lead-a 확인해 줘", { me: true, pid: "p-1" }), // 데스크 기록과 같은 글: 한 말풍선으로 합쳐지고 pid 만 남는다
+    said(2, "확인했습니다", { pid: "p-1" }),
+    said(3, "터미널에서 직접 친 말", { me: true, pid: "p-2" }),
+    said(4, "그 말의 답", { pid: "p-2" }),
+    said(5, "그냥 한 마디", { me: true, pid: "p-3" }),
+    said(6, "한 마디의 답", { pid: "p-3" }),
+    said(7, "pid 없는 말"),
+    said(8, "다른 리더 앞으로", { to: "lead-b", pid: "p-1" }),
+  ];
+  const t = I.timeline("p1", [], says, mine);
+  const by = (txt) => t.find((e) => e.text === txt);
+  assert.equal(by("확인했습니다").about, "lead-a");
+  assert.equal(by("그 말의 답").about, undefined); // 터미널에서 친 말: 누구에게인지 기록에 없다
+  assert.equal(by("한 마디의 답").about, undefined); // @ 없이 보낸 글
+  assert.equal(by("pid 없는 말").about, undefined);
+  assert.equal(by("다른 리더 앞으로").about, undefined); // 이미 to 가 있으면 to 가 따른다
+  assert.equal(by("확인했습니다").to, ""); // 말풍선의 "→" 표시는 늘지 않는다
+  assert.deepEqual(by("lead-a 확인해 줘").tos, ["lead-a", "lead-b"]);
+  assert.deepEqual(t.filter((e) => e.who === "me").length, 3); // 합쳐진 한 개 + 터미널 한 개 + 그냥 한 마디
+  assert.deepEqual(I.leaderEntries(t, "lead-a").map((e) => e.text), ["lead-a 확인해 줘", "확인했습니다"]);
+  assert.deepEqual(I.leaderEntries(t, "lead-b").map((e) => e.text), ["lead-a 확인해 줘", "다른 리더 앞으로"]);
 });
 test("main.js: 리더 줄 배선 — 방별 상태, 칩 아래 한 줄, 방을 떠난 리더는 전체, '전체 보기'는 둘 다 푼다", () => {
   const src = mainSrc();

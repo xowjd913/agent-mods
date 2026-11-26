@@ -325,7 +325,7 @@ function parsePoLines(text) {
     if (hit) hit.imgs = g.imgs;
   }
   out.sort((a, b) => a.ms - b.ms);
-  return out.slice(-MAX_PO).map(({ pid, ...x }) => x);
+  return out.slice(-MAX_PO).map(({ pid, ...x }) => (pid ? { ...x, pid } : x)); // the prompt id stays, when there is one: the 1:1 view pairs a reply with its prompt (#58)
 }
 
 // ---- picture files (Node side; the pure rules - which path may be drawn - are imgOk/splitImgs in the chat block)
@@ -1070,17 +1070,20 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
   // start of that send: a line ending in "…" also matches a record whose text starts with what is left (at least TL_CUT_MIN characters after
   // whitespace is squeezed, so a short line that merely ends in "…" does not hide a longer send). "" when the line is not such a cut.
   const cut = (v) => { const s = String(v ?? ""); if (!s.endsWith("…")) return ""; const p = full(s.slice(0, -1)); return p.length >= TL_CUT_MIN ? p : ""; };
+  // The PO's reply to a line the desk sent to a leader (#58): the hook gives a prompt and its reply the same pid, and the prompt matched a desk
+  // record that has a `to`. Only the 1:1 view reads it (`about`); the bubble does not say "→ leader", since the reply is to the person.
+  const about = new Map();
   if (room && room !== PO_OTHER) for (const x of says ?? []) {
     if (x.me) {
       const t = full(x.text), c = core(x.text), p = cut(x.text);
       const i = sentBy.findIndex((m, j) => !taken.has(j) && (x.ms - (Number(m.ms) || 0)) >= -60000 && (x.ms - (Number(m.ms) || 0)) <= 11 * 60000 && (full(m.line) === t || full(m.text) === t || (c.length > 1 && (core(m.line) === c || core(m.text) === c)) || (p && (full(m.line).startsWith(p) || full(m.text).startsWith(p)))));
-      if (i >= 0) { taken.add(i); continue; }
+      if (i >= 0) { taken.add(i); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); continue; }
       out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
       continue;
     }
-    out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: x.to || "" });
+    out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: x.to || "", ...(!x.to && x.pid && about.get(x.pid) ? { about: about.get(x.pid) } : {}) });
   }
-  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
+  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", ...(x.tos?.length ? { tos: x.tos } : {}), kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
   // Two entries with the same key (the same text at the same ms) would share one element id: the later ones get a #n suffix.
   const used = new Map();
   for (const e of out) {
@@ -1108,7 +1111,8 @@ function chatRecord(rec, status, now = 0, seq = "") {
   const imgs = (Array.isArray(rec?.imgs) ? rec.imgs : []).filter((x) => typeof x === "string" && x).slice(0, 4);
   if ((!text && !imgs.length) || !rec?.po) return null;
   const ms = Number(now) || 0;
-  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, ...(imgs.length ? { imgs } : {}), line: cleanText(rec.line ?? text).slice(0, 4000), to: String(rec.to ?? ""), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", ak: String(rec.ak ?? ""), status: CHAT_STATUS.includes(status) ? status : "failed" };
+  const tos = [...new Set((Array.isArray(rec?.tos) ? rec.tos : []).map((x) => String(x ?? "")).filter(Boolean))].slice(0, 8); // every leader the line names (#58); `to` stays the first
+  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, ...(imgs.length ? { imgs } : {}), line: cleanText(rec.line ?? text).slice(0, 4000), to: String(rec.to ?? ""), ...(tos.length > 1 ? { tos } : {}), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", ak: String(rec.ak ?? ""), status: CHAT_STATUS.includes(status) ? status : "failed" };
 }
 // The list with record `id` set to `status` at `now` (null when there is no such record or it already has it).
 function setChatStatus(list, id, status, now = 0) {
@@ -1233,7 +1237,10 @@ function roomLeaders(entries, label = (id) => id) {
 }
 // The leader to filter by: `leader` while the room still has it, else "" (= everyone; a leader that left the room goes back to 전체).
 const settleLeader = (choices, leader) => (leader && (choices ?? []).some((x) => x.id === leader) ? String(leader) : "");
-const leaderEntries = (entries, leader) => (leader ? (entries ?? []).filter((e) => entryLeader(e) === leader || (e?.who === "me" && e.to === leader)) : entries ?? []);
+// Attributed by a field only, never by guessing from the text: the person's line whose `to` / `tos` names the leader (a chat with @lead-x, an
+// answer button of its card), and the PO's line whose `to` names it or whose `about` does (its reply to a prompt the desk sent to that leader).
+const leaderEntries = (entries, leader) => (leader ? (entries ?? []).filter((e) => entryLeader(e) === leader
+  || (e?.who === "me" && (e.to === leader || (e.tos ?? []).includes(leader))) || (e?.who === "po" && (e.to === leader || e.about === leader))) : entries ?? []);
 // The "안 읽은 것" base, shared by every copy of the mod (Dock, window, pane): {<room>: {seen, ts}}. The first copy to draw a room takes the room's
 // last-opened marker before it moves, and the others use that same value for SNAP_TTL_MS after it was last drawn (each draw renews it).
 const SNAP_TTL_MS = 30000;
@@ -1313,6 +1320,32 @@ function decisionOptions(body) {
   const options = [...nums].sort((x, y) => x - y);
   if (options.length < 2) return { options: [], recommended: 0 };
   return { options, recommended: options.includes(rec) ? rec : 0 };
+}
+// What a decision report offers when it has no "N안:" lines (#62): its "추천: ..." and "답: ..." lines, shown on the card without opening it,
+// and the quoted answers after "답:" ("둘 다 진행" / "#59만" / "보류", also “…” and 「…」) as answer buttons when there are at least two.
+// Read strictly from the body; "답" must start a word (not "정답:" / "답변:"). The "추천" line may carry the "답:" part after it on the same line.
+// -> { lines: ["추천: ...", "답: ..."], answers: ["둘 다 진행", ...], recommended: "<the answer the 추천 text names>" | "" }
+function decisionHints(body) {
+  const lines = [];
+  let answers = [];
+  let rec = "";
+  const cut = (s) => (s.length > 160 ? `${s.slice(0, 159)}…` : s);
+  for (const raw of String(body ?? "").split(/\r?\n/)) {
+    const line = raw.replace(/^\s*(?:[-*]\s*)?/, "").trim();
+    const r = line.match(/^추천\s*[:：]\s*(.*?)(?:\s*[.。]?\s+답\s*[:：].*)?$/);
+    if (r && r[1] && !rec) { rec = r[1].trim(); lines.push(cut(`추천: ${rec}`)); }
+    const a = line.match(/(?:^|[\s.。,)])답\s*[:：]\s*(\S.*)$/);
+    if (a && !answers.length && !lines.some((x) => x.startsWith("답:"))) {
+      const got = [];
+      for (const m of a[1].matchAll(/"([^"\n]{1,40})"|“([^”\n]{1,40})”|「([^」\n]{1,40})」/g)) {
+        const w = (m[1] ?? m[2] ?? m[3]).trim();
+        if (w && !got.includes(w)) got.push(w);
+      }
+      answers = got.length >= 2 && got.length <= 6 ? got : [];
+      lines.push(cut(`답: ${a[1].trim()}`));
+    }
+  }
+  return { lines, answers, recommended: rec ? (answers.find((w) => rec.includes(w)) ?? "") : "" };
 }
 // Who is writing right now: the room's PO (its own terminal is working) and its leaders that have work going on -> [{who, name}] (PO first,
 // then the leaders by shown name). `who` is the timeline owner key ("po" or "l:<hc name>"), the same the entries use. Pure; the dots
@@ -1838,7 +1871,7 @@ function readHandoff(dir = inboxDir(), id = "") {
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, entryLeader, roomLeaders, settleLeader, leaderEntries};
+module.exports = { COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, entryLeader, roomLeaders, settleLeader, leaderEntries};
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)

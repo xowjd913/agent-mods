@@ -292,17 +292,20 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
   // start of that send: a line ending in "…" also matches a record whose text starts with what is left (at least TL_CUT_MIN characters after
   // whitespace is squeezed, so a short line that merely ends in "…" does not hide a longer send). "" when the line is not such a cut.
   const cut = (v) => { const s = String(v ?? ""); if (!s.endsWith("…")) return ""; const p = full(s.slice(0, -1)); return p.length >= TL_CUT_MIN ? p : ""; };
+  // The PO's reply to a line the desk sent to a leader (#58): the hook gives a prompt and its reply the same pid, and the prompt matched a desk
+  // record that has a `to`. Only the 1:1 view reads it (`about`); the bubble does not say "→ leader", since the reply is to the person.
+  const about = new Map();
   if (room && room !== PO_OTHER) for (const x of says ?? []) {
     if (x.me) {
       const t = full(x.text), c = core(x.text), p = cut(x.text);
       const i = sentBy.findIndex((m, j) => !taken.has(j) && (x.ms - (Number(m.ms) || 0)) >= -60000 && (x.ms - (Number(m.ms) || 0)) <= 11 * 60000 && (full(m.line) === t || full(m.text) === t || (c.length > 1 && (core(m.line) === c || core(m.text) === c)) || (p && (full(m.line).startsWith(p) || full(m.text).startsWith(p)))));
-      if (i >= 0) { taken.add(i); continue; }
+      if (i >= 0) { taken.add(i); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); continue; }
       out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
       continue;
     }
-    out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: x.to || "" });
+    out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: x.to || "", ...(!x.to && x.pid && about.get(x.pid) ? { about: about.get(x.pid) } : {}) });
   }
-  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
+  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", ...(x.tos?.length ? { tos: x.tos } : {}), kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
   // Two entries with the same key (the same text at the same ms) would share one element id: the later ones get a #n suffix.
   const used = new Map();
   for (const e of out) {
@@ -330,7 +333,8 @@ function chatRecord(rec, status, now = 0, seq = "") {
   const imgs = (Array.isArray(rec?.imgs) ? rec.imgs : []).filter((x) => typeof x === "string" && x).slice(0, 4);
   if ((!text && !imgs.length) || !rec?.po) return null;
   const ms = Number(now) || 0;
-  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, ...(imgs.length ? { imgs } : {}), line: cleanText(rec.line ?? text).slice(0, 4000), to: String(rec.to ?? ""), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", ak: String(rec.ak ?? ""), status: CHAT_STATUS.includes(status) ? status : "failed" };
+  const tos = [...new Set((Array.isArray(rec?.tos) ? rec.tos : []).map((x) => String(x ?? "")).filter(Boolean))].slice(0, 8); // every leader the line names (#58); `to` stays the first
+  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, ...(imgs.length ? { imgs } : {}), line: cleanText(rec.line ?? text).slice(0, 4000), to: String(rec.to ?? ""), ...(tos.length > 1 ? { tos } : {}), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", ak: String(rec.ak ?? ""), status: CHAT_STATUS.includes(status) ? status : "failed" };
 }
 // The list with record `id` set to `status` at `now` (null when there is no such record or it already has it).
 function setChatStatus(list, id, status, now = 0) {
@@ -455,7 +459,10 @@ function roomLeaders(entries, label = (id) => id) {
 }
 // The leader to filter by: `leader` while the room still has it, else "" (= everyone; a leader that left the room goes back to 전체).
 const settleLeader = (choices, leader) => (leader && (choices ?? []).some((x) => x.id === leader) ? String(leader) : "");
-const leaderEntries = (entries, leader) => (leader ? (entries ?? []).filter((e) => entryLeader(e) === leader || (e?.who === "me" && e.to === leader)) : entries ?? []);
+// Attributed by a field only, never by guessing from the text: the person's line whose `to` / `tos` names the leader (a chat with @lead-x, an
+// answer button of its card), and the PO's line whose `to` names it or whose `about` does (its reply to a prompt the desk sent to that leader).
+const leaderEntries = (entries, leader) => (leader ? (entries ?? []).filter((e) => entryLeader(e) === leader
+  || (e?.who === "me" && (e.to === leader || (e.tos ?? []).includes(leader))) || (e?.who === "po" && (e.to === leader || e.about === leader))) : entries ?? []);
 // The "안 읽은 것" base, shared by every copy of the mod (Dock, window, pane): {<room>: {seen, ts}}. The first copy to draw a room takes the room's
 // last-opened marker before it moves, and the others use that same value for SNAP_TTL_MS after it was last drawn (each draw renews it).
 const SNAP_TTL_MS = 30000;
@@ -535,6 +542,32 @@ function decisionOptions(body) {
   const options = [...nums].sort((x, y) => x - y);
   if (options.length < 2) return { options: [], recommended: 0 };
   return { options, recommended: options.includes(rec) ? rec : 0 };
+}
+// What a decision report offers when it has no "N안:" lines (#62): its "추천: ..." and "답: ..." lines, shown on the card without opening it,
+// and the quoted answers after "답:" ("둘 다 진행" / "#59만" / "보류", also “…” and 「…」) as answer buttons when there are at least two.
+// Read strictly from the body; "답" must start a word (not "정답:" / "답변:"). The "추천" line may carry the "답:" part after it on the same line.
+// -> { lines: ["추천: ...", "답: ..."], answers: ["둘 다 진행", ...], recommended: "<the answer the 추천 text names>" | "" }
+function decisionHints(body) {
+  const lines = [];
+  let answers = [];
+  let rec = "";
+  const cut = (s) => (s.length > 160 ? `${s.slice(0, 159)}…` : s);
+  for (const raw of String(body ?? "").split(/\r?\n/)) {
+    const line = raw.replace(/^\s*(?:[-*]\s*)?/, "").trim();
+    const r = line.match(/^추천\s*[:：]\s*(.*?)(?:\s*[.。]?\s+답\s*[:：].*)?$/);
+    if (r && r[1] && !rec) { rec = r[1].trim(); lines.push(cut(`추천: ${rec}`)); }
+    const a = line.match(/(?:^|[\s.。,)])답\s*[:：]\s*(\S.*)$/);
+    if (a && !answers.length && !lines.some((x) => x.startsWith("답:"))) {
+      const got = [];
+      for (const m of a[1].matchAll(/"([^"\n]{1,40})"|“([^”\n]{1,40})”|「([^」\n]{1,40})」/g)) {
+        const w = (m[1] ?? m[2] ?? m[3]).trim();
+        if (w && !got.includes(w)) got.push(w);
+      }
+      answers = got.length >= 2 && got.length <= 6 ? got : [];
+      lines.push(cut(`답: ${a[1].trim()}`));
+    }
+  }
+  return { lines, answers, recommended: rec ? (answers.find((w) => rec.includes(w)) ?? "") : "" };
 }
 // Who is writing right now: the room's PO (its own terminal is working) and its leaders that have work going on -> [{who, name}] (PO first,
 // then the leaders by shown name). `who` is the timeline owner key ("po" or "l:<hc name>"), the same the entries use. Pure; the dots
@@ -2435,7 +2468,7 @@ export default class Inbox extends View {
     try {
       // The PO reads a picture from its file: each path goes in the message as a line it can open with the Read tool.
       const line = [p.text, ...pics.map((x) => imgLine(x.path))].filter(Boolean).join("\n");
-      const r = this.deliver(po, line, c, { text: p.text, imgs: pics.map((x) => x.path), to: p.to[0] ?? "", po: v.pick, kind: "chat" });
+      const r = this.deliver(po, line, c, { text: p.text, imgs: pics.map((x) => x.path), to: p.to[0] ?? "", tos: p.to, po: v.pick, kind: "chat" });
       if (r === "sent" || r === "held" || r === "opening") { // opening: the bubble holds the text and sends it by itself once the pane opens
         this.sentAt2 = Date.now(); // the draw that shows the new bubble goes to the end once (sendFollow)
         this.chat.set_value("");
@@ -2707,10 +2740,14 @@ export default class Inbox extends View {
     const writing = this.writing === s.leader;
     const done = this.sentOf(a);
     const opts = kind === "decision" ? decisionOptions(item?.body) : { options: [], recommended: 0 }; // once: the chips and the recommended one read the same list
+    // Without "N안:" lines the card still shows what the report offers (#62): its 추천 / 답 lines and the quoted answers as buttons.
+    const hint = kind === "decision" && opts.options.length < 2 ? decisionHints(item?.body) : { lines: [], answers: [], recommended: "" };
     const box = v_flex().min_w(0).gap(6)
+      .children(hint.lines.map((x, i) => div().id(`hint-${s.leader}-${i}`).min_w(0).text_size(12).text_color(t.foreground).child(x)))
       .child(h_flex().gap(6).items_center().flex_wrap()
         .when(Boolean(link) && link !== item?.link, (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", (c) => openUrl(link, c))))
         .children(kind === "decision" ? opts.options.map((n) => this.button(t, `opt-${s.leader}-${n}`, `${n}안 선택`, (c) => this.send(a, `${n}안 선택`, c, "choice"), { primary: n === opts.recommended, disabled: a.po ? "" : NO_PO, tip: CLIP })) : [])
+        .children(hint.answers.map((w, i) => this.button(t, `ans-${s.leader}-${i}`, w, (c) => this.send(a, w, c, "choice"), { primary: w === hint.recommended, disabled: a.po ? "" : NO_PO, tip: CLIP })))
         .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c, "verify"), { primary: true, disabled: a.po ? "" : NO_PO, tip: CLIP })))
         .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); this.reveal(this.spot(s, item)); c.notify(); }, { disabled: a.po ? "" : NO_PO }))
         .child(div().text_size(11).text_color(done === "sent" ? t.working : done === "held" ? t.blocked : t.dim).child(done === "sent" ? "PO에 보냄 — 리더가 받으면 사라집니다" : done === "held" ? (this.isBlocked(a.po) ? "PO에 넣음 — PO가 질문 중입니다. 방의 질문에 먼저 답하세요" : "PO에 넣음 — 말풍선의 'Enter 누르기'로 보내세요") : "누르면 PO에 바로 보내고, 리더가 받으면 사라집니다")));
