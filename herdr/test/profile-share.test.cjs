@@ -88,10 +88,15 @@ test("모드 코드에는 기본 이름이 굳어 있지 않다(블록 밖)", ()
     assert.ok(!/\/\^lead-/.test(outside), `${f}: /^lead-`);
     assert.ok(!/role\s*===?\s*["']po["']/.test(outside), `${f}: role po`);
     assert.ok(!/["']leader["']\s*===/.test(outside), `${f}: role leader`);
+    assert.ok(!/labels\??\.session\b/.test(outside), `${f}: session label name`);
+    assert.ok(!/\/\^리더|\/\^PO\(\?:/.test(outside), `${f}: leader/PO tab-name pattern`);
+    assert.ok(!/`리더 · \$\{/.test(outside), `${f}: leader title prefix`);
   }
 });
 
 test("모드가 이름을 받는 자리: 인박스·work는 올리고(adoptNames), 나머지는 읽는다(syncNames)", () => {
+  assert.match(read("inbox/main.js"), /\badoptNames\(d\?\.names\)/); // the desk publishes inbox.names; a bare setNames there left leader-tabs & co. on the defaults
+  assert.doesNotMatch(read("inbox/main.js"), /\bsetNames\(d\?\.names\)/);
   assert.match(read("work/main.js"), /adoptNames\(d\.names\)/);
   assert.match(read("work/main.js"), /profileError/);
   assert.match(read("prs/main.js"), /adoptNames\(/);
@@ -124,4 +129,23 @@ test("설치기: work 모드에 profile.cjs를 함께 복사하고 인박스 것
   const log = console.log; console.log = () => {};
   try { inst.installMods(home, false); } finally { console.log = log; }
   assert.equal(fs.readFileSync(path.join(home, "mods", "work", "profile.cjs"), "utf8"), fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "profile.cjs"), "utf8"));
+});
+
+test("agent-groups: PO·리더 탭 이름 규칙은 프로필의 허브 이름·접두어를 따른다", () => {
+  const src = read("agent-groups/main.js");
+  const fn = (name) => { const m = src.match(new RegExp(`^const ${name} = .*$`, "m")); assert.ok(m, name); return m[0]; };
+  const run = (names) => new Function(`${blockOf("agent-groups/main.js")}\n${fn("poTab")}\n${fn("leaderTab")}\nsetNames(${JSON.stringify(names)});\nreturn { poTab, leaderTab };`)();
+  const d = run(undefined); // default profile: as before
+  assert.equal(d.poTab("PO · repo"), true);
+  assert.equal(d.poTab("PO"), true);
+  assert.equal(d.poTab("POLICY"), false);
+  assert.equal(d.poTab("DESK · x"), false);
+  assert.equal(d.leaderTab("리더 · repo"), true);
+  assert.equal(d.leaderTab("봇 · repo"), false);
+  const b = run(PROFILE.namesOf(PROFILE.loadProfile({ HERDR_INBOX_DIR: botDir() })));
+  assert.equal(b.poTab("DESK · x"), true);
+  assert.equal(b.poTab("DESKTOP"), false);
+  assert.equal(b.poTab("PO · x"), false);
+  assert.equal(b.leaderTab("봇 · x"), true);
+  assert.equal(b.leaderTab("리더 · x"), false);
 });

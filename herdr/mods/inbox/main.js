@@ -54,7 +54,7 @@ const CLIP = "답을 클립보드에 담아 PO 터미널에 붙여 넣고 Enter�
 // with setNames(). The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js and every other mod that reads names
 // (leader-tabs, agent-groups, work, tabs-mine, prs; a test keeps them identical and checks DEFAULT_NAMES against profile.cjs).
 const DEFAULT_NAMES = Object.freeze({
-  agentName: "^lead-[a-z0-9_-]+$", agentRole: "leader", titlePrefix: "^\\s*리더\\s*·\\s*", strip: "^lead-", // a reporting agent: its name, its `role` label value, what is cut off a title / a name
+  agentName: "^lead-[a-z0-9_-]+$", agentRole: "leader", titlePrefix: "^\\s*리더\\s*·\\s*", titlePrefixText: "리더 · ", strip: "^lead-", // a reporting agent: its name, its `role` label value, what is cut off a title (pattern + the literal text to put back) / a name
   hubRole: "po", hubIdLabel: "po", hubId: "^[a-z0-9-]{1,40}$", hubDir: "po", // the hub (PO): its `role` value, id label, id pattern, folder
   labelRole: "role", labelWait: "wait", labelWaitLink: "wait-link", labelSession: "session",
   answerLine: 'Panel answer ({kind}) for {agent}: "{text}".{ Target: {link}}',
@@ -1768,7 +1768,7 @@ export default class Inbox extends View {
         if (r.code !== 0) throw new Error(`수집기 종료 코드 ${r.code} ${(r.stderr || "").trim()}`);
         const d = JSON.parse(r.stdout);
         if (gen !== this.gen) return;
-        setNames(d?.names); // the profile of the inbox folder (names, labels, answer line); the defaults when the collector sends none
+        adoptNames(d?.names); // the profile of the inbox folder (names, labels, answer line); the defaults when the collector sends none
         // The cost enters the signature as what is drawn (label + tooltip, whole cents), never the raw numbers, so a working PO's tokens do not redraw the desk.
         const shown = {};
         for (const [po, c] of Object.entries(d?.cost ?? {})) shown[po] = [costLabel(c), costTip(c)];

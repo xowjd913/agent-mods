@@ -256,7 +256,9 @@ node herdr/tools/inbox-write.cjs say --hub main --to lead-demo --text "배포는
 
 ### 10.4 다른 모드가 프로필을 받는 길
 
-- **읽는 곳은 둘**: 데스크(`inbox`)는 `node inbox.cjs`가 내는 JSON의 `names`로, `work`는 `collect.cjs`가 같은 로더(설치기가 `work` 폴더에 `profile.cjs`를 함께 복사)로 읽어 낸 `names`로 받습니다. 둘 다 프로필이 깨졌으면 `profileError`로 이유를 알리고 기본 이름으로 보입니다. 이 두 곳 중 하나가 켜져 있으면 되고, 둘 다 없으면 기본 이름입니다.
-- **나눠 쓰는 길**: 받은 쪽이 공유 상태 `inbox.names`(프로필의 `names` JSON 그대로)에 올립니다. `leader-tabs`·`agent-groups`·`tabs-mine`·`prs`는 그릴 때와 타이머 때 이 키를 읽어 자기 이름 블록에 적용합니다(`syncNames`). 같은 내용이면 다시 쓰지 않습니다.
+- **읽는 곳은 셋**: 데스크(`inbox`)는 `node inbox.cjs`가 내는 JSON의 `names`로, `work`와 `prs`는 `collect.cjs`가 같은 로더(설치기가 `work` 폴더에 `profile.cjs`를 함께 복사)로 읽어 낸 `names`로 받습니다. 셋 다 프로필이 깨졌으면 `profileError`로 이유를 알리고 기본 이름으로 보입니다. 이 가운데 하나라도 켜져 있으면 되고, 모두 없으면 기본 이름입니다.
+- **나눠 쓰는 길**: 읽은 쪽(`inbox`·`work`·`prs`)이 공유 상태 `inbox.names`(프로필의 `names` JSON 그대로)에 올립니다(`adoptNames`). `leader-tabs`·`agent-groups`·`tabs-mine`·`prs`는 그릴 때와 타이머 때 이 키를 읽어 자기 이름 블록에 적용합니다(`syncNames`). 같은 내용이면 다시 쓰지 않습니다.
 - **다른 공유 키와 섞이지 않습니다**: `inbox.po`는 고른 PO 방, `leader.names`는 리더 이름 기억, `inbox.names`는 프로필 이름입니다.
-- **지금 한계**: 프로필 파일을 고친 뒤 `inbox`·`work`가 다시 읽기 전까지는 옛 이름이 남습니다. 화면 문구(`리더 · ` 접두어 문구 등)는 프로필 이름 대신 아직 고정된 곳이 있을 수 있습니다.
+- **지금 한계**: 프로필 파일을 고친 뒤 `inbox`·`work`·`prs`가 다시 읽기 전까지는 옛 이름이 남습니다. 아직 프로필을 따르지 않는 곳은 **데스크의 PO 탭 이름에서 프로젝트 이름을 떼는 `/^PO\s*[·:\-]?\s*(\S.*)$/`(`inbox/main.js` `poProject`)** 하나입니다(PO 시작 흐름이 만드는 `PO · <프로젝트>` 탭 이름 규칙이고, 화면 문구 `PO`·`리더`는 프로필 대상이 아닙니다).
+- **기본 이름이 조금 더 엄격해졌습니다**: 리더 이름 기본값이 `^lead-[a-z0-9_-]+$`라 대문자·점이 든 이름(`lead-Foo`, `lead-a.b`)은 이제 리더로 세지 않습니다. 인박스는 앞선 PR에서 이미 같은 규칙이고, `tabs-mine`·`leader-tabs`도 이제 같아졌습니다.
+- **탭 이름 규칙**: `agent-groups`가 라벨 없는 터미널을 나눌 때 쓰는 탭 이름 규칙은 프로필의 허브 이름(`hub.role`을 대문자로 쓴 낱말, 기본 `PO`)과 접두어의 첫 낱말(`agent.titlePrefix`, 기본 `리더`)을 따르고, 리더 행 제목에는 접두어 글자 그대로(`names.titlePrefixText`)를 붙입니다. 세션 라벨 이름은 모든 모드에서 `labels.session`입니다.

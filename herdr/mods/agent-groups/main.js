@@ -89,10 +89,11 @@ const OTHER = "기타";
 // 예약(schedules 모드)이 띄운 세션은 label schedule=<id>를 달고 부모 없이 뜬다. 작업 보기에서 공간 안에 "예약" 묶음으로 모은다.
 const SCHEDULE = "schedule";
 const SCHEDULED = "예약";
-// Label `herdr-team.sh spawn` puts on a team member: its Korean session name ("개발 · #351 ..."). A member has no tab to read it from.
-const SESSION = "session";
-// A PO terminal's tab name starts with "PO" as a word ("PO · repo"), so "POLICY" doesn't count.
-const PO_TAB = /^PO(?:\s|·|$)/;
+// The label `herdr-team.sh spawn` puts on a team member is its Korean session name ("개발 · #351 ..."); its label name comes from the profile (labelSession).
+// A PO terminal's tab name starts with the hub name in capitals as a word ("PO · repo"), so "POLICY" doesn't count. Both come from the profile.
+const poTab = (name) => { const w = String(NAMES.hubRole ?? "").toUpperCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); return Boolean(w) && new RegExp(`^${w}(?:\\s|·|$)`).test(name ?? ""); };
+// A leader's tab starts with the first word of the profile's title prefix ("리더").
+const leaderTab = (name) => { const w = String(NAMES.titlePrefixText ?? "").trim().split(/\s+/)[0]; return Boolean(w) && String(name ?? "").startsWith(w); };
 // Role label (its name and values come from the profile, default `role` = po / leader): the PO start flow sets the hub value on its own terminal and
 // `spawn --leader` sets the agent value. It is read first; the tab-name rules below apply only to a terminal without it.
 const NAMES_KEY = "leader.names"; // {<hc name>: session name}, shared with the inbox
@@ -121,7 +122,7 @@ function icon(p, size, color) {
 // with setNames(). The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js and every other mod that reads names
 // (leader-tabs, agent-groups, work, tabs-mine, prs; a test keeps them identical and checks DEFAULT_NAMES against profile.cjs).
 const DEFAULT_NAMES = Object.freeze({
-  agentName: "^lead-[a-z0-9_-]+$", agentRole: "leader", titlePrefix: "^\\s*리더\\s*·\\s*", strip: "^lead-", // a reporting agent: its name, its `role` label value, what is cut off a title / a name
+  agentName: "^lead-[a-z0-9_-]+$", agentRole: "leader", titlePrefix: "^\\s*리더\\s*·\\s*", titlePrefixText: "리더 · ", strip: "^lead-", // a reporting agent: its name, its `role` label value, what is cut off a title (pattern + the literal text to put back) / a name
   hubRole: "po", hubIdLabel: "po", hubId: "^[a-z0-9-]{1,40}$", hubDir: "po", // the hub (PO): its `role` value, id label, id pattern, folder
   labelRole: "role", labelWait: "wait", labelWaitLink: "wait-link", labelSession: "session",
   answerLine: 'Panel answer ({kind}) for {agent}: "{text}".{ Target: {link}}',
@@ -214,14 +215,14 @@ export function paneless(real, all, listed = new Map(), memo = {}) {
   const out = [];
   all.forEach((t, i) => {
     if (t.state !== "live" || byAddr.has(t.address)) return;
-    const session = String(t.labels?.[SESSION] ?? "").trim();
+    const session = String(t.labels?.[NAMES.labelSession] ?? "").trim();
     const leader = isLeader(t);
     if (!leader && !memberOf(t.name, session)) return;
     const home = seat(t);
     if (!home) return;
     // A leader's row reads like a real leader's: the full `session` label ("리더 · ..."), else "리더 · " + the
     // hc name without "lead-". Its tab name stays empty so taskPlan builds the section header itself.
-    const title = leader ? `리더 · ${leaderName(t.name, t, memo)}` : session;
+    const title = leader ? `${NAMES.titlePrefixText}${leaderName(t.name, t, memo)}` : session;
     out.push({
       address: t.address,
       pane: null,
@@ -278,8 +279,8 @@ export function taskPlan(agentList, all, tabNames = new Map(), memo = {}) {
       else if (isHubTerm(t)) pos.push(a);
       else if (isLeader(t)) leaders.push(a);
       else if (m) team.push({ a, ...m });
-      else if (PO_TAB.test(a.tab_name ?? "")) pos.push(a);
-      else if (parents.has(a.address) || /^리더/.test(a.tab_name ?? "")) leaders.push(a);
+      else if (poTab(a.tab_name)) pos.push(a);
+      else if (parents.has(a.address) || leaderTab(a.tab_name)) leaders.push(a);
       else others.push(a);
     }
     const leaderSet = new Set(leaders.map((a) => a.address));
