@@ -389,6 +389,11 @@ function setChatStatus(list, id, status, now = 0) {
   if (i < 0 || list[i].status === status) return null;
   return list.map((x, j) => (j === i ? { ...x, status, at: Number(now) || 0 } : x));
 }
+// The list without record `id` (null when there is no such record). Only a bubble that failed to send may go (see mineActs' "delete").
+function dropChat(list, id) {
+  if (!Array.isArray(list) || !list.some((x) => x && x.id === id)) return null;
+  return list.filter((x) => !(x && x.id === id));
+}
 // The small dim note under a bubble that is not (fully) sent: "" when it was sent. `blocked`: the PO still waits on a prompt; `age`: ms since
 // the status last changed (an Enter button older than ENTER_TTL_MS is gone: the pasted line may not be in the input any more).
 const ENTER_TTL_MS = 10 * 60 * 1000;
@@ -399,12 +404,12 @@ function mineNote(status, blocked = true, age = 0) {
   if (status === "noenter" && old) return "오래되어 입력창에 없을 수 있습니다 — 다시 보내세요";
   return MINE_NOTE[status] ?? "";
 }
-// The buttons a bubble offers, in order: "resend" (nothing reached the PO, or its pasted line is gone: send it again) and "enter" (it is pasted
+// The buttons a bubble offers, in order: "resend" (nothing reached the PO, or its pasted line is gone: send it again; a bubble that failed also offers "delete": drop it for good) and "enter" (it is pasted
 // into a normal prompt: only Enter is missing). A held one offers none while the PO still waits on its question (Enter there would answer the
 // question; that is only offered next to the question itself), and Enter and resend after it was answered. An Enter older than ENTER_TTL_MS
 // becomes a resend.
 function mineActs(status, blocked = false, age = 0) {
-  if (status === "nopane" || status === "failed" || status === "gone") return ["resend"];
+  if (status === "nopane" || status === "failed" || status === "gone") return ["resend", "delete"];
   const fresh = !(Number(age) > ENTER_TTL_MS);
   if (status === "noenter") return fresh ? ["enter"] : ["resend"];
   if (status === "held" && !blocked) return fresh ? ["enter", "resend"] : ["resend"];
@@ -2091,6 +2096,14 @@ export default class Inbox extends View {
     if (!id) return;
     try { const next = setChatStatus(shared(CHAT_KEY) ?? [], id, status, Date.now()); if (next) setShared(CHAT_KEY, next); } catch {}
   }
+  // The bubble's "삭제": a bubble that failed to send is removed from the chat for good (it does not come back when the chat is opened again).
+  discard(id, c) {
+    const r = this.recordOf(id);
+    if (!r || !this.recordActs(r, this.recordPo(r)).includes("delete")) return;
+    try { const next = dropChat(shared(CHAT_KEY) ?? [], id); if (next) setShared(CHAT_KEY, next); } catch {}
+    this.backs.delete(id);
+    c.notify();
+  }
   recordOf(id) { try { return (shared(CHAT_KEY) ?? []).find((x) => x?.id === id) ?? null; } catch { return null; } }
 
   // The ask card a send answered (record field `ak`) is marked sent / held, so a resend or Enter that went through closes it like the first send.
@@ -2918,7 +2931,7 @@ export default class Inbox extends View {
       const note = mineNote(e.status, blockedNow, age);
       const bad = e.status === "nopane" || e.status === "failed" || e.status === "noenter" || e.status === "gone" || (e.status === "held" && !blockedNow);
       const acts = mineActs(e.status, blockedNow, age);
-      const ACT = { resend: ["다시 보내기", "같은 글을 같은 PO에게 다시 보냅니다(말풍선은 늘지 않습니다)", (c) => this.resend(e.id, c)], enter: ["Enter 누르기", "PO의 입력창에 보낸 글이 아직 있는지 확인한 뒤 Enter만 누릅니다(PO가 질문 중이면 누르지 않습니다)", (c) => this.enterNow(e.id, c)] };
+      const ACT = { resend: ["다시 보내기", "같은 글을 같은 PO에게 다시 보냅니다(말풍선은 늘지 않습니다)", (c) => this.resend(e.id, c)], delete: ["삭제", "보내지 못한 이 말풍선을 채팅에서 지웁니다(되돌릴 수 없습니다)", (c) => this.discard(e.id, c)], enter: ["Enter 누르기", "PO의 입력창에 보낸 글이 아직 있는지 확인한 뒤 Enter만 누릅니다(PO가 질문 중이면 누르지 않습니다)", (c) => this.enterNow(e.id, c)] };
       const root = this.data?.root ?? "";
       const bp = bubbleParts(e.text, e.imgs, root);
       const dims = bp.imgs.map((p) => this.data?.imgd?.[p] ?? this.imgd.get(p));
