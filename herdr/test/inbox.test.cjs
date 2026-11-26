@@ -2814,7 +2814,7 @@ test("프로필이 깨졌으면 데스크 데이터가 이유를 알리고 기�
 
 test("main.js: 프로필을 읽어 온 names를 쓰고, 읽지 못한 이유를 보인다", () => {
   const src = mainSrc();
-  assert.match(src, /setNames\(d\?\.names\)/);
+  assert.match(src, /adoptNames\(d\?\.names\)/);
   assert.match(src, /d\?\.profileError/);
   assert.match(src, /const NO_PO = \(\) =>/);
   assert.ok(!/\bPO_DIR\b|\bisPoTerm\b|\/\^lead-\/\.test/.test(src)); // no hard-coded default name left in the desk

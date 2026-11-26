@@ -84,22 +84,21 @@ function memberOf(name, tabName) {
   const t = TAB_MEMBER.exec(tabName ?? "");
   return t ? { role: TAB_ROLE[t[1]], issue: t[2], summary: "" } : null;
 }
-const LEAD = /^lead-/;
 const ROLE_ORDER = { dev: 0, review: 1, integration: 2 };
 const OTHER = "기타";
 // 예약(schedules 모드)이 띄운 세션은 label schedule=<id>를 달고 부모 없이 뜬다. 작업 보기에서 공간 안에 "예약" 묶음으로 모은다.
 const SCHEDULE = "schedule";
 const SCHEDULED = "예약";
-// Label `herdr-team.sh spawn` puts on a team member: its Korean session name ("개발 · #351 ..."). A member has no tab to read it from.
-const SESSION = "session";
-// A PO terminal's tab name starts with "PO" as a word ("PO · repo"), so "POLICY" doesn't count.
-const PO_TAB = /^PO(?:\s|·|$)/;
-// Role label: the PO start flow sets `role=po` on its own terminal and `spawn --leader` sets
-// `role=leader`. It is read first; the tab-name rules below apply only to a terminal without it.
-const ROLE = "role";
+// The label `herdr-team.sh spawn` puts on a team member is its Korean session name ("개발 · #351 ..."); its label name comes from the profile (labelSession).
+// A PO terminal's tab name starts with the hub name in capitals as a word ("PO · repo"), so "POLICY" doesn't count. Both come from the profile.
+const poTab = (name) => { const w = String(NAMES.hubRole ?? "").toUpperCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); return Boolean(w) && new RegExp(`^${w}(?:\\s|·|$)`).test(name ?? ""); };
+// A leader's tab starts with the first word of the profile's title prefix ("리더").
+const leaderTab = (name) => { const w = String(NAMES.titlePrefixText ?? "").trim().split(/\s+/)[0]; return Boolean(w) && String(name ?? "").startsWith(w); };
+// Role label (its name and values come from the profile, default `role` = po / leader): the PO start flow sets the hub value on its own terminal and
+// `spawn --leader` sets the agent value. It is read first; the tab-name rules below apply only to a terminal without it.
 const NAMES_KEY = "leader.names"; // {<hc name>: session name}, shared with the inbox
 const namesMemo = () => { try { return shared(NAMES_KEY) ?? {}; } catch { return {}; } };
-const roleOf = (t) => String(t?.labels?.[ROLE] ?? "").trim().toLowerCase();
+const roleOf = (t) => labelOf(t, "labelRole").toLowerCase();
 const SECTION = { 4: "Needs you", 3: "Done", 2: "Working", 1: "Idle" };
 const SECTION_STATUS = { 4: "blocked", 3: "done", 2: "working" };
 
@@ -117,22 +116,73 @@ function icon(p, size, color) {
   return p.tint ? svg(p.icon).size(size).flex_none().text_color(color) : image(p.icon).w(size).h(size).flex_none();
 }
 
+// names:begin
+// The names this desk recognizes: which terminals are reporting agents and hubs, the labels it reads, the answer line (the profile, docs/inbox-contract.md
+// §9-§10). The defaults are today's behavior; `node inbox.cjs` prints the loaded profile as `names` (profile.cjs namesOf) and the desk applies it
+// with setNames(). The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js and every other mod that reads names
+// (leader-tabs, agent-groups, work, tabs-mine, prs; a test keeps them identical and checks DEFAULT_NAMES against profile.cjs).
+const DEFAULT_NAMES = Object.freeze({
+  agentName: "^lead-[a-z0-9_-]+$", agentRole: "leader", titlePrefix: "^\\s*리더\\s*·\\s*", titlePrefixText: "리더 · ", strip: "^lead-", // a reporting agent: its name, its `role` label value, what is cut off a title (pattern + the literal text to put back) / a name
+  hubRole: "po", hubIdLabel: "po", hubId: "^[a-z0-9-]{1,40}$", hubDir: "po", // the hub (PO): its `role` value, id label, id pattern, folder
+  labelRole: "role", labelWait: "wait", labelWaitLink: "wait-link", labelSession: "session",
+  answerLine: 'Panel answer ({kind}) for {agent}: "{text}".{ Target: {link}}',
+});
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // a hub id becomes a file name whatever its pattern says
+function compileNames(n) {
+  const re = (s) => { try { return new RegExp(s); } catch { return null; } };
+  const c = { ...n, agentRe: re(n.agentName), stripRe: n.strip ? re(n.strip) : null, prefixRe: n.titlePrefix ? re(n.titlePrefix) : null, hubIdRe: re(n.hubId) };
+  return c.agentRe && c.hubIdRe && (!n.strip || c.stripRe) && (!n.titlePrefix || c.prefixRe) ? c : null;
+}
+let NAMES = compileNames(DEFAULT_NAMES);
+let NAMES_JSON = "";
+// Applies the names the profile gave (null = defaults). Compiles only when they changed (the mods call this on every render); true when they did.
+const setNames = (n) => {
+  const key = JSON.stringify(n ?? null);
+  if (key === NAMES_JSON && NAMES) return false;
+  NAMES_JSON = key;
+  NAMES = compileNames({ ...DEFAULT_NAMES, ...(n && typeof n === "object" ? n : {}) }) ?? compileNames(DEFAULT_NAMES);
+  return true;
+};
+// Sharing: the desk and the work board load the profile (their helper prints `names`) and publish it; every other mod follows what is shared. In the helper
+// (node) there is no `shared`, so both are inert there.
+const NAMES_SHARED = "inbox.names";
+const adoptNames = (n) => {
+  const changed = setNames(n);
+  try { if (typeof setShared === "function" && JSON.stringify(shared(NAMES_SHARED) ?? {}) !== JSON.stringify(n ?? {})) setShared(NAMES_SHARED, n ?? {}); } catch {}
+  return changed;
+};
+const syncNames = () => { try { return typeof shared === "function" ? setNames(shared(NAMES_SHARED)) : false; } catch { return false; } };
+const isAgentName = (v) => NAMES.agentRe.test(String(v ?? ""));
+const labelOf = (t, key) => String(t?.labels?.[NAMES[key]] ?? "").trim(); // key: labelRole | labelWait | labelWaitLink | labelSession | hubIdLabel
+const roleIs = (t, role) => Boolean(role) && labelOf(t, "labelRole").toLowerCase() === String(role).toLowerCase();
+const isHubTerm = (t) => roleIs(t, NAMES.hubRole);
+const isAgentTerm = (t) => roleIs(t, NAMES.agentRole);
+const cleanPoId = (v) => { const s = String(v ?? "").trim(); return SAFE_ID.test(s) && NAMES.hubIdRe.test(s) ? s : ""; };
+const poId = (t) => (isHubTerm(t) ? cleanPoId(labelOf(t, "hubIdLabel")) : "");
+// The line pasted into the hub terminal. One line (newlines folded to spaces) so the submit keeps it as a single user message. A `{… {link} …}`
+// group of the template is kept (without its braces) only when there is a link.
+function answerLine(kind, leader, text, link) {
+  const body = String(text ?? "").replace(/\s*\n\s*/g, " ").trim();
+  const vals = { kind: String(kind ?? ""), agent: String(leader ?? ""), text: body, link: String(link ?? "") };
+  return NAMES.answerLine.replace(/\{([^{}]*)\{link\}([^{}]*)\}/g, (_, a, b) => (vals.link ? `${a}{link}${b}` : "")).replace(/\{(kind|agent|text|link)\}/g, (_, k) => vals[k]);
+}
+// names:end
+
 // leaderName:begin
 // The name a person knows a leader by: its Herdr session name. ONE rule for the inbox (cards, rows), agent-groups (leader headers), leader-tabs (tab text) and work (session rows).
-// The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js and agent-groups/main.js
+// The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js, agent-groups, leader-tabs and work
 // (a test keeps them identical). Order: the live terminal title -> the `session` label -> the last name remembered for that leader
 // (`memo`, {<hc name>: name}) -> the hc name ("lead-po-inbox" -> "po inbox"). The "리더 · " prefix is dropped: the place already says
 // it is a leader, and the name then reads as its task.
-const LEADER_PREFIX = /^\s*리더\s*·\s*/;
-const sessionName = (s) => String(s ?? "").replace(/^[^\p{L}\p{N}\p{Ps}\p{Pi}]+/u, "").replace(LEADER_PREFIX, "").trim();
-const liveName = (term) => [term?.title, term?.labels?.session].map(sessionName).find((n) => n && n !== term?.name && n !== term?.address && n.toLowerCase() !== "claude") ?? "";
-const leaderName = (leader, term, memo) => liveName(term) || sessionName(memo?.[leader]) || String(leader ?? "").replace(/^lead-/, "").replace(/-/g, " ").trim() || String(term?.address ?? "");
+const sessionName = (s) => String(s ?? "").replace(/^[^\p{L}\p{N}\p{Ps}\p{Pi}]+/u, "").replace(NAMES.prefixRe ?? /$^/, "").trim();
+const liveName = (term) => [term?.title, labelOf(term, "labelSession")].map(sessionName).find((n) => n && n !== term?.name && n !== term?.address && n.toLowerCase() !== "claude") ?? "";
+const leaderName = (leader, term, memo) => liveName(term) || sessionName(memo?.[leader]) || String(leader ?? "").replace(NAMES.stripRe ?? /$^/, "").replace(/-/g, " ").trim() || String(term?.address ?? "");
 // The memo with the live names of `terms` merged in; null when nothing changed. At most `max` leaders are kept (oldest dropped).
 function rememberNames(memo, terms, max = 60) {
   const next = { ...(memo ?? {}) };
   let changed = false;
   for (const t of terms ?? []) {
-    const n = /^lead-/.test(String(t?.name ?? "")) ? liveName(t) : "";
+    const n = isAgentName(t?.name) ? liveName(t) : "";
     if (!n || next[t.name] === n) continue;
     delete next[t.name]; // re-added last: the newest stay when the cap drops the oldest
     next[t.name] = n;
@@ -144,11 +194,8 @@ function rememberNames(memo, terms, max = 60) {
 }
 // leaderName:end
 
-// A leader terminal by its role label, else (no label) its lead- name.
-const isLeader = (t) => {
-  const role = roleOf(t);
-  return role === "leader" || (!role && LEAD.test(t?.name ?? ""));
-};
+// A leader terminal by its role label, else (no label) its agent name (default lead-*).
+const isLeader = (t) => isAgentTerm(t) || (!roleOf(t) && isAgentName(t?.name));
 // Team members and parked leaders run without a tab or pane, so agents() never lists them. Give each
 // live one an agent-like entry (no pane) in the space of the nearest ancestor that is listed (the PO
 // or leader above it), so taskPlan can place it. The name comes from the `session` label, else the hc name.
@@ -168,14 +215,14 @@ export function paneless(real, all, listed = new Map(), memo = {}) {
   const out = [];
   all.forEach((t, i) => {
     if (t.state !== "live" || byAddr.has(t.address)) return;
-    const session = String(t.labels?.[SESSION] ?? "").trim();
+    const session = String(t.labels?.[NAMES.labelSession] ?? "").trim();
     const leader = isLeader(t);
     if (!leader && !memberOf(t.name, session)) return;
     const home = seat(t);
     if (!home) return;
     // A leader's row reads like a real leader's: the full `session` label ("리더 · ..."), else "리더 · " + the
     // hc name without "lead-". Its tab name stays empty so taskPlan builds the section header itself.
-    const title = leader ? `리더 · ${leaderName(t.name, t, memo)}` : session;
+    const title = leader ? `${NAMES.titlePrefixText}${leaderName(t.name, t, memo)}` : session;
     out.push({
       address: t.address,
       pane: null,
@@ -225,16 +272,15 @@ export function taskPlan(agentList, all, tabNames = new Map(), memo = {}) {
     const team = [];
     for (const a of members) {
       const t = term.get(a.address);
-      const role = roleOf(t);
       const m = memberOf(t?.name, tabNames.get(a.address));
       if (t?.labels?.[SCHEDULE]) scheduled.push(a);
       // A labelled terminal is classified by its label, never by the tab it sits in; then the lead- name;
       // only then the team-member name and the tab name / "has child terminals".
-      else if (role === "po") pos.push(a);
-      else if (role === "leader" || (!role && LEAD.test(t?.name ?? ""))) leaders.push(a);
+      else if (isHubTerm(t)) pos.push(a);
+      else if (isLeader(t)) leaders.push(a);
       else if (m) team.push({ a, ...m });
-      else if (PO_TAB.test(a.tab_name ?? "")) pos.push(a);
-      else if (parents.has(a.address) || /^리더/.test(a.tab_name ?? "")) leaders.push(a);
+      else if (poTab(a.tab_name)) pos.push(a);
+      else if (parents.has(a.address) || leaderTab(a.tab_name)) leaders.push(a);
       else others.push(a);
     }
     const leaderSet = new Set(leaders.map((a) => a.address));
@@ -455,6 +501,7 @@ export default class Agents extends View {
 
   render(cx) {
     const t = theme();
+    syncNames(); // the profile the desk published
     if (props()?.sortMenu) return this.sortMenu(t);
     const collapsed = narrow();
     const sort = sortOf();
@@ -553,7 +600,7 @@ export default class Agents extends View {
       const tab = tabs.get(a.tab);
       const many = tabCounts.get(a.tab) > 1;
       // A PO row keeps the PO tab's name even when a leader shares the tab; the PO's own session title is not used.
-      const poRow = roleOf(termByAddress.get(a.address)) === "po" && tab?.named;
+      const poRow = isHubTerm(termByAddress.get(a.address)) && tab?.named;
       return [a.address, poRow ? tab.name : tab ? title(many ? { ...tab, named: false } : tab, many ? a : leads.get(a.tab)) : (a.title || a.program?.name || "")];
     }));
     const label = (a) => labels.get(a.address);

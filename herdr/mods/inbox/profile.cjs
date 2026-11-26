@@ -92,7 +92,7 @@ function loadProfile(env = process.env) {
 // and what the desk (which cannot require this file) compiles again. The defaults here and in the desk's names block must match (a test).
 function namesOf(p) {
   return {
-    agentName: p.agentName.source, agentRole: p.agentRole, titlePrefix: (prefixRegex(p.agentTitlePrefix) ?? { source: "" }).source, strip: p.agentStrip ? p.agentStrip.source : "",
+    agentName: p.agentName.source, agentRole: p.agentRole, titlePrefix: (prefixRegex(p.agentTitlePrefix) ?? { source: "" }).source, titlePrefixText: p.agentTitlePrefix, strip: p.agentStrip ? p.agentStrip.source : "",
     hubRole: p.hubRole, hubIdLabel: p.hubIdLabel, hubId: p.hubId.source, hubDir: p.hubDir,
     labelRole: p.labelRole, labelWait: p.labelWait, labelWaitLink: p.labelWaitLink, labelSession: p.labelSession, answerLine: p.answerLine,
   };
