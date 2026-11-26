@@ -1879,14 +1879,69 @@ test("timeline: 터미널에 직접 친 글(me)은 오른쪽 내 말풍선으로
   assert.deepEqual(kinds(I.timeline("p1", [], [typed("@lead-a 데스크 글")], [sent])), ["me"]);
   // 기록 하나는 직접 친 글 하나만 덮는다
   assert.deepEqual(kinds(I.timeline("p1", [], [typed("데스크 글"), typed("데스크 글", ms + 1000)], [sent])), ["me", "me:typed"]);
-  // 실패·칸 없음·사라짐 기록은 PO에 닿지 않았으니 덮지 않는다
-  for (const status of ["failed", "nopane", "gone"]) assert.deepEqual(kinds(I.timeline("p1", [], [typed("데스크 글")], [{ ...sent, status }])).sort(), ["me", "me:typed"]);
+  // 실패·칸 없음·사라짐으로 적힌 기록도 PO 훅이 같은 글을 제출로 기록했으면 닿은 것이다(#111): 하나로 덮이고 "sent"로 보인다
+  for (const status of ["failed", "nopane", "gone", "noenter", "sending"]) {
+    const t = I.timeline("p1", [], [typed("데스크 글")], [{ ...sent, status }]);
+    assert.deepEqual(kinds(t), ["me"], status);
+    assert.equal(t[0].status, "sent", status);
+  }
   // 다른 PO의 기록, 11분보다 오래된 기록, 훅 줄보다 1분 넘게 나중인 기록은 덮지 않는다
   assert.equal(I.timeline("p1", [], [typed("데스크 글")], [{ ...sent, po: "p2" }]).length, 1);
   assert.deepEqual(kinds(I.timeline("p1", [], [typed("데스크 글")], [{ ...sent, ms: ms - 12 * 60000 }])), ["me", "me:typed"]);
   assert.deepEqual(kinds(I.timeline("p1", [], [typed("데스크 글")], [{ ...sent, ms: ms + 2 * 60000 }])).sort(), ["me", "me:typed"]);
   // PO 모름 방에는 직접 친 글도 없다
   assert.equal(I.timeline(I.PO_OTHER, [], [typed("x")], []).length, 0);
+});
+
+test("timeline #111: 훅 제출 기록이 없는 실패 기록은 실패 그대로이고, 있는 것은 sent로 바뀐다 (17:02 실제 기록의 모양)", () => {
+  const ms = Date.parse(T(10));
+  const typed = (text, at) => ({ ts: new Date(at).toISOString(), ms: at, text, to: "", me: true });
+  // 17:02:24 데스크가 보냈고 hc send는 started:false로 끝나 실패로 적혔다. PO는 일하는 중이라 글을 줄에 세웠다가 25초 뒤 턴이 끝나자 제출했다
+  const failed = { id: "m1", ms, at: ms, text: "원격을 켰던 PO인데 재실행하니 안 돼", line: "원격을 켰던 PO인데 재실행하니 안 돼", to: "", po: "p1", status: "failed" };
+  const before = I.timeline("p1", [], [], [failed]);
+  assert.equal(before.length, 1);
+  assert.equal(before[0].status, "failed"); // 훅 기록이 아직 없는 동안은 실패로 보인다
+  assert.ok(I.mineActs(before[0].status).includes("resend")); // 실패 기록에는 다시 보내기가 있다(다른 버튼이 함께 있어도 상관없다)
+  const after = I.timeline("p1", [], [typed("원격을 켰던 PO인데 재실행하니 안 돼", ms + 25000)], [failed]);
+  assert.equal(after.length, 1); // 같은 글이 두 번(실패 말풍선 + 직접 친 글) 나오지 않는다
+  assert.equal(after[0].who, "me");
+  assert.equal(after[0].id, "m1"); // 데스크 기록이 남아 있다
+  assert.equal(after[0].status, "sent");
+  assert.ok(!I.mineActs(after[0].status).includes("resend")); // 다시 보내기 버튼이 없다 - 눌러도 중복으로 가지 않는다
+  // 붙여 넣기 래퍼가 붙은 훅 줄도 같은 글로 본다
+  const wrapped = I.timeline("p1", [], [typed('<pasted_content id="027d">\n원격을 켰던 PO인데 재실행하니 안 돼\n</pasted_content>', ms + 25000)], [failed]);
+  assert.equal(wrapped.length, 1);
+  assert.equal(wrapped[0].status, "sent");
+  // 다른 글의 훅 줄, 11분이 지난 훅 줄은 실패 기록을 살리지 않는다
+  assert.equal(I.timeline("p1", [], [typed("전혀 다른 글", ms + 25000)], [failed]).find((e) => e.id === "m1").status, "failed");
+  assert.equal(I.timeline("p1", [], [typed(failed.text, ms + 12 * 60000)], [failed]).find((e) => e.id === "m1").status, "failed");
+  // 같은 글의 정상 기록(sent)과 실패 기록이 함께 있으면 훅 줄 하나는 정상 기록이 먼저 가져간다 - 실패 기록은 실패로 남는다
+  const good = { ...failed, id: "m2", status: "sent", ms: ms + 1000, at: ms + 1000 };
+  const both = I.timeline("p1", [], [typed(failed.text, ms + 25000)], [failed, good]);
+  assert.equal(both.find((e) => e.id === "m1").status, "failed");
+  assert.equal(both.find((e) => e.id === "m2").status, "sent");
+  assert.equal(both.length, 2);
+  // 같은 글을 두 번 보냈고 훅 줄이 둘이면 둘 다 sent
+  const two = I.timeline("p1", [], [typed(failed.text, ms + 25000), typed(failed.text, ms + 40000)], [failed, { ...failed, id: "m3", ms: ms + 2000, at: ms + 2000 }]);
+  assert.deepEqual(two.filter((e) => e.who === "me").map((e) => e.status), ["sent", "sent"]);
+});
+
+test("hookProved #111: 훅의 me 줄이 기록의 글을 제출로 보았는지만 가린다", () => {
+  const ms = 1_000_000;
+  const rec = { line: "안녕  하세요", text: "안녕 하세요", ms };
+  assert.equal(I.hookProved([{ ms: ms + 25000, text: "안녕 하세요" }], rec), true);
+  assert.equal(I.hookProved([{ ms: ms + 25000, text: '<pasted_content id="1">안녕 하세요</pasted_content>' }], rec), true);
+  assert.equal(I.hookProved([{ ms: ms + 25000, text: "다른 글" }], rec), false);
+  assert.equal(I.hookProved([], rec), false);
+  assert.equal(I.hookProved(null, rec), false);
+  assert.equal(I.hookProved([{ ms: ms - 61000, text: "안녕 하세요" }], rec), false); // 보내기 1분 넘게 전의 줄
+  assert.equal(I.hookProved([{ ms: ms + 12 * 60000, text: "안녕 하세요" }], rec), false); // 11분 넘게 뒤의 줄
+  assert.equal(I.hookProved([{ ms: ms + 5, text: 7 }], rec), false);
+  // since로 창의 시작을 옮긴다(보내기 시작 시각)
+  assert.equal(I.hookProved([{ ms: ms + 50000, text: "안녕 하세요" }], rec, ms + 49000), true);
+  // 훅이 2000자에서 자른 긴 글("…")도 시작이 같으면 같은 글이다
+  const long = "가".repeat(900) + " " + "나".repeat(900);
+  assert.equal(I.hookProved([{ ms: ms + 1, text: long.slice(0, 1500) + "…" }], { line: long, text: long, ms }), true);
 });
 
 test("timeline: me 줄이 아닌 say는 왼쪽 PO 말풍선 그대로다", () => {

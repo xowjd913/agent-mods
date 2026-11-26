@@ -367,6 +367,23 @@ function tlMemoGet(kind, v, make) {
   return r;
 }
 const TL_CUT_MIN = 500;
+// The PO hook's copy of a submitted line (kind "me") against a desk record: compared without wrapper tags, whitespace squeezed, and (second chance) by words +
+// pictures; a hook line ending in "…" (the hook keeps 2000 characters, #49) matches a record that starts with what is left. The hook line is the proof that a
+// line really reached the PO's model, whatever the desk's own status says.
+const tlNorm = (v) => cutHead(String(v ?? "").replace(/\s+/g, " ").trim(), 2000);
+const tlFull = (v) => tlMemoGet("f", v, (s) => tlNorm(unwrapTags(s)));
+const tlCore = (v) => tlMemoGet("c", v, (s) => { const sp = splitImgs(s); return `${tlNorm(sp.text)}|${sp.imgs.join(",")}`; });
+// "" when the line is not such a cut (a short line that merely ends in "…" must not hide a longer send).
+const tlCut = (v) => { const s = String(v ?? ""); if (!s.endsWith("…")) return ""; const p = tlFull(s.slice(0, -1)); return p.length >= TL_CUT_MIN ? p : ""; };
+const hookKey = (v) => ({ t: tlFull(v), c: tlCore(v), p: tlCut(v) });
+const tlMatches = (k, m) => tlFull(m.line) === k.t || tlFull(m.text) === k.t || (k.c.length > 1 && (tlCore(m.line) === k.c || tlCore(m.text) === k.c)) || (k.p && (tlFull(m.line).startsWith(k.p) || tlFull(m.text).startsWith(k.p)));
+// A hook line belongs to a desk record when it came from up to 11 minutes (the Enter button's life) after the record's time to 1 minute before it.
+const tlWindow = (xms, mms, back = 60000) => (xms - mms) >= -back && (xms - mms) <= 11 * 60000;
+// recs = [{ms, text}] (the PO's "me" lines); m = the desk record ({line, text, ms}); since = where its window starts (default: the record's own time).
+// True when the PO's hook saw that record's text submitted (#111: a send that looked failed but reached the PO is proven by this). `back` = how far before `since` a line still counts (the send path passes a few seconds: an identical line from before this send, e.g. a repeated "네", proves nothing).
+function hookProved(recs, m, since = Number(m?.ms ?? m?.at) || 0, back = 60000) {
+  return (recs ?? []).some((x) => x && typeof x.text === "string" && tlWindow(Number(x.ms) || 0, since, back) && tlMatches(hookKey(x.text), m ?? {}));
+}
 function timeline(room, leaders, says, mine, waits = [], now = 0) {
   const out = [];
   const seen = new Set();
@@ -389,30 +406,29 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
   // own sends are pasted into that terminal too, so the hook sees them as well: such a line is dropped when a desk record that reached the PO
   // (not failed / nopane / gone) has the same text (its `line` or its `text`, whitespace ignored) and came from up to 11 minutes (the Enter
   // button's life) before to 1 minute after it. One desk record covers one typed line.
-  const sentBy = (mine ?? []).filter((m) => m.po === room && !["failed", "nopane", "gone"].includes(m.status));
+  // A record the desk marked failed / nopane / gone did not reach the PO as far as the desk knew, so it is matched only after every other record (a hand
+  // retyped copy must not turn a failed bubble "sent" while a good record has the same text). When the hook did see its text (#111: the desk's check of
+  // the PO's screen can miss a line the PO queued while it was busy), the record IS delivered: it is covered like any other and shown "sent".
+  const DESK_BAD = ["failed", "nopane", "gone"];
+  const own = (mine ?? []).filter((m) => m.po === room);
+  const sentBy = own.filter((m) => !DESK_BAD.includes(m.status)).concat(own.filter((m) => DESK_BAD.includes(m.status)));
+  const proven = new Set();
   const taken = new Set();
-  const tnorm = (v) => cutHead(String(v ?? "").replace(/\s+/g, " ").trim(), 2000);
-  // Compared without wrapper tags (the terminal's paste wrapper must not make a copy look different) and, as a second chance, by words + pictures.
-  const full = (v) => tlMemoGet("f", v, (s) => tnorm(unwrapTags(s)));
-  const core = (v) => tlMemoGet("c", v, (s) => { const sp = splitImgs(s); return `${tnorm(sp.text)}|${sp.imgs.join(",")}`; });
-  // The PO hook keeps at most 2000 characters of a typed line and ends a longer one in "…" (#49), so its copy of a long desk send is only the
-  // start of that send: a line ending in "…" also matches a record whose text starts with what is left (at least TL_CUT_MIN characters after
-  // whitespace is squeezed, so a short line that merely ends in "…" does not hide a longer send). "" when the line is not such a cut.
-  const cut = (v) => { const s = String(v ?? ""); if (!s.endsWith("…")) return ""; const p = full(s.slice(0, -1)); return p.length >= TL_CUT_MIN ? p : ""; };
+  const full = tlFull, core = tlCore, cut = tlCut;
   // The PO's reply to a line the desk sent to a leader (#58): the hook gives a prompt and its reply the same pid, and the prompt matched a desk
   // record that has a `to`. Only the 1:1 view reads it (`about`); the bubble does not say "→ leader", since the reply is to the person.
   const about = new Map();
   if (room && room !== PO_OTHER) for (const x of says ?? []) {
     if (x.me) {
-      const t = full(x.text), c = core(x.text), p = cut(x.text);
-      const i = sentBy.findIndex((m, j) => !taken.has(j) && (x.ms - (Number(m.ms) || 0)) >= -60000 && (x.ms - (Number(m.ms) || 0)) <= 11 * 60000 && (full(m.line) === t || full(m.text) === t || (c.length > 1 && (core(m.line) === c || core(m.text) === c)) || (p && (full(m.line).startsWith(p) || full(m.text).startsWith(p)))));
-      if (i >= 0) { taken.add(i); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); continue; }
+      const k = hookKey(x.text);
+      const i = sentBy.findIndex((m, j) => !taken.has(j) && tlWindow(x.ms, Number(m.ms) || 0) && tlMatches(k, m));
+      if (i >= 0) { taken.add(i); proven.add(sentBy[i]); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); continue; }
       out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
       continue;
     }
     out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: x.to || "", ...(!x.to && x.pid && about.get(x.pid) ? { about: about.get(x.pid) } : {}) });
   }
-  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", ...(x.tos?.length ? { tos: x.tos } : {}), kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
+  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", ...(x.tos?.length ? { tos: x.tos } : {}), kind: x.kind || "chat", status: proven.has(x) ? "sent" : liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
   // Two entries with the same key (the same text at the same ms) would share one element id: the later ones get a #n suffix.
   const used = new Map();
   for (const e of out) {
@@ -1277,6 +1293,7 @@ function restartDraft(mine, room, now) {
 // What the PO's hook recorded as submitted (UserPromptSubmit -> kind "me" lines of po/<id>.jsonl) is the proof of what `hc send` really sent.
 // The step-1 request must come back as exactly itself: a draft left in the input box is sent in front of it ("<draft><request>"), and the run stops.
 // recs = [{ms, text}] ("me" lines); since = ms just before the send. "wait" = no record yet, "ok", "mismatch" (something else was submitted).
+const SEND_PROOF_BACK_MS = 2000; // a hook line counts as proof of THIS send only from this long before the send started (clock slack); an older identical line is another send
 const RESTART_REC_MS = 12 * 1000; // how long the desk waits for the record of a send (the hook writes it when the prompt is submitted)
 const restartNorm = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 function restartSubmitCheck(recs, since, expected) {
@@ -2344,6 +2361,7 @@ export default class Inbox extends View {
     try {
       c.spawn(async (cx) => {
         let r = null;
+        const t0 = Date.now();
         try { r = await hc(["send", "--json", "--", po, text]); } catch (e) { r = { code: -1, stdout: "", stderr: String(e?.message ?? e) }; }
         const res = restartSendResult(r);
         if (!res.ok) {
@@ -2357,6 +2375,17 @@ export default class Inbox extends View {
               try { cx.notify(); } catch {}
               return;
             }
+          }
+          // `hc send` gave up without seeing a turn start, but the text may still have reached the PO (#111: a PO that was busy queues a pasted line and
+          // submits it when its turn ends, so it is neither in the input box nor started yet). The PO's hook writes a "me" line when a prompt is
+          // submitted: wait a little for it before calling the send failed. A line that arrives later still turns the bubble "sent" in the timeline.
+          if (res.notStarted && rec?.po && await this.poSeen(cx, rec.po, { line: text, text: rec.text ?? text }, t0)) {
+            this.diag(`desk send: hc reported no turn, the PO's hook saw the line (po ${po})`);
+            this.opening.delete(po); this.mark(id, "sent");
+            try { ok?.("sent"); } catch {}
+            this.say(`PO(${po})에 보냈습니다.`);
+            try { cx.notify(); } catch {}
+            return;
           }
           fail(res.why, cx);
           return;
@@ -2383,6 +2412,15 @@ export default class Inbox extends View {
     go(c);
   }
 
+  // Waits (bounded by RESTART_REC_MS) for the PO's hook to record `m` ({line, text}) as submitted after `since`; true when it did.
+  async poSeen(cx, room, m, since) {
+    const t0 = Date.now();
+    for (;;) {
+      try { if (hookProved(await this.poMe(room), m, since, SEND_PROOF_BACK_MS)) return true; } catch {}
+      if (Date.now() - t0 >= RESTART_REC_MS) return false;
+      try { await this.sleepOn(cx, 1000); } catch { return false; }
+    }
+  }
   // One line of the person's own history per desk send (the timeline draws it as the right-hand bubble). Returns its id ("" when nothing was recorded).
   record(rec, status) {
     try {
