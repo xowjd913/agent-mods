@@ -15,6 +15,7 @@
 //   node install.cjs hook --home <home> [--settings <settings.json>] [--remove]
 //     PO 훅(inbox의 po-hook.cjs) 한 줄을 Claude Code 설정(기본 ~/.claude/settings.json, CLAUDE_CONFIG_DIR이 있으면 그 폴더)의
 //     Stop·UserPromptSubmit에 넣는다. 다른 훅은 그대로 두고, 이미 있으면 바꾸지 않으며, 쓰기 전에 백업하고, JSON을 읽지 못하면 쓰지 않는다.
+//     --solo를 붙이면 혼자 모드 기록(UI 모드가 PO 없는 Claude 터미널의 말을 ~/.herdr-inbox/solo/에 저장)도 켠다(--remove --solo는 PO 훅은 그대로 두고 기록 표시만 끈다). 기본은 꺼짐이다.
 //     --remove는 우리 줄만 뺀다. 이 명령만 설정 파일을 건드린다(mods·remove는 건드리지 않는다).
 // 레이아웃 단계마다 기록 파일을 두어, 사용자가 되돌린 블록은 다시 바꾸지 않는다.
 "use strict";
@@ -65,7 +66,7 @@ function parseNames(value, flag) {
 }
 
 function parseArgs(argv) {
-  const out = { cmd: argv[0], home: null, extras: false, only: null, add: null, mods: null, created: false, settings: null, remove: false };
+  const out = { cmd: argv[0], home: null, extras: false, only: null, add: null, mods: null, created: false, settings: null, remove: false, solo: false };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--home") out.home = argv[++i];
@@ -76,6 +77,7 @@ function parseArgs(argv) {
     else if (a === "--created") out.created = true;
     else if (a === "--settings") { out.settings = argv[++i]; if (!out.settings) throw new Error("--settings 뒤에 파일 경로가 필요합니다."); }
     else if (a === "--remove") out.remove = true;
+    else if (a === "--solo") out.solo = true;
     else throw new Error(`알 수 없는 인자: ${a}`);
   }
   if (!out.home) throw new Error("--home이 필요합니다.");
@@ -605,10 +607,16 @@ function hookSettings(home, file, remove = false, now = Date.now()) {
   return { status: remove ? "removed" : "installed", file, ...(backup ? { backup } : {}) };
 }
 
+// 혼자 모드 기록 표시(inbox 폴더의 solo.on)를 켜거나 끈다. 방 목록의 "혼자 모드 켜기" 버튼과 같은 표시다. 켜진 상태를 돌려준다.
+function soloSetting(on, dir) {
+  const I = require("./mods/inbox/inbox.cjs");
+  return I.setSolo(dir || I.inboxDir(), on);
+}
+
 module.exports = {
   CORE, EXTRAS, ALL, MODS, MARK, LEGACY_MARK, LAYOUT_NAME,
   parseArgs, installMods, applyLayout, deriveUiLayout, pendingLayout, removeMods, listMods,
-  HOOK_EVENTS, HOOK_SCRIPT, isOurHook, settingsPath, hookScript, hookCommand, mergeHook, hookSettings,
+  HOOK_EVENTS, HOOK_SCRIPT, isOurHook, settingsPath, hookScript, hookCommand, mergeHook, hookSettings, soloSetting,
 };
 
 if (require.main === module) {
@@ -623,10 +631,17 @@ if (require.main === module) {
   else if (args.cmd === "pending-layout") { const name = pendingLayout(args.home); if (name) log(name); }
   else if (args.cmd === "layout") applyLayout(args.home, args.created);
   else if (args.cmd === "hook") {
+    if (args.remove && args.solo) { // `--remove --solo` only turns the solo recording off; the PO hook stays
+      try { soloSetting(false); log("혼자 모드 기록을 껐습니다(PO 훅은 그대로 둡니다)."); } catch (e) { log(`혼자 모드 기록 표시를 바꾸지 못했습니다: ${e.message}`); process.exit(1); }
+      return;
+    }
     const r = hookSettings(args.home, args.settings || settingsPath(), args.remove);
     const say = { installed: `PO 훅을 넣었습니다: ${r.file}${r.backup ? ` (백업: ${r.backup})` : ""}. 이미 켜진 PO 세션은 다시 시작해야 적용됩니다.`, present: `PO 훅이 이미 들어 있습니다: ${r.file}`, removed: `PO 훅을 뺐습니다: ${r.file}${r.backup ? ` (백업: ${r.backup})` : ""}`, absent: `뺄 PO 훅이 없습니다: ${r.file}`, skipped: `PO 훅은 넣지 않았습니다. ${r.error}`, invalid: `PO 훅을 넣지 못했습니다. ${r.error}` };
     log(say[r.status]);
     if (r.status === "invalid") process.exit(1);
+    if (args.solo) {
+      try { log(soloSetting(true) ? "혼자 모드 기록을 켰습니다(모든 Claude 터미널의 프롬프트가 이 컴퓨터에 저장됩니다)." : "혼자 모드 기록을 켜지 못했습니다."); } catch (e) { log(`혼자 모드 기록 표시를 바꾸지 못했습니다: ${e.message}`); process.exit(1); }
+    }
   }
   else { log(`알 수 없는 명령: ${args.cmd}`); process.exit(2); }
 }
