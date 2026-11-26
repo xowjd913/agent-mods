@@ -1554,7 +1554,8 @@ function statusSig(terms) {
     if (!lead && !poId(t)) continue;
     rows.push(`${t.address}|${String(t.status ?? "")}|${lead ? waitingKind(t) : ""}|${lead ? liveName(t) : ""}|${lead && hot.has(t.address) ? 1 : 0}|${lead && hot.has(t.address) ? typingLabel(states, t.address) : ""}`);
   }
-  return rows.sort().join("\n") + `\n#w:${[...roomWorking(terms)].sort().join(",")}`; // #69: a working terminal that is no PO/leader (a member right under a PO) still moves a room dot
+  const w = [...roomWorking(terms)].sort().join(",");
+  return rows.sort().join("\n") + (w ? `\n#w:${w}` : ""); // #69: a working terminal that is no PO/leader (a member right under a PO) still moves a room dot
 }
 // ---- images (pasted, picked or dropped in the box; or pasted in the PO terminal and read back by the hook)
 // A picture lives in <app root>/data/inbox/img/ (0600, written by this helper); a line of the desk's message names it as "[image: <path> — ...]"
