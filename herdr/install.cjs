@@ -381,7 +381,7 @@ function applyUiLayout(home, baseFile, baseLayout) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   writeLayout(file, ui);
   fs.writeFileSync(uiMarkFile(home), hashOf(text) + "\n");
-  log(`UI 모드 레이아웃을 ${current === null ? "만들었습니다" : "다시 만들었습니다"}: ${file} (탭 줄의 "UI 모드" 버튼으로 전환)`);
+  log(`UI 모드 레이아웃을 ${current === null ? "만들었습니다" : "다시 만들었습니다"}: ${file} (탭 줄의 "전체 화면" 버튼으로 전환)`);
   return current === null ? "created" : "updated";
 }
 
