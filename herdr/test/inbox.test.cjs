@@ -2875,6 +2875,8 @@ test("원격 연결 켜기: main.js는 /remote-control 한 줄만 sendLine 길�
   assert.doesNotMatch(methodOf(src, "  async remoteClose(po, cx) {", "  remoteSet(room"), /"enter"|"down"|"up"/); // the menu is closed with Esc only: never Enter on an option (Disconnect) // only through sendLine (its checks: running, not on a prompt, no held draft)
   const btn = methodOf(src, "  remoteButton(t, room, po, status) {", "  // A panel answer: the answer line");
   assert.match(btn, /원격 연결 켜기/);
+  assert.match(btn, /on \? "● 원격 연결 켜짐" : "원격 연결 켜기"/); // the button itself shows the on-state once the last check saw it on
+  assert.doesNotMatch(btn, /rc-mark/); // no second "켜짐" mark beside a button that still says 켜기
   assert.match(btn, /disabled: why/);
   assert.doesNotMatch(btn, /chatTarget|poList|PO_OTHER/); // knows no PO rules: a solo room can pass its own terminal
   assert.match(src, /const REMOTE_CMD = "\/remote-control";/);

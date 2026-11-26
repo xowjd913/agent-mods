@@ -2578,7 +2578,7 @@ export default class Inbox extends View {
       } catch (e) { done("fail", "fail", { why: String(e?.message ?? e).slice(0, 100) }); }
     });
   }
-  // The button and, beside it, the last known state ("● 켜짐" = the last screen check saw it on; it is not watched, so a disconnect made in the terminal shows only after the next check).
+  // The button and, beside it, the last known state: once the last screen check saw it on, the button itself reads "● 원격 연결 켜짐" (a click re-checks the screen and only sends if it no longer shows on). Not watched, so a disconnect made in the terminal shows only after the next check.
   remoteButton(t, room, po, status) {
     const r = this.rc.get(room);
     const rs = this.rs.get(room);
@@ -2586,9 +2586,8 @@ export default class Inbox extends View {
     const on = r && (r.phase === "on" || r.phase === "already");
     const at = on ? new Date(r.at).toTimeString().slice(0, 5) : "";
     return h_flex().id(`rc-${room}`).flex_none().min_w(0).gap(6).items_center()
-      .when(Boolean(on), (el) => el.child(div().id(`rc-mark-${room}`).flex_none().text_size(10.5).text_color(t.working).tooltip(`${at}에 화면으로 확인한 상태입니다. 그 뒤 터미널에서 끊었는지는 보지 않습니다`).child("● 켜짐")))
       .when(r?.phase === "send", (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child("확인 중…")))
-      .child(this.button(t, "rc-on", "원격 연결 켜기", (c) => this.remoteOn(room, po, c), { disabled: why, tip: why || "이 PO 터미널에 /remote-control을 보내 원격 연결(Remote Control)을 켭니다. 이미 켜져 있으면 보내지 않습니다" }));
+      .child(this.button(t, on ? "rc-on-done" : "rc-on", on ? "● 원격 연결 켜짐" : "원격 연결 켜기", (c) => this.remoteOn(room, po, c), { disabled: why, tip: why || (on ? `${at}에 화면으로 확인한 상태입니다. 그 뒤 터미널에서 끊었는지는 보지 않습니다. 누르면 화면을 다시 확인하고, 꺼져 있을 때만 /remote-control을 보냅니다` : "이 PO 터미널에 /remote-control을 보내 원격 연결(Remote Control)을 켭니다. 이미 켜져 있으면 보내지 않습니다") }));
   }
   // The system note of the last 원격 연결 try, as a quiet line at the end of the room's chat.
   remoteNoteRow(t, room) {
