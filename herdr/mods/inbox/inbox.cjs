@@ -1827,7 +1827,9 @@ function remoteScreen(text) {
   const clean = cleanText(text);
   const lines = clean.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim());
   const tail = lines.slice(-14).join("\n");
-  const menu = /Disconnect this session/i.test(tail) && (/Show QR code/i.test(tail) || /\bContinue\b/.test(tail));
+  // Only the three numbered option lines together count (prose that merely mentions these words is not the menu).
+  const opt = (n, re) => new RegExp(`^\\s*(?:[❯>›▶]\\s*)?${n}[.)]\\s*${re}\\s*$`, "im").test(tail);
+  const menu = opt(1, "Disconnect this session") && opt(2, "Show QR code") && opt(3, "Continue");
   const active = menu || /Remote Control (is )?(active|connected)/i.test(lines.slice(-8).join("\n"));
   const urls = clean.match(REMOTE_URL) ?? [];
   return { menu, active, url: urls.length ? urls[urls.length - 1].replace(/[.,;:]+$/, "") : "" };

@@ -1041,7 +1041,9 @@ function remoteScreen(text) {
   const clean = cleanText(text);
   const lines = clean.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim());
   const tail = lines.slice(-14).join("\n");
-  const menu = /Disconnect this session/i.test(tail) && (/Show QR code/i.test(tail) || /\bContinue\b/.test(tail));
+  // Only the three numbered option lines together count (prose that merely mentions these words is not the menu).
+  const opt = (n, re) => new RegExp(`^\\s*(?:[❯>›▶]\\s*)?${n}[.)]\\s*${re}\\s*$`, "im").test(tail);
+  const menu = opt(1, "Disconnect this session") && opt(2, "Show QR code") && opt(3, "Continue");
   const active = menu || /Remote Control (is )?(active|connected)/i.test(lines.slice(-8).join("\n"));
   const urls = clean.match(REMOTE_URL) ?? [];
   return { menu, active, url: urls.length ? urls[urls.length - 1].replace(/[.,;:]+$/, "") : "" };
@@ -2446,20 +2448,20 @@ export default class Inbox extends View {
       return o && o.code === 0 ? String(o.stdout ?? "") : null;
     } catch { return null; }
   }
-  // Esc closes the menu; checked on the screen right before each press and again after it (a press never goes on a screen without the menu, nor while the PO works: Esc
-  // would stop its turn). true = the menu is gone.
+  // Esc closes the menu, pressed ONCE (a second Esc in a row can rewind the PO's conversation). Right before it the screen must still show the whole menu and the
+  // terminal's status is read again (poTerm): not running or working = no press (Esc would stop its turn). After it the screen is read again; true = the menu is gone,
+  // false = it is still there (or anything could not be checked) and nothing more is pressed.
   async remoteClose(po, cx) {
-    for (let i = 0; i < 2; i++) {
-      const t = await this.remoteRead(po);
-      if (t === null) return false;
-      if (!remoteScreen(t).menu) return true;
-      if (String(this.liveTerms().find((x) => x.address === po)?.status ?? "") === "working") return false;
-      let k = null; try { k = await hc(["keys", po, "esc"]); } catch {}
-      if (!(k && k.code === 0)) return false;
-      await this.sleepOn(cx, 600);
-    }
     const t = await this.remoteRead(po);
-    return t !== null && !remoteScreen(t).menu;
+    if (t === null) return false;
+    if (!remoteScreen(t).menu) return true;
+    const term = await this.poTerm(po);
+    if (!term || !term.live || term.status === "working") return false;
+    let k = null; try { k = await hc(["keys", po, "esc"]); } catch {}
+    if (!(k && k.code === 0)) return false;
+    await this.sleepOn(cx, 600);
+    const after = await this.remoteRead(po);
+    return after !== null && !remoteScreen(after).menu;
   }
   remoteSet(room, patch, c) {
     const r = { ...(this.rc.get(room) ?? {}), at: Date.now(), ...patch };

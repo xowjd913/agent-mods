@@ -2896,6 +2896,11 @@ test("remoteScreen: 연결 메뉴·켜짐 표시·세션 주소를 화면에서 
   const a = I.remoteScreen(`${RC_BASE}\n  Remote Control active`);
   assert.equal(a.menu, false); assert.equal(a.active, true);
   assert.equal(I.remoteScreen("Disconnect this session").menu, false); // one line alone is not the menu
+  const prose = "Reviewer notes: you can Disconnect this session, Show QR code, or Continue with the review.\n> \n  ? for shortcuts";
+  assert.equal(I.remoteScreen(prose).menu, false); // the words in prose are not the menu
+  assert.equal(I.remoteScreen("1. Disconnect this session\n2. Show QR code").menu, false); // all three numbered options are needed
+  assert.equal(I.remoteScreen("  1. Disconnect this session\n  2. Show QR code\n  3. Continue").menu, true);
+  assert.equal(I.remoteScreen("  ❯ 3. Continue\n    1) Disconnect this session\n    2) Show QR code").menu, true);
   assert.equal(I.remoteScreen(`see ${RC_URL}.`).url, RC_URL); // trailing dot dropped
   assert.equal(I.remoteScreen(null).menu, false);
   assert.equal(I.remoteNote("on", { url: RC_URL }), `원격 연결 켜짐 — ${RC_URL}`);
@@ -2917,7 +2922,7 @@ const rcRun = async ({ pre, afterSend = [], status = "idle", statusAfterSend = s
   };
   const g = { hc, PROMPT_LINES: 40, REMOTE_CMD: "/remote-control", REMOTE_POLLS: 3, REMOTE_POLL_MS: 0, remoteScreen: I.remoteScreen, remoteNote: I.remoteNote, remoteBlock: I.remoteBlock };
   const self = {
-    rc: new Map(), rs: new Map(), st: status, liveTerms() { return [{ address: "t9", status: this.st }]; }, say: (m, bad) => log.says.push({ m, bad: Boolean(bad) }),
+    rc: new Map(), rs: new Map(), st: status, liveTerms() { return [{ address: "t9", status: this.st }]; }, poTerm: async function () { return { live: true, status: self.st }; }, say: (m, bad) => log.says.push({ m, bad: Boolean(bad) }),
     sleepOn: async () => {}, sendLine: async function (po, text) { log.sends.push(text); self.st = statusAfterSend; queue = afterSend.length ? afterSend : [pre]; return send; },
   };
   for (const [h, n] of [["  async remoteRead(po) {", "  // Esc closes the menu"], ["  async remoteClose(po, cx) {", "  remoteSet(room"], ["  remoteSet(room, patch, c) {", "  remoteOn(room"], ["  remoteOn(room, po, c) {", "  // The button and, beside it"]]) Object.assign(self, runMethod(src, h, n, g));
@@ -2939,9 +2944,16 @@ test("원격 연결 켜기: 보낸 뒤 연결 메뉴가 뜨면 Esc로 닫고 확
   assert.deepEqual(ok.log.sends, ["/remote-control"]); assert.deepEqual(ok.log.keys, ["esc"]);
   assert.equal(ok.rc.phase, "already");
   const stuck = await rcRun({ pre: RC_BASE, afterSend: [RC_MENU], esc: null });
-  assert.deepEqual(stuck.log.keys, ["esc", "esc"]); // never Enter / Down
+  assert.deepEqual(stuck.log.keys, ["esc"]); // ONE Esc, never a second one, Enter or Down
   assert.equal(stuck.rc.phase, "fail"); assert.equal(stuck.rc.note.bad, true);
   assert.match(stuck.rc.note.text, /^켜지 못함: .*Continue.*Disconnect는 고르지 마세요/);
+});
+test("원격 연결 켜기: 연결 메뉴가 아닌 화면(문장 속 같은 단어)에는 Esc를 누르지 않고, 메뉴를 못 닫았으면 Esc를 한 번만 누른다", async () => {
+  const prose = "Reviewer notes: Disconnect this session / Show QR code / Continue are the options.\n> ";
+  const r = await rcRun({ pre: RC_BASE, afterSend: [prose] });
+  assert.deepEqual(r.log.keys, []); assert.equal(r.rc.phase, "unknown");
+  const preProse = await rcRun({ pre: prose, afterSend: [prose] });
+  assert.deepEqual(preProse.log.keys, []);
 });
 test("원격 연결 켜기: 작업 중인 PO에는 Esc를 누르지 않는다(턴이 끊긴다)", async () => {
   const w = await rcRun({ pre: RC_BASE, afterSend: [RC_MENU], statusAfterSend: "working" }); // the PO started a turn after the send
