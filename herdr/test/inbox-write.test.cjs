@@ -184,6 +184,8 @@ test("say는 잘못된 PO id·받는 사람·빈 글·너무 긴 글을 쓰지 �
   for (const [args, code] of cases) assert.equal(W.run(args, envOf(dir), noHc).code, code, args.join(" "));
   assert.equal(fs.existsSync(path.join(dir, "po")), false);
   assert.equal(W.run(["say", "--po", "main", "--text", "가".repeat(2000)], envOf(dir), noHc).code, 0); // 경계값은 통과
+  assert.equal(W.run(["say", "--po", "main", "--text", "😀".repeat(1001)], envOf(dir), noHc).code, 2); // 리더는 UTF-16 단위로 자르므로 이모지는 2로 센다
+  assert.equal(W.run(["say", "--po", "main", "--text", "😀".repeat(1000)], envOf(dir), noHc).code, 0);
 });
 
 test("HERDR_INBOX_DIR이 없으면 홈의 .herdr-inbox를 쓴다", () => {

@@ -174,7 +174,8 @@ function sayRecord(profile, flags) {
   if (!hubOk(profile, hub)) throw new Fail(1, `say needs --hub <id> matching ${profile.hubId} (profile hub.id)`);
   const text = trimBlankLines(readContent(flags));
   if (!text.trim()) throw new Fail(2, "text is empty");
-  if ([...text].length > SAY_MAX) throw new Fail(2, `text is over ${SAY_MAX} characters`);
+  // UTF-16 units, like the desk reader's `slice(0, 2000)`: a text this accepts is never cut by the reader.
+  if (text.length > SAY_MAX) throw new Fail(2, `text is over ${SAY_MAX} characters (UTF-16 units; an emoji counts 2)`);
   const record = { ts: nowIso(), kind: "say", text };
   if (flags.to !== undefined) {
     if (!agentOk(profile, flags.to)) throw new Fail(1, `--to must match ${profile.agentName} (profile agent.name)`);

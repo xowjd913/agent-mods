@@ -2,7 +2,7 @@
 
 PO 데스크(`inbox` 모드)가 읽는 파일의 규칙입니다. **이 규칙대로 파일을 쓰면 어떤 AI·스크립트든 데스크에 보고를 올리고 답을 받을 수 있습니다.** 특정 작업 방식(PO·리더 체계)을 따르지 않아도 됩니다. 이 문서만으로 쓰는 쪽을 만들 수 있게 썼습니다.
 
-- 쓰는 도구: [`herdr/tools/inbox-write.cjs`](../herdr/tools/inbox-write.cjs) (의존성 없는 Node 스크립트, Windows 포함)
+- 쓰는 도구: [`herdr/tools/inbox-write.cjs`](../herdr/tools/inbox-write.cjs) (의존성 없는 Node 스크립트, 파일 쓰기는 Windows 포함 — `hc label` 호출은 Windows 미검증)
 - 읽는 쪽(데스크): [`docs/mods/inbox.md`](mods/inbox.md)
 - 이 문서는 **현재 동작**을 적었습니다. 결정 카드의 선택지 파싱은 [#62](https://github.com/xowjd913/agent-mods/issues/62)에서 넓어질 수 있습니다.
 
@@ -148,6 +148,10 @@ Panel answer (decision) for lead-demo: "2안 선택". Target: https://github.com
 node herdr/tools/inbox-write.cjs report --kind decision --agent lead-demo \
   --title "[lead-demo] 결정" --link https://github.com/owner/repo/pull/2 \
   --body $'어느 쪽으로?\n1안: 지금\n2안: 나중\n추천: 2안'
+# $'...'는 bash/zsh 전용입니다. 다른 쉘(PowerShell, cmd, sh)에서는 아래처럼 파일이나 표준 입력으로 줍니다.
+printf '어느 쪽으로?\n1안: 지금\n2안: 나중\n추천: 2안\n' > card.txt
+node herdr/tools/inbox-write.cjs report --kind decision --agent lead-demo --title "[lead-demo] 결정" --file card.txt
+printf '어느 쪽으로?\n1안: 지금\n2안: 나중\n' | node herdr/tools/inbox-write.cjs report --kind decision --agent lead-demo --title "[lead-demo] 결정" --body -
 
 # 긴 본문은 파일이나 표준 입력(-)으로
 node herdr/tools/inbox-write.cjs report --kind done --agent lead-demo --file report.md
@@ -162,7 +166,8 @@ node herdr/tools/inbox-write.cjs say --hub main --to lead-demo --text "배포는
 - 에이전트 이름: `--agent` → `HERDR_INBOX_AGENT` → 이 터미널의 이름(`hc get $HC_TERMINAL_ID`) 순서. 기본 프로필의 말인 `--leader`, `--po`, `HERDR_INBOX_LEADER`도 같은 뜻입니다.
 - 허브 id: `--hub`, 없으면 이 터미널의 부모가 `role=po` 라벨일 때 그 `po` 라벨. 둘 다 없으면 `po` 필드 없이 씁니다.
 - `answered`는 `--of`·`--link`를 안 주면 이 터미널의 `wait`·`wait-link` 라벨에서 읽습니다.
-- 종료 코드: `0` 썼음 / `1` 사용법·환경 오류(이름 규칙 위반, 프로필 오류 등) / `2` 내용 오류(없는 종류, 빈 글, 2000자 초과 — 아무것도 안 씀) / `4` 줄은 썼으나 `hc label` 실패(라벨은 손으로).
+- 종료 코드: `0` 썼음 / `1` 사용법·환경 오류(이름 규칙 위반, 프로필 오류 등) / `2` 내용 오류(없는 종류, 빈 글, 2000자 초과(UTF-16 단위로 셈, 이모지는 2 — 데스크가 같은 단위로 자르기 때문) — 아무것도 안 씀) / `4` 줄은 썼으나 `hc label` 실패(라벨은 손으로).
+- Windows: 쓰기 도구는 `hc`를 실행 파일로 직접 부릅니다(`execFileSync("hc")`, 쉘 없음). `hc`가 `.cmd` 래퍼라면 찾지 못할 수 있고, 그 경우 줄은 쓰이지만 라벨은 `hc label`을 손으로 달아야 합니다(종료 코드 4). Windows는 **검증하지 않았습니다.** 쉘을 거치면 `--link` 같은 값이 명령어로 해석될 위험이 있어 `shell: true`로 우회하지 않았습니다.
 - `hc`가 없어도 파일은 쓰입니다(`--agent`/`--terminal`을 직접 주면 `hc get`을 아예 부르지 않음). 라벨은 `hc label`이 있는 환경에서만 붙습니다.
 - 도구 없이 직접 쓰려면 위 규칙대로 JSON 한 줄을 파일에 **추가**하면 됩니다. 쉘이라면:
 
@@ -219,22 +224,28 @@ node herdr/tools/inbox-write.cjs say --hub main --to lead-demo --text "배포는
 
 ### 10.2 설정을 읽는 곳
 
-한 곳(`loadProfile`)에서 읽어 각 모드에 넘깁니다. 지금은 `inbox.cjs`·`main.js`가 같은 로직을 복사해 가지고 있고(모드는 `.cjs`를 `require`할 수 없어서), `leader-tabs`·`agent-groups`·`work`·`tabs-mine`도 이름 규칙을 각자 가지고 있습니다(7개 파일, 관련 줄 약 90개). 복사본이 많은 것이 작업량의 대부분입니다. 아래는 하드코딩된 규칙의 현재 위치(기준 커밋의 줄 번호)입니다.
+한 곳(`loadProfile`)에서 읽어 각 모드에 넘깁니다. 지금은 `inbox.cjs`·`main.js`가 같은 로직을 복사해 가지고 있고(모드는 `.cjs`를 `require`할 수 없어서), 다른 모드도 이름 규칙을 각자 가지고 있습니다. 아래는 `herdr/` 전체를 `lead-`, `role=`, `po=`, `wait=`, `po/`, `리더`, `labels.role|wait|po|session`으로 다시 훑은 결과입니다(기준 커밋의 줄 번호). `install.cjs`에는 이런 이름이 없습니다.
 
 | 규칙 | `inbox/inbox.cjs` | `inbox/main.js` | 그 밖 |
 |---|---|---|---|
 | 종류 집합 `KINDS` / `ASK_KINDS` | 10-11 | — | (계약 자체라 설정 대상 아님) |
 | 대기 판정 `lead-*` + `wait` 라벨 | 759 | 50 | `tabs-mine/main.js:32`, 주석 173 |
-| 표시 이름·세션 이름 (`리더 · ` 접두어, `lead-` 떼기, `labels.session`) | 767-770 | 58-61 | `leader-tabs/main.js:71-74`, `agent-groups/main.js:124-135`, `work/main.js:16-27`, `tabs-mine/main.js:103` (같은 블록을 복사해 두고 테스트가 같음을 지킴) |
-| `/^lead-/` 에이전트 이름 검사 | 776, 953, 979, 1358, 1398, 1413 | 67, 175, 201, 580, 620, 635, 2348 | `leader-tabs/main.js:80`, `agent-groups/main.js:87,147-150,231-234`, `work/main.js:42` |
-| 허브 터미널 찾기 `labels.role === "po"` | 858-862 | 81-85 | — |
+| 표시 이름·세션 이름 (`리더 · ` 접두어, `lead-` 떼기, `labels.session`) | 767-770 | 58-61 | `leader-tabs/main.js:71-74`, `agent-groups/main.js:124-135`, `work/main.js:16-27`(같은 블록 복사, 테스트가 같음을 지킴), `tabs-mine/main.js:103`, `work/collect.cjs:212`(`labels.session`) |
+| `/^lead-/` 에이전트 이름 검사 | 776, 953, 979, 1358, 1398, 1413 | 67, 175, 201, 580, 620, 635, 2348 | `leader-tabs/main.js:80`, `agent-groups/main.js:87,147-150,231-234`, `work/main.js:42`, `inbox/po-hook.cjs:99` |
+| 허브 터미널 찾기 `labels.role === "po"` | 858-862 | 81-85 | `leader-tabs/main.js:129,170`(`roleOf(po) !== "po"`), `agent-groups/main.js:556` |
+| 에이전트 역할 `role === "leader"` | 1257 | 479 | `leader-tabs/main.js:25,127,130,171`, `agent-groups/main.js:99,150,234`, **`prs/main.js:58`**(`labels.role === "leader"`로 리더 터미널 고름) |
 | 답 줄 템플릿 | 866-868 | 88-90 | — |
 | `@멘션` 정규식(`lead-`) | 875 | 97 | — |
-| 허브 id 규칙·라벨 (`PO_ID`, `cleanPoId`, `isPoTerm`, `poId`) | 933-937 | 155-159 | `inbox/po-hook.cjs:99-100` |
+| 허브 id 규칙·라벨 (`PO_ID`, `cleanPoId`, `isPoTerm`, `poId`) | 933-937 | 155-159 | `inbox/po-hook.cjs:100`(`I.poId`) |
 | "PO 모름" 방 이름 `PO_OTHER` | 934 | 156 | — |
-| 에이전트 역할 라벨 `role === "leader"` | 1257 | 479 | `leader-tabs/main.js:25`, `agent-groups/main.js:150,234` |
-| 허브 폴더 `po/`, `po-session` 폴더 | 591 | — | `po-hook.cjs` |
-| 화면 문구 (`NO_PO`, `role=po` 안내 등) | — | 44, 2359, 2409, 2641-2654 | — |
+| 허브 폴더 `PO_DIR = "po"` (`<인박스>/po/<id>.jsonl` 읽기·목록) | 295, 540, 546 | — | `inbox/po-hook.cjs:10`(주석), 쓰기 도구는 이미 `hub.dir`를 따름 |
+| 허브 노트 경로 `po/<id>.handoff.md` | 1789 (`handoffFile`) | 881(주석), 2094(화면에 보이는 경로 문자열) | — |
+| `PO_SESSION_DIR = "po-session"` | 591, 671, 702 | — | `po-hook.cjs`(세션 파일 쓰기) |
+| 화면 문구 (`NO_PO`, `role=po` 안내, `po=<id>` 툴팁, `리더` 단어) | — | 44, 46, 2359, 2409, 2431-2461, 2641-2654, 2844, 2864 | `leader-tabs`·`agent-groups`의 `리더 · ` 접두어 문구 |
+
+**설정 대상이 아닌 것**: 타임라인 소유자 키 `who: "po"`(inbox.cjs 1001·1188·1282 등, main.js 223·410·504·2718·2748·2777)는 화면 안의 내부 키라 허브 이름과 무관합니다. `schedules.cjs`의 `"wait"`는 다른 CLI 옵션입니다.
+
+**작업량 추정(PR 2)**: 고칠 파일은 **8개**(`inbox.cjs`, `inbox/main.js`, `po-hook.cjs`, `leader-tabs`, `agent-groups`, `work`(`main.js`+`collect.cjs`), `tabs-mine`, `prs`)이고 관련 줄은 약 **130개**입니다(이전 추정: 7개 파일·약 90줄). 늘어난 것은 `prs`·`po-hook`·`work/collect.cjs`와 `leader-tabs`·`agent-groups`의 역할 검사, 폴더 경로입니다. 복사된 이름 블록(`inbox.cjs`·`main.js`·`agent-groups`·`work`·`leader-tabs`)이 많아 한 로더로 모으는 일이 작업량의 대부분입니다. PR 하나로는 크니 ① 인박스 모드 + `po-hook` ② 나머지 모드(`leader-tabs`·`agent-groups`·`work`·`tabs-mine`·`prs`) 두 PR로 나누는 것을 권합니다.
 
 ### 10.3 동작 규칙(안)
 
