@@ -126,7 +126,14 @@ test("모드 칸: 모드 폴더의 mod.json 유무로 설치 여부를 보여 �
   h.clicks["mod-copy-inbox"]({}, c);
   h.clicks["mod-copy-win-inbox"]({}, c);
   h.clicks["mod-copy-tabs-mine"]({}, c);
-  assert.deepEqual(c.clip, ["sh herdr/install.sh --add inbox", "./herdr/install.ps1 -Add inbox", "sh herdr/install.sh --remove tabs-mine"]);
+  const RAW = "https://raw.githubusercontent.com/xowjd913/agent-mods/main/herdr";
+  assert.deepEqual(c.clip, [
+    `curl -fsSL ${RAW}/install.sh | sh -s -- --add inbox`,
+    `& ([scriptblock]::Create((irm ${RAW}/install.ps1))) -Add inbox`,
+    `curl -fsSL ${RAW}/install.sh | sh -s -- --remove tabs-mine`,
+  ]);
+  // 저장소를 받지 않은 폴더에서도 돌아야 하므로 저장소 안 경로를 쓰지 않는다.
+  for (const x of c.clip) assert.ok(!x.includes("herdr/install") || x.includes("raw.githubusercontent.com"), x);
   assert.deepEqual(h.opened, []);
 });
 

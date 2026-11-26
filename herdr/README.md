@@ -258,13 +258,13 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
    - `main`을 복제하고, 그 레이아웃으로 바꿉니다.
 3. **블록 넣기**: `dashboard`에 설치된 모드의 블록을 넣습니다.
    - `tabs-mine`: 탭 줄 `tabs`를 `tabs-mine`으로 바꿉니다.
-   - `work`·`prs`·`schedules`·`inbox`: 오른쪽 패널에 `work-board`, `pr-board`, `schedules-board`, `inbox-board`를 더합니다. `gh-accounts`는 더하지 않습니다(입구가 설정 창뿐이라서). 예전에 들어간 `accounts-board`는 `--remove`가 그대로 되돌립니다.
+   - `work`·`prs`·`schedules`·`inbox`: 오른쪽 패널에 `work-board`, `pr-board`, `schedules-board`, `inbox-board`를 더합니다. `gh-accounts`는 더하지 않습니다(입구가 설정 창뿐이라서). 예전에 들어간 `accounts-board`는 갱신할 때 한 번 빼고(`.board-dropped` 기록), `--remove`도 남은 것을 되돌립니다.
    - `agent-groups`: `agents`를 `agent-groups`로 바꿉니다.
    - `usage-status`: `workspace-status`를 `usage-status`로 바꿉니다.
    - `leader-tabs`: 칸 머리줄 `pane`을 `leader-tabs`로 바꿉니다.
    - `path-menu`: 레이아웃 맨 위 `link_handlers`에 `path-menu`를 더합니다.
 4. **기록 남기기**: 단계마다 모드 폴더 안에 기록 파일을 남깁니다.
-   - 예: `.tabs-swapped`, `.work-board-added`, `.pr-board-added`, `.board-added`, `.agents-swapped`, `.status-swapped`, `.header-swapped`, `.link-handler-added`
+   - 예: `.tabs-swapped`, `.work-board-added`, `.pr-board-added`, `.board-added`, `.board-dropped`, `.agents-swapped`, `.status-swapped`, `.header-swapped`, `.link-handler-added`
    - 다음 설치는 기록이 있는 단계를 건너뛰므로, 사용자가 되돌린 블록은 그대로 둡니다.
 
 같은 이름이지만 이 설치기의 모드를 쓰지 않는 `dashboard` 레이아웃이 이미 있으면, 그 레이아웃은 건드리지 않습니다.

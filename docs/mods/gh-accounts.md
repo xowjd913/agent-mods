@@ -80,7 +80,7 @@ gh 에 로그인된 github.com 계정입니다.
 sh herdr/install.sh --add gh-accounts  # 패널 (저장소 안에서)
 ```
 
-- 오른쪽 패널에는 아무것도 더하지 않습니다. 설정 창의 `GitHub` 칸이 이 화면을 엽니다. 예전에 더해진 `accounts-board`는 `--remove`가 되돌립니다.
+- 오른쪽 패널에는 아무것도 더하지 않습니다. 설정 창의 `GitHub` 칸이 이 화면을 엽니다. 예전에 더해진 `accounts-board`는 갱신할 때 한 번 빠지고(레이아웃의 다른 부분은 그대로), `--remove`도 남은 것을 되돌립니다.
 - 그다음 패널의 `설치…` 버튼으로 gh-account 도구를 설치합니다. 터미널에서 `sh herdr/install.sh --gh-account`로 해도 같습니다.
 
 빼는 방법과 다른 옵션은 [모드 골라 설치](../../herdr/README.md#모드-골라-설치)에 있습니다.

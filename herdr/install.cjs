@@ -304,12 +304,13 @@ const STEPS = [
     undo: (l) => dropPanel(l, "schedules"),
   },
   {
-    // 계정 화면의 입구는 설정 창뿐이라(#126) 새로 패널을 더하지 않는다. 예전 설치가 더해 둔 accounts-board 는 제거할 때 되돌린다.
-    name: "오른쪽 패널 계정(gh-accounts)",
+    // 계정 화면의 입구는 설정 창뿐이라(#126) 패널을 더하지 않고, 예전 설치가 더해 둔 accounts-board 는 갱신할 때 한 번 뺀다.
+    // 기록 이름을 새로 정해 예전 .board-added 기록과 무관하게 한 번 돈다. 제거할 때도 남은 블록을 되돌린다.
+    name: "오른쪽 패널 계정(gh-accounts) 정리",
     needs: ["gh-accounts"],
-    mark: ["gh-accounts", ".board-added"],
-    done: () => true,
-    apply: () => null,
+    mark: ["gh-accounts", ".board-dropped"],
+    done: (l) => !(panelBody(l)?.children ?? []).some((k) => k?.content?.mod === "gh-accounts"),
+    apply: (l) => { dropPanel(l, "gh-accounts"); return null; },
     undo: (l) => dropPanel(l, "gh-accounts"),
   },
   {

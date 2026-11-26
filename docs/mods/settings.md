@@ -21,8 +21,9 @@
 
 - 모드마다 이름, 한 줄 설명, `기본`/`추가`, 설치 여부가 한 줄로 나옵니다. `새로고침`으로 다시 읽습니다.
 - **모드를 켜고 끄는 것은 창에서 하지 않습니다.** 대신 그 모드에 맞는 명령을 복사 버튼으로 가져갈 수 있습니다.
-  - macOS·Linux: `sh herdr/install.sh --add <모드>` / `--remove <모드>`
-  - Windows: `./herdr/install.ps1 -Add <모드>` / `-Remove <모드>`
+  - macOS·Linux: `curl -fsSL https://raw.githubusercontent.com/xowjd913/agent-mods/main/herdr/install.sh | sh -s -- --add <모드>` (제거는 `--remove <모드>`)
+  - Windows: `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/xowjd913/agent-mods/main/herdr/install.ps1))) -Add <모드>` (제거는 `-Remove <모드>`)
+  - README의 설치 한 줄과 같은 원격 형태라서 저장소를 받지 않은 폴더에서도 그대로 돌아갑니다.
 - 창이 모드를 켜고 끄지 않는 까닭: 설치기(`install.cjs`)는 모드 폴더에 함께 복사되지 않아 앱 안에서 돌릴 수 없고, 레이아웃과 파일을 고치므로 명령을 눈으로 확인하고 직접 실행하는 편이 안전해서입니다. 모드를 바꾼 뒤에는 Herdr를 다시 시작하세요.
 - 이 목록은 설치기의 모드 목록을 손으로 옮긴 것입니다. 어긋나지 않는지는 자동 시험이 확인합니다.
 

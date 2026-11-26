@@ -628,25 +628,64 @@ test("mods·remove 명령은 Claude 설정 파일을 건드리지 않는다(CLAU
   assert.equal(inst.settingsPath({ CLAUDE_CONFIG_DIR: dir }), path.join(dir, "settings.json"));
 });
 
-test("--add gh-accounts는 오른쪽 패널을 더하지 않고, 예전에 더해진 accounts-board는 제거할 때 되돌린다", () => {
-  const home = tempHome();
-  quiet(() => inst.installMods(home, { add: ["gh-accounts"] }));
-  assert.deepEqual(installed(home), ["gh-accounts"]);
-  const file = cloneInto(home, inst.LAYOUT_NAME);
-  quiet(() => inst.applyLayout(home, true));
-  const ids = () => JSON.stringify(readJson(file)).match(/"id":"accounts-board"/g) ?? [];
-  assert.equal(ids().length, 0);
-  assert.ok(!mods(readJson(file)).includes("gh-accounts"));
-  // 예전 설치가 더해 둔 블록
+// 예전 설치가 오른쪽 패널에 더해 둔 accounts-board 블록을 레이아웃에 되심는다.
+function plantAccountsBoard(file) {
   const l = readJson(file);
   (function walk(n) {
     if (n.id === "panel-body") n.children.push({ id: "accounts-board", type: "block", content: { mod: "gh-accounts" } });
     for (const c of n.children || []) walk(c);
   })(l);
   fs.writeFileSync(file, JSON.stringify(l, null, 2) + "\n");
-  assert.equal(ids().length, 1);
+}
+const countBoards = (file) => JSON.stringify(readJson(file)).match(/"id":"accounts-board"/g)?.length ?? 0;
+
+test("--add gh-accounts는 오른쪽 패널을 더하지 않는다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { add: ["gh-accounts"] }));
+  assert.deepEqual(installed(home), ["gh-accounts"]);
+  const file = cloneInto(home, inst.LAYOUT_NAME);
+  quiet(() => inst.applyLayout(home, true));
+  assert.equal(countBoards(file), 0);
+  assert.ok(!mods(readJson(file)).includes("gh-accounts"));
+});
+
+test("예전 설치가 더해 둔 accounts-board는 갱신(applyLayout)할 때 한 번 빠지고, 나머지 레이아웃은 그대로 둔다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { add: ["gh-accounts", "inbox"] }));
+  const file = cloneInto(home, inst.LAYOUT_NAME);
+  plantAccountsBoard(file);
+  assert.equal(countBoards(file), 1);
+  quiet(() => inst.applyLayout(home, true));
+  assert.equal(countBoards(file), 0);
+  assert.ok(!mods(readJson(file)).includes("gh-accounts"));
+  assert.ok(mods(readJson(file)).includes("inbox"), "다른 모드의 블록은 그대로여야 한다");
+  const after = fs.readFileSync(file, "utf8");
+  // 두 번째 갱신은 아무것도 바꾸지 않는다(멱등)
+  quiet(() => inst.applyLayout(home, true));
+  assert.equal(fs.readFileSync(file, "utf8"), after);
+  assert.equal(countBoards(file), 0);
+  assert.ok(fs.existsSync(path.join(home, "mods", "gh-accounts", ".board-dropped")));
+});
+
+test("accounts-board가 없는 레이아웃에서는 갱신해도 바뀌지 않는다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { add: ["gh-accounts"] }));
+  const file = cloneInto(home, inst.LAYOUT_NAME);
+  const before = fs.readFileSync(file, "utf8");
+  quiet(() => inst.applyLayout(home, true));
+  assert.equal(countBoards(file), 0);
+  assert.deepEqual(mods(JSON.parse(before)).filter((m) => m === "gh-accounts"), []);
+});
+
+test("--remove gh-accounts는 남아 있는 accounts-board도 함께 되돌린다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { add: ["gh-accounts"] }));
+  const file = cloneInto(home, inst.LAYOUT_NAME);
+  quiet(() => inst.applyLayout(home, true));
+  plantAccountsBoard(file);
+  assert.equal(countBoards(file), 1);
   quiet(() => inst.removeMods(home, ["gh-accounts"]));
-  assert.equal(ids().length, 0);
+  assert.equal(countBoards(file), 0);
   assert.ok(!fs.existsSync(path.join(home, "mods", "gh-accounts")));
 });
 

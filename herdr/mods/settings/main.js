@@ -48,10 +48,14 @@ const MODS = [
   { name: "path-menu", desc: "터미널 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄운다" },
   { name: "inbox", desc: "UI 모드 패널: 리더 결과 보고를 채팅처럼 보고, 결정을 PO에게 답한다" },
 ];
-const cmdAdd = (mod) => `sh herdr/install.sh --add ${mod}`;
-const cmdAddWin = (mod) => `./herdr/install.ps1 -Add ${mod}`;
-const cmdRemove = (mod) => `sh herdr/install.sh --remove ${mod}`;
-const cmdRemoveWin = (mod) => `./herdr/install.ps1 -Remove ${mod}`;
+// README의 설치 한 줄과 같은 원격 형태라 저장소를 받지 않은 폴더에서도 그대로 돌아간다.
+const RAW = "https://raw.githubusercontent.com/xowjd913/agent-mods/main/herdr";
+const cmdSh = (flag, mod) => `curl -fsSL ${RAW}/install.sh | sh -s -- ${flag} ${mod}`;
+const cmdPs = (flag, mod) => `& ([scriptblock]::Create((irm ${RAW}/install.ps1))) ${flag} ${mod}`;
+const cmdAdd = (mod) => cmdSh("--add", mod);
+const cmdAddWin = (mod) => cmdPs("-Add", mod);
+const cmdRemove = (mod) => cmdSh("--remove", mod);
+const cmdRemoveWin = (mod) => cmdPs("-Remove", mod);
 
 const safeProps = () => { try { return props() ?? {}; } catch { return {}; } };
 // 창을 끌 때 쓰는 눌림은 모드가 처리하는 컨트롤에서 멈춘다.
