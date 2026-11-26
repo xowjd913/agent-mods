@@ -37,6 +37,7 @@ const ROOM_W = 168, SLIM_W = 58; // the window's room list / the dock's slim roo
 const PASTE_SETTLE_MS = 350; // the PO terminal takes the paste before Enter is pressed
 const PANE_POLL_MS = 300, PANE_WAIT_MS = 6000; // a send to a PO with no pane: how often / how long to wait for the pane the send opened
 const PROMPT_TIMEOUT_MS = 5000; // a screen read that has not answered by then is given up (the next one may start)
+const BANG_READ_MS = 6000; // a '!' command's screen read must answer within this, else it is refused and the busy flag is released
 const PROMPT_REFRESH_MS = 3000, PROMPT_LINES = 40; // a blocked PO's screen is re-read this often while shown (the last PROMPT_LINES lines are read)
 const BADGE_KEY = "inbox.badge"; // {id, ts}: the copy (dock / pane) that writes the app icon badge
 const OPEN_KEY = "inbox.expanded"; // cards the person opened ("자세히"), shared so they stay open across re-renders and window reopens
@@ -2113,6 +2114,7 @@ export default class Inbox extends View {
     if (!this.recordActs(r, po).includes("resend")) return;
     if (!po) { this.say(NO_PO(), true); c.notify(); return; }
     const before = r.status;
+    if (bangCommand(r.line || r.text) !== null) { this.resendBang(id, c, po, r, before); return; }
     this.mark(id, "sending");
     try {
       const out = this.deliver(po, r.line || r.text, c, r, (r2) => this.markAsk(r, r2), id);
@@ -2120,6 +2122,28 @@ export default class Inbox extends View {
       else if (out === "sent" || out === "held") this.markAsk(r, out);
     } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
     c.notify();
+  }
+
+  // A '!' bubble's resend goes through the same guard as the first send (PO idle, pane open, input box empty), so a resend never types into a PO that
+  // has since started working or has text in its box. A refusal puts the record back as it was and says why.
+  resendBang(id, c, po, r, before) {
+    const stop = (why, cx = c) => { this.bangBusy = false; this.mark(id, before); this.say(`${why} '!' 명령은 보내지 않았습니다. 상태를 확인한 뒤 '다시 보내기'를 누르세요.`, true); try { cx.notify(); } catch {} };
+    if (this.bangBusy) { this.say("앞의 '!' 명령을 확인하는 중입니다. 잠시 뒤에 다시 보내세요.", true); try { c.notify(); } catch {} return; }
+    if (this.mained) { this.say("UI 모드에서는 PO 터미널에 글을 그대로 붙여 넣을 수 없어 '!' 명령을 보내지 않았습니다.", true); try { c.notify(); } catch {} return; }
+    const gate = this.bangGate(po);
+    if (gate) { this.say(`${gate} '!' 명령은 보내지 않았습니다.`, true); try { c.notify(); } catch {} return; }
+    this.mark(id, "sending");
+    this.bangBusy = true;
+    this.bangCheck(c, po, stop, (cx, clip) => {
+      this.bangBusy = false;
+      try {
+        const out = this.deliver(po, r.line || r.text, cx, r, (r2) => this.markAsk(r, r2), id);
+        this.bangClipBack(cx, clip, out);
+        if (out === "busy") this.mark(id, before);
+        else if (out === "sent" || out === "held") this.markAsk(r, out);
+      } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
+      try { cx.notify(); } catch {}
+    });
   }
 
   // The bubble's "Enter 누르기": the text is in the PO's normal prompt and only Enter is missing. Before the key goes, the PO's screen is read and the
@@ -2569,34 +2593,73 @@ export default class Inbox extends View {
     if (pics.length) { refuse("'!' 명령은 그림과 함께 보낼 수 없어"); return; }
     if (!cmd) { refuse("'!' 뒤에 실행할 명령이 없어"); return; }
     if (/\n/.test(cmd)) { refuse("'!' 명령은 한 줄만 보낼 수 있어"); return; }
-    let hasPane = false;
-    try { hasPane = (panes() ?? []).some((x) => x.terminal === po); } catch {}
-    if (!hasPane) { refuse(`PO(${po})의 터미널 칸이 화면에 열려 있지 않아`); return; }
-    const term = this.liveTerms().find((x) => x.address === po);
-    if (!term || isBusy(term)) { refuse(`PO(${po})가 일하는 중이거나 질문 중이라`); return; }
+    const gate = this.bangGate(po);
+    if (gate) { refuse(gate); return; }
     const text = composeChat(this.chat.content());
     this.bangBusy = true;
+    this.bangCheck(c, po, refuse, (cx, clip) => {
+      this.bangBusy = false;
+      try {
+        const res = this.deliver(po, `!${cmd}`, cx, { text: `!${cmd}`, imgs: [], to: "", tos: [], po: this.view().pick, kind: "chat" });
+        this.bangClipBack(cx, clip, res);
+        if (res === "sent") {
+          this.sentAt2 = Date.now();
+          if (composeChat(this.chat.content()) === text) { this.chat.set_value(""); this.menu = null; }
+        }
+      } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
+      try { cx.notify(); } catch {}
+    });
+  }
+
+  // The checks that need no screen read: the PO's pane is open and the PO is neither working nor on a question. "" when it may go on, else the reason.
+  bangGate(po) {
+    let hasPane = false;
+    try { hasPane = (panes() ?? []).some((x) => x.terminal === po); } catch {}
+    if (!hasPane) return `PO(${po})의 터미널 칸이 화면에 열려 있지 않아`;
+    const term = this.liveTerms().find((x) => x.address === po);
+    if (!term || isBusy(term)) return `PO(${po})가 일하는 중이거나 질문 중이라`;
+    return "";
+  }
+
+  // Reads the PO's screen (and the clipboard text, to give it back after the paste) and calls `go(cx, clip)` only when the PO is idle at an EMPTY input
+  // box; every other outcome calls `fail(why, cx)`. The read is capped at BANG_READ_MS: a stalled `hc read` fails instead of holding the busy flag forever.
+  // Used by the first send and by a bubble's resend, so both go through the same guard.
+  bangCheck(c, po, fail, go) {
+    const spawn = (cx) => (async () => {
+      const work = Promise.all([
+        Promise.resolve().then(() => hc(["read", po, "--lines", String(PROMPT_LINES)])).catch(() => null),
+        this.clipText(),
+      ]);
+      const limit = new Promise((res) => { try { cx.timer.after(BANG_READ_MS, () => res(null)); } catch {} });
+      const got = await Promise.race([work, limit]);
+      if (!got) { fail(`PO(${po})의 화면 읽기가 ${Math.round(BANG_READ_MS / 1000)}초 안에 끝나지 않아`, cx); return; }
+      const [r, clip] = got;
+      if (!(r && r.code === 0)) { fail(`PO(${po})의 화면을 읽지 못해`, cx); return; }
+      const inp = promptInput(String(r.stdout ?? ""));
+      if (inp === null) { fail(`PO(${po})의 입력창을 화면에서 찾지 못해`, cx); return; }
+      if (inp !== "") { fail(`PO(${po})의 입력창이 비어 있지 않아`, cx); return; }
+      const t2 = this.liveTerms().find((x) => x.address === po);
+      if (!t2 || isBusy(t2)) { fail(`PO(${po})가 그 사이 일하거나 질문 중이 되어`, cx); return; }
+      go(cx, clip);
+    })().catch((e) => { try { fail(String(e?.message ?? e).slice(0, 80), cx); } catch {} });
+    try { c.spawn(spawn); } catch (e) { fail(String(e?.message ?? e).slice(0, 80), c); }
+  }
+
+  // The clipboard's TEXT (null when it holds none or cannot be read: a picture is not restored). Never throws.
+  async clipText() {
     try {
-      c.spawn(async (cx) => {
-        let r = null;
-        try { r = await hc(["read", po, "--lines", String(PROMPT_LINES)]); } catch { r = null; }
-        if (!(r && r.code === 0)) { refuse(`PO(${po})의 화면을 읽지 못해`, cx); return; }
-        const inp = promptInput(String(r.stdout ?? ""));
-        if (inp === null) { refuse(`PO(${po})의 입력창을 화면에서 찾지 못해`, cx); return; }
-        if (inp !== "") { refuse(`PO(${po})의 입력창이 비어 있지 않아`, cx); return; }
-        const t2 = this.liveTerms().find((x) => x.address === po);
-        if (!t2 || isBusy(t2)) { refuse(`PO(${po})가 그 사이 일하거나 질문 중이 되어`, cx); return; }
-        this.bangBusy = false;
-        try {
-          const res = this.deliver(po, `!${cmd}`, cx, { text: `!${cmd}`, imgs: [], to: "", tos: [], po: this.view().pick, kind: "chat" });
-          if (res === "sent") {
-            this.sentAt2 = Date.now();
-            if (composeChat(this.chat.content()) === text) { this.chat.set_value(""); this.menu = null; }
-          }
-        } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
-        try { cx.notify(); } catch {}
-      });
-    } catch (e) { refuse(String(e?.message ?? e).slice(0, 80)); }
+      const r = await exec("node", [HELPER(), "cliptext"], { timeout: 4000 });
+      if (r.code !== 0) return null;
+      const o = JSON.parse(r.stdout);
+      return typeof o?.text === "string" && o.text !== "" ? o.text : null;
+    } catch { return null; }
+  }
+
+  // After the '!' line was pasted (the paste itself runs inside deliver), the clipboard gets back what it held before. Not when the delivery is still
+  // waiting for a pane ("opening": that paste needs the clipboard later) or failed.
+  bangClipBack(cx, clip, res) {
+    if (typeof clip !== "string" || clip === "" || (res !== "sent" && res !== "held")) return;
+    try { cx.write_to_clipboard(clip); } catch {}
   }
 
   sendChat(c) {
