@@ -364,7 +364,7 @@ PO가 `say`를 따로 쓰지 않아도 **PO의 답이 바로 데스크에 올라
 ## 필요한 것
 
 - 함께 설치되는 모드: `tabs-mine`(패널 버튼)
-- 리더가 `~/.herdr-inbox/<리더>.jsonl`에 보고를 남기고 터미널에 `wait` 표시를 붙여 줘야 합니다. 이 모드는 읽기만 합니다.
+- 리더가 `~/.herdr-inbox/<리더>.jsonl`에 보고를 남기고 터미널에 `wait` 표시를 붙여 줘야 합니다. 이 모드는 읽기만 합니다. 파일 규칙 전체와 쓰기 도구(`herdr/tools/inbox-write.cjs`)는 [인박스 계약](../inbox-contract.md)에 있습니다.
   - 한 줄이 한 보고입니다: `{v, ts, leader, terminal, kind, title, body, link, po?}`. `po`(PO의 id)는 있으면 닫힌 리더를 PO에 묶는 데 쓰고, 없으면 없는 대로 읽습니다(쓰는 쪽은 agent-playbook).
   - `kind`: `start`, `done`, `decision`, `verify`, `stop`, `resume`, `answered`, `other`. 모르는 종류와 필드, 쓰다 만 마지막 줄은 건너뜁니다.
 - 답을 넣으려면 리더 터미널의 부모(PO)에 `role=po` 라벨이, PO 데스크에 나오려면 거기에 `po=<id>` 라벨도 있어야 합니다.
