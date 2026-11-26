@@ -7,27 +7,14 @@
 // Exit codes: 0 written, 1 usage/environment, 2 bad content (nothing written), 4 written but label failed.
 "use strict";
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
-const KINDS = ["start", "done", "decision", "verify", "stop", "resume", "answered", "other"]; // the kinds of the contract: fixed, a profile only adds aliases
-const REPORT_KINDS = KINDS.filter((k) => k !== "answered");
+const P = require("../mods/inbox/profile.cjs"); // the one profile loader (also read by the desk and the PO hook)
+const { KINDS, REPORT_KINDS, SAFE_NAME, DEFAULT_PROFILE, inboxDir } = P;
 const ASK_KINDS = ["decision", "verify"];
 const SAY_MAX = 2000;
 const HC_WAIT_MS = 3000;
-// What a name must satisfy whatever the profile says: it becomes a file name, so no separators, no leading dot, no "..", at most 64 characters.
-const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const SAFE_DIR = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
-
-// Today's rules. A profile file overrides single keys; anything it leaves out stays as it is here.
-const DEFAULT_PROFILE = Object.freeze({
-  v: 1,
-  agent: Object.freeze({ name: "^lead-[a-z0-9_-]+$", role: "leader" }), // name pattern of a reporting agent; its `role` label value
-  hub: Object.freeze({ role: "po", idLabel: "po", id: "^[a-z0-9-]{1,40}$", dir: "po" }), // the terminal that receives answers: role value, id label, id pattern, folder
-  labels: Object.freeze({ role: "role", wait: "wait", waitLink: "wait-link" }),
-  kinds: Object.freeze({}), // alias -> contract kind, e.g. {"question": "decision"}
-});
 
 const VALUE_FLAGS = new Set(["agent", "leader", "terminal", "hub", "po", "kind", "title", "body", "file", "link", "to", "text", "of"]);
 const BOOL_FLAGS = new Set(["no-label", "help"]);
@@ -43,54 +30,9 @@ Profile (names and labels): $HERDR_INBOX_PROFILE, else <inbox dir>/profile.json,
 
 class Fail extends Error { constructor(code, message) { super(message); this.code = code; } }
 
-function inboxDir(env = process.env) { return env.HERDR_INBOX_DIR || path.join(os.homedir(), ".herdr-inbox"); }
-
-function regexOf(src, what) {
-  try { return new RegExp(String(src)); } catch { throw new Fail(1, `profile: ${what} is not a valid regular expression: ${src}`); }
-}
-const plain = (v) => v && typeof v === "object" && !Array.isArray(v);
-const text1 = (v, what, safe) => {
-  const s = String(v ?? "").trim();
-  if (!s || (safe && !safe.test(s))) throw new Fail(1, `profile: ${what} must be a simple word (letters, digits, . _ -): "${s}"`);
-  return s;
-};
-
-// Reads the profile (see DEFAULT_PROFILE) and returns it ready to use: patterns compiled, names checked. Unknown keys are ignored.
-// A missing file is the default; an unreadable or invalid one is an error (exit 1) so a typo never silently falls back to other names.
+// A missing default profile file is the default profile; an unreadable or invalid one is an error (exit 1) so a typo never silently falls back to other names.
 function loadProfile(env = process.env) {
-  const file = env.HERDR_INBOX_PROFILE || path.join(inboxDir(env), "profile.json");
-  let raw = {};
-  let text = null;
-  try { text = fs.readFileSync(file, "utf8"); } catch (e) {
-    if (e.code !== "ENOENT" || env.HERDR_INBOX_PROFILE) throw new Fail(1, `cannot read profile ${file}: ${e.code || e.message}`); // only the default location may be absent
-  }
-  if (text !== null) {
-    try { raw = JSON.parse(text.replace(/^﻿/, "")); } catch { throw new Fail(1, `profile ${file} is not valid JSON`); }
-    if (!plain(raw)) throw new Fail(1, `profile ${file} must be a JSON object`);
-    if (raw.v !== undefined && raw.v !== 1) throw new Fail(1, `profile ${file}: only v 1 is known (got ${JSON.stringify(raw.v)})`);
-  }
-  const d = DEFAULT_PROFILE;
-  const pick = (key) => ({ ...d[key], ...(plain(raw[key]) ? raw[key] : {}) });
-  const agent = pick("agent"), hub = pick("hub"), labels = pick("labels");
-  const aliases = plain(raw.kinds) ? raw.kinds : {};
-  const kindMap = {};
-  for (const [alias, kind] of Object.entries(aliases)) {
-    if (!REPORT_KINDS.includes(kind)) throw new Fail(1, `profile: kinds.${alias} must map to one of ${REPORT_KINDS.join(", ")}`);
-    if (KINDS.includes(alias)) throw new Fail(1, `profile: kinds.${alias} is already a contract kind`);
-    kindMap[alias] = kind;
-  }
-  return {
-    agentName: regexOf(agent.name, "agent.name"),
-    agentRole: String(agent.role ?? "").trim(),
-    hubRole: text1(hub.role, "hub.role"),
-    hubIdLabel: text1(hub.idLabel, "hub.idLabel", SAFE_NAME),
-    hubId: regexOf(hub.id, "hub.id"),
-    hubDir: text1(hub.dir, "hub.dir", SAFE_DIR),
-    labelRole: text1(labels.role, "labels.role", SAFE_NAME),
-    labelWait: text1(labels.wait, "labels.wait", SAFE_NAME),
-    labelWaitLink: text1(labels.waitLink, "labels.waitLink", SAFE_NAME),
-    kindMap,
-  };
+  try { return P.loadProfile(env); } catch (e) { if (e instanceof P.ProfileError) throw new Fail(1, e.message); throw e; }
 }
 
 function parseArgs(argv) {
