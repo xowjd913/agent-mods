@@ -9,6 +9,7 @@ const mainSrc = () => fs.readFileSync(path.join(__dirname, "../mods/inbox/main.j
 const methodOf = (src, head, next) => { const a = src.indexOf(head), b = src.indexOf(next, a + 1); assert.ok(a > 0 && b > a, head); return src.slice(a, b); };
 const runMethod = (src, head, next, globals) => {
   const m = methodOf(src, head, next);
+  globals = { cutHead: I.cutHead, wellFormed: I.wellFormed, initial: I.initial, ...globals }; // the shared text-cut helpers of the chat block (#113)
   const names = Object.keys(globals);
   return new Function(...names, `return ({ ${m.replace(/\n\s*\/\/[^\n]*\s*$/g, "")} });`)(...names.map((k) => globals[k]));
 };
