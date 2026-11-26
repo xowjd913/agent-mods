@@ -640,3 +640,78 @@ test("--add gh-accounts는 오른쪽 패널에 accounts-board를 더하고, 제�
   assert.equal(ids().length, 0);
   assert.ok(!fs.existsSync(path.join(home, "mods", "gh-accounts")));
 });
+
+// UI 모드(#59): 기본 레이아웃(터미널 모드)에서 main 칸만 PO 데스크로 바꾼 `<이름>-ui` 레이아웃.
+const uiFile = (home) => path.join(home, "layouts", inst.LAYOUT_NAME + "-ui.json");
+const findNode = (n, id) => (n.id === id ? n : (n.children || []).map((c) => findNode(c, id)).find(Boolean));
+
+test("UI 모드: inbox를 설치하면 main 칸만 PO 데스크(mode main)로 바뀐 -ui 레이아웃을 만든다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { add: ["inbox"] }));
+  const base = cloneInto(home, inst.LAYOUT_NAME);
+  const { result } = quiet(() => inst.applyLayout(home, true));
+  assert.equal(result.ui, "created");
+  const ui = readJson(uiFile(home));
+  assert.deepEqual(findNode(ui, "main").content, { mod: "inbox", props: { mode: "main" } });
+  // 사이드바·탭 줄·상태 줄은 그대로, 기본 레이아웃(터미널 모드)은 건드리지 않는다.
+  assert.ok(mods(ui).includes("tabs-mine") && mods(ui).includes("workspace-status") && mods(ui).includes("agents"));
+  assert.ok(findNode(readJson(base), "main").content.pane);
+  assert.equal(ui.cloned_from, undefined);
+});
+
+test("UI 모드: main 칸이 content.tab active인 실제 모양도 바꾼다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { add: ["inbox"] }));
+  const layout = clonedMain();
+  findNode(layout, "main").content = { tab: "active", pane: { gap: 8, lone: true } };
+  fs.writeFileSync(path.join(home, "layouts", inst.LAYOUT_NAME + ".json"), JSON.stringify(layout));
+  quiet(() => inst.applyLayout(home, true));
+  assert.deepEqual(findNode(readJson(uiFile(home)), "main").content, { mod: "inbox", props: { mode: "main" } });
+});
+
+test("UI 모드: inbox가 없으면 만들지 않고, 두 번 실행해도 같다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, false));
+  cloneInto(home, inst.LAYOUT_NAME);
+  quiet(() => inst.applyLayout(home, true));
+  assert.ok(!fs.existsSync(uiFile(home)));
+  quiet(() => inst.installMods(home, { add: ["inbox"] }));
+  quiet(() => inst.applyLayout(home, false));
+  const once = fs.readFileSync(uiFile(home), "utf8");
+  const { result } = quiet(() => inst.applyLayout(home, false));
+  assert.equal(result.ui, "same");
+  assert.equal(fs.readFileSync(uiFile(home), "utf8"), once);
+});
+
+test("UI 모드: 기본 레이아웃이 바뀌면 따라가고, 사용자가 고친 파일은 다시 쓰지 않는다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { add: ["inbox"] }));
+  const base = cloneInto(home, inst.LAYOUT_NAME);
+  quiet(() => inst.applyLayout(home, true));
+  const layout = readJson(base);
+  findNode(layout, "spaces").content.mod = "my-spaces";
+  fs.writeFileSync(base, JSON.stringify(layout));
+  const { result } = quiet(() => inst.applyLayout(home, false));
+  assert.equal(result.ui, "updated");
+  assert.ok(mods(readJson(uiFile(home))).includes("my-spaces"));
+  const mine = fs.readFileSync(uiFile(home), "utf8").replace("my-spaces", "mine");
+  fs.writeFileSync(uiFile(home), mine);
+  findNode(layout, "spaces").content.mod = "other";
+  fs.writeFileSync(base, JSON.stringify(layout));
+  assert.equal(quiet(() => inst.applyLayout(home, false)).result.ui, "foreign");
+  assert.equal(fs.readFileSync(uiFile(home), "utf8"), mine);
+});
+
+test("UI 모드: 표시 없는 같은 이름 레이아웃은 건드리지 않고, inbox를 지우면 만든 파일만 지운다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { add: ["inbox"] }));
+  cloneInto(home, inst.LAYOUT_NAME);
+  fs.writeFileSync(uiFile(home), '{"id":"root","type":"row"}');
+  assert.equal(quiet(() => inst.applyLayout(home, true)).result.ui, "foreign");
+  assert.equal(fs.readFileSync(uiFile(home), "utf8"), '{"id":"root","type":"row"}');
+  fs.rmSync(uiFile(home));
+  quiet(() => inst.applyLayout(home, false));
+  assert.ok(fs.existsSync(uiFile(home)));
+  quiet(() => inst.removeMods(home, ["inbox"]));
+  assert.ok(!fs.existsSync(uiFile(home)));
+});
