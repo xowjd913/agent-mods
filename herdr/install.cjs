@@ -51,7 +51,7 @@ const LEGACY_LAYOUT = "agent-groups";
 const LAYOUT_MARK = ".herdr-installer-layout";
 const SRC = path.join(__dirname, "mods");
 // 모드 폴더 밖에 있지만 모드와 함께 복사할 파일. gh-accounts 패널은 설치·확인·계정 추가에 gh-account 도구를 쓴다.
-const BUNDLE = { "gh-accounts": [["gh-account/gh-account.cjs", "gh-account.cjs"]] };
+const BUNDLE = { "gh-accounts": [["gh-account/gh-account.cjs", "gh-account.cjs"]], work: [["mods/inbox/profile.cjs", "profile.cjs"]] }; // work: collect.cjs reads the inbox profile (names, labels)
 
 function log(msg) { process.stdout.write(msg + "\n"); }
 

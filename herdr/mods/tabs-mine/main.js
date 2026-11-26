@@ -55,6 +55,15 @@ const setNames = (n) => {
   NAMES = compileNames({ ...DEFAULT_NAMES, ...(n && typeof n === "object" ? n : {}) }) ?? compileNames(DEFAULT_NAMES);
   return true;
 };
+// Sharing: the desk and the work board load the profile (their helper prints `names`) and publish it; every other mod follows what is shared. In the helper
+// (node) there is no `shared`, so both are inert there.
+const NAMES_SHARED = "inbox.names";
+const adoptNames = (n) => {
+  const changed = setNames(n);
+  try { if (typeof setShared === "function" && JSON.stringify(shared(NAMES_SHARED) ?? {}) !== JSON.stringify(n ?? {})) setShared(NAMES_SHARED, n ?? {}); } catch {}
+  return changed;
+};
+const syncNames = () => { try { return typeof shared === "function" ? setNames(shared(NAMES_SHARED)) : false; } catch { return false; } };
 const isAgentName = (v) => NAMES.agentRe.test(String(v ?? ""));
 const labelOf = (t, key) => String(t?.labels?.[NAMES[key]] ?? "").trim(); // key: labelRole | labelWait | labelWaitLink | labelSession | hubIdLabel
 const roleIs = (t, role) => Boolean(role) && labelOf(t, "labelRole").toLowerCase() === String(role).toLowerCase();
@@ -225,8 +234,8 @@ export default class Tabs extends View {
     });
   }
 
-  // 답을 기다리는 리더 수: 대기 라벨(decision|verify)이 붙은 lead-* 터미널(PO 데스크 요약 칸과 같은 규칙, inbox.cjs의 waitingKind). PO 데스크 칸이 닫혀 있어도 터미널 라벨만 보므로 늘 맞다.
-  inboxWaiting() { return (terminals() ?? []).filter((t) => waitingKind(t)).length; }
+  // 답을 기다리는 리더 수: 대기 라벨(decision|verify)이 붙은 에이전트 이름(기본 lead-*)의 터미널(UI 모드 요약 칸과 같은 규칙, inbox.cjs의 waitingKind). UI 모드 칸이 닫혀 있어도 터미널 라벨만 보므로 늘 맞다.
+  inboxWaiting() { syncNames(); return (terminals() ?? []).filter((t) => waitingKind(t)).length; } // syncNames: the profile the desk published
 
   // One tab per wheel notch. A touchpad or smooth-scrolling mouse sends many
   // small events per gesture: a short swipe or one smoothed notch (about

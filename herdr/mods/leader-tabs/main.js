@@ -19,10 +19,9 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, terminals, focused, props, run, theme, home, layout, exec, checking, shared } from "herdr";
+import { panes, terminals, focused, props, run, theme, home, layout, exec, checking, shared, setShared } from "herdr";
 
 const PANE_ICON = (name) => `mods/pane/${name}.svg`;
-const roleOf = (t) => String(t?.labels?.role ?? "").trim().toLowerCase();
 const ARRANGE = 'f="$HOME/.claude/skills/leader/herdr-team.sh"; [ -f "$f" ] || exit 127; HC_TERMINAL_ID="$1" exec sh "$f" arrange';
 const HEAL_COOLDOWN = 30000;
 const SETTLE = 10000;
@@ -89,6 +88,15 @@ const setNames = (n) => {
   NAMES = compileNames({ ...DEFAULT_NAMES, ...(n && typeof n === "object" ? n : {}) }) ?? compileNames(DEFAULT_NAMES);
   return true;
 };
+// Sharing: the desk and the work board load the profile (their helper prints `names`) and publish it; every other mod follows what is shared. In the helper
+// (node) there is no `shared`, so both are inert there.
+const NAMES_SHARED = "inbox.names";
+const adoptNames = (n) => {
+  const changed = setNames(n);
+  try { if (typeof setShared === "function" && JSON.stringify(shared(NAMES_SHARED) ?? {}) !== JSON.stringify(n ?? {})) setShared(NAMES_SHARED, n ?? {}); } catch {}
+  return changed;
+};
+const syncNames = () => { try { return typeof shared === "function" ? setNames(shared(NAMES_SHARED)) : false; } catch { return false; } };
 const isAgentName = (v) => NAMES.agentRe.test(String(v ?? ""));
 const labelOf = (t, key) => String(t?.labels?.[NAMES[key]] ?? "").trim(); // key: labelRole | labelWait | labelWaitLink | labelSession | hubIdLabel
 const roleIs = (t, role) => Boolean(role) && labelOf(t, "labelRole").toLowerCase() === String(role).toLowerCase();
@@ -164,12 +172,13 @@ export default class LeaderTabs extends View {
   // The PO's live leaders, when this pane's own terminal is one of two or more; otherwise null.
   leaders(p) {
     if (!p?.terminal) return null;
+    syncNames(); // the profile the desk published (also covers the timers, which run outside render)
     const all = terminals();
     const own = all.find((t) => t.address === p.terminal);
-    if (!own || roleOf(own) !== "leader" || !own.parent) return null;
+    if (!own || !isAgentTerm(own) || !own.parent) return null;
     const po = all.find((t) => t.address === own.parent);
-    if (!po || roleOf(po) !== "po") return null;
-    const list = all.filter((t) => t.parent === po.address && t.state === "live" && roleOf(t) === "leader");
+    if (!po || !isHubTerm(po)) return null;
+    const list = all.filter((t) => t.parent === po.address && t.state === "live" && isAgentTerm(t));
     return list.length >= 2 ? list : null;
   }
 
@@ -207,10 +216,11 @@ export default class LeaderTabs extends View {
   // On a PO's own pane: if the leader pane closed because its owner ended, seat a remaining leader.
   reseat(p) {
     if (!p?.terminal || checking()) return;
+    syncNames();
     const all = terminals();
     const po = all.find((t) => t.address === p.terminal);
-    if (!po || roleOf(po) !== "po") return;
-    const live = all.filter((t) => t.parent === po.address && t.state === "live" && roleOf(t) === "leader");
+    if (!po || !isHubTerm(po)) return;
+    const live = all.filter((t) => t.parent === po.address && t.state === "live" && isAgentTerm(t));
     const ps = panes();
     const seated = live.filter((t) => ps.some((q) => q.terminal === t.address && q.tab === p.tab)).map((t) => t.address);
     const key = po.address;

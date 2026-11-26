@@ -3,7 +3,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, run, theme, exec, appHome, checking, window, openOverlay, shared } from "herdr";
+import { agents, run, theme, exec, appHome, checking, window, openOverlay, shared, setShared } from "herdr";
 
 const COLLECT = () => `${appHome()}/mods/work/collect.cjs`;
 const LOAD_TIMEOUT = 90000, LOAD_STALL_MS = 100000;
@@ -36,6 +36,15 @@ const setNames = (n) => {
   NAMES = compileNames({ ...DEFAULT_NAMES, ...(n && typeof n === "object" ? n : {}) }) ?? compileNames(DEFAULT_NAMES);
   return true;
 };
+// Sharing: the desk and the work board load the profile (their helper prints `names`) and publish it; every other mod follows what is shared. In the helper
+// (node) there is no `shared`, so both are inert there.
+const NAMES_SHARED = "inbox.names";
+const adoptNames = (n) => {
+  const changed = setNames(n);
+  try { if (typeof setShared === "function" && JSON.stringify(shared(NAMES_SHARED) ?? {}) !== JSON.stringify(n ?? {})) setShared(NAMES_SHARED, n ?? {}); } catch {}
+  return changed;
+};
+const syncNames = () => { try { return typeof shared === "function" ? setNames(shared(NAMES_SHARED)) : false; } catch { return false; } };
 const isAgentName = (v) => NAMES.agentRe.test(String(v ?? ""));
 const labelOf = (t, key) => String(t?.labels?.[NAMES[key]] ?? "").trim(); // key: labelRole | labelWait | labelWaitLink | labelSession | hubIdLabel
 const roleIs = (t, role) => Boolean(role) && labelOf(t, "labelRole").toLowerCase() === String(role).toLowerCase();
@@ -81,7 +90,7 @@ const NAMES_KEY = "leader.names"; // written by the inbox / agent-groups; read-o
 const namesMemo = () => { try { return shared(NAMES_KEY) ?? {}; } catch { return {}; } };
 // A leader session shows its session name by the shared rule (collect.cjs's label is the `session` label or the raw title, which can carry
 // "리더 · " or a status glyph); any other session keeps its label.
-const sessionLabel = (s) => /^lead-/.test(String(s.name ?? "")) ? leaderName(s.name, { name: s.name, address: s.terminal, title: s.label }, namesMemo()) : (s.label || s.name || s.terminal);
+const sessionLabel = (s) => isAgentName(s.name) ? leaderName(s.name, { name: s.name, address: s.terminal, title: s.label }, namesMemo()) : (s.label || s.name || s.terminal);
 
 // Opens a URL in the default browser.
 function openUrl(url) {
@@ -136,7 +145,8 @@ export default class Work extends View {
         const d = JSON.parse(r.stdout);
         if (gen !== this.gen) return;
         this.data = d;
-        this.error = d.errors?.length ? d.errors.join(" / ") : null;
+        adoptNames(d.names); // the profile (names, labels) the collector loaded; shared with the other mods
+        this.error = [...(d.errors ?? []), ...(d.profileError ? [`프로필을 읽지 못해 기본 이름으로 보여 줍니다: ${d.profileError}`] : [])].join(" / ") || null;
       } catch (e) { if (gen === this.gen) this.error = `새로고침 실패: ${String(e?.message ?? e).slice(0, 180)}`; }
       finally {
         if (gen === this.gen) {

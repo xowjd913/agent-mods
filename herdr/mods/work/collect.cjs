@@ -186,6 +186,16 @@ function worktreesOf(repo) {
 }
 
 // ---- local part: terminals, sessions, repos ----
+// The profile's names (docs/inbox-contract.md §9-§10): the label that holds a session's name. The loader is shared with the inbox (mods/inbox/profile.cjs);
+// the installer copies it next to this file. A broken profile leaves the defaults and is reported as `profileError`, never silently ignored.
+function loadNames() {
+  let P = null;
+  for (const p of ["./profile.cjs", "../inbox/profile.cjs"]) { try { P = require(p); break; } catch {} }
+  if (!P) return { names: null, profileError: "" };
+  try { return { names: P.namesOf(P.loadProfile()), profileError: "" }; } catch (e) { return { names: null, profileError: String((e && e.message) || e) }; }
+}
+let SESSION_LABEL = "session";
+
 function collectLocal() {
   const listing = run("hc", ["ls", "--json"]);
   const terminals = listing ? JSON.parse(listing).terminals || [] : [];
@@ -209,7 +219,7 @@ function collectLocal() {
     sessions.push({
       terminal: t.address,
       name: t.name || null,
-      label: (detail.labels && detail.labels.session) || detail.title || t.name || t.address,
+      label: (detail.labels && detail.labels[SESSION_LABEL]) || detail.title || t.name || t.address,
       parent: t.parent || null,
       status: t.status || null,
       cwd: t.cwd,
@@ -396,7 +406,9 @@ function main() {
     }
     console.log(JSON.stringify({ issues: mapIssues(state, [...repos.values()]), dirs: Object.keys(state.dirs).length, urls: state.urls }, null, 2));
   } else {
-    const result = collect();
+    const profile = loadNames();
+    if (profile.names) SESSION_LABEL = profile.names.labelSession;
+    const result = { ...collect(), names: profile.names, profileError: profile.profileError };
     if (command === "--debug") printMapping(result);
     else process.stdout.write(JSON.stringify(result));
     pruneCache();

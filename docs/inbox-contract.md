@@ -204,11 +204,11 @@ node herdr/tools/inbox-write.cjs say --hub main --to lead-demo --text "배포는
 
 - 잘못된 프로필(JSON 오류, 모르는 버전, 깨진 정규식, 폴더 이름에 `/`나 `..`, 계약 종류를 별칭으로 덮어쓰기 등)은 **오류로 끝납니다.** 오타가 나도 조용히 기본 이름으로 쓰여 엉뚱한 파일이 생기는 일을 막습니다.
 - 모르는 키는 무시합니다.
-- **지금 적용 범위**: 쓰기 도구, 데스크(`inbox`: `inbox.cjs`·`main.js`), PO 훅(`po-hook.cjs`)은 프로필을 따릅니다. 한 로더(`herdr/mods/inbox/profile.cjs`)가 읽고, 데스크는 `node inbox.cjs`가 내는 JSON의 `names`로 받으며 프로필이 깨졌으면 화면에 오류 문구를 보이고 기본 이름으로 보여 줍니다(PO 훅은 깨진 프로필이면 아무것도 쓰지 않습니다). `tabs-mine`·`leader-tabs`·`agent-groups`·`work`·`prs`는 아직 기본 이름(`lead-*`, `role=po` 등이 코드에 고정)만 이해합니다. 이 모드들을 따르게 하는 작업은 [#60](https://github.com/xowjd913/agent-mods/issues/60)의 남은 PR입니다. 그때까지 프로필을 바꾸면 위 모드들은 바뀐 이름을 못 알아볼 수 있습니다.
+- **지금 적용 범위**: 쓰기 도구, 데스크(`inbox`: `inbox.cjs`·`main.js`), PO 훅(`po-hook.cjs`)은 프로필을 따릅니다. 한 로더(`herdr/mods/inbox/profile.cjs`)가 읽고, 데스크는 `node inbox.cjs`가 내는 JSON의 `names`로 받으며 프로필이 깨졌으면 화면에 오류 문구를 보이고 기본 이름으로 보여 줍니다(PO 훅은 깨진 프로필이면 아무것도 쓰지 않습니다). `tabs-mine`·`leader-tabs`·`agent-groups`·`work`·`prs`도 같은 이름 블록(모드는 `.cjs`를 `require`할 수 없어 파일마다 복사하고, 테스트가 한 글자도 다르지 않음을 지킵니다)으로 프로필을 따릅니다. 이름을 어디서 받는지는 [10.4](#104-다른-모드가-프로필을-받는-길)에 있습니다. 프로필을 바꾼 뒤에는 데스크(또는 `work` 패널)가 한 번 새로 읽어야 다른 모드에도 퍼집니다.
 
 ## 10. 데스크가 프로필을 읽게 하는 설계 (후속 PR)
 
-> 이 절은 설계이고, ① 인박스 모드(`inbox.cjs`·`main.js`)와 `po-hook.cjs`는 구현됐습니다(`profile.cjs`). ② 나머지 모드는 아직입니다. 목표: 프로필 없이는 지금과 **똑같이** 동작하고, 프로필이 있으면 `lead-*`·`role=po`·"리더 · " 같은 이름 규칙 없이도 데스크가 끝까지 동작합니다. 구현하며 달라진 점: 화면 문구 키 `ui.hubName`/`ui.agentName`은 만들지 않았고(문구는 그대로), 에이전트 이름 기본값은 `^lead-[a-z0-9_-]+$`로 더 엄격해졌으며, `po-session` 폴더는 고정입니다. 기본 위치에 프로필이 없거나 그 경로가 폴더 아래가 아니면(ENOENT·ENOTDIR) 기본 프로필입니다.
+> 이 절은 설계이고, ① 인박스 모드(`inbox.cjs`·`main.js`)와 `po-hook.cjs`는 구현됐습니다(`profile.cjs`). ② 나머지 모드(`leader-tabs`·`agent-groups`·`work`·`tabs-mine`·`prs`)도 구현됐습니다(10.4). 목표: 프로필 없이는 지금과 **똑같이** 동작하고, 프로필이 있으면 `lead-*`·`role=po`·"리더 · " 같은 이름 규칙 없이도 데스크가 끝까지 동작합니다. 구현하며 달라진 점: 화면 문구 키 `ui.hubName`/`ui.agentName`은 만들지 않았고(문구는 그대로), 에이전트 이름 기본값은 `^lead-[a-z0-9_-]+$`로 더 엄격해졌으며, `po-session` 폴더는 고정입니다. 기본 위치에 프로필이 없거나 그 경로가 폴더 아래가 아니면(ENOENT·ENOTDIR) 기본 프로필입니다.
 
 ### 10.1 읽는 쪽에 추가로 필요한 키
 
@@ -224,7 +224,7 @@ node herdr/tools/inbox-write.cjs say --hub main --to lead-demo --text "배포는
 
 ### 10.2 설정을 읽는 곳
 
-한 곳(`loadProfile`)에서 읽어 각 모드에 넘깁니다. 지금은 `inbox.cjs`·`main.js`가 같은 로직을 복사해 가지고 있고(모드는 `.cjs`를 `require`할 수 없어서), 다른 모드도 이름 규칙을 각자 가지고 있습니다. 아래는 `herdr/` 전체를 `lead-`, `role=`, `po=`, `wait=`, `po/`, `리더`, `labels.role|wait|po|session`으로 다시 훑은 결과입니다(기준 커밋의 줄 번호). `install.cjs`에는 이런 이름이 없습니다.
+한 곳(`loadProfile`)에서 읽어 각 모드에 넘깁니다(모드는 `.cjs`를 `require`할 수 없어 이름 블록을 복사해 쓰며, 지금은 구현됐습니다). 아래는 구현 전에 `herdr/` 전체를 `lead-`, `role=`, `po=`, `wait=`, `po/`, `리더`, `labels.role|wait|po|session`으로 다시 훑은 결과입니다(기준 커밋의 줄 번호). `install.cjs`에는 이런 이름이 없습니다.
 
 | 규칙 | `inbox/inbox.cjs` | `inbox/main.js` | 그 밖 |
 |---|---|---|---|
@@ -251,5 +251,12 @@ node herdr/tools/inbox-write.cjs say --hub main --to lead-demo --text "배포는
 
 - 프로필 위치와 오류 처리는 쓰기 도구와 같습니다(§9): 기본 위치에 파일이 없으면 기본 프로필, 깨진 파일이나 환경 변수가 가리키는 없는 파일은 오류(데스크는 오류 문구를 화면에 보이고 기본값으로 **조용히 대체하지 않음**).
 - 파일 이름 안전 규칙(§2)은 프로필과 무관하게 항상 적용합니다.
-- 복사된 로직은 한 모듈로 모읍니다. `main.js`가 `require`를 못 하는 제약은 지금처럼 빌드 단계에서 `inbox.cjs`의 `chat:begin`~`chat:end` 같은 표시로 복사하거나, 프로필을 `main.js`가 `fs`로 직접 읽는 얇은 로더로 해결합니다(구현 때 정함).
+- 복사된 로직은 한 모듈(`profile.cjs`)로 모읍니다. `main.js`가 `require`를 못 하는 제약은 `// names:begin`~`// names:end` 블록을 파일마다 복사하고, 테스트(`profile-share.test.cjs`)가 블록이 한 글자도 다르지 않음을 지키는 것으로 풀었습니다.
 - 테스트: 기본 프로필 결과가 현재와 같음을 기존 테스트로 보장하고, `lead-*`도 `role=po`도 없는 프로필로 쓰기 도구 → 데스크 읽기 → 답 줄 생성 → `answered`까지 끝까지 도는 테스트를 더합니다.
+
+### 10.4 다른 모드가 프로필을 받는 길
+
+- **읽는 곳은 둘**: 데스크(`inbox`)는 `node inbox.cjs`가 내는 JSON의 `names`로, `work`는 `collect.cjs`가 같은 로더(설치기가 `work` 폴더에 `profile.cjs`를 함께 복사)로 읽어 낸 `names`로 받습니다. 둘 다 프로필이 깨졌으면 `profileError`로 이유를 알리고 기본 이름으로 보입니다. 이 두 곳 중 하나가 켜져 있으면 되고, 둘 다 없으면 기본 이름입니다.
+- **나눠 쓰는 길**: 받은 쪽이 공유 상태 `inbox.names`(프로필의 `names` JSON 그대로)에 올립니다. `leader-tabs`·`agent-groups`·`tabs-mine`·`prs`는 그릴 때와 타이머 때 이 키를 읽어 자기 이름 블록에 적용합니다(`syncNames`). 같은 내용이면 다시 쓰지 않습니다.
+- **다른 공유 키와 섞이지 않습니다**: `inbox.po`는 고른 PO 방, `leader.names`는 리더 이름 기억, `inbox.names`는 프로필 이름입니다.
+- **지금 한계**: 프로필 파일을 고친 뒤 `inbox`·`work`가 다시 읽기 전까지는 옛 이름이 남습니다. 화면 문구(`리더 · ` 접두어 문구 등)는 프로필 이름 대신 아직 고정된 곳이 있을 수 있습니다.
