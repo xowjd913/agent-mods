@@ -23,11 +23,24 @@ test("PO가 고치거나 요약해서 보냈어도 pid로 이어지고 exact만 
   assert.deepEqual(noHash[0].fwd, [{ to: "lead-demo", exact: false }]); // h is optional
 });
 
-test("공백·줄바꿈만 다른 글과 <hc/pasted> 껍질은 같은 글로 본다(exact)", () => {
+test("공백·줄바꿈만 다른 글은 같은 글로 보고, me 줄의 <hc/pasted> 껍질은 벗기고 비교한다(exact)", () => {
   assert.equal(I.fwdHash("a  b\n c"), I.fwdHash(" a b c "));
-  assert.equal(I.fwdHash('<pasted_content id="x">긴 글</pasted_content>'), I.fwdHash("긴 글"));
   const out = parse(me("가  나\n다", "p1"), fwd("lead-demo", "p1", { h: I.fwdHash("가 나 다") }));
   assert.equal(out[0].fwd[0].exact, true);
+  const wrapped = parse(me('<pasted_content id="x">긴 글</pasted_content>', "p2"), fwd("lead-demo", "p2", { h: I.fwdHash("긴 글") }));
+  assert.equal(wrapped[0].fwd[0].exact, true);
+});
+
+test("해시는 ASCII 공백(스페이스·탭·CR·LF)만 접고, NBSP·U+3000은 접지도 자르지도 않는다 (셸 도우미와 바이트 단위로 맞추기 위함)", () => {
+  // contract §4 sample pair: printf '배포는 내일 합니다.' | shasum -a 256 | cut -c1-16
+  assert.equal(I.fwdHash("배포는 내일 합니다."), "31006470c1510a5e");
+  assert.equal(I.fwdHash("  배포는  내일\r\n합니다. \t"), "31006470c1510a5e");
+  assert.equal(I.fwdHash("a b"), "c8687a08aa5d6ed2");
+  assert.equal(I.fwdHash("a\u00a0b"), "9507017c6d887511");
+  assert.equal(I.fwdHash("a\u3000b"), "a59e41483057a662");
+  assert.equal(I.fwdHash("\u00a0a b\u3000"), "af90782fa2429a07"); // the ends are not cut either
+  assert.notEqual(I.fwdHash("a\u00a0b"), I.fwdHash("a b"));
+  assert.match(I.fwdHash("x"), /^[0-9a-f]{16}$/);
 });
 
 test("한 말을 여러 리더에게 보내면 리더마다 한 번씩, 같은 리더에게 다시 보내도 한 번만 센다", () => {

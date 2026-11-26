@@ -301,9 +301,12 @@ const MAX_PO_TEXT = 2000;
 // typed into the PO terminal itself (written by the PO hook): it comes back with `me: true` and is shown as the person's own bubble.
 // A {ts, kind:"fwd", to, pid, h?} line (#82, written by the PO's send helper) says the person's prompt `pid` was forwarded to the agent `to`:
 // the matching `me` line comes back with `fwd: [{to, exact}]` (`exact` = what was sent has the same words as the prompt; `h` = fwdHash of the sent
-// text). Linked by the prompt id only, never by guessing from the text; a `fwd` with no `pid`, a `to` that is not an agent name, or no `me` line
+// text). The hash is plain: UTF-8 bytes of the text with each run of ASCII whitespace (space, tab, CR, LF) made one space and the ends cut of those
+// (NBSP, U+3000 and other Unicode spaces stay as they are), sha256, first 16 hex chars lowercase, so a shell helper can match it byte for byte.
+// The helper hashes the text it sent as it is; the desk hashes the `me` line after unwrapTags (the hook's <hc>/<pasted_content> wrapper is not part of
+// what the person said). Linked by the prompt id only, never by guessing from the text; a `fwd` with no `pid`, a `to` that is not an agent name, or no `me` line
 // with that `pid` is dropped, and the same pid + agent counts once (a resend).
-const fwdHash = (text) => require("crypto").createHash("sha256").update(unwrapTags(text).replace(/\s+/g, " ").trim()).digest("hex").slice(0, 16);
+const fwdHash = (text) => require("crypto").createHash("sha256").update(String(text ?? "").replace(/[ \t\r\n]+/g, " ").replace(/^ | $/g, ""), "utf8").digest("hex").slice(0, 16);
 function parsePoLines(text) {
   const out = [];
   const fwds = []; // {kind:"fwd"} lines, joined to their `me` line below
@@ -327,13 +330,14 @@ function parsePoLines(text) {
     if (!body.trim()) continue;
     const ms = Date.parse(o.ts);
     if (!(ms > 0)) continue;
-    out.push({ ts: new Date(ms).toISOString(), ms, text: body.trim().slice(0, MAX_PO_TEXT), to: typeof o.to === "string" ? o.to.trim() : "", ...(o.kind === "me" ? { me: true, whole: fwdHash(o.text) } : {}), pid: typeof o.pid === "string" ? o.pid : "" });
+    out.push({ ts: new Date(ms).toISOString(), ms, text: body.trim().slice(0, MAX_PO_TEXT), to: typeof o.to === "string" ? o.to.trim() : "", ...(o.kind === "me" ? { me: true, raw: o.text } : {}), pid: typeof o.pid === "string" ? o.pid : "" });
   }
   const byPid = new Map(); // the prompt id -> its (latest) `me` line
   for (const x of out) if (x.me && x.pid) byPid.set(x.pid, x);
   for (const f of fwds) {
     const m = byPid.get(f.pid);
     if (!m || (m.fwd ?? []).some((y) => y.to === f.to)) continue;
+    m.whole ??= fwdHash(unwrapTags(m.raw)); // hashed only for a prompt that was forwarded
     (m.fwd ??= []).push({ to: f.to, exact: Boolean(f.h) && f.h === m.whole });
   }
   // An image line belongs to the prompt with its prompt id, else to the latest prompt within 2 minutes before it.
@@ -343,7 +347,7 @@ function parsePoLines(text) {
     if (hit) hit.imgs = g.imgs;
   }
   out.sort((a, b) => a.ms - b.ms);
-  return out.slice(-MAX_PO).map(({ pid, whole, ...x }) => (pid ? { ...x, pid } : x)); // the prompt id stays, when there is one: the 1:1 view pairs a reply with its prompt (#58)
+  return out.slice(-MAX_PO).map(({ pid, whole, raw, ...x }) => (pid ? { ...x, pid } : x)); // the prompt id stays, when there is one: the 1:1 view pairs a reply with its prompt (#58)
 }
 
 // ---- picture files (Node side; the pure rules - which path may be drawn - are imgOk/splitImgs in the chat block)
