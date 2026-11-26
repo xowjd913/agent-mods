@@ -229,6 +229,21 @@ function staleDrafts(keys, live, seen, now) {
 // person's own key press (`keyAt`, within DRAFT_KEY_MS) and without a clear of ours (which empties the mirror first), the text is put back.
 const DRAFT_KEY_MS = 1000;
 const draftWiped = (mirror, value, keyAt, now) => Boolean(mirror) && String(mirror.text ?? "") !== "" && String(value ?? "") === "" && !(Number(now) - Number(keyAt) < DRAFT_KEY_MS);
+// #66 (draft per room): the unsent chat text each room holds while another room is shown. `cur` = what the box holds now {text, content, range, pics};
+// leaving `from` stores it there (nothing to keep = the room's entry goes), arriving at `to` takes that room's entry out (it is the box again) and
+// returns it as `load` (null = an empty box). A room that was left empty keeps no entry; the map is capped (oldest dropped). Pure (no mutation of `map`).
+const ROOM_DRAFTS_MAX = 24;
+function swapDraft(map, from, to, cur) {
+  const out = new Map(map);
+  if (from != null) {
+    out.delete(from);
+    if (cur && (String(cur.text ?? "") !== "" || (cur.pics ?? []).length > 0)) out.set(from, cur);
+  }
+  const load = to != null && to !== from ? out.get(to) ?? null : null;
+  if (to != null && to !== from) out.delete(to);
+  while (out.size > ROOM_DRAFTS_MAX) out.delete(out.keys().next().value);
+  return { map: out, load };
+}
 // The "@" menu: "@here" first, then the live leaders of the picked PO (`pick`, a PO id; none for PO_OTHER), by shown name. `query`
 // filters by hc name or shown name.
 function leaderMenu(terms, memo, query = "", limit = 8, pick = "") {
@@ -788,6 +803,13 @@ const MD_HEAD = /^\s*\[[^\]\n]{1,60}\][ \t]+\S[^\n]{0,60}$/;
 // the list marks people type ("•", "1)") written as real Markdown items with a blank line before the list and after it (#66), so the view draws
 // them as a list whose wrapped lines sit under the item text. The words themselves are never changed. Code fences are left as written.
 // Never produces HTML: the view shows tags as text. Pure.
+// A single "~" is written "\~" so the view does not strike text through between two of them ("3~4.5일 ... 1.5~2일" is a range, not a
+// strikethrough); "~~text~~" stays a strikethrough. `code` spans and links/URLs are left as they are (an escape would show inside them). Pure.
+const TILDE_KEEP = /(`+[^`\n]*`+|\]\([^)\n]*\)|<?(?:https?:\/\/|www\.)[^\s<>)]*>?)/;
+function escTilde(ln) {
+  if (!ln.includes("~")) return ln;
+  return ln.split(TILDE_KEEP).map((seg, i) => (i % 2 ? seg : seg.replace(/(?<![~\\])~(?!~)/g, "\\~"))).join("");
+}
 function mdText(text) { return tlMemoGet("m", text, mdTextRaw); }
 function mdTextRaw(text) {
   const norm = (ln) => ln.replace(/!\[/g, "!\\[").replace(/^(\s*)[•‣▪◦●・]\s+/, "$1- ").replace(/^(\s*)(\d{1,3})[)）]\s+/, "$1$2. ");
@@ -801,7 +823,7 @@ function mdTextRaw(text) {
     const ln = src[i];
     if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; inList = false; rows.push({ s: ln, flow: false }); continue; }
     if (fence) { rows.push({ s: ln, flow: false }); continue; }
-    let s = norm(ln);
+    let s = escTilde(norm(ln));
     if (head && i === first) s = `**${s.trim()}**`;
     else if (/^\s*【[^】\n]*】[:：]?\s*$/.test(s)) s = `**${s.trim()}**`;
     const m = MD_ITEM.exec(s);
@@ -1238,6 +1260,8 @@ export default class Inbox extends View {
     try { this.chat.set_auto_grow(1, INPUT_MAX_LINES); } catch {}
     this.menu = null; // the open "@" menu: {start, end, query, items, sel}
     this.changedAt = 0; // the last edit of the box (ms)
+    this.roomDrafts = new Map(); // #66: room id -> the unsent chat draft {text, content, range, pics} of a room that is not shown now (see swapDraft)
+    this.draftRoom = null; // the room the chat box belongs to now
     this.mirror = new Map(); // #74: box key ("chat" or a leader) -> {text, content, range}: the last text each box held (see keep / guard)
     this.keyAt = 0; // the last key press in a box (ms): an emptied box with no key press just before it was wiped, not edited
     this.sentAt = 0; // the last send (ms)
@@ -1482,6 +1506,33 @@ export default class Inbox extends View {
       try { range = st.selected_range(); } catch {}
       this.mirror.set(key, { text, content, range });
     } catch {}
+  }
+  // #66: the chat box holds the draft of the room shown. When the room changes (a click on a room, or the shown room moving by itself) the box's
+  // text, mention chips, cursor and pictures go to that room's slot and the new room's slot comes back (or an empty box). Sending clears only the
+  // box of the room shown, so another room's draft is untouched. Idempotent: called with the room already shown it does nothing.
+  syncRoom(pick) {
+    if (pick == null || pick === this.draftRoom) return;
+    const from = this.draftRoom;
+    this.draftRoom = pick;
+    if (from == null) return; // first look: the box was never anyone else's
+    let cur = null;
+    try { cur = { text: this.chat.value(), content: this.chat.content(), range: this.chat.selected_range(), pics: this.pics.slice() }; } catch {}
+    const r = swapDraft(this.roomDrafts, from, pick, cur);
+    this.roomDrafts = r.map;
+    this.menu = null;
+    this.heldAt = 0;
+    this.mirror.delete("chat"); // the swap below is the mod's own write, not a loss
+    try {
+      if (r.load) {
+        try { this.chat.set_value(r.load.content ?? r.load.text); } catch { this.chat.set_value(r.load.text); }
+        if (r.load.range) this.chat.set_selected_range(r.load.range);
+      } else this.chat.set_value("");
+    } catch {}
+    this.pics = r.load?.pics ?? [];
+    try { this.lastValue = this.chat.value(); this.core = editCore(this.lastValue); } catch {}
+    this.brk = null;
+    this.keep("chat", this.chat);
+    this.diag(`draft: room switched, ${r.load ? `restored ${String(r.load.text).length} chars` : "empty box"}`);
   }
   wipe(key, st) {
     this.mirror.delete(key);
@@ -1934,6 +1985,7 @@ export default class Inbox extends View {
 
   pickPo(id, c) {
     this.heldAt = 0;
+    this.syncRoom(id);
     try { setShared(PICK_KEY, id); } catch {}
     this.menu = null;
     this.markSeen();
@@ -3024,6 +3076,7 @@ export default class Inbox extends View {
     });
     const t = theme();
     const v = this.view();
+    this.syncRoom(v.pick); // the room can move by itself (a closed PO, the first pick): the box follows it
     this.drawnAt = Date.now();
     const strip = this.windowed && this.narrow; // a narrow window: the rooms are a strip on top; the dock and a pane use the slim column when narrow
     const blocks = [];

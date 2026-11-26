@@ -1162,10 +1162,10 @@ test("#74: 소스 — 채팅 상자는 모든 방에서 같은 자리에 그려�
   for (const id of ["chat-box", "chat-target", "chat-row", "chat-input"]) assert.match(box, new RegExp(`id\\("${id}"\\)`));
   assert.match(MAIN, /full\(cx\) \{\n    this\.tvN = 0;\n    this\.noteRedraw\(cx\);\n    this\.guardAll\(\);/);
   assert.match(MAIN, /pinTick\(cx\) \{\n    this\.guardAll\(\);/);
-  // the only places that write into the box: our own clears (wipe), the guard's restore, the "@" pick, the held / stray line break
+  // the only places that write into the box: our own clears (wipe), the guard's restore, the "@" pick, the held / stray line break, the room switch (syncRoom, #66)
   const writers = MAIN.split("\n").map((l, i) => [i + 1, l]).filter(([, l]) => /this\.chat\.(set_value|replace)\(/.test(l));
   const where = (n) => { const head = MAIN.slice(0, MAIN.split("\n").slice(0, n).join("\n").length); return head.slice(head.lastIndexOf("\n  ") + 1).split("\n")[0]; };
-  for (const [n] of writers) assert.match(MAIN.split("\n").slice(0, n).reverse().find((l) => /^  [a-zA-Z]+\(.*\) \{$/.test(l)), /pickMenu|enterBox|dropBreak|dropAt/, `line ${n}`);
+  for (const [n] of writers) assert.match(MAIN.split("\n").slice(0, n).reverse().find((l) => /^  [a-zA-Z]+\(.*\) \{$/.test(l)), /pickMenu|enterBox|dropBreak|dropAt|syncRoom/, `line ${n}`);
 });
 
 test("#66 mdText: a numbered list stays compact even when the source has blank lines between its items, like the '-' list", () => {

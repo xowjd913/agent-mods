@@ -1007,6 +1007,21 @@ function staleDrafts(keys, live, seen, now) {
 // person's own key press (`keyAt`, within DRAFT_KEY_MS) and without a clear of ours (which empties the mirror first), the text is put back.
 const DRAFT_KEY_MS = 1000;
 const draftWiped = (mirror, value, keyAt, now) => Boolean(mirror) && String(mirror.text ?? "") !== "" && String(value ?? "") === "" && !(Number(now) - Number(keyAt) < DRAFT_KEY_MS);
+// #66 (draft per room): the unsent chat text each room holds while another room is shown. `cur` = what the box holds now {text, content, range, pics};
+// leaving `from` stores it there (nothing to keep = the room's entry goes), arriving at `to` takes that room's entry out (it is the box again) and
+// returns it as `load` (null = an empty box). A room that was left empty keeps no entry; the map is capped (oldest dropped). Pure (no mutation of `map`).
+const ROOM_DRAFTS_MAX = 24;
+function swapDraft(map, from, to, cur) {
+  const out = new Map(map);
+  if (from != null) {
+    out.delete(from);
+    if (cur && (String(cur.text ?? "") !== "" || (cur.pics ?? []).length > 0)) out.set(from, cur);
+  }
+  const load = to != null && to !== from ? out.get(to) ?? null : null;
+  if (to != null && to !== from) out.delete(to);
+  while (out.size > ROOM_DRAFTS_MAX) out.delete(out.keys().next().value);
+  return { map: out, load };
+}
 // The "@" menu: "@here" first, then the live leaders of the picked PO (`pick`, a PO id; none for PO_OTHER), by shown name. `query`
 // filters by hc name or shown name.
 function leaderMenu(terms, memo, query = "", limit = 8, pick = "") {
@@ -1566,6 +1581,13 @@ const MD_HEAD = /^\s*\[[^\]\n]{1,60}\][ \t]+\S[^\n]{0,60}$/;
 // the list marks people type ("•", "1)") written as real Markdown items with a blank line before the list and after it (#66), so the view draws
 // them as a list whose wrapped lines sit under the item text. The words themselves are never changed. Code fences are left as written.
 // Never produces HTML: the view shows tags as text. Pure.
+// A single "~" is written "\~" so the view does not strike text through between two of them ("3~4.5일 ... 1.5~2일" is a range, not a
+// strikethrough); "~~text~~" stays a strikethrough. `code` spans and links/URLs are left as they are (an escape would show inside them). Pure.
+const TILDE_KEEP = /(`+[^`\n]*`+|\]\([^)\n]*\)|<?(?:https?:\/\/|www\.)[^\s<>)]*>?)/;
+function escTilde(ln) {
+  if (!ln.includes("~")) return ln;
+  return ln.split(TILDE_KEEP).map((seg, i) => (i % 2 ? seg : seg.replace(/(?<![~\\])~(?!~)/g, "\\~"))).join("");
+}
 function mdText(text) { return tlMemoGet("m", text, mdTextRaw); }
 function mdTextRaw(text) {
   const norm = (ln) => ln.replace(/!\[/g, "!\\[").replace(/^(\s*)[•‣▪◦●・]\s+/, "$1- ").replace(/^(\s*)(\d{1,3})[)）]\s+/, "$1$2. ");
@@ -1579,7 +1601,7 @@ function mdTextRaw(text) {
     const ln = src[i];
     if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; inList = false; rows.push({ s: ln, flow: false }); continue; }
     if (fence) { rows.push({ s: ln, flow: false }); continue; }
-    let s = norm(ln);
+    let s = escTilde(norm(ln));
     if (head && i === first) s = `**${s.trim()}**`;
     else if (/^\s*【[^】\n]*】[:：]?\s*$/.test(s)) s = `**${s.trim()}**`;
     const m = MD_ITEM.exec(s);
@@ -1880,7 +1902,7 @@ function readHandoff(dir = inboxDir(), id = "") {
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries};
+module.exports = { COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries};
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)
