@@ -38,6 +38,7 @@ const DEFAULT_NAMES = Object.freeze({
   hubRole: "po", hubIdLabel: "po", hubId: "^[a-z0-9-]{1,40}$", hubDir: "po", // the hub (PO): its `role` value, id label, id pattern, folder
   labelRole: "role", labelWait: "wait", labelWaitLink: "wait-link", labelSession: "session",
   answerLine: 'Panel answer ({kind}) for {agent}: "{text}".{ Target: {link}}',
+  preset: "po", arrangeScript: "~/.claude/skills/leader/herdr-team.sh", // the profile's preset ("none" = no agent / hub naming rules at all, #124) and the PO arrange script ("" = not there: the features that need it hide)
 });
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // a hub id becomes a file name whatever its pattern says
 function compileNames(n) {
@@ -235,7 +236,8 @@ export default class Tabs extends View {
   }
 
   // 답을 기다리는 리더 수: 대기 라벨(decision|verify)이 붙은 에이전트 이름(기본 lead-*)의 터미널(UI 모드 요약 칸과 같은 규칙, inbox.cjs의 waitingKind). UI 모드 칸이 닫혀 있어도 터미널 라벨만 보므로 늘 맞다.
-  inboxWaiting() { syncNames(); return (terminals() ?? []).filter((t) => waitingKind(t)).length; } // syncNames: the profile the desk published
+  // syncNames: the profile the desk published. With the "none" preset (#124) no name marks a leader, so any terminal carrying the wait label counts.
+  inboxWaiting() { syncNames(); const any = NAMES.preset === "none"; return (terminals() ?? []).filter((t) => (any ? ["decision", "verify"].includes(labelOf(t, "labelWait").toLowerCase()) : waitingKind(t))).length; }
 
   // One tab per wheel notch. A touchpad or smooth-scrolling mouse sends many
   // small events per gesture: a short swipe or one smoothed notch (about
