@@ -349,6 +349,16 @@ function tlMemoGet(kind, v, make) {
   return r;
 }
 const TL_CUT_MIN = 500;
+// #87: a report that is an announcement (finished / started / resumed / stopped) is drawn as one centered line, not a bubble; the ones that
+// need an answer (decision, verify) stay cards. `start` is not a shown report today (tlShown), so it only matters if that ever changes.
+const NOTICE_KINDS = new Set(["start", "done", "resume", "stop"]);
+const isNotice = (e) => String(e?.who ?? "").startsWith("l:") && Boolean(e.it) && NOTICE_KINDS.has(e.it.kind) && !e.waiting && !e.wait;
+// "<name> · <kind> · <first line>" ("kind" = the shown kind word); the first line is the report's headline, whitespace squeezed.
+const noticeText = (name, kind, it) => [name, kind, String(it?.head || it?.lead || it?.title || "").replace(/\s+/g, " ").trim()].filter(Boolean).join(" · ");
+// A line pasted into the PO terminal that another terminal sent (`<hc from="t137 lead-x">`) is that terminal's words, not the person's. -> the sender's
+// hc name ("lead-x", the last word of `from`), "" when the line is not such a message.
+const hcSender = (text) => { const m = /^\s*<hc\s+from="([^"]*)"/.exec(String(text ?? "")); return m ? (m[1].trim().split(/\s+/).pop() ?? "") : ""; };
+const HC_REPORT_MS = 5 * 60 * 1000; // an hc line and the report it carries are written within this gap
 function timeline(room, leaders, says, mine, waits = [], now = 0) {
   const out = [];
   const seen = new Set();
@@ -384,8 +394,15 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
   // The PO's reply to a line the desk sent to a leader (#58): the hook gives a prompt and its reply the same pid, and the prompt matched a desk
   // record that has a `to`. Only the 1:1 view reads it (`about`); the bubble does not say "→ leader", since the reply is to the person.
   const about = new Map();
+  const coveredReports = new Set(); // indexes into `out` of the reports an hc copy was matched to
   if (room && room !== PO_OTHER) for (const x of says ?? []) {
     if (x.me) {
+      // #87: the PO hook also records a leader's report that arrived as `<hc from=...>`; the report is already on the desk (card or notice), so that copy is not a bubble of the person. One report covers one such line.
+      const from = hcSender(x.text);
+      if (from) {
+        const r = out.findIndex((e, k) => e.leader === from && e.it && !coveredReports.has(k) && Math.abs(x.ms - e.ms) <= HC_REPORT_MS);
+        if (r >= 0) { coveredReports.add(r); continue; }
+      }
       const t = full(x.text), c = core(x.text), p = cut(x.text);
       const i = sentBy.findIndex((m, j) => !taken.has(j) && (x.ms - (Number(m.ms) || 0)) >= -60000 && (x.ms - (Number(m.ms) || 0)) <= 11 * 60000 && (full(m.line) === t || full(m.text) === t || (c.length > 1 && (core(m.line) === c || core(m.text) === c)) || (p && (full(m.line).startsWith(p) || full(m.text).startsWith(p)))));
       if (i >= 0) { taken.add(i); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); continue; }
@@ -3162,6 +3179,21 @@ export default class Inbox extends View {
             .child(div().flex_1().min_w(0).max_w(this.capOf() ?? "75%").px(12).py(9).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(12.5).text_color(t.foreground)
               .child(this.mdFolded(id, e.text, t)))
             .child(this.sideTools(t, id, e.text, e.ms))));
+    }
+    if (isNotice(e)) {
+      // #87: an announcement (완료·재개·중단·시작) is one centered red line, not a bubble. A click opens the whole report under it. The slide-in
+      // (the kit's transition() only animates a later change of a target) is not drawn: a line that is already on screen would not move.
+      const open = this.isOpen(e.s, e.it);
+      const red = t.blocked;
+      const word = (KIND[e.it.kind] ?? KIND.other)[0];
+      const flip = (_e, c) => { this.toggleOpen(e.s, e.it); this.reveal(this.spot(e.s, e.it)); c.notify(); };
+      return v_flex().id(this.spot(e.s, e.it)).flex_none().w_full().px(10).pt(top).gap(4).items_center()
+        .child(h_flex().w_full().min_w(0).items_center().justify_center()
+          .child(div().id(`nt-${id}`).max_w("92%").min_w(0).truncate().px(12).py(4).rounded(10).bg(red + "1f").border(1).border_color(red + "55").text_size(12).text_color(red).cursor_pointer()
+            .hover((x) => x.bg(red + "33")).on_mouse_down("left", stop).on_click(flip).tooltip(open ? "눌러서 접기" : "눌러서 전체 내용 보기")
+            .child(noticeText(shortName(e.leader), word, e.it))))
+        .when(open, (el) => el.child(v_flex().w_full().max_w(this.capOf() ?? "75%").min_w(0).px(12).py(9).rounded(12).bg(red + "14").border(1).border_color(red + "44").text_size(12.5).text_color(t.foreground)
+          .child(this.body(t, e.it, id))));
     }
     const a = e.waiting ? v.asks.find((x) => x.s.leader === e.leader) : null;
     const wait = e.it ? { ...e.it, kind: e.waiting || e.it.kind } : null;
