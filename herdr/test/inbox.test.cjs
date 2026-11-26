@@ -2854,3 +2854,30 @@ test("main.js: 프로필을 읽어 온 names를 쓰고, 읽지 못한 이유를 
   assert.ok(!/\bPO_DIR\b|\bisPoTerm\b|\/\^lead-\/\.test/.test(cjs));
   assert.ok(!/\/\^lead-\/\.test/.test(fs.readFileSync(path.join(__dirname, "../mods/inbox/po-hook.cjs"), "utf8")));
 });
+
+// ---- 원격 연결 켜기 (#79) ----
+test("remoteBlock: 새로 시작과 같은 이유로 막고, 보내는 중이면 한 번 더 누르지 못한다", () => {
+  assert.match(I.remoteBlock({}), /찾지 못/);
+  assert.match(I.remoteBlock({ po: "p", status: "working" }), /작업 중/);
+  assert.match(I.remoteBlock({ po: "p", status: "blocked" }), /질문 중/);
+  assert.match(I.remoteBlock({ po: "p", status: "idle", running: true }), /새로 시작하는 중/);
+  assert.match(I.remoteBlock({ po: "p", status: "idle", sending: true }), /보내는 중/);
+  assert.equal(I.remoteBlock({ po: "p", status: "idle" }), "");
+  assert.equal(I.remoteBlock({ po: "p", status: "done" }), "");
+  assert.equal(I.REMOTE_CMD, "/remote-control");
+});
+test("원격 연결 켜기: main.js는 /remote-control 한 줄만 sendLine 길로 보내고, 방 머리말에 놓이며, 터미널 주소만 받아 다른 방에서도 쓸 수 있다", () => {
+  const src = mainSrc();
+  const on = methodOf(src, "  remoteOn(room, po, c) {", "  // The button (and the reason");
+  assert.match(on, /this\.sendLine\(po, REMOTE_CMD, /);
+  assert.match(on, /remoteBlock\(/);
+  assert.doesNotMatch(on, /hc\(\["send"/); // only through sendLine (its checks: running, not on a prompt, no held draft)
+  const btn = methodOf(src, "  remoteButton(t, room, po, status) {", "  // A panel answer: the answer line");
+  assert.match(btn, /원격 연결 켜기/);
+  assert.match(btn, /disabled: why/);
+  assert.doesNotMatch(btn, /chatTarget|poList|PO_OTHER/); // knows no PO rules: a solo room can pass its own terminal
+  assert.match(src, /const REMOTE_CMD = "\/remote-control";/);
+  assert.match(src, /this\.remoteButton\(t, v\.pick, rpo, /);
+  assert.match(src, /\.when\(Boolean\(rcb\), \(el\) => el\.child\(rcb\)\)/); // in the room header
+  assert.equal(I.remoteBlock.toString().replace(/\s+/g, " "), src.match(/function remoteBlock[\s\S]*?\n}\n/)[0].replace(/\s+/g, " ").trim());
+});

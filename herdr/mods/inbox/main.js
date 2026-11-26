@@ -1026,6 +1026,14 @@ function restartBlock({ po = "", status = "", running = false } = {}) {
   if (s === "working") return "PO가 작업 중입니다 — 끝난 뒤에 누르세요";
   return "";
 }
+// ---- "원격 연결 켜기" (#79): one click sends `/remote-control` to the room's terminal through the same `hc send` path as 새로 시작 (sendLine). The desk cannot
+// press it for the person any other way (a skill cannot run the command). Pure part: why it cannot be pressed now ("" when it can).
+const REMOTE_CMD = "/remote-control";
+const REMOTE_SHOW_MS = 30 * 1000; // how long "보냈습니다" stays beside the button
+function remoteBlock({ po = "", status = "", running = false, sending = false } = {}) {
+  if (sending) return "원격 연결 명령을 보내는 중입니다";
+  return restartBlock({ po, status, running });
+}
 // The line pasted into the PO (English: it is read by an agent). `file` is where the note goes (shown with ~).
 function handoffAsk(file) {
   return `${RESTART_MARK} The user will restart you with /clear. Before that, write a handoff note to ${file} (overwrite it; create the folder if needed) so that the next session can continue seamlessly: (1) decisions and final checks the user still has to answer, (2) each running leader with its task, issue/PR and state, (3) what you were doing and the next steps, (4) anything that is only in this conversation. Keep it short and in the user's language. Do nothing else; reply "handoff written" when the file is saved.`;
@@ -1305,6 +1313,7 @@ export default class Inbox extends View {
     this.promptChain = 0; // the newest scheduled re-read of the screen; an older one does nothing
     this.who = new Map(); // room -> the leader the room is narrowed to (#58, "특정 리더만"); like `filt`, not saved
     this.rs = new Map(); // room -> the state of its "PO 새로 시작" (see restartOpen)
+    this.rc = new Map(); // room -> the state of its "원격 연결 켜기" {phase: send | sent | fail, at, why} (see remoteOn)
     this.rgen = 0; // numbers a restart run: a timer of an older run does nothing
     this.filt = new Map(); // room -> the chat filter chip picked there (전체 when missing); not saved: a restart shows every message again
     this.heldAt = 0; // the last Enter held back as a possible IME confirm (ms)
@@ -2407,6 +2416,36 @@ export default class Inbox extends View {
         .child(this.button(t, "rs-close", r.phase === "run" || r.phase === "clear" || r.phase === "timeout" ? "취소" : "닫기", (c) => this.restartClose(room, c), { tip: r.phase === "run" || r.phase === "clear" ? "기다리기를 멈춥니다(이미 보낸 요청은 그대로입니다)" : "" })));
   }
 
+  // ---- "원격 연결 켜기" (#79), per terminal: `target` = {room (the key of the state), po (the terminal address), status}. A room of any kind can use it (PO room now,
+  // a solo room later): it only needs the terminal's address and its hc status. Sends the one line /remote-control; nothing else is read or promised about the result.
+  remoteOn(room, po, c) {
+    const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "");
+    const r0 = this.rc.get(room);
+    const rs = this.rs.get(room);
+    const why = remoteBlock({ po, status: st, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")), sending: r0?.phase === "send" });
+    if (why) { this.say(why, true); try { c.notify(); } catch {} return; }
+    this.rc.set(room, { phase: "send", at: Date.now(), why: "" });
+    try { c.notify(); } catch {}
+    c.spawn(async (cx) => {
+      let res = { ok: false, why: "보내지 못했습니다" };
+      try { res = await this.sendLine(po, REMOTE_CMD, () => true, room); } catch (e) { res = { ok: false, why: String(e?.message ?? e).slice(0, 100) }; }
+      this.rc.set(room, { phase: res.ok ? "sent" : "fail", at: Date.now(), why: res.ok ? "" : res.why });
+      if (res.ok) this.say("원격 연결 명령(/remote-control)을 보냈습니다. 터미널에서 이어서 확인하세요.");
+      else this.say(`원격 연결을 켜지 못했습니다: ${res.why}`, true);
+      try { cx.notify(); } catch {}
+    });
+  }
+  // The button (and the reason / result beside it). Header area only, so it can sit in any room's header.
+  remoteButton(t, room, po, status) {
+    const r = this.rc.get(room);
+    const rs = this.rs.get(room);
+    const why = remoteBlock({ po, status, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")), sending: r?.phase === "send" });
+    const note = r && r.phase === "sent" && Date.now() - r.at < REMOTE_SHOW_MS ? "명령을 보냈습니다" : r && r.phase === "fail" && Date.now() - r.at < REMOTE_SHOW_MS ? r.why : "";
+    return h_flex().id(`rc-${room}`).flex_none().min_w(0).gap(6).items_center()
+      .when(Boolean(note), (el) => el.child(div().min_w(0).truncate().text_size(10.5).text_color(r.phase === "fail" ? t.blocked : t.working).child(note)))
+      .child(this.button(t, "rc-on", "원격 연결 켜기", (c) => this.remoteOn(room, po, c), { disabled: why, tip: why || "이 PO 터미널에 /remote-control을 보내 원격 연결(Remote Control)을 켭니다" }));
+  }
+
   // A panel answer: the answer line goes through deliver(). The box is cleared and the ask marked once it reached the PO (or, when the PO had
   // no pane, once the pane opened and it was delivered).
   send(a, text, cx, kind = "answer") {
@@ -3070,12 +3109,16 @@ export default class Inbox extends View {
     const bar = this.filterBar(t, v);
     const lbar = this.leaderBar(t, v);
     const rrow = this.restartRow(t, v, cx); // "PO 새로 시작": the button, its confirm line or its steps (null in the other-PO room)
+    const rpo = v.pick && v.pick !== PO_OTHER ? chatTarget(v.terms, [], v.pick).po ?? "" : "";
+    const rcb = rpo ? this.remoteButton(t, v.pick, rpo, String(v.terms.find((x) => x.address === rpo)?.status ?? "")) : null; // "원격 연결 켜기" (#79): in the room header
     const usage = this.usageLine(t, v.pick); // null before the first read (and when there is no cost to show either)
     const panel = this.promptPanel(t, v, cx); // a blocked PO's screen + its keys (null while the room's PO is not waiting on a prompt)
     const room = v_flex().flex_1().min_w(0).min_h(0).when(!strip, (el) => el.h_full()) // beside the rooms the column must fill the row (h_flex centers children)
       .when(!strip && Boolean(head), (el) => el.child(h_flex().flex_none().h(30).px(14).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(head))
-        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : `리더 ${new Set(v.raw.filter((e) => e.leader).map((e) => e.leader)).size}명`))))
+        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : `리더 ${new Set(v.raw.filter((e) => e.leader).map((e) => e.leader)).size}명`))
+        .when(Boolean(rcb), (el) => el.child(rcb))))
+      .when(strip && Boolean(rcb), (el) => el.child(h_flex().flex_none().min_w(0).px(14).pb(4).justify_end().child(rcb))) // the picker layout has no room header
       .when(Boolean(usage), (el) => el.child(usage))
       .when(Boolean(bar), (el) => el.child(bar))
       .when(Boolean(lbar), (el) => el.child(lbar))
