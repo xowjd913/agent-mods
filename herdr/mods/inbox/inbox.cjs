@@ -1358,10 +1358,22 @@ function pinStep(st, o) {
   const prev = Number(st?.ct) || 0;
   const grew = ch > prev + 1;
   const near = y + vh >= ch - PIN_SLACK;
+  // The growth only counts for a view that was at the END OF WHAT IT SHOWED before it (the handle's y is still the old layout's): a person
+  // reading higher up (an expanded long bubble) is not dragged down by a new row, however often the content grows (#54).
+  const nearPrev = prev > 0 ? y + vh >= prev - PIN_SLACK : true;
   if (near) return { pinned: true, ct: ch, go: was && grew && y + vh < ch - 1 };
-  if (was && grew) return { pinned: true, ct: ch, go: true };
+  if (was && grew && nearPrev) return { pinned: true, ct: ch, go: true };
   return { pinned: false, ct: ch, go: false };
 }
+// A message the person just sent follows to the newest even from higher up: the first draw that shows a new last entry within SEND_FOLLOW_MS of the
+// send (`at` = when it was sent, 0 = none) goes to the end once.
+const SEND_FOLLOW_MS = 5000;
+const sendFollow = (at, now, key, seen) => Number(at) > 0 && now - Number(at) < SEND_FOLLOW_MS && key !== (seen ?? "");
+// ScrollHandle.scroll_to_item(i) reveals that row with the smallest scroll, so on a row TALLER than the viewport (an expanded long bubble, #54)
+// it lands on the row's top, then on its bottom, then on its top again: every call flips the view. A re-pin call is therefore made only while the
+// view is not at its end AND the content grew since the last call (`seen` = the content height at that call): within PIN_SLACK of the end, with
+// nothing new to catch up on, a view stays where it is (a call there would flip it just the same).
+const pinCall = (o, seen) => !atBottom(o?.y, o?.vh, o?.ch) && (Number(o?.ch) || 0) > (Number(seen) || 0) + 1;
 // ---- selection: a drag-selected text must not be rebuilt under the pointer
 const SEL_HOLD_MS = 120000, PRESS_HOLD_MS = 8000;
 // st = {sel: a selection is settled, selAt, press: the pointer is down in the list, pressAt}. While true, background redraws wait.
@@ -1578,7 +1590,7 @@ function readHandoff(dir = inboxDir(), id = "") {
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS };
+module.exports = { handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, sendFollow, SEND_FOLLOW_MS };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)
