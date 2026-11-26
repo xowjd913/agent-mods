@@ -427,7 +427,7 @@ test("main.js: 페인 모드: 같은 메신저 화면, 자기 제목줄을 쓰�
   assert.match(open, /if \(this\.windowed\) \{ try \{ closeOverlay/); // 창에서 열면 창을 닫는다
   assert.ok(!/hc send|hc\(/.test(open));
   // 머리줄: 페인은 제목·옆에 열기가 없고(페인 머리줄·이미 페인), 닫기 버튼도 만들지 않는다
-  assert.match(src, /\.when\(!this\.paned \|\| this\.mained, \(el\) => el\.child\(div\(\)\.text_size\(15\)[^\n]*UI 모드/); // 페인은 자기 제목줄이 있고, UI 모드 main 칸은 없어서 제목을 그린다
+  assert.match(src, /\.when\(!this\.paned \|\| this\.mained, \(el\) => el\.child\(div\(\)\.text_size\(fz\(15\)\)[^\n]*UI 모드/); // 페인은 자기 제목줄이 있고, UI 모드 main 칸은 없어서 제목을 그린다
   assert.match(src, /\.when\(!this\.paned, \(el\) => el\.child\(this\.button\(t, "inbox-beside", "옆에 열기"/);
   assert.match(src, /\.when\(this\.windowed, \(el\) => el\.child\(div\(\)\.id\("inbox-close"\)/);
   // 갱신·뱃지: 창과 페인은 5초(페인은 그려지는 동안만), Dock만 30초, 뱃지는 창만 건너뛴다
