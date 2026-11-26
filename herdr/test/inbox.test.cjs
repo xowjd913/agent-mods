@@ -3036,8 +3036,17 @@ test("원격 연결 켜기: main.js는 /remote-control 한 줄만 sendLine 길�
 const RC_BASE = "● Done\n\n> \n  ? for shortcuts";
 const RC_URL = "https://claude.ai/code/session_abc123";
 const RC_MENU = `  Remote Control\n  This session is connected: ${RC_URL}\n\n  ❯ 1. Disconnect this session\n    2. Show QR code\n    3. Continue\n\n  Enter to select · Esc to cancel`;
+test("원격 연결 켜기 #109: 켜기 버튼의 안내는 저장된 켜짐 기록으로 이어 보여 준다는 점과 기록이 없을 때의 한계, 눌러도 안전하다는 점을 알린다", () => {
+  const btn = methodOf(mainSrc(), "  remoteButton(t, room, po, status) {", "  // After a start or a reload of the desk");
+  assert.match(btn, /Herdr를 다시 켜도 이 데스크가 켜짐을 본 적이 있으면 켜짐으로 이어서 보여 줍니다/);
+  assert.match(btn, /본 적이 없거나 확인할 수 없는 경우\(예: Windows\)/);
+  assert.match(btn, /이미 켜져 있으면 연결 메뉴를 Esc로 닫기만 합니다/);
+  // main.js never reads the transcript itself: the helper (inbox.cjs checkRemote) does, and only to rule out a clean disconnect
+  assert.doesNotMatch(mainSrc(), /bridge-session|bridgeSessionId/);
+  assert.equal(I.termPid.toString().replace(/\s+/g, " "), mainSrc().match(/function termPid[\s\S]*?\n}\n/)[0].replace(/\s+/g, " ").trim());
+});
 test("remoteScreen: 연결 메뉴·켜짐 표시·세션 주소를 화면에서 읽는다", () => {
-  assert.deepEqual(I.remoteScreen(RC_BASE), { menu: false, active: false, seen: false, url: "" });
+  assert.deepEqual(I.remoteScreen(RC_BASE), { menu: false, active: false, seen: false, off: false, url: "" });
   const m = I.remoteScreen(RC_MENU);
   assert.equal(m.menu, true); assert.equal(m.active, true); assert.equal(m.url, RC_URL);
   const a = I.remoteScreen(`${RC_BASE}\n  Remote Control active`);
@@ -3070,7 +3079,7 @@ const rcRun = async ({ pre, afterSend = [], status = "idle", statusAfterSend = s
   const g = { hc, PROMPT_LINES: 40, REMOTE_CMD: "/remote-control", REMOTE_POLLS: 3, REMOTE_POLL_MS: 0, remoteScreen: I.remoteScreen, remoteNote: I.remoteNote, remoteBlock: I.remoteBlock };
   const self = {
     rc: new Map(), rs: new Map(), st: status, liveTerms() { return [{ address: "t9", status: this.st }]; }, poTerm: async function () { return { live: true, status: self.st }; }, say: (m, bad) => log.says.push({ m, bad: Boolean(bad) }),
-    sleepOn: async () => {}, sendLine: async function (po, text) { log.sends.push(text); self.st = statusAfterSend; queue = afterSend.length ? afterSend : [pre]; return send; },
+    sleepOn: async () => {}, remoteMark: async () => {}, remoteHelper: async () => null, sendLine: async function (po, text) { log.sends.push(text); self.st = statusAfterSend; queue = afterSend.length ? afterSend : [pre]; return send; },
   };
   for (const [h, n] of [["  async remoteRead(po) {", "  // Esc closes the menu"], ["  async remoteClose(po, cx) {", "  remoteSet(room"], ["  remoteSet(room, patch, c) {", "  remoteOn(room"], ["  remoteOn(room, po, c) {", "  // The button and, beside it"]]) Object.assign(self, runMethod(src, h, n, g));
   let job = Promise.resolve();
@@ -3143,14 +3152,18 @@ test("remoteScreen: 켜짐 안내 줄(실제 화면 문구)은 seen, 그 뒤에 
   assert.equal(I.remoteScreen(`  Remote Control disconnected\n${RC_LINE}\n${RC_BASE}`).seen, true); // the later line wins
   assert.equal(I.remoteScreen("I will run /remote-control later\n> \n").seen, false);
 });
+// The methods of the remoteRestore flow (each its own runMethod: a method is wrapped alone).
+const restoreMethods = (src, g) => Object.assign({}, runMethod(src, "  async remoteRead(po) {", "  // Esc closes the menu", g), runMethod(src, "  remoteRestore(cx, force = false) {", "  async remotePid(po) {", g),
+  runMethod(src, "  async remotePid(po) {", "  async remoteHelper(cmd", g), runMethod(src, "  async remoteHelper(cmd", "  async remoteMark(room", g), runMethod(src, "  async remoteMark(room", "  // A panel answer: the answer line", g));
 test("remoteRestore: 시작·새로고침 때 PO마다 화면을 한 번만 읽어(보내거나 누르지 않음) 켜짐이면 안내 줄 없이 켜짐 상태로 맞춘다", async () => {
   const src = mainSrc();
   const reads = [], other = [];
   const screens = { t1: `${RC_LINE}\n${RC_BASE}`, t2: RC_BASE, t3: null };
-  const g = { hc: async (a) => { if (a[0] === "read") { reads.push(a[1]); return screens[a[1]] === null ? { code: 1, stdout: "" } : { code: 0, stdout: screens[a[1]] }; } other.push(a); return { code: 0, stdout: "" }; },
+  const g = { hc: async (a) => { if (a[0] === "read") { reads.push(a[1]); return screens[a[1]] === null ? { code: 1, stdout: "" } : { code: 0, stdout: screens[a[1]] }; } if (a[0] !== "get") other.push(a); return { code: 0, stdout: "" }; },
+    exec: async () => ({ code: 1, stdout: "" }), HELPER: () => "inbox.cjs", termPid: I.termPid,
     PROMPT_LINES: 40, remoteScreen: I.remoteScreen, poList: (terms) => terms.map((t) => ({ id: t.id, address: t.address })) };
   const self = { rc: new Map(), rcChecked: new Set(), say: () => { throw new Error("no toast"); }, liveTerms: () => [{ id: "a", address: "t1" }, { id: "b", address: "t2" }, { id: "c", address: "t3" }] };
-  Object.assign(self, runMethod(src, "  async remoteRead(po) {", "  // Esc closes the menu", g), runMethod(src, "  remoteRestore(cx, force = false) {", "  // A panel answer: the answer line", g));
+  Object.assign(self, restoreMethods(src, g));
   let notified = 0; const spawned = [];
   const cx = { spawn: (fn) => spawned.push(fn(cx)), notify: () => { notified++; } };
   self.remoteRestore(cx); await Promise.all(spawned); await tick();
@@ -3166,4 +3179,144 @@ test("remoteRestore: 시작·새로고침 때 PO마다 화면을 한 번만 읽�
   const m = mainSrc();
   assert.match(m, /this\.remoteRestore\(cx\);/); // after a load
   assert.match(m, /this\.remoteRestore\(c, true\); this\.load\(c\);/); // the refresh button
+});
+
+// ---- #109: remote stays on across a restart of the Herdr app (the PO's claude process keeps running): a saved record + the same process + the transcript
+const RB_ON = JSON.stringify({ type: "bridge-session", sessionId: "s1", bridgeSessionId: "cse_abc", lastSequenceNum: 3, ownerAccountUuid: "u" });
+const RB_OFF = JSON.stringify({ type: "bridge-session", sessionId: "s1", bridgeSessionId: "" });
+const rcFix = (transcriptLines = [RB_ON]) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "inbox-rc-"));
+  const tp = path.join(dir, "s1.jsonl");
+  fs.writeFileSync(tp, transcriptLines.map((l) => l + "\n").join(""));
+  I.writePoSession(dir, "a", { transcript_path: tp, session_id: "s1" }, 1);
+  const ps = { out: "Tue Nov 24 12:31:42 2026" }; // what `ps -o lstart=` prints for the PO's claude
+  const psRun = () => { if (ps.out === null) throw new Error("no such process"); return ps.out + "\n"; };
+  return { dir, tp, ps, psRun, mark: (pid = 4242, url = RC_URL) => I.markRemote(dir, "a", pid, { url, psRun, platform: "darwin" }), check: (pid = 4242, extra = {}) => I.checkRemote(dir, "a", pid, { psRun, platform: "darwin", ...extra }) };
+};
+test("checkRemote #109: 같은 pid·같은 시작 시각·같은 세션이고 bridge 기록이 비어 있지 않으면 켜짐으로 이어 본다", () => {
+  const f = rcFix();
+  assert.equal(f.mark(), true);
+  assert.equal(f.mark(), false); // the same record again is not rewritten
+  const rec = JSON.parse(fs.readFileSync(path.join(f.dir, "po-remote", "a.json"), "utf8"));
+  assert.deepEqual({ on: rec.on, pid: rec.pid, start: rec.start, sid: rec.sid, url: rec.url }, { on: true, pid: 4242, start: "Tue Nov 24 12:31:42 2026", sid: "s1", url: RC_URL });
+  if (process.platform !== "win32") assert.equal((fs.statSync(path.join(f.dir, "po-remote", "a.json")).mode & 0o777), 0o600); // Windows has no POSIX modes
+  assert.deepEqual(f.check(), { on: true, why: "", url: RC_URL });
+  assert.equal(I.readRemoteRec(f.dir, "a").pid, 4242); // a true check keeps the record
+});
+test("checkRemote #109: 같은 pid라도 프로세스 시작 시각이 다르면(껐다 다시 켠 claude, resume) 꺼짐이고 기록을 지운다", () => {
+  const f = rcFix(); f.mark();
+  f.ps.out = "Wed Nov 25 09:00:00 2026";
+  assert.deepEqual(f.check(), { on: false, why: "start", url: "" });
+  assert.equal(I.readRemoteRec(f.dir, "a"), null);
+  assert.deepEqual(f.check(), { on: false, why: "norecord", url: "" });
+});
+test("checkRemote #109: 트랜스크립트의 마지막 bridge-session 기록이 빈 것(깔끔한 연결 끊기)이면 꺼짐, 그 뒤에 다시 켜서 찬 기록이 생기면 켜짐", () => {
+  const f = rcFix([RB_ON, JSON.stringify({ type: "user", message: "x" }), RB_OFF]); f.mark();
+  assert.equal(I.bridgeState(f.tp), "off");
+  assert.deepEqual(f.check(), { on: false, why: "bridge", url: "" });
+  assert.equal(I.readRemoteRec(f.dir, "a"), null);
+  const g = rcFix([RB_ON, RB_OFF, JSON.stringify({ type: "user" }), RB_ON]); g.mark();
+  assert.equal(I.bridgeState(g.tp), "on");
+  assert.equal(g.check().on, true);
+  const h = rcFix([JSON.stringify({ type: "user" })]); h.mark(); // no bridge line at all: nothing backs the record
+  assert.equal(I.bridgeState(h.tp), "none");
+  assert.equal(h.check().on, false);
+});
+test("checkRemote #109: 켜짐 근거가 되는 bridge 줄(비어 있지 않은 마지막 줄)이 안 보이면 꺼짐(없음·잘린 꼬리), 세션 기록이 사라졌어도 꺼짐", () => {
+  const f = rcFix([JSON.stringify({ type: "user", message: "x".repeat(200) })]); f.mark();
+  assert.equal(I.bridgeState(f.tp), "none"); // the whole file read and no bridge line in it
+  assert.deepEqual(f.check(), { on: false, why: "bridge", url: "" });
+  const g = rcFix([RB_OFF, JSON.stringify({ type: "user", message: "y".repeat(300) })]); g.mark(); // a disconnect line buried behind a long tail
+  assert.equal(I.bridgeState(g.tp, 64), "none"); // the 64-byte tail holds no bridge line
+  assert.deepEqual(g.check(4242, { bridge: (file) => I.bridgeState(file, 64) }), { on: false, why: "bridge", url: "" });
+  const k = rcFix([RB_OFF, RB_ON, JSON.stringify({ type: "user", message: "z" })]); k.mark();
+  assert.equal(I.bridgeState(k.tp, 160), "on"); // a non-empty line inside the tail still backs the record
+  assert.equal(k.check(4242, { bridge: (file) => I.bridgeState(file, 160) }).on, true);
+  const h = rcFix(); h.mark();
+  fs.unlinkSync(path.join(h.dir, "po-session", "a.json"));
+  assert.deepEqual(h.check(), { on: false, why: "session", url: "" });
+});
+test("checkRemote #109: pid가 이미 없으면(ps가 못 찾음) 꺼짐이고 기록을 지운다", () => {
+  const f = rcFix(); f.mark();
+  f.ps.out = null;
+  assert.deepEqual(f.check(), { on: false, why: "dead", url: "" });
+  assert.equal(I.readRemoteRec(f.dir, "a"), null);
+  const g = rcFix(); g.mark();
+  assert.deepEqual(g.check(5555), { on: false, why: "pid", url: "" }); // another pid in the terminal now
+});
+test("checkRemote #109: 세션이 바뀌었거나(/clear) 기록이 없으면 꺼짐, Windows·시작 시각을 못 읽을 때는 기록하지 않아 지금 동작(화면만)으로 남는다", () => {
+  const f = rcFix(); f.mark();
+  I.writePoSession(f.dir, "a", { transcript_path: f.tp, session_id: "s2" }, 2);
+  assert.deepEqual(f.check(), { on: false, why: "session", url: "" });
+  const g = rcFix();
+  assert.equal(g.check().why, "norecord");
+  assert.equal(I.markRemote(g.dir, "a", 4242, { psRun: g.psRun, platform: "win32" }), false);
+  assert.equal(I.procStart(4242, "win32", g.psRun), null);
+  g.ps.out = "";
+  assert.equal(g.mark(), false); // ps printed nothing
+  assert.equal(I.readRemoteRec(g.dir, "a"), null);
+  assert.equal(I.markRemote(g.dir, "../x", 4242, { psRun: g.psRun, platform: "darwin" }), false); // not a PO id
+  assert.equal(I.procStart(1, "darwin", g.psRun), null);
+  assert.equal(I.clearRemote(g.dir, "a"), false);
+});
+test("termPid #109: hc get의 foreground가 claude일 때만 그 pid를 쓴다(셸·다른 프로세스는 null)", () => {
+  const get = (fg) => ({ code: 0, stdout: JSON.stringify({ pid: 10, foreground: fg }) });
+  assert.equal(I.termPid(get({ pid: 92326, name: "claude.exe", argv: ["claude"] })), 92326);
+  assert.equal(I.termPid(get({ pid: 77, argv: ["claude", "--model", "x"] })), 77);
+  assert.equal(I.termPid(get({ pid: 5, name: "zsh", argv: ["-zsh"] })), null);
+  assert.equal(I.termPid(get({ pid: 1, name: "claude" })), null);
+  assert.equal(I.termPid(get(undefined)), null);
+  assert.equal(I.termPid({ code: 1, stdout: "" }), null);
+  assert.equal(I.termPid({ code: 0, stdout: "x" }), null);
+  assert.equal(I.termPid(null), null);
+});
+test("remoteScreen #109: 끊김 줄이 켜짐 줄 뒤에 있으면 off, 켜짐 줄이 없거나 뒤에 있으면 off가 아니다", () => {
+  assert.equal(I.remoteScreen(`${RC_LINE}\n  Remote Control disconnected\n${RC_BASE}`).off, true);
+  assert.equal(I.remoteScreen(`  Remote Control disconnected\n${RC_LINE}\n${RC_BASE}`).off, false);
+  assert.equal(I.remoteScreen(RC_BASE).off, false); // scrolled away is not "off"
+  assert.equal(I.remoteScreen(RC_MENU).off, false);
+});
+test("remoteRestore #109: 화면에서 줄이 밀려나도 저장된 기록이 같은 프로세스로 확인되면 켜짐, 화면이 끊김이면 기록을 지우고 켜기로 둔다", async () => {
+  const src = mainSrc();
+  const f = rcFix(); f.mark(4242, RC_URL);
+  const screens = { t1: RC_BASE, t2: RC_BASE, t3: `${RC_LINE}\n  Remote Control disconnected\n${RC_BASE}`, t4: RC_BASE, t5: `${RC_LINE}\n${RC_BASE}` };
+  const pids = { t1: 4242, t2: 999, t3: 4242, t4: null, t5: 4242 }; // the claude pid each terminal reports
+  const helper = [];
+  const exec = async (_n, a) => {
+    const [, cmd, po, pid, url] = a; helper.push([cmd, po, pid]);
+    const out = cmd === "remote-check" ? I.checkRemote(f.dir, po, Number(pid), { psRun: f.psRun, platform: "darwin" })
+      : cmd === "remote-mark" ? { ok: I.markRemote(f.dir, po, Number(pid), { url, psRun: f.psRun, platform: "darwin" }) } : { ok: I.clearRemote(f.dir, po) };
+    return { code: 0, stdout: JSON.stringify(out) };
+  };
+  const hc = async (a) => a[0] === "read" ? { code: 0, stdout: screens[a[1]] }
+    : a[0] === "get" ? { code: 0, stdout: JSON.stringify({ foreground: pids[a[1]] ? { pid: pids[a[1]], name: "claude.exe" } : { pid: 5, name: "zsh" } }) } : { code: 0, stdout: "" };
+  const sent = [];
+  const g = { hc: async (a) => { if (a[0] === "keys" || a[0] === "send") sent.push(a); return hc(a); }, exec, HELPER: () => "inbox.cjs", termPid: I.termPid, PROMPT_LINES: 40, remoteScreen: I.remoteScreen, poList: (terms) => terms.map((t) => ({ id: t.id, address: t.address })) };
+  const self = { rc: new Map(), rcChecked: new Set(), say: () => { throw new Error("no toast"); }, liveTerms: () => ["a", "b", "c", "d", "e"].map((id, i) => ({ id, address: `t${i + 1}` })) };
+  Object.assign(self, restoreMethods(src, g));
+  const spawned = [];
+  const cx = { spawn: (fn) => spawned.push(fn(cx)), notify: () => {} };
+  self.remoteRestore(cx); await Promise.all(spawned); await tick(); await tick();
+  assert.equal(self.rc.get("a")?.phase, "on"); assert.equal(self.rc.get("a").url, RC_URL); assert.equal(self.rc.get("a").note, undefined); // t1: same process (pid + start) => on, no chat note
+  assert.equal(self.rc.has("b"), false); // t2: a record of another PO id is absent: nothing
+  assert.equal(self.rc.has("c"), false); // t3: the screen says it was disconnected
+  assert.equal(self.rc.has("d"), false); // t4: no claude pid in the foreground: no check, nothing
+  assert.equal(self.rc.get("e")?.phase, "on"); // t5: the screen still shows the line (the live signal) => on
+  assert.ok(helper.some((h) => h[0] === "remote-clear" && h[1] === "c"));
+  assert.ok(helper.some((h) => h[0] === "remote-mark" && h[1] === "e" && h[2] === "4242")); // seen on the screen: saved for the next restart
+  assert.deepEqual(sent, []); // read only: no send, no key
+  // the process was replaced (same pid, later start): the record fails and is deleted
+  f.ps.out = "Thu Nov 26 08:00:00 2026"; self.rc.clear(); spawned.length = 0;
+  self.remoteRestore(cx, true); await Promise.all(spawned); await tick(); await tick();
+  assert.equal(self.rc.has("a"), false);
+  assert.equal(I.readRemoteRec(f.dir, "a"), null);
+});
+test("원격 연결 켜기 #109: 켜짐·이미 켜짐이 확인되면 그 터미널의 claude pid를 기록하고, 화면이 끊김이면 기록을 지운 뒤 보낸다", () => {
+  const src = mainSrc();
+  const on = methodOf(src, "  remoteOn(room, po, c) {", "  // The button and, beside it");
+  assert.match(on, /if \(phase === "on" \|\| phase === "already"\) this\.remoteMark\(room, po, extra\.url \?\? ""\)/);
+  assert.match(on, /if \(pre && pre\.off\) await this\.remoteHelper\("remote-clear", room\)/);
+  // the record is only ever written from the process behind a screen that showed it on, never from a send alone
+  const cli = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8");
+  assert.match(cli, /cmd === "remote-check"/); assert.match(cli, /cmd === "remote-mark"/); assert.match(cli, /cmd === "remote-clear"/);
 });

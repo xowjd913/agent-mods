@@ -738,6 +738,86 @@ function readPoSession(dir, id) {
   if (!file) return null;
   try { const o = JSON.parse(fs.readFileSync(file, "utf8")); return sessionRecord({ transcript_path: o?.path, session_id: o?.sid }); } catch { return null; }
 }
+// ---- #109: Remote Control stays on after the desk (or the whole Herdr app) restarts, because the PO's `claude` process keeps running in the terminal host. The desk
+// writes a record <inbox dir>/po-remote/<po id>.json = {pid, start, sid, url, ms} when it SEES remote on, and a later start restores "on" from it only while the
+// same process is still running (same pid AND same process start time: a restarted or resumed claude is a new process), the session is the same, and the transcript's
+// newest `bridge-session` line is not the empty one a clean disconnect leaves (a non-empty line alone proves nothing: an exit or a resume leaves it behind).
+const REMOTE_DIR = "po-remote";
+const REMOTE_BRIDGE_MAX = 8 << 20; // the transcript's last 8 MiB are searched for the newest bridge-session line
+const remoteRecFile = (dir, id) => (cleanPoId(id) ? path.join(dir, REMOTE_DIR, `${cleanPoId(id)}.json`) : null);
+// When process `pid` started, as ps prints it in the C locale (the same string for the same process, whatever the user's language), or null: not running, ps
+// failed, or Windows (no ps; there the restore is simply off and the screen stays the only source).
+function procStart(pid, platform = process.platform, psRun = null) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 1 || platform === "win32") return null;
+  try {
+    const ps = psRun ?? ((x) => require("child_process").execFileSync("ps", ["-o", "lstart=", "-p", String(x)], { timeout: 3000, stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, LC_ALL: "C", LANG: "C" } }).toString("utf8"));
+    return String(ps(n)).trim() || null;
+  } catch { return null; }
+}
+// The newest bridge-session line of a transcript: "on" (it names a bridge session), "off" (empty id: a clean disconnect), "none" (no such line in the last 8 MiB).
+function bridgeState(file, max = REMOTE_BRIDGE_MAX) {
+  let fd = -1;
+  try {
+    fd = fs.openSync(file, "r");
+    const size = fs.fstatSync(fd).size, len = Math.min(size, max);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    const lines = buf.toString("utf8").split("\n");
+    if (size > len) lines.shift(); // the cut first line
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i].includes('"bridge-session"')) continue;
+      let o = null;
+      try { o = JSON.parse(lines[i]); } catch { continue; }
+      if (o?.type === "bridge-session") return typeof o.bridgeSessionId === "string" && o.bridgeSessionId ? "on" : "off";
+    }
+  } catch {} finally { if (fd >= 0) try { fs.closeSync(fd); } catch {} }
+  return "none";
+}
+function readRemoteRec(dir, id) {
+  const file = remoteRecFile(dir, id);
+  if (!file) return null;
+  try { const o = JSON.parse(fs.readFileSync(file, "utf8")); return o && o.on === true && Number.isInteger(o.pid) && typeof o.start === "string" && o.start ? o : null; } catch { return null; }
+}
+function clearRemote(dir, id) {
+  const file = remoteRecFile(dir, id);
+  if (!file) return false;
+  try { fs.unlinkSync(file); return true; } catch { return false; }
+}
+// Records that PO `id`'s claude process `pid` has remote on (the desk saw it). Not written without a process start time (Windows, a dead pid) or when it is the same
+// as the record already there. Returns true when written.
+function markRemote(dir, id, pid, { url = "", now = Date.now(), psRun = null, platform = process.platform } = {}) {
+  const file = remoteRecFile(dir, id);
+  const start = procStart(pid, platform, psRun);
+  if (!file || !start) return false;
+  const ses = readPoSession(dir, id);
+  const u = typeof url === "string" && /^https:\/\/claude\.ai\//.test(url) && url.length <= 500 ? url : "";
+  const rec = { on: true, pid: Number(pid), start, sid: ses?.sid ?? "", url: u, ms: Number(now) || Date.now() };
+  const old = readRemoteRec(dir, id);
+  if (old && old.pid === rec.pid && old.start === rec.start && old.sid === rec.sid && (old.url ?? "") === rec.url) return false;
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(rec), { mode: 0o600 });
+  fs.renameSync(tmp, file);
+  return true;
+}
+// Is remote still on for PO `id` whose claude process is `pid`? {on, why, url}. All of these must hold: a record, the same pid, the same process start time (a
+// dead pid has none), the same session, and the transcript's newest bridge-session line is not the empty one. A record that fails is deleted (it can never be true again).
+function checkRemote(dir, id, pid, { psRun = null, platform = process.platform, bridge = bridgeState } = {}) {
+  const rec = readRemoteRec(dir, id);
+  if (!rec) return { on: false, why: "norecord", url: "" };
+  const off = (why) => { clearRemote(dir, id); return { on: false, why, url: "" }; };
+  if (rec.pid !== Number(pid)) return off("pid");
+  const start = procStart(pid, platform, psRun);
+  if (!start) return off("dead");
+  if (start !== rec.start) return off("start");
+  const ses = readPoSession(dir, id);
+  if (rec.sid && !ses) return off("session"); // the session record the desk saw is gone: the transcript cannot be checked
+  if (rec.sid && ses?.sid && ses.sid !== rec.sid) return off("session");
+  // Only a non-empty newest bridge line backs the record. "none" (no line at all, or none inside the 8 MiB tail read: a disconnect may be buried further back) is not enough.
+  if (ses && bridge(ses.path) !== "on") return off("bridge");
+  return { on: true, why: "", url: typeof rec.url === "string" ? rec.url : "" };
+}
 // {<po id>: {usd, unknown:[model ids not in the table], sub:<sub-agent transcripts counted>, partial}} for every PO that has a session record
 // whose transcript can be read. A PO without a record (it started before the hook recorded sessions) is simply absent: nothing is shown.
 // `cacheDir` is where the read-position cache lives: the desk watches the inbox folder (and reloads on any change in it), so collect() keeps the
@@ -2015,7 +2095,7 @@ function remoteBlock({ po = "", status = "", running = false, sending = false } 
 const REMOTE_POLLS = 5, REMOTE_POLL_MS = 1000; // after the send: this many screen reads, this far apart (~5 s)
 const REMOTE_URL = /https:\/\/claude\.ai\/code\/[^\s)\]>"'`]+/g;
 // What the PO's screen says about Remote Control. `menu` = Claude Code's "already connected" menu (Disconnect this session / Show QR code / Continue), `active` = the
-// footer says it is on, `url` = the last session link on screen. Text copied from Claude Code's UI and NOT verified against a real terminal (UNVERIFIED).
+// footer says it is on, `url` = the last session link on screen, `off` = a disconnect line is on screen after the last on line (#109: that clears the saved on-record). Text copied from Claude Code's UI and NOT verified against a real terminal (UNVERIFIED).
 function remoteScreen(text) {
   const clean = cleanText(text);
   const lines = clean.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim());
@@ -2029,7 +2109,7 @@ function remoteScreen(text) {
   let on = -1, off = -1;
   lines.forEach((l, i) => { if (/\/?remote[- ]control (is )?(active|connected)/i.test(l)) on = i; if (/remote[- ]control (is )?(disconnected|off|stopped|inactive)|disconnected (this )?session/i.test(l)) off = i; });
   const urls = clean.match(REMOTE_URL) ?? [];
-  return { menu, active, seen: active || (on >= 0 && on > off), url: urls.length ? urls[urls.length - 1].replace(/[.,;:]+$/, "") : "" };
+  return { menu, active, seen: active || (on >= 0 && on > off), off: !active && off >= 0 && off > on, url: urls.length ? urls[urls.length - 1].replace(/[.,;:]+$/, "") : "" };
 }
 // The one-line system note for the room's chat. kind: on | already | fail | unknown.
 function remoteNote(kind, { url = "", why = "" } = {}) {
@@ -2097,6 +2177,15 @@ function restartTerm(r) {
   if (!j || typeof j !== "object") return null;
   const turn = Number(j.turn);
   return { live: String(j.state ?? "") === "live" && (j.exit_code === null || j.exit_code === undefined), status: String(j?.status?.state ?? "").trim().toLowerCase(), turn: Number.isFinite(turn) ? turn : null };
+}
+// The claude process of a terminal from `hc get <t> --json` ({code, stdout}): its foreground process when that is claude, else null (a shell prompt, a child in front).
+function termPid(r) {
+  if (!r || Number(r.code) !== 0) return null;
+  let j = null;
+  try { j = JSON.parse(String(r.stdout ?? "")); } catch { return null; }
+  const f = j?.foreground, pid = Number(f?.pid);
+  const name = String(f?.name ?? (Array.isArray(f?.argv) ? f.argv[0] : "") ?? "");
+  return Number.isInteger(pid) && pid > 1 && /(^|[\\/])claude(\.exe)?$/i.test(name) ? pid : null;
 }
 // Why nothing is sent now ("" when it can be): the terminal must be known and running, not on a prompt, not working (idle or done are both fine).
 function restartSendBlock(term) {
@@ -2173,12 +2262,13 @@ function readHandoff(dir = inboxDir(), id = "") {
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { hookProved, initial, cutPoint, cutHead, cutTail, wellFormed, CLIP_TEXT_MAX, clipText, bangCommand, promptInput, promptParse, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, SEND_PROOF_BACK_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, roomWorking, REMOTE_CMD, REMOTE_POLLS, REMOTE_POLL_MS, remoteBlock, remoteScreen, remoteNote, SOLO_DIR, soloEnabled, readSolo, setSolo, SOLO_FLAG, soloFile, decisionGroups, groupAnswer, dropChat };
+module.exports = { hookProved, initial, cutPoint, cutHead, cutTail, wellFormed, CLIP_TEXT_MAX, clipText, bangCommand, promptInput, promptParse, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, SEND_PROOF_BACK_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, roomWorking, REMOTE_CMD, REMOTE_POLLS, REMOTE_POLL_MS, remoteBlock, remoteScreen, remoteNote, SOLO_DIR, soloEnabled, readSolo, setSolo, SOLO_FLAG, soloFile, decisionGroups, groupAnswer, dropChat, REMOTE_DIR, remoteRecFile, termPid, procStart, bridgeState, readRemoteRec, clearRemote, markRemote, checkRemote };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)
   // `node inbox.cjs clipimg`    -> {"path": <saved picture of the clipboard>|null}
   // `node inbox.cjs handoff <po id>` -> {path, exists, ms, size, text} of that PO's handoff note
+  // `node inbox.cjs remote-check <po id> <pid>` -> {on, why, url}; `remote-mark <po id> <pid> [url]` / `remote-clear <po id>` -> {ok} (#109)
   // `node inbox.cjs addimg <f>` -> {"path": <saved copy of the picture file f>|null}
   const [cmd, arg] = process.argv.slice(2);
   loadNames(); // every subcommand reads the profile (hub folder, id pattern); a broken one is reported in the data (`profileError`)
@@ -2188,6 +2278,9 @@ if (require.main === module) {
   else if (cmd === "diag") { try { diagAppend(JSON.parse(arg)); } catch {} process.stdout.write("{}"); }
   else if (cmd === "po-me") { let me = []; try { const f = poFile(inboxDir(), arg); if (f) me = parsePoLines(readTail(f)).filter((x) => x.me).slice(-20).map((x) => ({ ms: x.ms, text: x.text })); } catch {} process.stdout.write(JSON.stringify(me)); }
   else if (cmd === "handoff") process.stdout.write(JSON.stringify(readHandoff(inboxDir(), arg)));
+  else if (cmd === "remote-check") { let r = { on: false, why: "error", url: "" }; try { r = checkRemote(inboxDir(), arg, Number(process.argv[4])); } catch {} process.stdout.write(JSON.stringify(r)); }
+  else if (cmd === "remote-mark") { let ok = false; try { ok = markRemote(inboxDir(), arg, Number(process.argv[4]), { url: process.argv[5] ?? "" }); } catch {} process.stdout.write(JSON.stringify({ ok })); }
+  else if (cmd === "remote-clear") { let ok = false; try { ok = clearRemote(inboxDir(), arg); } catch {} process.stdout.write(JSON.stringify({ ok })); }
   else if (cmd === "addimg") process.stdout.write(JSON.stringify(shown(importImage(arg))));
   else process.stdout.write(JSON.stringify(collect()));
 }
