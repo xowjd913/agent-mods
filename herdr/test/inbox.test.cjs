@@ -1088,7 +1088,7 @@ test("poFile: 앞뒤 공백이 낀 id는 다듬은 id로 파일을 만든다", (
 
 test("main.js: Enter 전송은 imeHold를 거치고, PO 라벨이 없으면 안내를 보인다", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8").replace(/\r\n/g, "\n");
-  assert.match(src, /imeHold\(value, this\.editAt, this\.heldAt, now\)/); // 글자가 바뀐 때 기준(위젯이 넣은 줄바꿈은 편집이 아니다)
+  assert.match(src, /imeHold\(value, this\.editAt, this\.heldAt, now, atTextEnd\(value, cur\)\)/); // 글자가 바뀐 때 기준(위젯이 넣은 줄바꿈은 편집이 아니다)
   assert.match(src, /id\("po-hint"\)/);
   assert.match(src, /\.child\(this\.picker\(t, v\)\)/); // 전체 보기는 PO가 0개여도 안내를 그린다
 });

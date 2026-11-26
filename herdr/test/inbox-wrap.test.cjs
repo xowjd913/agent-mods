@@ -1165,7 +1165,7 @@ test("#74: 소스 — 채팅 상자는 모든 방에서 같은 자리에 그려�
   // the only places that write into the box: our own clears (wipe), the guard's restore, the "@" pick, the held / stray line break
   const writers = MAIN.split("\n").map((l, i) => [i + 1, l]).filter(([, l]) => /this\.chat\.(set_value|replace)\(/.test(l));
   const where = (n) => { const head = MAIN.slice(0, MAIN.split("\n").slice(0, n).join("\n").length); return head.slice(head.lastIndexOf("\n  ") + 1).split("\n")[0]; };
-  for (const [n] of writers) assert.match(MAIN.split("\n").slice(0, n).reverse().find((l) => /^  [a-zA-Z]+\(.*\) \{$/.test(l)), /pickMenu|enterBox|dropBreak/, `line ${n}`);
+  for (const [n] of writers) assert.match(MAIN.split("\n").slice(0, n).reverse().find((l) => /^  [a-zA-Z]+\(.*\) \{$/.test(l)), /pickMenu|enterBox|dropBreak|dropAt/, `line ${n}`);
 });
 
 test("#66 mdText: a numbered list stays compact even when the source has blank lines between its items, like the '-' list", () => {

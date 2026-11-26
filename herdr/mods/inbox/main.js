@@ -129,10 +129,10 @@ const strayBreak = (value, sentAt, now) => String(value ?? "").length > 0 && Str
 // commit's own 100 ms edit) sends. `heldAt`: when an Enter was last held (0 = never); `changedAt`, `now`: ms.
 const IME_MS = 500;
 const IME_TAIL = /[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\u3040-\u30FF\u3400-\u9FFF]$/;
-const imeHold = (value, changedAt, heldAt, now) => {
+const imeHold = (value, changedAt, heldAt, now, atEnd = true) => {
   if (Number(heldAt) > 0 && Number(changedAt) <= Number(heldAt) + 100) return false;
   if (Number(now) - Number(changedAt) < IME_MS) return true;
-  return IME_TAIL.test(String(value ?? "").trimEnd());
+  return atEnd !== false && IME_TAIL.test(String(value ?? "").trimEnd()); // a syllable still being composed sits at the cursor: with the cursor inside the text the tail is settled
 };
 // The line break the widget itself puts in the box for a held Enter (it may add it before or after the key handler runs): the held Enter
 // must not leave it there, or the person sees a blank line appear before the second Enter. `heldAt`, `now`: ms; HELD_BREAK_MS covers both orders.
@@ -140,6 +140,20 @@ const HELD_BREAK_MS = 150;
 const strayHeld = (value, heldAt, now) => Number(heldAt) > 0 && Number(now) - Number(heldAt) < HELD_BREAK_MS && /\n$/.test(String(value ?? ""));
 // The text with its trailing line breaks cut: what "an edit" is measured on (the widget's own line break for an Enter is not an edit).
 const editCore = (value) => String(value ?? "").replace(/\n+$/, "");
+// #83: Enter sends from any cursor position. The widget may also put its own line break at the cursor (anywhere in the text, not only at the end):
+// `strayAt(prev, value)` is where exactly one "\n" was inserted into `prev` (-1 if the change is anything else), `withoutAt` takes it out again,
+// `enterPending(enterAt, now)` says an Enter was pressed just before (or up to 25 ms after) `now`, and `atTextEnd(value, cursor)` is whether the
+// cursor is at the end of the text (an unknown cursor counts as the end, the careful side for the IME hold).
+const strayAt = (prev, value) => {
+  const a = String(prev ?? ""), b = String(value ?? "");
+  if (b.length !== a.length + 1) return -1;
+  let i = 0;
+  while (i < a.length && a[i] === b[i]) i++;
+  return b[i] === "\n" && b.slice(0, i) + b.slice(i + 1) === a ? i : -1;
+};
+const withoutAt = (value, i) => String(value ?? "").slice(0, i) + String(value ?? "").slice(i + 1);
+const enterPending = (enterAt, now) => Number(enterAt) > 0 && Number(now) - Number(enterAt) >= -25 && Number(now) - Number(enterAt) < HELD_BREAK_MS;
+const atTextEnd = (value, cursor) => cursor == null || !Number.isFinite(Number(cursor)) || Number(cursor) >= editCore(value).length;
 const holdShown = (changedAt, heldAt) => Number(heldAt) > 0 && Number(changedAt) <= Number(heldAt) + 100; // a held Enter is still waiting for its second one
 // The "@query" being typed right before `cursor` (offsets into the box text), or null. Not inside a chip, not in the middle of a word.
 function mentionQuery(text, cursor, tokens = []) {
@@ -1243,6 +1257,9 @@ export default class Inbox extends View {
     this.heldAt = 0; // the last Enter held back as a possible IME confirm (ms)
     this.nlAt = 0; // the last Shift+Enter handled (ms)
     this.core = ""; // the box text without trailing line breaks, as of the last change
+    this.lastValue = ""; // #83: the box text as of the last change (a line break the widget put at the cursor is found against it)
+    this.enterAt = 0; // #83: the last plain Enter (key or submit event) in the chat box (ms)
+    this.brk = null; // #83: {idx, at, core, editAt}: the line break the widget last put in the text, and the edit state before it
     this.editAt = 0; // the last time that text changed (ms); the IME hold reads this, not changedAt
     this.pics = []; // pictures waiting in the box: [{path, w, h}] (saved under the inbox's po/img by the helper)
     this.picBusy = 0; // pictures being read from the clipboard / a file right now
@@ -1266,6 +1283,10 @@ export default class Inbox extends View {
       try { value = this.chat.value(); } catch {}
       if (this.guard("chat", this.chat, value)) return; // the box was emptied behind the person's back: the text is back, nothing else to do
       this.keep("chat", this.chat, value);
+      const brk = strayAt(this.lastValue, value); // #83: the widget put a line break at the cursor
+      this.lastValue = value;
+      if (brk >= 0 && enterPending(this.enterAt, this.changedAt)) { this.dropAt(value, brk, this.editAt); return; } // the Enter (sent or held) left it: take it out, wherever it is
+      this.brk = brk >= 0 ? { idx: brk, at: this.changedAt, core: this.core, editAt: this.editAt } : null; // (the key may come after this change: see enterBox)
       const core = editCore(value); // an edit is a change of the text itself: the widget's own line break for an Enter is not one
       if (core !== this.core) { this.core = core; this.editAt = this.changedAt; }
       this.heldTick(c);
@@ -2476,10 +2497,20 @@ export default class Inbox extends View {
   enterBox(intent, c) {
     const now = Date.now();
     if (intent === "send") {
+      this.enterAt = now;
       if (now - this.pickedAt <= 250 || now - this.sentAt <= 250 || now - this.heldAt < 150) return; // (the key and the submit event of one press are one Enter)
       let value = "";
       try { value = this.chat.value(); } catch {}
-      if (value.trim() && imeHold(value, this.editAt, this.heldAt, now)) { // maybe the IME's confirming Enter: only this once
+      let cur = null; // #83: where the cursor was when Enter was pressed (Enter sends from any position; the IME tail rule is for the end)
+      try { cur = this.chat.selected_range().end; } catch {}
+      const b = this.brk;
+      if (b && now - b.at <= 25 && value[b.idx] === "\n") { // the widget's line break at the cursor came before this key: it is not the person's text
+        value = withoutAt(value, b.idx);
+        cur = b.idx;
+        this.dropAt(this.chat.value(), b.idx, b.editAt);
+        this.core = b.core;
+      }
+      if (value.trim() && imeHold(value, this.editAt, this.heldAt, now, atTextEnd(value, cur))) { // maybe the IME's confirming Enter: only this once
         this.heldAt = now;
         if (strayHeld(value, now, now) && now - this.changedAt <= 25) this.dropBreak(value); // the widget already added its line break
         c.notify();
@@ -2490,6 +2521,21 @@ export default class Inbox extends View {
       this.nlAt = now;
       try { c.timer.after(40, () => { if (needsNewline(this.changedAt, now)) { try { this.chat.replace("\n"); } catch {} } }); } catch {}
     }
+  }
+
+  // #83: takes the one line break at `idx` out (the text and the chips around it stay, the cursor goes where the break was); `editAt` is the edit time to keep.
+  dropAt(value, idx, editAt) {
+    const next = withoutAt(value, idx);
+    this.lastValue = next;
+    this.core = editCore(next);
+    this.editAt = editAt;
+    this.brk = null;
+    try {
+      this.chat.set_selected_range({ start: idx, end: idx + 1 });
+      this.chat.replace("");
+      if (this.chat.value() !== next) this.chat.set_value(next); // the widget would not replace with nothing: plain text instead
+      this.chat.set_selected_range({ start: idx, end: idx });
+    } catch {}
   }
 
   // Takes the one trailing line break the widget added out of the box (the cursor goes to the end, where it was).
