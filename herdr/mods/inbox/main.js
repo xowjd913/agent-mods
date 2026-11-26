@@ -704,6 +704,33 @@ function decisionOptions(body) {
   if (options.length < 2) return { options: [], recommended: 0 };
   return { options, recommended: options.includes(rec) ? rec : 0 };
 }
+// A decision report that asks several questions (#76): a header line starting with a circled digit ("① 병합 시점", "**② 순서**", "- ③ …") opens a
+// question, and the "N안:" lines below it (until the next header) are that question's options. Only when at least two questions each have
+// at least two options; otherwise [] and the card reads the whole body as one question (decisionOptions). Options above the first header
+// belong to no question and make the body ambiguous, so they also give [].
+// -> [{ label: "①", options: [1, 2], recommended: 2 | 0 }, ...]
+const GROUP_HEAD = /^\s*(?:[-*#>]+\s*)?(?:\*\*)?([①②③④⑤⑥⑦⑧⑨⑩])/;
+function decisionGroups(body) {
+  const segs = [{ label: "", lines: [] }];
+  for (const line of String(body ?? "").split(/\r?\n/)) {
+    const m = line.match(GROUP_HEAD);
+    if (m) segs.push({ label: m[1], lines: [] });
+    else segs[segs.length - 1].lines.push(line);
+  }
+  if (segs.length < 3 || decisionOptions(segs[0].lines.join("\n")).options.length) return [];
+  const groups = segs.slice(1).map((s) => ({ label: s.label, ...decisionOptions(s.lines.join("\n")) }));
+  return groups.every((g) => g.options.length >= 2) && new Set(groups.map((g) => g.label)).size === groups.length ? groups : [];
+}
+// The answer for picks {label: N}: "①1안, ②2안" in the questions' order; "" until every question has a pick that is one of its options.
+function groupAnswer(groups, picks) {
+  const parts = [];
+  for (const g of groups ?? []) {
+    const n = picks?.[g.label];
+    if (!g.options.includes(n)) return "";
+    parts.push(`${g.label}${n}안`);
+  }
+  return parts.join(", ");
+}
 // What a decision report offers when it has no "N안:" lines (#62): its "추천: ..." and "답: ..." lines, shown on the card without opening it,
 // and the quoted answers after "답:" ("둘 다 진행" / "#59만" / "보류", also “…” and 「…」) as answer buttons when there are at least two.
 // Read strictly from the body; "답" must start a word (not "정답:" / "답변:"). The "추천" line may carry the "답:" part after it on the same line.
@@ -3489,15 +3516,35 @@ export default class Inbox extends View {
       .when(Boolean(extra), (el) => el.child(extra));
   }
 
+  // One button of a multi-question decision card (#76): remember the pick; with every question picked, send "①1안, ②2안" at once and forget them.
+  pickGroup(a, groups, label, n, cx) {
+    const key = this.askKey(a);
+    this.gpick ??= new Map();
+    const cur = this.gpick.get(a.s.leader);
+    const picks = cur?.key === key ? { ...cur.picks, [label]: n } : { [label]: n };
+    const text = groupAnswer(groups, picks);
+    if (!text) { this.gpick.set(a.s.leader, { key, picks }); cx.notify(); return; }
+    this.gpick.delete(a.s.leader);
+    this.send(a, text, cx, "choice");
+  }
+
   // What a waiting leader's message offers: 링크 열기, 확인 완료 (verify), 답 쓰기 with its answer box, and what an answer does.
   askActions(t, a, cx) {
     const { s, kind, item, link } = a;
     const writing = this.writing === s.leader;
     const done = this.sentOf(a);
-    const opts = kind === "decision" ? decisionOptions(item?.body) : { options: [], recommended: 0 }; // once: the chips and the recommended one read the same list
+    const groups = kind === "decision" ? decisionGroups(item?.body) : []; // several questions (#76): one button row per question
+    const opts = kind === "decision" && !groups.length ? decisionOptions(item?.body) : { options: [], recommended: 0 }; // once: the chips and the recommended one read the same list
+    const key = this.askKey(a);
+    const picks = this.gpick?.get(s.leader)?.key === key ? this.gpick.get(s.leader).picks : {};
     // Without "N안:" lines the card still shows what the report offers (#62): its 추천 / 답 lines and the quoted answers as buttons.
-    const hint = kind === "decision" && opts.options.length < 2 ? decisionHints(item?.body) : { lines: [], answers: [], recommended: "" };
+    const hint = kind === "decision" && !groups.length && opts.options.length < 2 ? decisionHints(item?.body) : { lines: [], answers: [], recommended: "" };
     const box = v_flex().min_w(0).gap(6)
+      .children(groups.map((g, gi) => h_flex().id(`grp-${s.leader}-${gi}`).gap(6).items_center().flex_wrap()
+        .child(div().flex_none().text_size(12).font_semibold().text_color(t.foreground).child(g.label))
+        .children(g.options.map((n) => this.button(t, `opt-${s.leader}-${gi}-${n}`, `${n}안${n === g.recommended ? " (추천)" : ""}`, (c) => this.pickGroup(a, groups, g.label, n, c),
+          { primary: picks[g.label] === n, disabled: a.po ? "" : NO_PO(), tip: `${g.label}번 질문에 ${n}안을 고릅니다. 모든 질문을 고르면 한 번에 보냅니다` })))))
+      .when(groups.length > 0 && done === "", (el) => el.child(div().text_size(11).text_color(t.dim).child(`질문마다 하나씩 고르면 한 번에 보냅니다(${groups.filter((g) => !picks[g.label]).map((g) => g.label).join("·")} 남음)`)))
       .children(hint.lines.map((x, i) => div().id(`hint-${s.leader}-${i}`).min_w(0).text_size(12).text_color(t.foreground).child(x)))
       .child(h_flex().gap(6).items_center().flex_wrap()
         .when(Boolean(link) && link !== item?.link, (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", (c) => openUrl(link, c))))
