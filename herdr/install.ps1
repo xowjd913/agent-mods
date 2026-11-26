@@ -95,7 +95,7 @@ try {
   if (Test-Path (Join-Path $AppHome 'mods\inbox\po-hook.cjs')) {
     $H = Invoke-Helper @('hook', '--home', $AppHome)
     Write-Host -NoNewline $H.Out
-    if ($H.Code -ne 0) { Write-Host 'PO 훅을 설정에 넣지 못했습니다(PO 답이 데스크에 자동으로 올라오지 않습니다).' }
+    if ($H.Code -ne 0) { Write-Host 'PO 훅을 설정에 넣지 못했습니다(PO 답이 UI 모드에 자동으로 올라오지 않습니다).' }
   }
   if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { Write-Host 'gh가 없어 Work·PRs 패널은 GitHub 데이터를 불러오지 못합니다. GitHub CLI를 설치하고 로그인하세요.' }
 
