@@ -1881,7 +1881,7 @@ export default class Inbox extends View {
     try {
       c.spawn(async (cx) => {
         let r = null;
-        try { r = await hc(["send", po, text, "--json"]); } catch (e) { r = { code: -1, stdout: "", stderr: String(e?.message ?? e) }; }
+        try { r = await hc(["send", "--json", "--", po, text]); } catch (e) { r = { code: -1, stdout: "", stderr: String(e?.message ?? e) }; }
         const res = restartSendResult(r);
         if (!res.ok) { this.diag(`desk send failed: ${res.detail} (po ${po})`); fail(res.why, cx); return; }
         this.opening.delete(po);
@@ -2114,7 +2114,7 @@ export default class Inbox extends View {
     const at = Date.now();
     // hc() has no timeout option and exec() has no kill/abort (herdr.d.ts): a started send cannot be recalled or cut short from here; `hc send` itself waits at most
     // 60 s for a person's unfinished draft (draft_wait), then sends. Closing the restart strip only stops the steps after it (gen check).
-    try { r = await hc(["send", po, text, "--json"]); } catch (e) { r = { code: -1, stdout: "", stderr: String(e?.message ?? e) }; }
+    try { r = await hc(["send", "--json", "--", po, text]); } catch (e) { r = { code: -1, stdout: "", stderr: String(e?.message ?? e) }; }
     const res = restartSendResult(r);
     if (!res.ok) { this.diag(`restart send failed: ${res.detail} (po ${po})`); return no(res.why); }
     return { ok: true, why: "", turn: res.turn ?? term.turn, at };
