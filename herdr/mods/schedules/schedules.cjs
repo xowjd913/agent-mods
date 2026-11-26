@@ -457,6 +457,7 @@ function defaultDeps() {
     pidAlive: (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; } },
     osNotify: (title, body) => osNotify(title, body),
     ghAccount: () => loadGhAccount(),
+    claudeDir: () => claudeAccountDir(),
   };
 }
 
@@ -776,10 +777,19 @@ function makeWorktree(deps, a, now) {
   throw new Error("워크트리 이름을 정하지 못했습니다.");
 }
 
-function launchArgs(a, name, cwd, extraEnv = {}) {
+// 책상(계정 패널)에서 "새 세션에 사용"으로 고른 Claude 계정 폴더. 기본 계정이거나 도구가 없으면 null(= CLAUDE_CONFIG_DIR 를 넣지 않는다).
+function claudeAccountDir() {
+  for (const f of ["./claude-account.cjs", "../../claude-account/claude-account.cjs"]) {
+    try { const m = require(f); return m.selectedDir(m.makeCtx()); } catch {}
+  }
+  return null;
+}
+
+function launchArgs(a, name, cwd, extraEnv = {}, claudeDir = null) {
   const argv = [];
   if (!WIN) {
     argv.push("env", `PATH=${extraEnv.PATH ?? process.env.PATH ?? ""}`);
+    if (a.program === "claude" && claudeDir) argv.push(`CLAUDE_CONFIG_DIR=${claudeDir}`);
     // 계정 이름·신원 파일 경로만 넘긴다. 토큰은 넘기지 않는다(세션 안의 gh·git 이 그때그때 받는다).
     for (const [k, v] of Object.entries(extraEnv)) if (k !== "PATH" && /^[A-Z_][A-Z0-9_]*$/.test(k)) argv.push(`${k}=${v}`);
   }
@@ -872,7 +882,7 @@ function execute(runId, deps = defaultDeps()) {
       }
     }
     const name = `sched-${a.id.slice(0, 6)}-${stamp(now).replace("-", "")}${run.id.slice(0, 2)}`.slice(0, 32);
-    const launched = deps.hc(launchArgs(a, name, cwd, acct.env));
+    const launched = deps.hc(launchArgs(a, name, cwd, acct.env, deps.claudeDir ? deps.claudeDir() : null));
     if (launched.code !== 0) return finish({ status: "실패", error: oneLine(launched.stderr || launched.stdout, 200) || "hc run 실패" });
     let info = null;
     try { info = JSON.parse(launched.stdout); } catch {}
@@ -1297,7 +1307,7 @@ function main(argv) {
 module.exports = {
   ScheduleError, compile, nextAfter, nextTimes, latestIn, describe, validateAutomation, zonedToUtc, partsOf, localZone,
   tick, collectNotices, osNotifyCommand, execute, runNow, refreshRun, launchArgs, slugOf, stamp, claimRun, list, validate, save, remove, toggle, nextCmd, options, codexModels, branchOptions,
-  defaultDeps, loadGhAccount, accountEnv, syncStatus, setSyncRepo, record, importFromRepo, normRemote,
+  defaultDeps, claudeAccountDir, loadGhAccount, accountEnv, syncStatus, setSyncRepo, record, importFromRepo, normRemote,
   paths: { STORE_DIR, AUTOS_FILE, RUNS_FILE, SETTINGS_FILE },
 };
 if (require.main === module) main(process.argv.slice(2));

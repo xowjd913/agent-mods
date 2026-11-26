@@ -84,6 +84,9 @@ test("--extras는 추가 모드도 복사하고, 이후 기본 설치도 추가 
   // 계정 패널은 gh-account 도구를 함께 가져간다
   assert.equal(fs.readFileSync(path.join(home, "mods", "gh-accounts", "gh-account.cjs"), "utf8"),
     fs.readFileSync(path.join(__dirname, "..", "gh-account", "gh-account.cjs"), "utf8"));
+  // Claude 계정 도구(#121)는 계정 패널·스케줄·받은 글 모드가 각자 폴더에서 쓴다
+  const cca = fs.readFileSync(path.join(__dirname, "..", "claude-account", "claude-account.cjs"), "utf8");
+  for (const m of ["gh-accounts", "schedules", "inbox"]) assert.equal(fs.readFileSync(path.join(home, "mods", m, "claude-account.cjs"), "utf8"), cca, m);
   fs.writeFileSync(path.join(home, "mods", "usage-status", "main.js"), "old");
   const { result } = quiet(() => inst.installMods(home, false));
   assert.ok(result.installed.includes("usage-status"));

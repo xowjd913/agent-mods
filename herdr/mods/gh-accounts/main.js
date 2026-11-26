@@ -12,6 +12,7 @@ import { v_flex, h_flex, InputState, Input, Popover } from "gpui-base";
 import { theme, exec, appHome, checking, spaces, panes, window } from "herdr";
 
 const APP = () => `${appHome()}/mods/gh-accounts/gh-account.cjs`;
+const CAPP = () => `${appHome()}/mods/gh-accounts/claude-account.cjs`;
 const ICON = (name) => `mods/workspace-chrome/${name}.svg`;
 const TIMEOUT = 30000, TEST_TIMEOUT = 60000, REFRESH_MS = 60000, LOGIN_POLL_MS = 2000;
 const NONE = "-none-";
@@ -27,6 +28,9 @@ let shellPath = null;
 // gh-account CLI 를 부른다. HERDR_APP_HOME 을 이 Herdr 설정 폴더로 맞춰, 터미널의 gh 래퍼·git 도우미와 같은 매핑 파일을 쓴다.
 const cli = (args, timeout = TIMEOUT) => exec("env",
   [`HERDR_APP_HOME=${appHome()}`, ...(shellPath ? [`PATH=${shellPath}`] : []), "node", APP(), ...args], { timeout });
+// claude-account CLI(Claude 계정 목록·전환·로그인). 같은 PATH 를 넘기고, 로그인 시작은 이 CLI 가 hc 로 백그라운드 터미널을 연다.
+const ccli = (args, timeout = TIMEOUT) => exec("env",
+  [`HERDR_APP_HOME=${appHome()}`, ...(shellPath ? [`PATH=${shellPath}`] : []), "node", CAPP(), ...args], { timeout });
 const missingTool = (r) => r.code !== 0 && /Cannot find module|MODULE_NOT_FOUND/.test(r.stderr || "");
 const base = (p) => String(p ?? "").replace(/[\\/]+$/, "").split(/[\\/]/).pop();
 const lines = (r) => [...String(r.stdout || "").split("\n"), ...String(r.stderr || "").split("\n")].map((l) => l.trim()).filter(Boolean);
@@ -80,12 +84,20 @@ export default class Accounts extends View {
     this.loginAsk = false; // 계정 추가 확인 카드
     this.login = null;     // login status --json (진행 중일 때만)
     this.polling = false;
+    this.cl = null;        // Claude 계정: claude-account list 결과 { selected, accounts }
+    this.clMissing = false;
+    this.clBusy = false;
+    this.clAsk = false;    // Claude 계정 추가 이름 입력 카드
+    this.clConfirm = null; // { id, label, kind: "logout" | "remove" }
+    this.clLogin = null;   // claude-account login status (진행 중일 때만)
+    this.clPolling = false;
+    this.clInput = this.input("계정 이름(예: 회사, 개인)");
     this.ruleInput = this.input("owner/* 또는 owner/repo");
     this.targetInput = this.input("폴더 경로 또는 owner/repo");
     if (checking()) return;
     this.load(cx);
     cx.timer.every(REFRESH_MS, (cx) => { if (!this.saving) this.load(cx); });
-    cx.timer.every(LOGIN_POLL_MS, (cx) => this.poll(cx));
+    cx.timer.every(LOGIN_POLL_MS, (cx) => { this.poll(cx); this.pollClaude(cx); });
   }
 
   input(placeholder) {
@@ -131,6 +143,7 @@ export default class Accounts extends View {
       finally {
         this.busy = false;
         cx.notify();
+        this.loadClaude(cx);
         if (this.queued) { this.queued = false; this.load(cx); }
       }
     });
@@ -382,6 +395,182 @@ export default class Accounts extends View {
     return out;
   }
 
+  // ---- Claude 계정 ----
+
+  // 목록을 읽고, 로그인 여부를 모르거나 오래된 계정은 하나씩 확인한다(claude auth status 는 느려서 렌더가 아니라 여기서만).
+  loadClaude(cx) {
+    if (this.clBusy || checking()) return;
+    this.clBusy = true;
+    cx.spawn(async (cx) => {
+      try {
+        let r = await ccli(["list"]);
+        if (missingTool(r)) { this.clMissing = true; this.cl = null; return; }
+        this.clMissing = false;
+        let d = parse(r.stdout);
+        if (!d) return;
+        this.cl = d;
+        cx.notify();
+        const stale = d.accounts.filter((a) => !a.status || !a.status.fresh);
+        for (const a of stale) await ccli(["status", ...(a.id ? ["--id", a.id] : [])], 60000);
+        if (stale.length) {
+          r = await ccli(["list"]);
+          d = parse(r.stdout);
+          if (d) this.cl = d;
+        }
+        const lg = parse((await ccli(["login", "status"])).stdout);
+        this.clLogin = lg && RUNNING.has(lg.state) ? lg : null;
+        if (this.clLogin) this.clAsk = false;
+      } catch { /* 다음 새로고침에 다시 읽는다 */ }
+      finally { this.clBusy = false; cx.notify(); }
+    });
+  }
+
+  // 바꾸는 명령 하나. 끝나면 note 를 보여 주고 목록을 다시 읽는다.
+  claudeRun(cx, args, { ok, timeout, after } = {}) {
+    this.dd = null;
+    if (this.saving) return;
+    this.saving = true;
+    this.note = null;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const r = await ccli(args, timeout);
+        const j = parse(r.stdout);
+        if (r.code === 0 && j?.ok !== false) this.note = { text: ok ?? "바꿨습니다.", bad: false };
+        else this.note = { text: j?.message ?? (lines(r).join(" · ").slice(0, 300) || `실패했습니다(코드 ${r.code}).`), bad: true };
+        if (after) await after(r, j);
+      } catch (e) { this.note = { text: `실행하지 못했습니다: ${String(e?.message ?? e).slice(0, 180)}`, bad: true }; }
+      finally { this.saving = false; cx.notify(); this.loadClaude(cx); }
+    });
+  }
+
+  selectClaude(cx, id) {
+    this.claudeRun(cx, ["select", ...(id ? ["--id", id] : [])], { ok: "새로 여는 세션부터 이 계정을 씁니다. 지금 돌고 있는 세션은 그대로입니다." });
+  }
+
+  // 이름을 받아 계정 폴더를 만들고 바로 로그인 터미널을 연다. 로그인을 시작하지 못해도 계정은 목록에 남아 "로그인" 단추로 다시 시도할 수 있다.
+  addClaude(cx) {
+    const label = this.clInput.value().trim();
+    if (!label) { this.note = { text: "계정 이름을 적으세요.", bad: true }; cx.notify(); return; }
+    this.claudeRun(cx, ["add", "--label", label], {
+      ok: "계정을 더했습니다.",
+      after: async (_r, j) => {
+        if (!j?.ok) return;
+        this.clInput.set_value("");
+        this.clAsk = false;
+        await this.startClaudeLogin(j.id, `${j.label} 계정을 더했습니다.`);
+      },
+    });
+  }
+
+  async startClaudeLogin(id, prefix = "") {
+    const r = await ccli(["login", "start", "--id", id]);
+    const j = parse(r.stdout);
+    if (j?.ok) { this.clLogin = j.login; this.note = { text: `${prefix} 로그인 주소를 기다리는 중입니다.`.trim(), bad: false }; }
+    else this.note = { text: `${prefix} ${j?.message ?? "로그인을 시작하지 못했습니다."} 목록의 로그인 단추로 다시 시도하세요.`.trim(), bad: true };
+  }
+
+  pollClaude(cx) {
+    if (!this.clLogin || !RUNNING.has(this.clLogin.state) || this.clPolling) return;
+    this.clPolling = true;
+    cx.spawn(async (cx) => {
+      try {
+        const j = parse((await ccli(["login", "status"])).stdout);
+        if (!j) return;
+        if (RUNNING.has(j.state)) { this.clLogin = j; return; }
+        this.clLogin = null;
+        const who = j.label ? `${j.label} ` : "";
+        if (j.state === "done") this.note = { text: j.duplicate ? `${who}로그인에 성공했습니다. 주의: ${j.message}` : `${who}로그인에 성공했습니다.`, bad: Boolean(j.duplicate) };
+        else if (j.state === "cancelled") this.note = { text: j.message ?? "로그인을 그만뒀습니다.", bad: false };
+        else this.note = { text: `${who}로그인에 실패했습니다. ${j.message ?? ""}`.trim(), bad: true };
+        this.loadClaude(cx);
+      } catch { /* 다음에 다시 읽는다 */ }
+      finally { this.clPolling = false; cx.notify(); }
+    });
+  }
+
+  usageText(u) { return u && u.length ? u.map((x) => `${x.label} ${x.percent}%`).join(" · ") : ""; }
+
+  claudeRow(t, a, canAct) {
+    const on = a.selected;
+    const known = a.status && a.status.loggedIn !== null && a.status.loggedIn !== undefined;
+    const state = !a.status ? "확인 중…" : a.status.loggedIn === true ? `로그인됨${a.status.authMethod ? ` · ${a.status.authMethod}` : ""}` : known ? "로그인 안 됨" : "확인하지 못함";
+    const stateColor = a.status?.loggedIn === true ? t.muted : a.status?.loggedIn === false ? t.blocked : t.dim;
+    const key = a.id ?? "default";
+    const usage = this.usageText(a.usage);
+    const running = Boolean(this.clLogin && RUNNING.has(this.clLogin.state));
+    return v_flex().flex_none().px(8).py(4).gap(3).rounded(6)
+      .child(h_flex().id(`cl-pick-${key}`).gap(8).items_center().cursor_pointer()
+        .on_click((_e, cx) => { if (!on && !this.saving) this.selectClaude(cx, a.id); })
+        .child(div().flex_none().size(14).rounded(7).border(1).border_color(on ? t.accent : t.input).flex().items_center().justify_center()
+          .when(on, (e) => e.child(div().size(8).rounded(4).bg(t.accent))))
+        .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(a.label))
+        .when(on, (e) => e.child(div().flex_none().text_size(11).text_color(t.accent).child("새 세션에 사용")))
+        .child(div().flex_none().text_size(11).text_color(stateColor).child(state)))
+      .when(Boolean(a.id) || Boolean(usage), (el) => el.child(h_flex().pl(22).gap(6).items_center()
+        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(usage ? `사용량 ${usage}` : a.id ? `폴더 ${a.folder}` : ""))
+        .when(Boolean(a.id), (e) => e
+          .when(a.status?.loggedIn !== true, (x) => x.child(this.button(t, `cl-login-${key}`, "로그인", (cx) => this.claudeRun(cx, ["login", "start", "--id", a.id], {
+            ok: "로그인 주소를 기다리는 중입니다.",
+            after: async (_r, j) => { if (j?.ok) this.clLogin = j.login; },
+          }), { disabled: !canAct || running })))
+          .when(a.status?.loggedIn === true, (x) => x.child(this.button(t, `cl-logout-${key}`, "로그아웃", (cx) => { this.clConfirm = { id: a.id, label: a.label, kind: "logout" }; cx.notify(); }, { disabled: !canAct })))
+          .child(this.button(t, `cl-remove-${key}`, "목록에서 빼기", (cx) => { this.clConfirm = { id: a.id, label: a.label, kind: "remove" }; cx.notify(); }, { disabled: !canAct })))));
+  }
+
+  claudeConfirmCard(t) {
+    const c = this.clConfirm;
+    const logout = c.kind === "logout";
+    return v_flex().mx(8).my(4).p(8).gap(4).rounded(8).border(1).border_color(t.accent).bg(t.background)
+      .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child(logout ? `${c.label} 계정을 로그아웃할까요?` : `${c.label} 계정을 목록에서 뺄까요?`))
+      .child(div().text_size(11).text_color(t.muted).child(logout
+        ? "이 계정 폴더의 로그인만 지웁니다. 기본 계정과 다른 계정에는 영향이 없고, 지금 돌고 있는 세션도 그대로입니다."
+        : "목록에서만 빼고 계정 폴더는 디스크에 그대로 둡니다. 새로 여는 세션이 기본 계정을 쓰게 될 수 있습니다."))
+      .child(h_flex().pt(4).gap(6)
+        .child(this.button(t, "cl-confirm-go", logout ? "로그아웃" : "빼기", (cx) => {
+          this.clConfirm = null;
+          this.claudeRun(cx, [c.kind, "--id", c.id], { ok: logout ? `${c.label} 계정에서 로그아웃했습니다.` : `${c.label} 계정을 목록에서 뺐습니다. 폴더는 그대로 있습니다.` });
+        }, { primary: true }))
+        .child(this.button(t, "cl-confirm-no", "취소", (cx) => { this.clConfirm = null; cx.notify(); })));
+  }
+
+  claudeLoginCard(t) {
+    const l = this.clLogin;
+    const mac = window()?.platform === "macos";
+    const card = v_flex().mx(8).my(4).p(8).gap(6).rounded(8).border(1).border_color(t.accent).bg(t.background)
+      .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child(`${l.label ?? "Claude"} 계정 로그인 중`));
+    if (!l.url) card.child(div().text_size(11.5).text_color(t.dim).child("로그인 주소를 기다리는 중입니다…"));
+    else {
+      card.child(div().text_size(11.5).text_color(t.muted).child(`1. 주소 복사를 누릅니다. 2. 시크릿 창(${mac ? "Cmd+Shift+N" : "Ctrl+Shift+N"})에서 열기: 새 시크릿 창에 붙여 넣고, 더할 Claude 계정으로 로그인합니다. 3. 승인하면 여기가 저절로 끝납니다.`))
+        .child(div().text_size(11).text_color(t.dim).max_h(48).overflow_hidden().child(l.url))
+        .child(this.button(t, "cl-login-copy", "주소 복사", (cx) => { copyText(l.url); this.note = { text: "주소를 복사했습니다. 시크릿 창에 붙여 넣으세요.", bad: false }; cx.notify(); }, { primary: true }));
+    }
+    card.child(h_flex().gap(6).child(this.button(t, "cl-login-cancel", "그만두기", (cx) => this.claudeRun(cx, ["login", "cancel"], { ok: "로그인을 그만두는 중입니다.", after: () => { this.clLogin = null; } }))));
+    return card;
+  }
+
+  claudeBlock(t) {
+    const out = [];
+    const canAct = Boolean(this.cl);
+    out.push(this.heading(t, "Claude 계정", false, "새로 여는 세션이 쓸 Claude 계정을 고릅니다. 지금 돌고 있는 세션은 그대로이고, 새로 여는 세션부터 적용됩니다. 한도가 차도 저절로 바꾸지 않습니다.",
+      this.button(t, "cl-add", "계정 추가…", (cx) => { this.clAsk = true; cx.notify(); }, { disabled: !canAct || this.clAsk || Boolean(this.clLogin) })));
+    if (this.clMissing) { out.push(div().px(8).text_size(11.5).text_color(t.idle ?? t.dim).child(MISSING_HINT.replace("gh-account.cjs", "claude-account.cjs"))); return out; }
+    if (!this.cl) { out.push(div().px(8).text_size(11.5).text_color(t.dim).child("불러오는 중…")); return out; }
+    for (const a of this.cl.accounts) out.push(this.claudeRow(t, a, canAct));
+    if (this.clConfirm) out.push(this.claudeConfirmCard(t));
+    if (this.clLogin) out.push(this.claudeLoginCard(t));
+    else if (this.clAsk) {
+      out.push(v_flex().mx(8).my(4).p(8).gap(6).rounded(8).border(1).border_color(t.idle ?? t.accent).bg(t.background)
+        .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child("Claude 계정 추가"))
+        .child(div().text_size(11).text_color(t.muted).child("계정 이름을 적고 시작을 누르면 이 계정 전용 폴더를 만들고 로그인 주소를 보여 줍니다. 설정·스킬·훅은 기본 계정과 같은 것을 씁니다. 토큰은 Claude 가 보관하고 이 패널은 보지 않습니다."))
+        .child(this.textInput(t, this.clInput))
+        .child(h_flex().pt(2).gap(6)
+          .child(this.button(t, "cl-add-go", "시작", (cx) => this.addClaude(cx), { primary: true }))
+          .child(this.button(t, "cl-add-no", "취소", (cx) => { this.clAsk = false; cx.notify(); }))));
+    }
+    return out;
+  }
+
   // ---- 공통 그리기 ----
 
   button(t, id, label, onClick, { primary = false, disabled = false } = {}) {
@@ -600,6 +789,7 @@ export default class Accounts extends View {
           .child(this.button(t, "rule-add", "추가", (cx) => this.addRule(cx), { primary: true })));
       }
     }
+    body.push(...this.claudeBlock(t));
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .child(h_flex().h(38).px(14).flex_none().items_center().justify_between()
         .child(h_flex().gap(6).items_center()
