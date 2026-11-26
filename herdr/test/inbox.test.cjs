@@ -2057,6 +2057,11 @@ test("roomWorking(#69): PO·리더·팀원 중 working이 있는 방만 낸다 �
   assert.deepEqual([...I.roomWorking(null)], []);
 });
 
+test("statusSig(#69): PO 바로 밑 일반 터미널이 일하기 시작해도 값이 달라진다", () => {
+  const w = tm({ address: "w1", name: "worker", parent: "tp" });
+  assert.notEqual(I.statusSig([poT(), w]), I.statusSig([poT(), { ...w, status: "working" }]));
+});
+
 test("main.js: 방 목록 작업 중 점(#69) — 세 보기가 같은 점을 쓰고, 자리는 늘 잡아 둔다", () => {
   const src = mainSrc();
   const dot = methodOf(src, "  roomDot(t, x) {", "\n  }\n");
