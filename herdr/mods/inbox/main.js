@@ -1059,6 +1059,32 @@ function usageTip(rows, now) {
 }
 // usageLine:end
 
+// costLine:begin
+// One PO's current-session cost, shown after the usage line: "이 세션 약 4,300원". The numbers come from inbox.cjs (poCosts: the usage fields of the
+// session transcript x the price table there x the fixed KRW rate there) as {usd, unknown, sub, partial, rate, rateNote}; this block only words them.
+// It is an API-equivalent estimate, not the subscription bill. `unknown` lists the model ids that are not in the price table: the label is then
+// "?원" (no guess). Copied between the markers into inbox/main.js and inbox.cjs (a test keeps them identical).
+function costLabel(c) {
+  if (!c || !Number.isFinite(c.usd)) return "";
+  if ((Array.isArray(c.unknown) && c.unknown.length) || !(c.rate > 0)) return "?원";
+  return `약 ${Math.round(c.usd * c.rate).toLocaleString("en-US")}원`;
+}
+function costTip(c) {
+  if (!c || !Number.isFinite(c.usd)) return "";
+  const unk = Array.isArray(c.unknown) && c.unknown.length;
+  return [
+    "이 PO의 현재 세션에서 쓴 금액: API 기준 추정 금액, 구독 청구액 아님",
+    unk ? "" : `달러로는 $${c.usd >= 1000 ? Math.round(c.usd).toLocaleString("en-US") : c.usd.toFixed(2)}`,
+    c.rate > 0 ? `환율 ${Number(c.rate).toLocaleString("en-US")}원/$ (${c.rateNote || "고정값"})` : "",
+    c.sub > 0 ? "서브에이전트 포함" : "메인 세션만",
+    unk ? `가격표에 없는 모델이라 합계를 내지 않았습니다: ${c.unknown.slice(0, 3).join(", ")}` : "",
+    c.partial ? "아직 다 읽지 못해 더 늘 수 있습니다" : "",
+    "빠른 모드·미국 데이터 거주 가격·웹 검색 같은 서버 도구 요금은 계산하지 않아 실제보다 적을 수 있습니다",
+    "/clear 하면 0부터 다시 셉니다",
+  ].filter(Boolean).join(" · ");
+}
+// costLine:end
+
 function ago(iso) {
   const m = Math.floor((Date.now() - Date.parse(iso)) / 60000);
   if (!(m >= 0)) return "";
@@ -1227,14 +1253,18 @@ export default class Inbox extends View {
 
   // The usage line under the room title ("Claude 5h ▬ 54% · 7d ▬ 34%"); 80% and over is drawn in the warning color, the tooltip has the
   // time left until each reset. Nothing before the first read.
-  usageLine(t) {
+  usageLine(t, pick = "") {
     const rows = this.usage;
-    if (rows === undefined) return null;
+    // The picked PO's session cost ("이 세션 약 4,300원"), from the helper's data; nothing when the PO has no recorded session (or is the "PO 모름" room).
+    const c = pick && pick !== PO_OTHER ? this.data?.cost?.[pick] : null;
+    const cost = costLabel(c);
+    const withCost = (el) => (cost ? el.child(div().flex_none().child("·")).child(div().id("inbox-cost").flex_none().tooltip(costTip(c)).child(`이 세션 ${cost}`)) : el);
+    if (rows === undefined) return cost ? withCost(h_flex().id("inbox-usage").flex_none().h(22).px(this.compact ? 10 : 14).gap(6).items_center().overflow_hidden().text_size(11).text_color(t.dim)) : null;
     const track = this.narrow ? 28 : USAGE_TRACK_W;
     const line = h_flex().id("inbox-usage").flex_none().h(22).px(this.compact ? 10 : 14).gap(6).items_center().overflow_hidden().text_size(11).text_color(t.dim)
       .tooltip(usageTip(rows, Date.now())).child(div().flex_none().child("Claude"));
-    if (!rows) return line.child(div().flex_none().text_color(t.muted).child("Unknown"));
-    return rows.reduce((el, u, i) => {
+    if (!rows) return withCost(line.child(div().flex_none().text_color(t.muted).child("Unknown")));
+    return withCost(rows.reduce((el, u, i) => {
       const warn = u.percent >= USAGE_WARN;
       return el
         .when(i > 0, (x) => x.child(div().flex_none().child("·")))
@@ -1242,7 +1272,7 @@ export default class Inbox extends View {
         .child(div().flex_none().w(track).h(USAGE_TRACK_H).rounded(USAGE_TRACK_H).bg(t.border)
           .child(div().h(USAGE_TRACK_H).w(usageFill(u.percent, track)).rounded(USAGE_TRACK_H).bg(warn ? t.blocked : t.foreground)))
         .child(div().flex_none().text_color(warn ? t.blocked : t.muted).child(`${u.percent}%`));
-    }, line);
+    }, line));
   }
 
   // ---- redraw gating (a drag-select must not be rebuilt under the pointer) and the pin to the newest
@@ -1600,7 +1630,10 @@ export default class Inbox extends View {
         if (r.code !== 0) throw new Error(`수집기 종료 코드 ${r.code} ${(r.stderr || "").trim()}`);
         const d = JSON.parse(r.stdout);
         if (gen !== this.gen) return;
-        const sig = JSON.stringify({ ...d, at: 0 });
+        // The cost enters the signature as what is drawn (label + tooltip, whole cents), never the raw numbers, so a working PO's tokens do not redraw the desk.
+        const shown = {};
+        for (const [po, c] of Object.entries(d?.cost ?? {})) shown[po] = [costLabel(c), costTip(c)];
+        const sig = JSON.stringify({ ...d, cost: shown, at: 0 });
         this.changed = sig !== this.sigData || Boolean(this.error) || !this.data || Date.now() - this.drawnAt > LOAD_REDRAW_MS;
         this.sigData = sig;
         this.data = d;
@@ -2803,7 +2836,7 @@ export default class Inbox extends View {
       .when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks);
     const bar = this.filterBar(t, v);
     const rrow = this.restartRow(t, v, cx); // "PO 새로 시작": the button, its confirm line or its steps (null in the other-PO room)
-    const usage = this.usageLine(t); // null before the first read
+    const usage = this.usageLine(t, v.pick); // null before the first read (and when there is no cost to show either)
     const panel = this.promptPanel(t, v, cx); // a blocked PO's screen + its keys (null while the room's PO is not waiting on a prompt)
     const room = v_flex().flex_1().min_w(0).min_h(0).when(!strip, (el) => el.h_full()) // beside the rooms the column must fill the row (h_flex centers children)
       .when(!strip && Boolean(head), (el) => el.child(h_flex().flex_none().h(30).px(14).gap(6).items_center().border_b(1).border_color(t.border)
