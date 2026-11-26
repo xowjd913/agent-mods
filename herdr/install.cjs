@@ -39,7 +39,7 @@ const MODS = {
   "leader-tabs": { desc: "칸 머리줄에 리더 탭을 보여 준다", deps: [] },
   "path-menu": { desc: "터미널 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄운다", deps: [] },
   "gh-accounts": { desc: "계정 패널: 스페이스·저장소마다 쓸 GitHub 계정 고르기 (--gh-account 도구 필요)", deps: ["tabs-mine"] },
-  inbox: { desc: "PO 데스크 패널: 리더 결과 보고를 채팅처럼 보고, 결정을 PO에게 답한다", deps: ["tabs-mine"] },
+  inbox: { desc: "UI 모드 패널: 리더 결과 보고를 채팅처럼 보고, 결정을 PO에게 답한다", deps: ["tabs-mine"] },
 };
 const MARK = ".installed-by-herdr-installer";
 // 예전 설치 스크립트가 남긴 표시. 이 표시가 있는 폴더도 우리 것으로 보고 덮어쓴다.
@@ -308,7 +308,7 @@ const STEPS = [
     undo: (l) => dropPanel(l, "gh-accounts"),
   },
   {
-    name: "오른쪽 패널 PO 데스크(inbox)",
+    name: "오른쪽 패널 UI 모드(inbox)",
     needs: ["inbox"],
     mark: ["inbox", ".board-added"],
     done: () => false,
@@ -344,7 +344,7 @@ function migrateMarks(home) {
   fs.rmSync(old, { force: true });
 }
 
-// UI 모드 레이아웃(<기본 레이아웃>-ui): 기본 레이아웃에서 터미널이 있는 main 칸(content.tab "active", 없으면 id "main")만 PO 데스크로 바꾼 복사본.
+// UI 모드 레이아웃(<기본 레이아웃>-ui): 기본 레이아웃에서 터미널이 있는 main 칸(content.tab "active", 없으면 id "main")만 UI 모드로 바꾼 복사본.
 // 터미널 모드(기본 레이아웃)와 `layout.switch`로 오간다. 만든 파일의 해시를 inbox 모드 폴더에 남겨, 사용자가 고친 파일은 다시 쓰지 않는다.
 const UI_SUFFIX = "-ui";
 const UI_MARK = ["inbox", ".ui-layout-hash" ];

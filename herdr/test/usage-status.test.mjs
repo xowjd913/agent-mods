@@ -45,7 +45,7 @@ test("parseUsage: 없음·깨진 JSON·오래됨·빈 한도는 null(Unknown)", 
   assert.equal(parseUsage(file([{ kind: "five_hour", percentUsed: "x" }]), NOW), null);
 });
 
-// 받은편지함(PO 데스크) 머리줄이 같은 파일을 읽는 복사본은 이 모드의 parseUsage와 같은 행을 돌려줘야 한다(리셋 시각 resetsAt만 더 있다).
+// 받은편지함(UI 모드) 머리줄이 같은 파일을 읽는 복사본은 이 모드의 parseUsage와 같은 행을 돌려줘야 한다(리셋 시각 resetsAt만 더 있다).
 test("parseUsage: 받은편지함 복사본과 같은 행을 돌려준다", () => {
   const inbox = createRequire(import.meta.url)("../mods/inbox/inbox.cjs");
   const strip = (rows) => rows && rows.map(({ label, percent }) => ({ label, percent }));
