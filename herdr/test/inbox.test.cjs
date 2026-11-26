@@ -1147,7 +1147,7 @@ test("main.js: 칩은 대기 중인 결정(decision) 말풍선에만, 같은 sen
   const src = mainSrc();
   const a = src.indexOf("  askActions(t, a, cx) {");
   const body = src.slice(a, src.indexOf("    if (!a.po) box.child", a));
-  assert.match(body, /const opts = kind === "decision" \? decisionOptions\(item\?\.body\)/); // 한 번만 계산
+  assert.match(body, /const opts = kind === "decision" && !groups\.length \? decisionOptions\(item\?\.body\)/); // 한 번만 계산
   assert.match(body, /kind === "decision" \? opts\.options\.map/);
   assert.match(body, /`\$\{n\}안 선택`/);
   assert.match(body, /this\.send\(a, `\$\{n\}안 선택`, c, "choice"\)/);
@@ -1184,7 +1184,7 @@ test("main.js: 추천·답 줄과 답 버튼은 N안 칩이 없는 결정 카드
   const src = mainSrc();
   const a = src.indexOf("  askActions(t, a, cx) {");
   const body = src.slice(a, src.indexOf("    if (!a.po) box.child", a));
-  assert.match(body, /const hint = kind === "decision" && opts\.options\.length < 2 \? decisionHints\(item\?\.body\)/);
+  assert.match(body, /const hint = kind === "decision" && !groups\.length && opts\.options\.length < 2 \? decisionHints\(item\?\.body\)/);
   assert.match(body, /hint\.lines\.map/);
   assert.match(body, /hint\.answers\.map/);
   assert.match(body, /this\.send\(a, w, c, "choice"\)/);
