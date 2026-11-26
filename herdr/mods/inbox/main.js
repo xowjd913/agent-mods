@@ -2859,7 +2859,7 @@ export default class Inbox extends View {
         this.bangClipBack(cx, clip, res);
         if (res === "sent") {
           this.sentAt2 = Date.now();
-          if (composeChat(this.chat.content()) === text) { this.chat.set_value(""); this.menu = null; }
+          if (composeChat(this.chat.content()) === text) { this.wipe("chat", this.chat); this.menu = null; }
         }
       } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
       try { cx.notify(); } catch {}
