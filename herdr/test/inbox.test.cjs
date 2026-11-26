@@ -2099,6 +2099,72 @@ test("main.js: 방 목록 작업 중 점(#69) — 세 보기가 같은 점을 �
   assert.match(src, /roomWorking\(terms\)/);
 });
 
+test("remoteRooms(#119): 켜짐(on·already)인 방만 낸다 — 확인 중·실패·모름·상태 없음은 꺼짐", () => {
+  const rc = new Map([["pa", { phase: "on" }], ["pb", { phase: "already" }], ["pc", { phase: "send" }], ["pd", { phase: "fail" }], ["pe", { phase: "unknown" }], ["pf", null], ["pg", {}]]);
+  assert.deepEqual([...I.remoteRooms(rc)].sort(), ["pa", "pb"]);
+  assert.deepEqual([...I.remoteRooms(new Map())], []);
+  assert.deepEqual([...I.remoteRooms(null)], []);
+  assert.deepEqual([...I.remoteRooms(undefined)], []);
+});
+
+test("statusSig(#119): 원격 켜짐 방이 바뀌면 값이 달라지고, 같으면(순서만 달라도) 같다", () => {
+  const terms = [poT()];
+  const base = I.statusSig(terms);
+  assert.equal(I.statusSig(terms, new Set()), base); // 켜진 방이 없으면 예전 값 그대로
+  assert.equal(I.statusSig(terms, undefined), base);
+  const on = I.statusSig(terms, I.remoteRooms(new Map([["pa", { phase: "on" }]])));
+  assert.notEqual(on, base); // 꺼짐 → 켜짐
+  assert.notEqual(I.statusSig(terms, I.remoteRooms(new Map([["pa", { phase: "on" }], ["pb", { phase: "already" }]]))), on); // 방이 더 켜짐
+  assert.equal(I.statusSig(terms, I.remoteRooms(new Map([["pa", { phase: "already" }]]))), on); // on과 already는 같은 켜짐
+  assert.equal(I.statusSig(terms, I.remoteRooms(new Map([["pb", { phase: "on" }], ["pa", { phase: "on" }]]))), I.statusSig(terms, I.remoteRooms(new Map([["pa", { phase: "on" }], ["pb", { phase: "on" }]])))); // 순서와 무관
+  assert.equal(I.statusSig(terms, I.remoteRooms(new Map([["pa", { phase: "unknown" }]]))), base); // 모름은 꺼짐과 같다
+  assert.equal(I.statusSig(null, I.remoteRooms(new Map())), "");
+});
+
+// A recording stand-in for the gpui builder: every chained call is kept, so the test can read what a room view would draw.
+function fakeDiv() {
+  const calls = [];
+  const el = new Proxy({}, { get: (_o, k) => (k === "calls" ? calls : (...a) => (calls.push([k, ...a]), el)) });
+  return el;
+}
+
+test("main.js: 방 목록 원격 표시(#119) — 켜짐일 때만 강조색 글자와 툴팁을 내고, 꺼짐·모름은 평소 'PO'", () => {
+  const src = mainSrc();
+  const g = { div: fakeDiv, PO_OTHER: I.PO_OTHER };
+  const make = (head, next) => runMethod(src, head, next, g);
+  const { roomRemote } = make("  roomRemote(t, x, text) {", "  // The small line under a room's name");
+  const { roomSub } = make("  roomSub(t, x) {", "  // The count badges of a room");
+  const t = { working: "#ACC", dim: "#DIM" };
+  const self = { roomRemote };
+  const sub = roomSub.bind(self);
+  const kinds = (el) => el.calls.map((c) => c[0]);
+  assert.equal(roomRemote(t, { id: "pa", remote: false }, "원격"), null); // 꺼짐
+  assert.equal(roomRemote(t, { id: "pa" }, "원격"), null); // 모름(상태 없음)도 꺼짐
+  const on = roomSub.call(self, t, { id: "pa", remote: true });
+  assert.deepEqual(on.calls.find((c) => c[0] === "text_color"), ["text_color", "#ACC"]); // 강조색
+  assert.deepEqual(on.calls.find((c) => c[0] === "tooltip"), ["tooltip", "원격 연결 켜짐"]);
+  assert.deepEqual(on.calls.find((c) => c[0] === "child"), ["child", "PO · 원격"]);
+  const off = sub(t, { id: "pa", remote: false });
+  assert.deepEqual(off.calls.find((c) => c[0] === "child"), ["child", "PO"]);
+  assert.deepEqual(off.calls.find((c) => c[0] === "text_color"), ["text_color", "#DIM"]);
+  assert.ok(!kinds(off).includes("tooltip")); // 꺼짐에는 툴팁이 없다
+  const other = sub(t, { id: I.PO_OTHER, remote: true });
+  assert.deepEqual(other.calls.find((c) => c[0] === "child"), ["child", "채팅 없음"]); // 주인 없는 방은 늘 그대로
+  const narrow = roomRemote(t, { id: "pa", remote: true }, "원격");
+  assert.deepEqual(narrow.calls.find((c) => c[0] === "child"), ["child", "원격"]);
+});
+
+test("main.js: 방 목록 원격 표시(#119) — 세 보기가 같은 표시를 쓰고, 방마다 상태를 싣고, 다시 그림 서명에 넣는다", () => {
+  const src = mainSrc();
+  assert.equal((src.match(/this\.roomRemote\(t, x, "원격"\)/g) ?? []).length, 2); // 고르개·좁은 목록
+  assert.equal((src.match(/this\.roomSub\(t, x\)/g) ?? []).length, 1); // 방 칸(넓은 목록)
+  assert.match(methodOf(src, "  roomSub(t, x) {", "\n  }\n"), /this\.roomRemote\(t, x, "PO · 원격"\)/); // 같은 표시를 쓴다
+  assert.match(src, /const remote = remoteRooms\(this\.rc\)/);
+  assert.match(src, /remote: remote\.has\(p\.id\)/);
+  assert.match(methodOf(src, "  pollStatus(cx) {", "  refreshMs()"), /statusSig\(terms, remoteRooms\(this\.rc\)\)/);
+  assert.doesNotMatch(src, /child\(x\.id === PO_OTHER \? "채팅 없음" : "PO"\)/); // 예전 고정 글자는 없다
+});
+
 test("typingNow: 방의 PO와 그 방 리더 중 working인 것만, 이름순으로 낸다", () => {
   const terms = [poT({ status: "working" }), leadT("lead-b", { status: "working", title: "베타 작업" }), leadT("lead-a", { status: "working", title: "알파 작업" }), leadT("lead-c", { status: "idle" }), leadT("lead-d", { status: "blocked" })];
   assert.deepEqual(I.typingNow(terms, "pa", {}), [{ who: "po", name: "데스크", label: "작업중" }, { who: "l:lead-d", name: "d", label: "승인 대기" }, { who: "l:lead-b", name: "베타 작업", label: "작업중" }, { who: "l:lead-a", name: "알파 작업", label: "작업중" }]); // PO 먼저, 리더는 이름순; 권한 기다림(blocked)도 일하는 중으로 센다
@@ -2144,7 +2210,7 @@ test("main.js: 폴더 감시는 그려질 때만 걸고, 안 그려지면 풀며
   assert.match(src, /cx\.timer\.every\(this\.refreshMs\(\)/); // 타이머는 그대로
   const poll = methodOf(src, "  pollStatus(cx) {", "  refreshMs()");
   assert.match(poll, /if \(!this\.drawing\(\)\) \{ this\.stopWatch\(\); return; \}/);
-  assert.match(poll, /statusSig\(terms\)/);
+  assert.match(poll, /statusSig\(terms, remoteRooms\(this\.rc\)\)/); // 원격 켜짐 방도 서명에 든다(#119)
   assert.match(poll, /this\.liveTerms\(\)/);
   assert.match(poll, /graceKey\(this\.typingAt, now\)/); // 말미 유예가 끝나면 서명이 달라져 점이 사라진다
   assert.match(poll, /if \(first\) return;/); // 처음 한 번은 다시 그리지 않는다
@@ -2163,7 +2229,7 @@ test("startWatch·stopWatch·pollStatus: 가짜 런타임으로 감시 한 번, 
   const calls = { watch: 0, cancel: 0 };
   let resolve;
   const mkWatch = () => { calls.watch++; const p = new Promise((r) => { resolve = r; }); p.cancel = () => { calls.cancel++; resolve([]); }; return p; };
-  const g = mkGlobals({ watchFolder: mkWatch, statusSig: I.statusSig, graceKey: I.graceKey, Date, STATUS_POLL_MS: 1500, WATCH_DEBOUNCE_MS: 5, Array });
+  const g = mkGlobals({ watchFolder: mkWatch, statusSig: I.statusSig, remoteRooms: I.remoteRooms, graceKey: I.graceKey, Date, STATUS_POLL_MS: 1500, WATCH_DEBOUNCE_MS: 5, Array });
   const m = {
     ...runMethod(src, "  stopWatch() {", "  // Starts watching", g),
     ...runMethod(src, "  startWatch(cx) {", "  // Every STATUS_POLL_MS", g),
@@ -2171,7 +2237,7 @@ test("startWatch·stopWatch·pollStatus: 가짜 런타임으로 감시 한 번, 
   };
   const loads = [];
   let drawing = true, terms = [poT()], notified = 0, badged = 0;
-  const self = { watch: null, watchGen: 0, debounced: false, sig: null, typingAt: new Map(), syncTyping: () => {}, data: { dir: "/x/inbox" }, drawing: () => drawing, liveTerms: () => terms, badge: () => badged++, load: (c) => loads.push(c), ui: {} };
+  const self = { watch: null, watchGen: 0, debounced: false, sig: null, rc: new Map(), typingAt: new Map(), syncTyping: () => {}, data: { dir: "/x/inbox" }, drawing: () => drawing, liveTerms: () => terms, badge: () => badged++, load: (c) => loads.push(c), ui: {} };
   self.softNotify = (c) => c.notify(); // (the real one waits while a selection is held: see the quietNow test)
   for (const k of Object.keys(m)) self[k] = m[k].bind(self);
   const cx = { spawn: (f) => f({ timer: { after: (ms, fn) => setTimeout(() => fn({}), ms) } }), notify: () => notified++, timer: { after: (ms, fn) => setTimeout(() => fn({}), ms) } };
@@ -2185,6 +2251,18 @@ test("startWatch·stopWatch·pollStatus: 가짜 런타임으로 감시 한 번, 
   assert.equal(notified, 1); assert.equal(badged, 1); // 바뀌면 한 번
   self.pollStatus(cx);
   assert.equal(notified, 1); // 가만하면 다시 그리지 않는다
+  self.rc.set("pa", { phase: "send" }); // 확인 중은 꺼짐과 같아 다시 그리지 않는다(#119)
+  self.pollStatus(cx);
+  assert.equal(notified, 1);
+  self.rc.set("pa", { phase: "on" }); // 원격이 켜지면 터미널이 그대로여도 방 목록을 다시 그린다
+  self.pollStatus(cx);
+  assert.equal(notified, 2); assert.equal(badged, 2);
+  self.rc.set("pa", { phase: "already" }); // on → already는 같은 켜짐
+  self.pollStatus(cx);
+  assert.equal(notified, 2);
+  self.rc.delete("pa"); // 꺼지면 다시 그려 표시가 사라진다
+  self.pollStatus(cx);
+  assert.equal(notified, 3);
   // 폴더에 변화가 오면 짧은 뒤 한 번 읽는다(여러 번 와도 한 번)
   const first = resolve; first(["/x/inbox/a.jsonl"]); await tick();
   resolve(["/x/inbox/b.jsonl"]); await tick();
