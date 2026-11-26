@@ -712,6 +712,7 @@ test("UI 모드: 표시 없는 같은 이름 레이아웃은 건드리지 않고
   fs.rmSync(uiFile(home));
   quiet(() => inst.applyLayout(home, false));
   assert.ok(fs.existsSync(uiFile(home)));
-  quiet(() => inst.removeMods(home, ["inbox"]));
+  const gone = quiet(() => inst.removeMods(home, ["inbox"]));
   assert.ok(!fs.existsSync(uiFile(home)));
+  assert.match(gone.out, /터미널 모드'로 먼저 돌아오세요/); // 보던 -ui 레이아웃이 사라지니 먼저 돌아오라는 안내(review-59 R1 P3)
 });

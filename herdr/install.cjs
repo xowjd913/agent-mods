@@ -393,6 +393,7 @@ function removeUiLayout(home, baseFile) {
   if (hashOf(current) !== readMark(home)) return false;
   fs.rmSync(file, { force: true });
   log(`UI 모드 레이아웃을 지웠습니다: ${file}`);
+  log("UI 모드 화면을 보고 있었다면 Herdr에서 '터미널 모드'로 먼저 돌아오세요(보던 -ui 레이아웃이 없어집니다).");
   return true;
 }
 

@@ -1806,6 +1806,7 @@ export default class Inbox extends View {
     text = cleanText(text); // nothing but plain text is pasted into a PO
     if (!opened && this.opening.has(po)) { this.say(`PO(${po})의 칸을 여는 중입니다. 열리면 먼저 보낸 글이 자동으로 갑니다.`, true); return "busy"; }
     if (!id) id = this.record({ ...rec, line: text }, "sending");
+    if (this.mained) return this.deliverByAddress(po, text, c, rec, ok, id); // UI mode: no terminal block is on screen, so there is no pane to focus or paste into
     try {
       c.write_to_clipboard(text);
       if (!this.backs.has(id)) { let fp = ""; try { fp = focused()?.pane ?? ""; } catch {} this.backs.set(id, fp); } // where the keyboard is now: given back after Enter
@@ -1858,6 +1859,40 @@ export default class Inbox extends View {
   }
 
   isBlocked(po) { return String(this.liveTerms().find((t) => t.address === po)?.status ?? "").toLowerCase() === "blocked"; }
+
+  // UI mode (`main`): the PO terminal has no pane, so nothing is focused, kept, pasted from the clipboard or given the keyboard back. The text goes by terminal
+  // address with `hc send <po> <text> --json` (paste + Enter in one step; the path the #41 restart already uses). Runs in cx.spawn; returns at once:
+  //   "opening"  the send is in flight (the record is "sending"; it turns "sent" and `ok("sent")` runs when `hc send` reports started, else "failed" + the reason)
+  //   "failed"   the PO is on a prompt (`hc send` would refuse; --force is never used): nothing sent
+  // One send per PO at a time (`opening`, same guard as the pane path). Real-app behavior of a hidden terminal is unverified (see docs/mods/inbox.md).
+  deliverByAddress(po, text, c, rec, ok, id) {
+    if (this.isBlocked(po)) {
+      this.mark(id, "failed");
+      this.say(`PO(${po})가 질문에 답을 기다리는 중이라 보내지 않았습니다. 질문에 먼저 답한 뒤 말풍선의 '다시 보내기'를 누르세요.`, true);
+      return "failed";
+    }
+    this.opening.add(po);
+    this.mark(id, "sending");
+    const fail = (why, cx) => {
+      this.opening.delete(po); this.mark(id, "failed");
+      this.say(`PO(${po})에 보내지 못했습니다: ${why}. 말풍선의 '다시 보내기'를 누르세요.`, true);
+      try { cx.notify(); } catch {}
+    };
+    try {
+      c.spawn(async (cx) => {
+        let r = null;
+        try { r = await hc(["send", po, text, "--json"]); } catch (e) { r = { code: -1, stdout: "", stderr: String(e?.message ?? e) }; }
+        const res = restartSendResult(r);
+        if (!res.ok) { this.diag(`desk send failed: ${res.detail} (po ${po})`); fail(res.why, cx); return; }
+        this.opening.delete(po);
+        this.mark(id, "sent");
+        try { ok?.("sent"); } catch {}
+        this.say(`PO(${po})에 보냈습니다.`);
+        try { cx.notify(); } catch {}
+      });
+    } catch (e) { fail(String(e?.message ?? e).slice(0, 80), c); return "failed"; }
+    return "opening";
+  }
 
   // Gives the keyboard back after a send (Dock, window and pane alike): the pane that had it before, then this desk's box.
   restore(back, c, id = "", after = 0) {
