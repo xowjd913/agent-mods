@@ -871,3 +871,128 @@ test("기록 저장소: 사전 확인 명령은 확인(ack) 전에는 가져오�
   assert.equal(S.importFromRepo({ folders: [f.work], ack: true }, deps).added, 1);
   assert.equal(ran, 0);
 });
+
+// ---- 예약별 계정 ----
+
+// 가짜 gh-account: acct-a, acct-b 만 로그인돼 있다. 토큰은 다루지 않는다.
+function fakeGhAccount({ installed = true, logins = ["acct-a", "acct-b"] } = {}) {
+  const calls = [];
+  const check = (account) => {
+    if (!installed) return { ok: false, error: "예약별 계정을 쓰려면 먼저 계정 패널에서 gh-account 를 설치하세요." };
+    const hit = (logins || []).find((l) => l.toLowerCase() === String(account).toLowerCase());
+    return hit ? { ok: true, login: hit } : { ok: false, error: `${account} 계정은 gh 에 로그인돼 있지 않습니다.` };
+  };
+  return {
+    calls,
+    ga: {
+      check: (account) => { calls.push(["check", account]); return check(account); },
+      accounts: () => ({ installed, logins: installed ? logins : null }),
+      env: (o) => {
+        calls.push(["env", o]);
+        const env = installed ? { PATH: "/wrap/bin:/usr/bin" } : {};
+        if (!o.account) return { ok: true, env };
+        const c = check(o.account);
+        return c.ok ? { ok: true, env: { ...env, GH_ACCOUNT: c.login, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "include.path", GIT_CONFIG_VALUE_0: `/id/${c.login}.gitconfig` }, account: c.login } : { ok: false, error: c.error };
+      },
+    },
+  };
+}
+
+test("계정: 형식 검사, 저장은 로그인된 계정만 gh 의 이름으로, 비우면 자동", () => {
+  reset();
+  const now = { t: utc("2026-03-02T00:00:00Z") };
+  const { deps } = fakeDeps(now);
+  assert.ok(S.validateAutomation(auto({ account: "a b" })).some((e) => e.includes("계정 이름이 올바르지 않습니다")));
+  assert.deepEqual(S.validateAutomation(auto({ account: "" })), []);
+  // gh-account 가 없으면 계정을 정할 수 없다(자동은 된다)
+  assert.match(S.save(auto({ account: "acct-a" }), deps).error, /먼저 계정 패널에서 gh-account 를 설치/);
+  assert.equal(S.save(auto(), deps).automation.account, "");
+  const f = fakeGhAccount();
+  deps.ghAccount = () => f.ga;
+  assert.match(S.save(auto({ account: "acct-c" }), deps).error, /acct-c 계정은 gh 에 로그인돼 있지 않습니다/);
+  const saved = S.save(auto({ account: "ACCT-B" }), deps);
+  assert.equal(saved.automation.account, "acct-b");
+  const stored = JSON.parse(fs.readFileSync(S.paths.AUTOS_FILE, "utf8")).automations.find((a) => a.id === saved.automation.id);
+  assert.equal(stored.account, "acct-b");
+  assert.ok(!JSON.stringify(stored).includes("tok"), "토큰은 저장하지 않는다");
+  // 옛 판 gh-account
+  deps.ghAccount = () => ({ old: true });
+  assert.match(S.save(auto({ account: "acct-a" }), deps).error, /옛 판/);
+  // 화면 목록
+  deps.ghAccount = () => f.ga;
+  assert.deepEqual(S.options({}, deps).accounts, { installed: true, old: false, logins: ["acct-a", "acct-b"] });
+  deps.ghAccount = () => null;
+  assert.deepEqual(S.options({}, deps).accounts, { installed: false, old: false, logins: null });
+});
+
+test("execute: 정한 계정은 사전 검사와 세션에 PATH·GH_ACCOUNT·신원만 넘기고 토큰은 넘기지 않는다", () => {
+  reset();
+  const now = { t: utc("2026-03-02T09:00:00Z") };
+  const a = { id: "acc00001", createdAt: now.t, ...auto({ account: "acct-b", precheck: { command: "true", timeoutSec: 5 } }) };
+  seed([a], { acc00001: [{ id: "r1", automationId: "acc00001", trigger: "예약", scheduledAt: now.t, startedAt: now.t, status: "실행 중" }] });
+  const envs = [];
+  const f = fakeGhAccount();
+  const { deps, calls } = fakeDeps(now, { hc: (args) => (args[0] === "run" ? { code: 1, stdout: "", stderr: "stop here" } : { code: 1, stdout: "", stderr: "" }) });
+  deps.shell = (command, cwd, ms, env) => { envs.push(env); return { code: 0, timedOut: false, error: "", stderr: "" }; };
+  deps.ghAccount = () => f.ga;
+  S.execute("r1", deps);
+  assert.deepEqual(f.calls.find((c) => c[0] === "env")[1], { account: "acct-b", dir: os.tmpdir() });
+  assert.equal(envs[0].GH_ACCOUNT, "acct-b");
+  assert.equal(envs[0].PATH, "/wrap/bin:/usr/bin");
+  const run = calls.hc.find((c) => c[0] === "run");
+  if (process.platform !== "win32") {
+    assert.ok(run.includes("PATH=/wrap/bin:/usr/bin"), run.join(" "));
+    assert.ok(run.includes("GH_ACCOUNT=acct-b"));
+    assert.ok(run.includes("GIT_CONFIG_VALUE_0=/id/acct-b.gitconfig"));
+  }
+  assert.ok(!run.some((x) => /tok|GH_TOKEN/.test(x)));
+  const rec = readRuns().acc00001[0];
+  assert.equal(rec.account, "acct-b");
+  assert.ok(!JSON.stringify(readRuns()).includes("tok"));
+});
+
+test("execute: 정한 계정을 쓸 수 없으면 다른 계정으로 돌지 않고 '실패'로 기록한다, 자동은 막지 않는다", () => {
+  reset();
+  const now = { t: utc("2026-03-02T09:00:00Z") };
+  const a = { id: "acc00002", createdAt: now.t, ...auto({ account: "acct-c" }) };
+  const b = { id: "acc00003", createdAt: now.t, ...auto() };
+  seed([a, b], {
+    acc00002: [{ id: "r1", automationId: "acc00002", trigger: "예약", scheduledAt: now.t, startedAt: now.t, status: "실행 중" }],
+    acc00003: [{ id: "r2", automationId: "acc00003", trigger: "예약", scheduledAt: now.t, startedAt: now.t, status: "실행 중" }],
+  });
+  const { deps, calls } = fakeDeps(now);
+  deps.ghAccount = () => fakeGhAccount().ga;
+  S.execute("r1", deps);
+  let run = readRuns().acc00002[0];
+  assert.equal(run.status, "실패");
+  assert.match(run.error, /acct-c 계정은 gh 에 로그인돼 있지 않습니다/);
+  assert.equal(calls.hc.length, 0, "세션을 띄우지 않는다");
+  // gh-account 가 지워졌어도 정한 계정이면 실패
+  deps.ghAccount = () => null;
+  seed([a, b], { acc00002: [{ id: "r3", automationId: "acc00002", trigger: "예약", scheduledAt: now.t, startedAt: now.t, status: "실행 중" }], acc00003: [{ id: "r2", automationId: "acc00003", trigger: "예약", scheduledAt: now.t, startedAt: now.t, status: "실행 중" }] });
+  S.execute("r3", deps);
+  assert.match(readRuns().acc00002[0].error, /먼저 계정 패널에서 gh-account 를 설치/);
+  // 자동: gh-account 가 없거나 깨져도 그냥 돈다(원래 PATH)
+  deps.ghAccount = () => { throw new Error("broken"); };
+  S.execute("r2", deps);
+  run = readRuns().acc00003[0];
+  assert.notEqual(run.error && run.error.includes("계정"), true, run.error);
+  assert.equal(calls.hc.filter((c) => c[0] === "run").length, 1);
+});
+
+test("loadGhAccount: 없으면 null, 예약별 계정을 모르는 옛 판이면 old", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "schedules-ga-"));
+  assert.equal(S.loadGhAccount(path.join(dir, "none.cjs")), null);
+  const old = path.join(dir, "old.cjs");
+  fs.writeFileSync(old, "module.exports = { makeCtx: () => ({}) };\n");
+  assert.deepEqual(S.loadGhAccount(old), { old: true });
+});
+
+test("기록 저장소: 예약별 계정은 기록 파일에 적지 않는다", () => {
+  const f = syncFixture();
+  seed([worktreeAuto(f.work, { account: "acct-b" })]);
+  assert.equal(S.setSyncRepo(f.repo, f.deps).ok, true);
+  assert.equal(S.record({ all: true }, f.deps).ok, true);
+  const text = fs.readFileSync(path.join(f.repo, "herdr-schedules", "주간-점검-a1b2c3d4.json"), "utf8");
+  assert.ok(!text.includes("acct-b"), text);
+});

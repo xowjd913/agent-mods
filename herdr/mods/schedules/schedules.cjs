@@ -38,6 +38,11 @@ const DEFAULT_PRECHECK_TIMEOUT = 60;
 const WORKER_STALE_MS = 10 * MIN;
 
 const PROGRAMS = ["claude", "codex"];
+const ACCOUNT_NAME = /^[A-Za-z0-9_-]{1,39}$/; // GitHub 로그인 이름. 이름만 저장하고 토큰은 저장하지 않는다
+// 설치된 gh-account 도구. 예약 실행 때 계정을 고르는 래퍼·자격 증명 도우미도 이 파일을 쓴다.
+const GH_ACCOUNT_APP = path.join(APP_HOME, "gh-account", "gh-account.cjs");
+const NEED_GH_ACCOUNT = "예약별 계정을 쓰려면 먼저 계정 패널에서 gh-account 를 설치하세요.";
+const OLD_GH_ACCOUNT = "설치된 gh-account 가 예약별 계정을 모르는 옛 판입니다. 계정 패널에서 업데이트하세요.";
 const PRESETS = ["hourly", "daily", "weekdays", "weekly"];
 const WEEKDAY_KO = ["일", "월", "화", "수", "목", "금", "토"];
 
@@ -323,6 +328,7 @@ function validateAutomation(a, { checkFolder = true } = {}) {
   else if (a.name.trim().length > 60) errors.push("이름은 60자 이하여야 합니다.");
   if (!PROGRAMS.includes(a.program)) errors.push("프로그램은 claude 또는 codex여야 합니다.");
   if (typeof a.prompt !== "string" || !a.prompt.trim()) errors.push("프롬프트를 입력하세요.");
+  if (a.account !== undefined && a.account !== null && a.account !== "" && !ACCOUNT_NAME.test(String(a.account))) errors.push("계정 이름이 올바르지 않습니다. 영문·숫자·_ - 만 씁니다.");
   for (const key of ["model", "effort"]) {
     if (a[key] !== undefined && a[key] !== null && a[key] !== "" && !safeToken.test(String(a[key]))) errors.push(`${key === "model" ? "모델" : "강도"} 값에 쓸 수 없는 글자가 있습니다.`);
   }
@@ -437,8 +443,8 @@ function defaultDeps() {
       const r = spawnSync("gh", args, { encoding: "utf8", timeout, windowsHide: true });
       return { code: r.error ? 127 : r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr || (r.error ? String(r.error.message) : "") };
     },
-    shell: (command, cwd, timeoutMs) => {
-      const r = spawnSync(command, { shell: true, cwd, timeout: timeoutMs, encoding: "utf8", windowsHide: true, maxBuffer: 4 << 20 });
+    shell: (command, cwd, timeoutMs, env) => {
+      const r = spawnSync(command, { shell: true, cwd, timeout: timeoutMs, encoding: "utf8", windowsHide: true, maxBuffer: 4 << 20, env: env ? { ...process.env, ...env } : process.env });
       const timedOut = !!(r.error && r.error.code === "ETIMEDOUT") || r.signal === "SIGTERM";
       return { code: r.status, timedOut, error: r.error && !timedOut ? String(r.error.message) : "", stderr: (r.stderr || "").trim() };
     },
@@ -450,7 +456,52 @@ function defaultDeps() {
     },
     pidAlive: (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; } },
     osNotify: (title, body) => osNotify(title, body),
+    ghAccount: () => loadGhAccount(),
   };
+}
+
+// 설치된 gh-account 도구를 읽는다. 없으면 null, 예약별 계정을 모르는 옛 판이면 { old: true }.
+// 토큰은 받지 않는다: 계정 이름과 로그인 목록만 보고, 토큰은 실행 중에 래퍼·자격 증명 도우미가 받는다.
+function loadGhAccount(file = GH_ACCOUNT_APP) {
+  try {
+    if (!fs.existsSync(file)) return null;
+    const mod = require(file);
+    if (typeof mod.scheduleEnv !== "function" || typeof mod.makeCtx !== "function") return { old: true };
+    const ctx = mod.makeCtx({ env: { ...process.env, HERDR_APP_HOME: APP_HOME } });
+    return {
+      env: (o) => mod.scheduleEnv(ctx, o),
+      check: (account) => mod.scheduleAccount(ctx, account),
+      accounts: () => mod.scheduleAccounts(ctx),
+    };
+  } catch { return null; }
+}
+
+// 예약 실행에 더할 환경 변수(PATH 앞 래퍼 폴더, GH_ACCOUNT, 커밋 신원).
+// 자동(계정 비움)은 절대 실행을 막지 않는다. 정한 계정은 쓸 수 없으면 다른 계정으로 돌지 않게 실패로 돌려준다.
+function accountEnv(a, dir, deps) {
+  let ga = null;
+  try { ga = deps.ghAccount ? deps.ghAccount() : null; } catch { ga = null; }
+  if (!a.account) {
+    if (!ga || ga.old) return { ok: true, env: {} };
+    try { const r = ga.env({ dir }); return r && r.ok ? { ok: true, env: r.env || {} } : { ok: true, env: {} }; } catch { return { ok: true, env: {} }; }
+  }
+  if (!ga) return { ok: false, error: NEED_GH_ACCOUNT };
+  if (ga.old) return { ok: false, error: OLD_GH_ACCOUNT };
+  try {
+    const r = ga.env({ account: a.account, dir });
+    return r && r.ok ? { ok: true, env: r.env || {}, account: r.account || a.account } : { ok: false, error: (r && r.error) || `${a.account} 계정을 확인하지 못했습니다.` };
+  } catch (e) {
+    return { ok: false, error: `${a.account} 계정을 확인하지 못했습니다: ${oneLine(e.message, 120)}` };
+  }
+}
+
+// 저장할 때: 정한 계정이 gh 에 로그인돼 있는지 본다. gh 가 쓰는 이름(대소문자)을 돌려준다.
+function checkAccount(account, deps) {
+  let ga = null;
+  try { ga = deps.ghAccount ? deps.ghAccount() : null; } catch { ga = null; }
+  if (!ga) return { ok: false, error: NEED_GH_ACCOUNT };
+  if (ga.old) return { ok: false, error: OLD_GH_ACCOUNT };
+  try { return ga.check(account); } catch (e) { return { ok: false, error: `${account} 계정을 확인하지 못했습니다: ${oneLine(e.message, 120)}` }; }
 }
 // OS 알림을 띄운다(기다리지 않고 떼어 낸다). 실패해도 tick은 계속된다.
 // macOS는 osascript, Windows는 PowerShell의 WinRT 토스트(BurntToast 없이), 그 밖은 notify-send.
@@ -725,9 +776,13 @@ function makeWorktree(deps, a, now) {
   throw new Error("워크트리 이름을 정하지 못했습니다.");
 }
 
-function launchArgs(a, name, cwd) {
+function launchArgs(a, name, cwd, extraEnv = {}) {
   const argv = [];
-  if (!WIN) argv.push("env", `PATH=${process.env.PATH ?? ""}`);
+  if (!WIN) {
+    argv.push("env", `PATH=${extraEnv.PATH ?? process.env.PATH ?? ""}`);
+    // 계정 이름·신원 파일 경로만 넘긴다. 토큰은 넘기지 않는다(세션 안의 gh·git 이 그때그때 받는다).
+    for (const [k, v] of Object.entries(extraEnv)) if (k !== "PATH" && /^[A-Z_][A-Z0-9_]*$/.test(k)) argv.push(`${k}=${v}`);
+  }
   if (a.program === "claude") {
     argv.push("claude", "--permission-mode", "auto");
     if (a.model) argv.push("--model", String(a.model));
@@ -782,10 +837,14 @@ function execute(runId, deps = defaultDeps()) {
   try {
     const runBase = a.folder.mode === "worktree" ? (repoInfo(deps, a.folder.path) ?? { main: a.folder.path }).main : a.folder.path;
     if (!isDir(runBase)) return finish({ status: "실패", error: `폴더를 찾지 못했습니다: ${a.folder.path}` });
+    // 계정: 정한 계정을 쓸 수 없으면 다른 계정(gh 활성 계정)으로 돌지 않게 여기서 멈춘다.
+    const acct = accountEnv(a, runBase, deps);
+    if (!acct.ok) return finish({ status: "실패", account: a.account, error: acct.error });
+    if (acct.account) patchRun(runId, { account: acct.account });
     // 사전 검사는 예약된 실행에서만 돈다. 지금 실행(수동)은 건너뛴다.
     if (run.trigger !== "수동" && a.precheck && String(a.precheck.command ?? "").trim()) {
       const timeoutSec = a.precheck.timeoutSec ?? DEFAULT_PRECHECK_TIMEOUT;
-      const r = deps.shell(a.precheck.command, runBase, timeoutSec * 1000);
+      const r = deps.shell(a.precheck.command, runBase, timeoutSec * 1000, acct.env);
       if (r.timedOut) return finish({ status: "검사로 건너뜀", error: `사전 검사가 ${timeoutSec}초 안에 끝나지 않았습니다.` });
       if (r.error) return finish({ status: "검사로 건너뜀", error: `사전 검사를 실행하지 못했습니다: ${oneLine(r.error, 120)}` });
       if (r.code !== 0) return finish({ status: "검사로 건너뜀", error: `사전 검사 종료 코드 ${r.code}${r.stderr ? `: ${oneLine(r.stderr, 120)}` : ""}` });
@@ -813,7 +872,7 @@ function execute(runId, deps = defaultDeps()) {
       }
     }
     const name = `sched-${a.id.slice(0, 6)}-${stamp(now).replace("-", "")}${run.id.slice(0, 2)}`.slice(0, 32);
-    const launched = deps.hc(launchArgs(a, name, cwd));
+    const launched = deps.hc(launchArgs(a, name, cwd, acct.env));
     if (launched.code !== 0) return finish({ status: "실패", error: oneLine(launched.stderr || launched.stdout, 200) || "hc run 실패" });
     let info = null;
     try { info = JSON.parse(launched.stdout); } catch {}
@@ -884,6 +943,12 @@ function save(input, deps = defaultDeps()) {
   const now = deps.now();
   const errors = validateAutomation(input);
   if (errors.length) return { ok: false, errors, error: errors[0] };
+  let account = "";
+  if (input.account) {
+    const c = checkAccount(String(input.account), deps);
+    if (!c.ok) return { ok: false, errors: [c.error], error: c.error };
+    account = c.login;
+  }
   return withLock(() => {
     const store = loadAutos();
     const tz = input.timezone || localZone();
@@ -894,6 +959,7 @@ function save(input, deps = defaultDeps()) {
       prompt: input.prompt,
       model: input.model ? String(input.model) : "",
       effort: input.effort ? String(input.effort) : "",
+      account,
       schedule: input.schedule,
       timezone: tz,
       graceMinutes: input.graceMinutes ?? DEFAULT_GRACE,
@@ -1021,6 +1087,7 @@ function repoVisibility(deps, root) {
 }
 
 // 저장소 파일 한 개의 내용. 작업 폴더는 "폴더 이름 + 원격 URL"로만 적는다.
+// 예약별 계정(account)은 이 PC 의 gh 로그인에 달린 설정이라 적지 않는다(공개 저장소에 계정 이름이 남지 않게). 가져오면 자동(매핑 따름)이다.
 function recordOf(a, deps) {
   const f = a.folder;
   const where = f.path ? { name: f.path.split(/[\\/]/).filter(Boolean).pop() ?? "", remote: originUrl(deps, f.path) } : { name: f.hint?.name ?? "", remote: f.hint?.remote ?? "" };
@@ -1076,7 +1143,7 @@ function fromRecord(rec, now, findFolder) {
   const linked = findFolder(hint);
   const auto = {
     id: rec.id, createdAt: rec.createdAt, cursor: now, name: String(rec.name ?? "").trim(), enabled: false, program: rec.program, prompt: rec.prompt,
-    model: rec.model ? String(rec.model) : "", effort: rec.effort ? String(rec.effort) : "", schedule: rec.schedule, timezone: rec.timezone || localZone(),
+    model: rec.model ? String(rec.model) : "", effort: rec.effort ? String(rec.effort) : "", account: "", schedule: rec.schedule, timezone: rec.timezone || localZone(),
     graceMinutes: rec.graceMinutes ?? DEFAULT_GRACE, notify: rec.notify || DEFAULT_NOTIFY,
     precheck: rec.precheck && String(rec.precheck.command ?? "").trim() ? { command: String(rec.precheck.command), timeoutSec: rec.precheck.timeoutSec ?? DEFAULT_PRECHECK_TIMEOUT } : null,
     folder: { mode: f.mode, path: linked || "", ...(f.mode === "worktree" && f.base ? { base: String(f.base) } : {}), ...(linked ? {} : { hint }) },
@@ -1164,13 +1231,21 @@ function branchOptions(deps, dir) {
   }
   return { isRepo: true, branches, defaultBranch };
 }
+// 예약 화면의 계정 목록. installed 가 false 면 자동만 고를 수 있다. logins 가 null 이면 목록을 읽지 못했다.
+function accountOptions(deps) {
+  let ga = null;
+  try { ga = deps.ghAccount ? deps.ghAccount() : null; } catch { ga = null; }
+  if (!ga) return { installed: false, old: false, logins: null };
+  if (ga.old) return { installed: true, old: true, logins: null };
+  try { const r = ga.accounts(); return { installed: !!r.installed, old: false, logins: r.logins ?? null }; } catch { return { installed: true, old: false, logins: null }; }
+}
 function options({ path: dir } = {}, deps = defaultDeps()) {
   const folders = [];
   for (const a of loadAutos().automations) {
     const p = a && a.folder && typeof a.folder.path === "string" ? a.folder.path : "";
     if (p && !folders.includes(p) && isDir(p)) folders.push(p);
   }
-  const out = { ok: true, codex: codexModels(), folders, isRepo: false, branches: [], defaultBranch: "" };
+  const out = { ok: true, codex: codexModels(), folders, isRepo: false, branches: [], defaultBranch: "", accounts: accountOptions(deps) };
   if (typeof dir === "string" && dir.trim() && isDir(dir.trim())) Object.assign(out, branchOptions(deps, dir.trim()));
   return out;
 }
@@ -1222,7 +1297,7 @@ function main(argv) {
 module.exports = {
   ScheduleError, compile, nextAfter, nextTimes, latestIn, describe, validateAutomation, zonedToUtc, partsOf, localZone,
   tick, collectNotices, osNotifyCommand, execute, runNow, refreshRun, launchArgs, slugOf, stamp, claimRun, list, validate, save, remove, toggle, nextCmd, options, codexModels, branchOptions,
-  defaultDeps, syncStatus, setSyncRepo, record, importFromRepo, normRemote,
+  defaultDeps, loadGhAccount, accountEnv, syncStatus, setSyncRepo, record, importFromRepo, normRemote,
   paths: { STORE_DIR, AUTOS_FILE, RUNS_FILE, SETTINGS_FILE },
 };
 if (require.main === module) main(process.argv.slice(2));

@@ -12,17 +12,22 @@
 //     새로 복제해야 할 레이아웃 이름을 출력한다. 이미 있으면 아무것도 출력하지 않는다.
 //   node install.cjs layout --home <home> [--created]
 //     우리 레이아웃에 모드 블록을 처음 한 번만 넣는다. --created는 방금 복제한 레이아웃이라는 뜻이다.
+//   node install.cjs hook --home <home> [--settings <settings.json>] [--remove]
+//     PO 훅(inbox의 po-hook.cjs) 한 줄을 Claude Code 설정(기본 ~/.claude/settings.json, CLAUDE_CONFIG_DIR이 있으면 그 폴더)의
+//     Stop·UserPromptSubmit에 넣는다. 다른 훅은 그대로 두고, 이미 있으면 바꾸지 않으며, 쓰기 전에 백업하고, JSON을 읽지 못하면 쓰지 않는다.
+//     --remove는 우리 줄만 뺀다. 이 명령만 설정 파일을 건드린다(mods·remove는 건드리지 않는다).
 // 레이아웃 단계마다 기록 파일을 두어, 사용자가 되돌린 블록은 다시 바꾸지 않는다.
 "use strict";
 const fs = require("node:fs");
 const path = require("node:path");
 
 const CORE = ["tabs-mine", "work", "prs", "wt-menu", "schedules"];
-const EXTRAS = ["usage-status", "agent-groups", "leader-tabs", "path-menu"];
+const EXTRAS = ["usage-status", "agent-groups", "leader-tabs", "path-menu", "gh-accounts", "inbox"];
 const ALL = [...CORE, ...EXTRAS];
 // 모드 설명과 꼭 함께 있어야 하는 모드. deps는 코드에서 확인한 것만 적는다.
 //   work·prs: wt-menu 팝업을 연다(work/main.js, prs/main.js의 openOverlay). 패널 버튼은 tabs-mine에만 있다.
 //   prs: 데이터를 mods/work/collect.cjs로 읽는다. schedules: 30초 tick을 tabs-mine이 부른다.
+//   gh-accounts: 패널 버튼이 tabs-mine에만 있다. gh-account 도구(--gh-account)는 모드가 아니라 따로 설치한다.
 const MODS = {
   "tabs-mine": { desc: "탭 줄. 오른쪽 패널에 Work·PRs·예약 버튼을 더하고 예약 실행을 맡는다", deps: [] },
   work: { desc: "Work 패널: 누가 무엇을 하고 있나", deps: ["tabs-mine", "wt-menu"] },
@@ -33,6 +38,8 @@ const MODS = {
   "agent-groups": { desc: "왼쪽 사이드바 에이전트 목록을 작업별로 묶는다", deps: [] },
   "leader-tabs": { desc: "칸 머리줄에 리더 탭을 보여 준다", deps: [] },
   "path-menu": { desc: "터미널 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄운다", deps: [] },
+  "gh-accounts": { desc: "계정 패널: 스페이스·저장소마다 쓸 GitHub 계정 고르기 (--gh-account 도구 필요)", deps: ["tabs-mine"] },
+  inbox: { desc: "UI 모드 패널: 리더 결과 보고를 채팅처럼 보고, 결정을 PO에게 답한다", deps: ["tabs-mine"] },
 };
 const MARK = ".installed-by-herdr-installer";
 // 예전 설치 스크립트가 남긴 표시. 이 표시가 있는 폴더도 우리 것으로 보고 덮어쓴다.
@@ -43,6 +50,8 @@ const LEGACY_LAYOUT = "agent-groups";
 // 이 설치기가 쓰는 레이아웃 이름(dashboard 또는 예전 agent-groups) 기록. 블록이 모두 빠진 뒤에도 같은 레이아웃을 알아본다.
 const LAYOUT_MARK = ".herdr-installer-layout";
 const SRC = path.join(__dirname, "mods");
+// 모드 폴더 밖에 있지만 모드와 함께 복사할 파일. gh-accounts 패널은 설치·확인·계정 추가에 gh-account 도구를 쓴다.
+const BUNDLE = { "gh-accounts": [["gh-account/gh-account.cjs", "gh-account.cjs"]], work: [["mods/inbox/profile.cjs", "profile.cjs"]] }; // work: collect.cjs reads the inbox profile (names, labels)
 
 function log(msg) { process.stdout.write(msg + "\n"); }
 
@@ -56,7 +65,7 @@ function parseNames(value, flag) {
 }
 
 function parseArgs(argv) {
-  const out = { cmd: argv[0], home: null, extras: false, only: null, add: null, mods: null, created: false };
+  const out = { cmd: argv[0], home: null, extras: false, only: null, add: null, mods: null, created: false, settings: null, remove: false };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--home") out.home = argv[++i];
@@ -65,6 +74,8 @@ function parseArgs(argv) {
     else if (a === "--add") out.add = parseNames(argv[++i], a);
     else if (a === "--mods") out.mods = parseNames(argv[++i], a);
     else if (a === "--created") out.created = true;
+    else if (a === "--settings") { out.settings = argv[++i]; if (!out.settings) throw new Error("--settings 뒤에 파일 경로가 필요합니다."); }
+    else if (a === "--remove") out.remove = true;
     else throw new Error(`알 수 없는 인자: ${a}`);
   }
   if (!out.home) throw new Error("--home이 필요합니다.");
@@ -117,6 +128,7 @@ function installMods(home, opts = {}) {
     }
     fs.mkdirSync(target, { recursive: true });
     fs.cpSync(path.join(SRC, mod), target, { recursive: true, force: true });
+    for (const [from, to] of BUNDLE[mod] || []) fs.copyFileSync(path.join(__dirname, from), path.join(target, to));
     fs.writeFileSync(path.join(target, MARK), "");
     log(`모드 설치: ${target}`);
     result.installed.push(mod);
@@ -288,6 +300,22 @@ const STEPS = [
     undo: (l) => dropPanel(l, "schedules"),
   },
   {
+    name: "오른쪽 패널 계정(gh-accounts)",
+    needs: ["gh-accounts"],
+    mark: ["gh-accounts", ".board-added"],
+    done: () => false,
+    apply: (l) => addPanel(l, "accounts-board", "gh-accounts"),
+    undo: (l) => dropPanel(l, "gh-accounts"),
+  },
+  {
+    name: "오른쪽 패널 UI 모드(inbox)",
+    needs: ["inbox"],
+    mark: ["inbox", ".board-added"],
+    done: () => false,
+    apply: (l) => addPanel(l, "inbox-board", "inbox"),
+    undo: (l) => dropPanel(l, "inbox"),
+  },
+  {
     name: "칸 머리줄(leader-tabs)",
     needs: ["leader-tabs"],
     mark: ["leader-tabs", ".header-swapped"],
@@ -314,6 +342,59 @@ function migrateMarks(home) {
     if (ours(modDir(home, mod))) fs.writeFileSync(path.join(modDir(home, mod), file), "");
   }
   fs.rmSync(old, { force: true });
+}
+
+// UI 모드 레이아웃(<기본 레이아웃>-ui): 기본 레이아웃에서 터미널이 있는 main 칸(content.tab "active", 없으면 id "main")만 UI 모드로 바꾼 복사본.
+// 터미널 모드(기본 레이아웃)와 `layout.switch`로 오간다. 만든 파일의 해시를 inbox 모드 폴더에 남겨, 사용자가 고친 파일은 다시 쓰지 않는다.
+const UI_SUFFIX = "-ui";
+const UI_MARK = ["inbox", ".ui-layout-hash" ];
+const hashOf = (text) => require("node:crypto").createHash("sha1").update(text).digest("hex");
+const uiMarkFile = (home) => path.join(modDir(home, UI_MARK[0]), UI_MARK[1]);
+const readMark = (home) => { try { return fs.readFileSync(uiMarkFile(home), "utf8").trim(); } catch { return ""; } };
+const uiText = (layout) => JSON.stringify(layout, null, 2) + "\n";
+
+// 기본 레이아웃 객체에서 UI 모드 레이아웃 객체를 만든다. main 칸이 없으면 null.
+function deriveUiLayout(base) {
+  const ui = JSON.parse(JSON.stringify(base));
+  let main = null;
+  walk(ui, (n) => { if (!main && n.type === "block" && n.content?.tab === "active") main = n; });
+  if (!main) walk(ui, (n) => { if (!main && n.type === "block" && n.id === "main") main = n; });
+  if (!main) return null;
+  main.content = { mod: "inbox", props: { mode: "main" } };
+  delete ui.cloned_from;
+  return ui;
+}
+
+function applyUiLayout(home, baseFile, baseLayout) {
+  if (!available(home, "inbox")) return "skipped";
+  const file = path.join(path.dirname(baseFile), path.basename(baseFile, ".json") + UI_SUFFIX + ".json");
+  const ui = deriveUiLayout(baseLayout);
+  if (!ui) { log("UI 모드 레이아웃: main(터미널) 칸을 찾지 못해 만들지 않았습니다."); return "skipped"; }
+  const text = uiText(ui);
+  let current = null;
+  try { current = fs.readFileSync(file, "utf8"); } catch {}
+  if (current === text) { fs.writeFileSync(uiMarkFile(home), hashOf(text) + "\n"); return "same"; }
+  if (current !== null && hashOf(current) !== readMark(home)) {
+    log(`${file} 은(는) 이 설치기가 만들었거나 그대로 둔 파일이 아니라 건드리지 않습니다.`);
+    return "foreign";
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  writeLayout(file, ui);
+  fs.writeFileSync(uiMarkFile(home), hashOf(text) + "\n");
+  log(`UI 모드 레이아웃을 ${current === null ? "만들었습니다" : "다시 만들었습니다"}: ${file} (탭 줄의 "전체 화면" 버튼으로 전환)`);
+  return current === null ? "created" : "updated";
+}
+
+// inbox를 지울 때: 우리가 만든 그대로인 UI 모드 레이아웃만 지운다.
+function removeUiLayout(home, baseFile) {
+  const file = path.join(path.dirname(baseFile), path.basename(baseFile, ".json") + UI_SUFFIX + ".json");
+  let current;
+  try { current = fs.readFileSync(file, "utf8"); } catch { return false; }
+  if (hashOf(current) !== readMark(home)) return false;
+  fs.rmSync(file, { force: true });
+  log(`UI 모드 레이아웃을 지웠습니다: ${file}`);
+  log("UI 모드 화면을 보고 있었다면 Herdr에서 '터미널 모드'로 먼저 돌아오세요(보던 -ui 레이아웃이 없어집니다).");
+  return true;
 }
 
 function applyLayout(home, created) {
@@ -359,7 +440,8 @@ function applyLayout(home, created) {
     step.after?.(home);
     if (applied) log(`레이아웃 반영: ${step.name}`);
   }
-  return { changed: changed.filter((c) => c.applied).map((c) => c.step.mark[1]), file };
+  const ui = applyUiLayout(home, file, layout);
+  return { changed: changed.filter((c) => c.applied).map((c) => c.step.mark[1]), file, ui };
 }
 
 function pendingLayout(home) {
@@ -412,6 +494,7 @@ function revertLayout(home, mods) {
     log(`레이아웃을 읽지 못해 되돌리지 않았습니다: ${found.file} (${e.message})`);
     return;
   }
+  if (mods.includes("inbox")) removeUiLayout(home, found.file);
   const names = [];
   for (const step of STEPS) {
     if (mods.includes(step.mark[0]) && step.undo(layout)) names.push(step.name);
@@ -437,9 +520,95 @@ function listMods(home) {
   return ALL.map((mod) => ({ mod, status: modStatus(home, mod) }));
 }
 
+// ---- PO hook: one entry in Claude Code's settings.json (Stop and UserPromptSubmit) that runs inbox/po-hook.cjs.
+// Our entry is told apart from every other hook by its exact command shape: node "<home>/mods/inbox/po-hook.cjs" (what hookCommand writes).
+const HOOK_EVENTS = ["Stop", "UserPromptSubmit"];
+const HOOK_SCRIPT = "po-hook.cjs";
+const HOOK_TIMEOUT_S = 5;
+const isOurHook = (h) => h && typeof h.command === "string" && /^node "[^"\n\r]*[\\/]mods[\\/]inbox[\\/]po-hook\.cjs"$/.test(h.command);
+const settingsPath = (env = process.env) => path.join(env.CLAUDE_CONFIG_DIR || path.join(require("node:os").homedir(), ".claude"), "settings.json");
+const hookScript = (home) => path.join(modDir(home, "inbox"), HOOK_SCRIPT);
+// The command that runs the script with node (no sh needed: it runs the same on macOS, Linux and Windows).
+function hookCommand(script) {
+  if (/["\n\r]/.test(script)) throw new Error(`훅 스크립트 경로에 쓸 수 없는 글자가 있습니다: ${script}`);
+  return `node "${script}"`;
+}
+// The settings object with our entry added to (or taken out of, `remove`) every event: {settings, changed}. Pure: the input is not changed.
+// Everything else (other hooks, other groups, other keys) is kept as it is. An entry of ours that already has `command` is left alone; one
+// with another command (the install moved) gets the new command. Throws a Korean message when `hooks` or an event has an unexpected shape:
+// nothing is guessed, so nothing is written over it.
+function mergeHook(settings, command, remove = false) {
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) throw new Error("설정 파일의 최상위가 객체가 아닙니다.");
+  const out = JSON.parse(JSON.stringify(settings));
+  let changed = false;
+  if (out.hooks === undefined) { if (remove) return { settings: out, changed: false }; out.hooks = {}; }
+  if (!out.hooks || typeof out.hooks !== "object" || Array.isArray(out.hooks)) throw new Error("설정 파일의 hooks가 객체가 아닙니다.");
+  for (const ev of HOOK_EVENTS) {
+    if (out.hooks[ev] === undefined) {
+      if (remove) continue;
+      out.hooks[ev] = [{ hooks: [{ type: "command", command, timeout: HOOK_TIMEOUT_S }] }];
+      changed = true;
+      continue;
+    }
+    const groups = out.hooks[ev];
+    if (!Array.isArray(groups)) throw new Error(`설정 파일의 hooks.${ev}가 배열이 아닙니다.`);
+    for (const g of groups) if (!g || typeof g !== "object" || (g.hooks !== undefined && !Array.isArray(g.hooks))) throw new Error(`설정 파일의 hooks.${ev} 항목 모양을 알 수 없습니다.`);
+    if (remove) {
+      for (const g of groups) {
+        const keep = (g.hooks ?? []).filter((h) => !isOurHook(h));
+        if (keep.length !== (g.hooks ?? []).length) { g.hooks = keep; changed = true; }
+      }
+      const left = groups.filter((g) => !((g.hooks ?? []).length === 0 && Array.isArray(g.hooks)));
+      if (left.length !== groups.length) { out.hooks[ev] = left; changed = true; }
+      if (!out.hooks[ev].length) delete out.hooks[ev];
+      continue;
+    }
+    const mine = groups.flatMap((g) => (g.hooks ?? []).filter(isOurHook));
+    if (!mine.length) { groups.push({ hooks: [{ type: "command", command, timeout: HOOK_TIMEOUT_S }] }); changed = true; continue; }
+    for (const h of mine) if (h.command !== command) { h.command = command; changed = true; }
+  }
+  if (remove && !Object.keys(out.hooks).length) delete out.hooks;
+  return { settings: out, changed };
+}
+const indentOf = (text) => { const m = /\n([ \t]+)\S/.exec(text); return m ? m[1] : "  "; };
+// Install or remove the hook entry in the settings file `file`. Returns {status, file, backup?}:
+//   status "installed" | "updated"-free: "installed" (added or fixed), "present" (already there, nothing written), "removed", "absent" (nothing to remove),
+//   "skipped" (the script is not installed), "invalid" (the file is not usable JSON: nothing written; `error` says why).
+// The file is backed up (<file>.bak-herdr-<time>) before it is changed and replaced atomically (a temp file in the same folder, then rename);
+// a symlinked settings file is written through the link. A missing file is created on install.
+function hookSettings(home, file, remove = false, now = Date.now()) {
+  const script = hookScript(home);
+  if (!remove && !fs.existsSync(script)) return { status: "skipped", file, error: `${script} 이(가) 없습니다. inbox 모드를 먼저 설치하세요.` };
+  let real = file;
+  try { real = fs.realpathSync(file); } catch {}
+  let text = null;
+  try { text = fs.readFileSync(real, "utf8"); } catch (e) { if (e.code !== "ENOENT") return { status: "invalid", file, error: `설정 파일을 읽지 못했습니다: ${e.message}` }; }
+  let cur = {};
+  if (text !== null) {
+    try { cur = JSON.parse(text.replace(/^\uFEFF/, "")); } catch (e) { return { status: "invalid", file, error: `설정 파일이 올바른 JSON이 아니라 건드리지 않았습니다: ${e.message}` }; }
+  } else if (remove) return { status: "absent", file };
+  let merged;
+  try { merged = mergeHook(cur, hookCommand(script), remove); } catch (e) { return { status: "invalid", file, error: `${e.message} 건드리지 않았습니다.` }; }
+  if (!merged.changed) return { status: remove ? "absent" : "present", file };
+  const body = JSON.stringify(merged.settings, null, text === null ? 2 : indentOf(text)) + (text === null || text.endsWith("\n") ? "\n" : "");
+  fs.mkdirSync(path.dirname(real), { recursive: true });
+  let backup;
+  if (text !== null) {
+    backup = `${real}.bak-herdr-${new Date(now).toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}`;
+    fs.copyFileSync(real, backup);
+  }
+  const tmp = `${real}.tmp-herdr-${process.pid}`;
+  let mode = 0o600;
+  try { mode = fs.statSync(real).mode & 0o777; } catch {}
+  fs.writeFileSync(tmp, body, { mode });
+  fs.renameSync(tmp, real);
+  return { status: remove ? "removed" : "installed", file, ...(backup ? { backup } : {}) };
+}
+
 module.exports = {
   CORE, EXTRAS, ALL, MODS, MARK, LEGACY_MARK, LAYOUT_NAME,
-  parseArgs, installMods, applyLayout, pendingLayout, removeMods, listMods,
+  parseArgs, installMods, applyLayout, deriveUiLayout, pendingLayout, removeMods, listMods,
+  HOOK_EVENTS, HOOK_SCRIPT, isOurHook, settingsPath, hookScript, hookCommand, mergeHook, hookSettings,
 };
 
 if (require.main === module) {
@@ -453,5 +622,11 @@ if (require.main === module) {
   else if (args.cmd === "list") listMods(args.home);
   else if (args.cmd === "pending-layout") { const name = pendingLayout(args.home); if (name) log(name); }
   else if (args.cmd === "layout") applyLayout(args.home, args.created);
+  else if (args.cmd === "hook") {
+    const r = hookSettings(args.home, args.settings || settingsPath(), args.remove);
+    const say = { installed: `PO 훅을 넣었습니다: ${r.file}${r.backup ? ` (백업: ${r.backup})` : ""}. 이미 켜진 PO 세션은 다시 시작해야 적용됩니다.`, present: `PO 훅이 이미 들어 있습니다: ${r.file}`, removed: `PO 훅을 뺐습니다: ${r.file}${r.backup ? ` (백업: ${r.backup})` : ""}`, absent: `뺄 PO 훅이 없습니다: ${r.file}`, skipped: `PO 훅은 넣지 않았습니다. ${r.error}`, invalid: `PO 훅을 넣지 못했습니다. ${r.error}` };
+    log(say[r.status]);
+    if (r.status === "invalid") process.exit(1);
+  }
   else { log(`알 수 없는 명령: ${args.cmd}`); process.exit(2); }
 }

@@ -1,6 +1,6 @@
 ﻿# Herdr 모드를 설치·갱신한다(Windows). 다시 실행해도 된다. install.sh의 Windows 버전이다.
 #   기본 모드: tabs-mine, work, prs, wt-menu, schedules
-#   추가 모드(-Extras): usage-status, agent-groups, leader-tabs, path-menu
+#   추가 모드(-Extras): usage-status, agent-groups, leader-tabs, path-menu, gh-accounts, inbox
 #   인자 없이 실행하면 설치된 모드만 갱신한다(처음이면 기본 모드를 설치한다).
 #   -Only work,prs / -Add usage-status / -Remove leader-tabs / -List 로 모드를 고를 수 있다.
 # 저장소를 받지 않고 바로 실행할 수도 있다.
@@ -74,6 +74,11 @@ try {
     $R = Invoke-Helper @('remove', '--home', $AppHome, '--mods', ($Remove -join ','))
     Write-Host -NoNewline $R.Out
     if ($R.Code -ne 0 -and $R.Code -ne 2) { Write-Host '모드를 지우지 못했습니다.' }
+    # PO 훅(inbox): Claude Code 설정의 한 줄을 뺀다. 다른 훅은 건드리지 않는다.
+    if ($Remove -contains 'inbox') {
+      $R = Invoke-Helper @('hook', '--home', $AppHome, '--remove')
+      Write-Host -NoNewline $R.Out
+    }
     return
   }
 
@@ -86,6 +91,12 @@ try {
   Write-Host -NoNewline $R.Out
   if ($R.Code -eq 2) { return }
   if ($R.Code -ne 0) { Write-Host '모드를 복사하지 못했습니다.'; return }
+  # PO 훅(inbox): Claude Code 설정(~\.claude\settings.json, CLAUDE_CONFIG_DIR이 있으면 그 폴더)의 Stop·UserPromptSubmit에 한 줄을 넣는다. 실패해도 설치는 계속한다.
+  if (Test-Path (Join-Path $AppHome 'mods\inbox\po-hook.cjs')) {
+    $H = Invoke-Helper @('hook', '--home', $AppHome)
+    Write-Host -NoNewline $H.Out
+    if ($H.Code -ne 0) { Write-Host 'PO 훅을 설정에 넣지 못했습니다(PO 답이 UI 모드에 자동으로 올라오지 않습니다).' }
+  }
   if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { Write-Host 'gh가 없어 Work·PRs 패널은 GitHub 데이터를 불러오지 못합니다. GitHub CLI를 설치하고 로그인하세요.' }
 
   # 2) 레이아웃. 우리 레이아웃이 없으면 실행 중인 앱에서 기본 레이아웃(main)을 복제한다.

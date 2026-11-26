@@ -1,7 +1,7 @@
 // Clone of Herdr's shipped `tabs` mod. The PRs button shows a count of PRs needing my action (collect.cjs `attention`: my open PRs with failing CI or changes requested, plus open PRs asking me to review). The layout blocks are "work-board" (mod work) and "pr-board" (mod prs); the id "work" is already a layout column. Changed: the right-panel buttons are Files, Changes, then Work and PRs (added after the stock ones).
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, ScrollHandle } from "gpui-base";
-import { spaces, panes, terminals, focused, run, notify, openOverlay, theme, window, shared, layout, settings, exec, appHome, checking } from "herdr";
+import { spaces, panes, terminals, focused, run, notify, openOverlay, theme, window, shared, layout, settings, exec, appHome, checking, layouts, nextCommand } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -28,6 +28,71 @@ function label(tab, lead) {
   return (tab.name === prog || !tab.named) && telling ? live : base;
 }
 
+// names:begin
+// The names this desk recognizes: which terminals are reporting agents and hubs, the labels it reads, the answer line (the profile, docs/inbox-contract.md
+// §9-§10). The defaults are today's behavior; `node inbox.cjs` prints the loaded profile as `names` (profile.cjs namesOf) and the desk applies it
+// with setNames(). The mods cannot require a .cjs file, so this block is copied verbatim between the markers into inbox/main.js and every other mod that reads names
+// (leader-tabs, agent-groups, work, tabs-mine, prs; a test keeps them identical and checks DEFAULT_NAMES against profile.cjs).
+const DEFAULT_NAMES = Object.freeze({
+  agentName: "^lead-[a-z0-9_-]+$", agentRole: "leader", titlePrefix: "^\\s*리더\\s*·\\s*", titlePrefixText: "리더 · ", strip: "^lead-", // a reporting agent: its name, its `role` label value, what is cut off a title (pattern + the literal text to put back) / a name
+  hubRole: "po", hubIdLabel: "po", hubId: "^[a-z0-9-]{1,40}$", hubDir: "po", // the hub (PO): its `role` value, id label, id pattern, folder
+  labelRole: "role", labelWait: "wait", labelWaitLink: "wait-link", labelSession: "session",
+  answerLine: 'Panel answer ({kind}) for {agent}: "{text}".{ Target: {link}}',
+});
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // a hub id becomes a file name whatever its pattern says
+function compileNames(n) {
+  const re = (s) => { try { return new RegExp(s); } catch { return null; } };
+  const c = { ...n, agentRe: re(n.agentName), stripRe: n.strip ? re(n.strip) : null, prefixRe: n.titlePrefix ? re(n.titlePrefix) : null, hubIdRe: re(n.hubId) };
+  return c.agentRe && c.hubIdRe && (!n.strip || c.stripRe) && (!n.titlePrefix || c.prefixRe) ? c : null;
+}
+let NAMES = compileNames(DEFAULT_NAMES);
+let NAMES_JSON = "";
+// Applies the names the profile gave (null = defaults). Compiles only when they changed (the mods call this on every render); true when they did.
+const setNames = (n) => {
+  const key = JSON.stringify(n ?? null);
+  if (key === NAMES_JSON && NAMES) return false;
+  NAMES_JSON = key;
+  NAMES = compileNames({ ...DEFAULT_NAMES, ...(n && typeof n === "object" ? n : {}) }) ?? compileNames(DEFAULT_NAMES);
+  return true;
+};
+// Sharing: the desk and the work board load the profile (their helper prints `names`) and publish it; every other mod follows what is shared. In the helper
+// (node) there is no `shared`, so both are inert there.
+const NAMES_SHARED = "inbox.names";
+const adoptNames = (n) => {
+  const changed = setNames(n);
+  try { if (typeof setShared === "function" && JSON.stringify(shared(NAMES_SHARED) ?? {}) !== JSON.stringify(n ?? {})) setShared(NAMES_SHARED, n ?? {}); } catch {}
+  return changed;
+};
+const syncNames = () => { try { return typeof shared === "function" ? setNames(shared(NAMES_SHARED)) : false; } catch { return false; } };
+const isAgentName = (v) => NAMES.agentRe.test(String(v ?? ""));
+const labelOf = (t, key) => String(t?.labels?.[NAMES[key]] ?? "").trim(); // key: labelRole | labelWait | labelWaitLink | labelSession | hubIdLabel
+const roleIs = (t, role) => Boolean(role) && labelOf(t, "labelRole").toLowerCase() === String(role).toLowerCase();
+const isHubTerm = (t) => roleIs(t, NAMES.hubRole);
+const isAgentTerm = (t) => roleIs(t, NAMES.agentRole);
+const cleanPoId = (v) => { const s = String(v ?? "").trim(); return SAFE_ID.test(s) && NAMES.hubIdRe.test(s) ? s : ""; };
+const poId = (t) => (isHubTerm(t) ? cleanPoId(labelOf(t, "hubIdLabel")) : "");
+// The line pasted into the hub terminal. One line (newlines folded to spaces) so the submit keeps it as a single user message. A `{… {link} …}`
+// group of the template is kept (without its braces) only when there is a link.
+function answerLine(kind, leader, text, link) {
+  const body = String(text ?? "").replace(/\s*\n\s*/g, " ").trim();
+  const vals = { kind: String(kind ?? ""), agent: String(leader ?? ""), text: body, link: String(link ?? "") };
+  return NAMES.answerLine.replace(/\{([^{}]*)\{link\}([^{}]*)\}/g, (_, a, b) => (vals.link ? `${a}{link}${b}` : "")).replace(/\{(kind|agent|text|link)\}/g, (_, k) => vals[k]);
+}
+// names:end
+
+// Which terminal is a waiting leader. Copied verbatim from inbox/inbox.cjs (a test keeps them identical).
+const waitingKind = (t) => (isAgentName(t?.name) ? (["decision", "verify"].find((k) => k === labelOf(t, "labelWait").toLowerCase()) ?? "") : "");
+
+// UI 모드/터미널 모드: 설치기가 터미널 모드 레이아웃(<이름>)에서 만든 `<이름>-ui`와 서로 바꾼다. 짝이 없으면 null.
+function modeTarget() {
+  try {
+    const cur = String(shared("layout") ?? "");
+    const ui = cur.endsWith("-ui");
+    const name = ui ? cur.slice(0, -3) : `${cur}-ui`;
+    return cur && (layouts() ?? []).includes(name) ? { ui, name } : null;
+  } catch { return null; }
+}
+
 export default class Tabs extends View {
   init(_props, cx) {
     this.attention = 0;
@@ -43,6 +108,8 @@ export default class Tabs extends View {
       this.adopted = new Set();
       cx.timer.every(2000, () => this.adoptSchedules());
       cx.timer.every(150, () => this.restoreAdopted());
+      // keys.json의 "tabs-mine.mode"(예: "cmd-shift-u": "tabs-mine.mode")로도 같은 전환을 한다.
+      cx.spawn(async () => { for (;;) { const c = String(await nextCommand()); if (c === "mode") { const m = modeTarget(); if (m) run("layout.switch", { name: m.name }); } } });
     }
     this.pressed = null;
     this.scroll = ScrollHandle.new();
@@ -97,7 +164,7 @@ export default class Tabs extends View {
       const target = this.scheduleSpace(t.cwd);
       const moved = !!(target && prev && target !== prev.space);
       if (moved) run("space.select", { id: target });
-      this.adopting.set(t.address, { at: Date.now(), target, moved, prev: prev ? { space: prev.space, tab: prev.tab } : null, name: String(t.labels?.session ?? "").trim() || null });
+      this.adopting.set(t.address, { at: Date.now(), target, moved, prev: prev ? { space: prev.space, tab: prev.tab } : null, name: labelOf(t, "labelSession") || null });
       run("terminal.keep", { terminal: t.address, place: "tab" });
       this.restoreAdopted(); // 칸이 바로 생겼으면 기다리지 않고 곧장 되돌린다
     } catch {}
@@ -166,6 +233,9 @@ export default class Tabs extends View {
       finally { this.counting = false; }
     });
   }
+
+  // 답을 기다리는 리더 수: 대기 라벨(decision|verify)이 붙은 에이전트 이름(기본 lead-*)의 터미널(UI 모드 요약 칸과 같은 규칙, inbox.cjs의 waitingKind). UI 모드 칸이 닫혀 있어도 터미널 라벨만 보므로 늘 맞다.
+  inboxWaiting() { syncNames(); return (terminals() ?? []).filter((t) => waitingKind(t)).length; } // syncNames: the profile the desk published
 
   // One tab per wheel notch. A touchpad or smooth-scrolling mouse sends many
   // small events per gesture: a short swipe or one smoothed notch (about
@@ -263,7 +333,7 @@ export default class Tabs extends View {
     // Another mod may set workspace.panels without our ids: always offer the panels this layout actually has,
     // and drop the ones it doesn't (the stock list names Files, which this layout replaced).
     const have = (body?.children ?? []).map(c => c.id);
-    const listed = shared("workspace.panels") ?? ["files", "changes", "work-board", "pr-board", "schedules-board"];
+    const listed = shared("workspace.panels") ?? ["files", "changes", "work-board", "pr-board", "schedules-board", "accounts-board", "inbox-board"];
     const enabled = [...new Set([...listed.filter(id => !have.length || have.includes(id)), ...have])];
     this.syncPanel(space, panel, body, enabled);
     const panelButton = (id, label, icon, badge) => {
@@ -276,7 +346,7 @@ export default class Tabs extends View {
           else { run("layout.select", { stack: "panel-body", child: id }); run("layout.show", { id: "panel" }); }
         }).child(svg(icon).size(14)).child(label)
         .when(badge > 0, (el) => el.child(div().flex_none().min_w(16).h(16).px(4).rounded(8).bg(t.blocked).flex().items_center().justify_center().text_size(10.5).font_semibold().text_color("#ffffff")
-          .tooltip("내 확인이 필요한 PR (내 PR 중 CI 실패·수정 요청, 내게 온 리뷰 요청)").child(String(badge))));
+          .tooltip("알림 수: PRs는 내 확인이 필요한 PR(내 PR 중 CI 실패·수정 요청, 내게 온 리뷰 요청), UI 모드는 답을 기다리는 리더").child(String(badge))));
     };
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
@@ -290,6 +360,12 @@ export default class Tabs extends View {
       .when(enabled.includes("work-board"), el => el.child(panelButton("work-board", "Work", "mods/workspace-chrome/layers.svg")))
       .when(enabled.includes("pr-board"), el => el.child(panelButton("pr-board", "PRs", "mods/workspace-chrome/git-compare.svg", this.attention)))
       .when(enabled.includes("schedules-board"), el => el.child(panelButton("schedules-board", "예약", "mods/workspace-chrome/clock.svg")))
+      .when(enabled.includes("accounts-board"), el => el.child(panelButton("accounts-board", "계정", "mods/workspace-chrome/git-branch.svg")))
+      .when(enabled.includes("inbox-board"), el => el.child(panelButton("inbox-board", "UI 모드", "mods/workspace-chrome/archive.svg", this.inboxWaiting())))
+      .when(Boolean(modeTarget()), el => el.child(h_flex().id("mode-switch").h(26).px(8).flex_none().items_center().rounded(6).text_size(12).bg(t.selected).text_color(t.foreground)
+        .hover(s => s.bg(t.hover)).on_mouse_down("left", stop).on_click(() => { const m = modeTarget(); if (m) run("layout.switch", { name: m.name }); })
+        .tooltip(modeTarget()?.ui ? "터미널 화면으로 돌아갑니다. 터미널은 꺼지지 않습니다" : "UI 모드를 전체 화면으로 씁니다. 터미널은 숨겨질 뿐 계속 돕니다")
+        .child(modeTarget()?.ui ? "터미널 모드" : "전체 화면")))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/tabs/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));
