@@ -226,7 +226,8 @@ test("parsePoLines: an img line goes to the 'me' line with the same prompt id, e
   assert.equal(out.length, 2);
   assert.deepEqual(out[0].imgs, [a]);
   assert.deepEqual(out[1].imgs, [b]);
-  assert.ok(out.every((x) => !("pid" in x)));
+  assert.deepEqual(out.map((x) => x.pid), ["p1", "p2"]); // the prompt id stays on the line (the 1:1 view pairs a reply with its prompt, #58); a line without one has no pid
+  assert.ok(!("pid" in I.parsePoLines(L({ ts: iso(0), kind: "say", text: "x" }))[0]));
   // an img line with nothing to attach to is dropped silently
   assert.deepEqual(I.parsePoLines(L({ ts: iso(0), kind: "img", pid: "zz", imgs: [a] })), []);
   // too old to belong to the prompt without an id
