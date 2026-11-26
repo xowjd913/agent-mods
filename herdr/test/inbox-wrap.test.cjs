@@ -438,7 +438,7 @@ test("R17: each bubble has a 복사 chip that copies the unwrapped text; backgro
   assert.match(side, /on_mouse_down\("left", stop\)/);
   assert.equal((MAIN.match(/this\.sideTools\(t, id, e\.text, e\.ms\)/g) ?? []).length, 2, "mine and the PO's");
   // every background source goes through softNotify or the quiet check
-  assert.match(MAIN, /if \(!same\) this\.softNotify\(cx\);/);
+  assert.match(MAIN, /if \(!same\) this\.softNotify\(c2\);/);
   assert.match(MAIN, /this\.narrow = n; this\.softNotify\(cx\)/, "a resize redraw goes through softNotify (onSize)");
   assert.match(MAIN, /if \(r\.go && quietNow\(this\.ui, Date\.now\(\)\)\) return;/);
   assert.doesNotMatch(MAIN, /!this\.ui\.press\) this\.scroll/);
