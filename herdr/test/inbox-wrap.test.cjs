@@ -271,12 +271,12 @@ test("R16: the same closing-tag regex is in the mod copy, and the terminal-line 
 function replyDesk(store = {}) {
   const grab = (name, end) => { const a = MAIN.indexOf(name), b = MAIN.indexOf(end, a); assert.ok(a > 0 && b > a, name); return MAIN.slice(a, b); };
   const body = [grab("  picsOf(key = null)", "  bumpBusy("), grab("  pruneReply(asks)", "  pruneSent(asks)"), grab("  clearBox(a, how", "  box(leader, cx)")].join("\n");
-  const make = new Function("shared", "setShared", "SENT_KEY", `return class Desk {
-    constructor() { this.pics = []; this.replyPics = new Map(); this.replyBusy = new Map(); this.inputs = new Map(); this.writing = null; }
+  const make = new Function("shared", "setShared", "SENT_KEY", "staleDrafts", `return class Desk {
+    constructor() { this.pics = []; this.replyPics = new Map(); this.replyBusy = new Map(); this.inputs = new Map(); this.inputSeen = new Map(); this.writing = null; }
     askKey(a) { return a.kind + "|" + a.link; }
     ${body}
   }`);
-  return new (make((k) => store[k], (k, v) => { store[k] = v; }, "sent"))();
+  return new (make((k) => store[k], (k, v) => { store[k] = v; }, "sent", I.staleDrafts))();
 }
 const ASK = (leader) => ({ kind: "decision", link: "l", s: { leader } });
 const fakeInput = (v) => ({ v, value() { return this.v; }, set_value(x) { this.v = x; } });

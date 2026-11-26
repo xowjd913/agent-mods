@@ -787,6 +787,42 @@ test("choosePick: 마지막에 고른 PO(살아 있으면), 아니면 살아 있
   assert.equal(I.choosePick([{ id: "a", n: 0 }, { id: "b", n: 0 }], "", false), "a");
 });
 
+test("#57 재현: terminals()에서 고른 PO가 잠깐 빠지면 choosePick만으로는 다른 방으로 튄다 — settlePick은 유예 동안 고른 방을 붙든다", () => {
+  const now = 1_000_000;
+  const both = [{ id: "a", n: 1 }, { id: "b", n: 3 }];
+  const gap = [{ id: "b", n: 3 }]; // a 가 한 번의 조회에서 빠졌다
+  assert.equal(I.choosePick(gap, "a", false), "b"); // 예전 동작: 쓰던 방이 b 로 바뀌고 채팅 대상도 b 의 PO가 된다
+  assert.deepEqual(I.settlePick(gap, "a", false, now - 2000, now), { pick: "a", ghost: true }); // 고른 방 유지
+  assert.deepEqual(I.settlePick(both, "a", false, now - 2000, now), { pick: "a", ghost: false }); // 살아 있으면 그대로
+  assert.deepEqual(I.settlePick(gap, "a", false, now - I.PICK_GRACE_MS, now), { pick: "b", ghost: false }); // 유예가 지나면 되돌린다
+  assert.deepEqual(I.settlePick(gap, "a", false, 0, now), { pick: "b", ghost: false }); // 산 적을 모르면(창을 막 열었다) 붙들지 않는다
+  assert.deepEqual(I.settlePick(gap, "", false, 0, now), { pick: "b", ghost: false }); // 고른 적이 없으면 자동 선택
+  // 'PO 모름' 방도 잠깐 비었다고 사라지지 않는다
+  assert.deepEqual(I.settlePick(gap, I.PO_OTHER, false, now - 1000, now), { pick: I.PO_OTHER, ghost: true });
+  assert.deepEqual(I.settlePick(gap, I.PO_OTHER, true, now - 1000, now), { pick: I.PO_OTHER, ghost: false });
+  assert.deepEqual(I.settlePick([], "a", false, now - 1000, now), { pick: "a", ghost: true }); // PO가 하나도 안 보이는 순간에도
+});
+
+test("#57 재현: 답변 상자 초안은 리더가 한 번 빠졌다고 지워지지 않고, 유예가 지나야 지워진다", () => {
+  const now = 5_000_000;
+  const seen = new Map([["lead-a", now - 3000], ["lead-b", now - I.DRAFT_GRACE_MS - 1]]);
+  const stale = (live) => I.staleDrafts(["lead-a", "lead-b", "lead-c"], new Set(live), seen, now);
+  assert.deepEqual(stale([]), ["lead-b", "lead-c"]); // a 는 방금 있었다 → 남긴다, 본 적 없는 c 는 바로 지운다
+  assert.deepEqual(stale(["lead-b"]), ["lead-c"]);
+  assert.deepEqual(stale(["lead-a", "lead-b", "lead-c"]), []);
+});
+
+test("#57: view()는 settlePick으로 고른 방을 붙들고, 자동으로 고른 방도 저장해 리더 수에 따라 떠다니지 않게 한다", () => {
+  const MAIN = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  assert.match(MAIN, /settlePick\(pos, last, hasOther, this\.pickLive\.id === last \? this\.pickLive\.at : 0, now\)/);
+  assert.match(MAIN, /if \(pick && pick !== last\) \{ try \{ setShared\(PICK_KEY, pick\); \} catch \{\} \}/);
+  assert.match(MAIN, /settled\.ghost && !rooms\.some/); // 붙든 방은 방 목록에도 남는다
+  assert.match(MAIN, /staleDrafts\(this\.inputs\.keys\(\), live, this\.inputSeen, now\)/);
+  const chat = (src) => src.slice(src.indexOf("// chat:begin"), src.indexOf("// chat:end"));
+  const cjs = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8");
+  assert.equal(chat(MAIN), chat(cjs));
+});
+
 test("parseLines·summarize: 보고 줄의 po는 규칙에 맞을 때만 읽고, 리더의 po는 가장 최근 줄의 것이다", () => {
   const l1 = JSON.stringify({ ts: "2026-01-01T00:00:00Z", kind: "done", po: "devnotes" });
   const l2 = JSON.stringify({ ts: "2026-01-02T00:00:00Z", kind: "done" });

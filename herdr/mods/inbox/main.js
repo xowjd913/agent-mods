@@ -193,6 +193,24 @@ function choosePick(pos, last, hasOther) {
   const best = (pos ?? []).map((p, i) => ({ p, i })).sort((a, b) => b.p.n - a.p.n || a.i - b.i)[0];
   return best ? best.p.id : hasOther ? PO_OTHER : "";
 }
+
+// #57: the room the person picked stays until they pick another. The PO list comes from `terminals()`, which can miss a PO for a moment
+// (a redraw, a restart of its pane): `choosePick` would then fall to another room, and the chat box would aim at that PO. A picked room
+// that was live within PICK_GRACE_MS is held as a "ghost" room (no PO to send to, but the pick, the draft and the room list stay).
+// `liveAt` = the last time `last` was seen live (ms, 0 = unknown). -> {pick, ghost}
+const PICK_GRACE_MS = 30000;
+function settlePick(pos, last, hasOther, liveAt, now) {
+  const l = String(last ?? "");
+  const pick = choosePick(pos, last, hasOther);
+  if (pick === l || !l || !(liveAt > 0) || now - liveAt >= PICK_GRACE_MS) return { pick, ghost: false };
+  return { pick: l, ghost: true };
+}
+// #57: an answer-box draft of a leader that stopped waiting is cleared only after the leader has been gone for DRAFT_GRACE_MS (a leader
+// missing from one poll must not wipe what the person was typing). `seen`: leader -> last ms it was waiting. -> the leaders to clear.
+const DRAFT_GRACE_MS = 60000;
+function staleDrafts(keys, live, seen, now) {
+  return [...keys].filter((k) => !live.has(k) && !(now - (seen.get(k) ?? 0) < DRAFT_GRACE_MS));
+}
 // The "@" menu: "@here" first, then the live leaders of the picked PO (`pick`, a PO id; none for PO_OTHER), by shown name. `query`
 // filters by hc name or shown name.
 function leaderMenu(terms, memo, query = "", limit = 8, pick = "") {
@@ -999,6 +1017,8 @@ export default class Inbox extends View {
     this.narrow = !this.windowed; // narrower than WIDE_MIN (until the first size report: the dock and a pane start narrow, the window wide)
     this.writing = null; // leader whose answer box is open
     this.inputs = new Map(); // leader -> InputState
+    this.inputSeen = new Map(); // leader -> last ms its answer box was wanted (a draft is cleared only after DRAFT_GRACE_MS without it)
+    this.pickLive = { id: "", at: 0, label: "" }; // the picked room, the last time it was live (a PO missing from one poll keeps its room: #57)
     this.msg = null; // {text, bad}
     this.copied = null; // key of the command whose 복사 button just ran
     this.more = new Set(); // bubble ids the person opened with "더 보기" (#47: long messages start folded)
@@ -1376,7 +1396,12 @@ export default class Inbox extends View {
   pruneReply(asks) {
     const live = new Set(asks.map((a) => a.s.leader));
     for (const m of [this.replyPics, this.replyBusy]) for (const k of [...m.keys()]) if (!live.has(k)) m.delete(k);
-    for (const [k, st] of [...this.inputs]) if (!live.has(k)) { try { if (String(st.value() ?? "") !== "") st.set_value(""); } catch {} } // an old draft must not reappear on the leader's next card
+    const now = Date.now();
+    for (const k of live) this.inputSeen.set(k, now);
+    for (const k of staleDrafts(this.inputs.keys(), live, this.inputSeen, now)) { // an old draft must not reappear on the leader's next card (but one missing poll must not wipe it: #57)
+      try { const st = this.inputs.get(k); if (String(st.value() ?? "") !== "") st.set_value(""); } catch {}
+      this.inputSeen.delete(k);
+    }
   }
   pruneSent(asks) {
     try {
@@ -1519,16 +1544,22 @@ export default class Inbox extends View {
     const hasOther = all.some((a) => a.owner === PO_OTHER) || reps.some((r) => r.owner === PO_OTHER);
     let last = "";
     try { last = shared(PICK_KEY) ?? ""; } catch {}
-    const pick = choosePick(pos, last, hasOther);
+    const now = Date.now();
+    const settled = settlePick(pos, last, hasOther, this.pickLive.id === last ? this.pickLive.at : 0, now);
+    const pick = settled.pick;
+    if (!settled.ghost) {
+      if (last && (pos.some((p) => p.id === last) || (last === PO_OTHER && hasOther))) this.pickLive = { id: last, at: now, label: last === PO_OTHER ? OTHER_LABEL : pos.find((p) => p.id === last)?.label ?? last };
+      if (pick && pick !== last) { try { setShared(PICK_KEY, pick); } catch {} } // the room shown is the room kept: an automatic pick no longer floats with the leader counts
+    }
     let mine = [], seen = {};
     try { mine = shared(CHAT_KEY) ?? []; } catch {}
     try { seen = shared(SEEN_KEY) ?? {}; } catch {}
     const leaders = (this.data?.leaders ?? []).map((s) => ({ s, owner: leaderOwner(terms, s.leader, s.terminal, s.po) }));
-    const now = Date.now();
     const waits = (id) => all.filter((a) => a.owner === id).map((a) => ({ leader: a.s.leader, ts: a.item?.ts ?? "", kind: a.kind }));
     const room = (id) => timeline(id, leaders, id === PO_OTHER ? [] : this.data?.po?.[id] ?? [], mine, waits(id), now);
     const rooms = pos.map((p) => ({ id: p.id, label: p.label, title: p.title, blocked: this.isBlocked(p.address) }));
     if (hasOther) rooms.push({ id: PO_OTHER, label: OTHER_LABEL, title: "", blocked: false });
+    if (settled.ghost && !rooms.some((r) => r.id === pick)) rooms.push({ id: pick, label: this.pickLive.label, title: "", blocked: false, ghost: true }); // held for a moment: the room list does not lose it
     let raw = [];
     const tabs = rooms.map((r) => {
       const entries = room(r.id);
@@ -2015,14 +2046,15 @@ export default class Inbox extends View {
         .on_mouse_down("left", stop).on_click((_e, c) => this.pickMenu(i, c))
         .child(div().text_size(12.5).font_semibold().text_color(it.id === "here" ? t.muted : tint(t, it.id)).child(`@${it.label}`))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(it.id === "here" ? "PO에게 그냥 보내기" : it.sub))));
-    const target = v.tabs.find((x) => x.id === v.pick && x.id !== PO_OTHER);
+    const ghost = v.tabs.some((x) => x.id === v.pick && x.ghost);
+    const target = v.tabs.find((x) => x.id === v.pick && x.id !== PO_OTHER && !x.ghost);
     const chip = (ctx) => div().h(ctx.line_height).px(5).rounded(5).flex().items_center().bg(t.working + "26").text_color(t.working).text_size(12.5).font_semibold()
       .child(ctx.token.label ?? ctx.token.text.trim());
     return v_flex().flex_none().px(10).pb(10).pt(6).gap(6).border_t(1).border_color(t.border)
       .on_key_down((e, c) => this.inputKey(e, c))
       .when(Boolean(menu), (el) => el.child(menu))
       .when(holdShown(this.changedAt, this.heldAt), (el) => el.child(div().text_size(11).text_color(t.working).child("한 번 더 Enter로 보냅니다")))
-      .child(div().truncate().text_size(10.5).text_color(t.dim).child(target ? `받는 PO: ${target.label}` : "받는 PO가 없습니다 — PO를 고르세요"))
+      .child(div().truncate().text_size(10.5).text_color(t.dim).child(target ? `받는 PO: ${target.label}` : ghost ? "PO 터미널을 다시 찾는 중입니다 — 쓰던 글은 그대로 있습니다" : "받는 PO가 없습니다 — PO를 고르세요"))
       .when(this.pics.length > 0 || this.picBusy > 0, (el) => el.child(this.picRow(t, null)))
       .child(h_flex().gap(6).items_center()
         .on_drop((ev, c) => this.dropPics(ev?.paths, c))
