@@ -36,7 +36,7 @@ const WIDE_MIN = 520; // two columns (rooms | room) from this width; narrower: t
 const ROOM_W = 168, SLIM_W = 58; // the window's room list / the dock's slim room column (initial circle + badges, the project as the tooltip)
 const PASTE_SETTLE_MS = 350; // the PO terminal takes the paste before Enter is pressed
 const PANE_POLL_MS = 300, PANE_WAIT_MS = 6000; // a send to a PO with no pane: how often / how long to wait for the pane the send opened
-const PROMPT_TIMEOUT_MS = 5000; // a screen read that has not answered by then is given up (the next one may start)
+const PROMPT_TIMEOUT_MS = 5000, PROMPT_RETRY_MS = 2000; // a screen read that has not answered by then ends as "could not read" and is tried again after PROMPT_RETRY_MS
 const PROMPT_REFRESH_MS = 3000, PROMPT_LINES = 40; // a blocked PO's screen is re-read this often while shown (the last PROMPT_LINES lines are read)
 const BADGE_KEY = "inbox.badge"; // {id, ts}: the copy (dock / pane) that writes the app icon badge
 const OPEN_KEY = "inbox.expanded"; // cards the person opened ("자세히"), shared so they stay open across re-renders and window reopens
@@ -473,18 +473,44 @@ const PROMPT_TIMER = /^[\s│┃|]*[^\p{L}\p{N}\s]?\s*\p{L}[\p{L}\s'-]{0,30}[…
 const promptTail = (text, n = 10) => cleanText(text).split("\n").map((l) => l.trimEnd()).filter((l) => l.trim() && !PROMPT_TIMER.test(l)).slice(-n).map((l) => (l.length > 140 ? `${l.slice(0, 139)}…` : l));
 const PROMPT_NUM = /^[\s│┃|]*([❯>›])?\s*(\d{1,2})[.)]\s+(\S.*?)[\s│┃|]*$/;
 const promptFooter = (l) => /^[^\p{L}\p{N}]*$/u.test(l) || (l.length <= 140 && /\b(esc|enter|tab|ctrl|shift|alt)\b|^\s*[↑↓←→]|\? for shortcuts/i.test(l));
-// {options: [{key, label, on}], head: the up to 2 lines right above the choices}. Options only when they are 1..N (2 or more).
+// {options: [{key, label, on}], head: the up to 2 lines right above the choices, tabs: the tab bar line of a multi-question prompt or ""}.
+// Options only when they are 1..N (2 or more). A choice may carry description lines under it (AskUserQuestion: the row is indented deeper than the
+// number): those belong to the choice above and do not break the run. The tab bar ("← ☐ Scope  ☐ Priority  ✔ Submit →") is the line with arrows and
+// checkbox marks somewhere above the choices; it is kept so the desk can offer the tab keys.
+const promptCol = (l) => l.length - l.replace(/^[\s│┃|]*/, "").length;
+const PROMPT_TABS = /←.*→|→.*←/; // the bar has both arrows (and a checkbox mark, below)
+const PROMPT_MARK = /[☐☒☑✔✓□■]/;
 function promptParse(text) {
   const lines = promptTail(text, 24);
   const num = lines.map((l) => PROMPT_NUM.exec(l));
+  const none = { options: [], head: [], tabs: "" };
+  // the numbered row that owns line i: itself, or the one up to 4 lines above it when every line between is a description (indented deeper than its number)
+  const owner = (i) => {
+    for (let j = i; j >= 0 && i - j <= 4; j--) {
+      if (!num[j]) continue;
+      const col = lines[j].search(/\d/);
+      for (let k = j + 1; k <= i; k++) if (promptCol(lines[k]) <= col && !/^[^\p{L}\p{N}]*$/u.test(lines[k])) return -1; // a rule line (no letters or digits) between choices is skipped
+      return j;
+    }
+    return -1;
+  };
   let end = lines.length - 1;
   for (let skip = 0; end >= 0 && !num[end] && skip < 6 && promptFooter(lines[end]); skip++) end--;
-  if (end < 0 || !num[end]) return { options: [], head: [] };
-  let start = end;
-  while (start > 0 && num[start - 1]) start--;
-  const options = num.slice(start, end + 1).map((m) => ({ key: m[2], label: m[3].trim().slice(0, 80), on: m[1] === "❯" || m[1] === "›" }));
-  if (options.length < 2 || !options.every((o, i) => Number(o.key) === i + 1)) return { options: [], head: [] };
-  return { options: options.slice(0, 6), head: lines.slice(Math.max(0, start - 2), start) };
+  if (end < 0) return none;
+  end = owner(end);
+  if (end < 0) return none;
+  const rows = [end];
+  while (Number(num[rows[rows.length - 1]][2]) > 1) {
+    const prev = owner(rows[rows.length - 1] - 1);
+    if (prev < 0) break;
+    rows.push(prev);
+  }
+  rows.reverse();
+  const options = rows.map((j) => { const m = num[j]; return { key: m[2], label: m[3].trim().slice(0, 80), on: m[1] === "❯" || m[1] === "›" }; });
+  if (options.length < 2 || !options.every((o, i) => Number(o.key) === i + 1)) return none;
+  const start = rows[0];
+  const tabs = lines.slice(Math.max(0, start - 5), start).reverse().find((l) => PROMPT_TABS.test(l) && PROMPT_MARK.test(l)) ?? ""; // only near the question: an arrow line far up is output
+  return { options: options.slice(0, 8), head: lines.slice(Math.max(0, start - 2), start), tabs: tabs.replace(/[│┃|]/g, " ").replace(/\s+/g, " ").trim() };
 }
 const promptOptions = (text) => promptParse(text).options;
 // What identifies the question on screen: the choices (without which one is highlighted) and the lines above them, whitespace squeezed; when
@@ -2333,29 +2359,27 @@ export default class Inbox extends View {
   // the desk itself, and refused unless the PO is still blocked (a stale panel must not answer a different prompt).
   readPrompt(po, cx) {
     const now = Date.now();
-    if ((this.promptBusy && now - this.promptBusyAt < PROMPT_TIMEOUT_MS) || (this.prompt?.po === po && now - this.prompt.at < PROMPT_REFRESH_MS)) return;
-    const gen = ++this.promptGen; // a read that comes back after it was given up (or replaced) is ignored
-    this.promptBusy = true;
-    this.promptBusyAt = now;
+    const cur = this.prompt?.po === po ? this.prompt : null;
+    if ((this.promptBusy && now - this.promptBusyAt < PROMPT_TIMEOUT_MS) || (cur && now - cur.at < (cur.failed ? PROMPT_RETRY_MS : PROMPT_REFRESH_MS))) return;
+    const gen = ++this.promptGen;
+    this.promptBusy = true; this.promptBusyAt = now;
     let done = false;
-    const fin = (text) => {
+    // Every ending fills this.prompt (the screen, or {failed: true}), so the panel never stays on "reading": a read that fails, comes back empty or
+    // takes too long is shown as "could not read" and tried again. After an await only the spawn's / timer's own cx is used (a render's cx is not
+    // good any more by then, #92).
+    const fin = (text, c2) => {
       if (done || gen !== this.promptGen) return;
-      done = true;
-      this.promptBusy = false;
-      // The same screen again (only a timer row moved): no new state and no redraw, so a drag-select in the panel is not cut. Either way the next read is
-      // scheduled here (one chain: a newer read replaces the older chain), and only while the PO still waits.
-      const same = this.prompt?.po === po && promptSame(this.prompt.text, text);
-      this.prompt = same ? { ...this.prompt, at: Date.now() } : { po, at: Date.now(), text };
+      done = true; this.promptBusy = false;
+      const failed = !String(text ?? "").trim();
+      const same = !failed && cur && !cur.failed && promptSame(cur.text, text);
+      this.prompt = same ? { ...cur, at: Date.now() } : { po, at: Date.now(), text: failed ? "" : text, failed };
       const chain = ++this.promptChain;
-      try {
-        if (!same) this.softNotify(cx);
-        cx.timer.after(PROMPT_REFRESH_MS + 100, (c2) => { if (chain === this.promptChain && this.isBlocked(po)) this.readPrompt(po, c2); });
-      } catch {}
+      if (!same) this.softNotify(c2);
+      try { c2.timer.after((failed ? PROMPT_RETRY_MS : PROMPT_REFRESH_MS) + 100, (c3) => { if (chain === this.promptChain && this.isBlocked(po)) this.readPrompt(po, c3); }); } catch {}
     };
-    try { cx.timer.after(PROMPT_TIMEOUT_MS, (c2) => { if (!done && gen === this.promptGen) { this.promptBusy = false; try { c2.notify(); } catch {} } }); } catch {}
-    let r;
-    try { r = hc(["read", po, "--lines", String(PROMPT_LINES)]); } catch { fin(""); return; }
-    Promise.resolve(r).then((o) => fin(o && o.code === 0 ? String(o.stdout ?? "") : "")).catch(() => fin(""));
+    try { cx.timer.after(PROMPT_TIMEOUT_MS, (c2) => fin("", c2)); } catch {}
+    const read = async () => { try { const o = await hc(["read", po, "--lines", String(PROMPT_LINES)]); return o && o.code === 0 ? String(o.stdout ?? "") : ""; } catch { return ""; } };
+    try { cx.spawn(async (c2) => { fin(await read(), c2); }); } catch { read().then((text) => fin(text, cx)); }
   }
   // A key press from the question panel. Never on a stale panel: the PO must still be blocked, and its screen is read again right before the key
   // and must show the same question the buttons were built from (else the panel is refreshed and no key goes).
@@ -2365,6 +2389,7 @@ export default class Inbox extends View {
     const shown = this.prompt?.po === po ? this.prompt : null;
     if (!shown) { say(`PO(${po})의 화면을 아직 읽지 못해 ${key}를 누르지 않았습니다. 잠시 뒤 다시 누르세요.`); return; }
     const want = promptSig(shown.text);
+    if (shown.failed || !want) { say(`PO(${po})의 화면을 읽지 못해 처음 본 질문이 없어 ${key}를 누르지 않았습니다. 다시 읽기를 누르세요.`); return; } // never a key for a screen the person has not seen
     const fail = () => say(`PO(${po})의 화면을 다시 읽지 못해 ${key}를 누르지 않았습니다.`);
     let rd;
     try { rd = hc(["read", po, "--lines", String(PROMPT_LINES)]); } catch { fail(); return; }
@@ -2384,19 +2409,28 @@ export default class Inbox extends View {
   promptPanel(t, v, cx) {
     const po = v.pick && v.pick !== PO_OTHER ? chatTarget(v.terms, [], v.pick).po : "";
     if (!po || !this.isBlocked(po)) { this.prompt = null; return null; }
-    this.readPrompt(po, cx);
+    try { this.readPrompt(po, cx); } catch { this.promptBusy = false; this.prompt = { po, at: Date.now(), text: "", failed: true }; }
     const shown = this.prompt?.po === po ? this.prompt : null;
     const lines = shown ? promptTail(shown.text, 40) : [];
-    const opts = shown ? promptOptions(shown.text) : [];
-    const key = (k, label, tip, primary) => this.button(t, `pp-${k}`, label, (c) => this.pressPrompt(po, k === "esc" ? "esc" : k === "enter" ? "enter" : k, c), { primary, tip });
+    const parsed = shown ? promptParse(shown.text) : { options: [], head: [], tabs: "" };
+    const opts = parsed.options;
+    const key = (k, label, tip, primary) => this.button(t, `pp-${k}`, label, (c) => this.pressPrompt(po, k, c), { primary, tip });
+    // Never a dead end: whatever the read or the parse gave, the person can open that terminal and answer there (and read the screen as it is).
+    const note = !shown ? "화면을 읽는 중…"
+      : !lines.length ? "화면을 읽지 못했습니다. '다시 읽기'를 누르거나 '터미널 열기'로 직접 답하세요."
+      : !opts.length ? "선택지를 찾지 못했습니다. 아래 화면 그대로를 보고 '터미널 열기'로 직접 답하세요." : "";
     return v_flex().id("po-prompt").flex_none().min_w(0).max_h(PROMPT_MAX_H).mx(10).mb(6).p(10).gap(8).rounded(8).bg(t.blocked + "14").border(1).border_color(t.blocked + "55").on_mouse_down("left", stop)
       .child(div().min_w(0).truncate().text_size(fz(11)).font_semibold().text_color(t.blocked).child("PO가 질문 중입니다 — 화면 끝"))
+      .when(Boolean(note), (el) => el.child(div().min_w(0).text_size(fz(11)).text_color(t.dim).child(note)))
       .child(v_flex().id("po-prompt-lines").min_w(0).min_h(0).max_h(PROMPT_LINES_H).overflow_y_scrollbar().gap(2)
-        .children(lines.length ? lines.map((l, i) => div().min_w(0).text_size(fz(11)).text_color(t.muted).child(this.text(`pp-l${i}`, chatHtml(l)))) : [div().text_size(fz(11)).text_color(t.dim).child(shown ? "화면을 읽지 못했습니다. 아래 버튼은 PO가 질문 중일 때만 눌립니다." : "화면을 읽는 중…")]))
+        .children(lines.map((l, i) => div().min_w(0).text_size(fz(11)).text_color(t.muted).child(this.text(`pp-l${i}`, chatHtml(l))))))
       .child(h_flex().min_w(0).gap(6).items_center().flex_wrap()
         .children(opts.map((o) => this.button(t, `pp-${o.key}`, `${o.key}. ${o.label.length > 32 ? `${o.label.slice(0, 31)}…` : o.label}`, (c) => this.pressPrompt(po, o.key, c), { primary: o.on, tip: o.label })))
+        .when(Boolean(parsed.tabs), (el) => el.child(key("left", "← 이전 질문", `질문 탭을 앞으로(${parsed.tabs})`)).child(key("right", "다음 질문 →", `질문 탭을 뒤로(${parsed.tabs})`)))
         .child(key("enter", "Enter", "화면에서 강조된 선택지를 확정합니다(PO가 질문 중일 때만)"))
-        .child(key("esc", "Esc", "질문을 취소합니다(PO가 질문 중일 때만)")));
+        .child(key("esc", "Esc", "질문을 취소합니다(PO가 질문 중일 때만)"))
+        .child(this.button(t, "pp-term", "터미널 열기", (c) => { try { run("terminal.peek", { terminal: po }); } catch (e) { this.say(`터미널을 열지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); } c.notify(); }, { tip: "이 PO의 터미널 화면을 엽니다(키는 누르지 않습니다)" }))
+        .child(this.button(t, "pp-reread", "다시 읽기", (c) => { this.prompt = null; this.promptBusy = false; c.notify(); }, { tip: "PO 화면을 다시 읽습니다" })));
   }
 
   // ---- "PO 새로 시작" (per room): ask the PO for a handoff note, wait for it, /clear, /PO. State per room in this.rs[room] =
