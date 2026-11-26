@@ -1529,6 +1529,20 @@ function typingNow(terms, room, memo, track = null, now = 0) {
   leaders.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return [...out, ...leaders];
 }
+// #69: the rooms with work going on, as a Set of room ids (a PO's id, or PO_OTHER): a room is working when its PO, a leader of it, or a team
+// member below them is "working" right now. Status only (the terminals the poll already reads), no grace: it goes out as soon as all stop.
+// Waiting for an approval ("blocked") is not working: the room's red count / "질문" chip says that.
+function roomWorking(terms) {
+  const list = terms ?? [];
+  const out = new Set();
+  const states = workStates(list);
+  for (const p of poList(list)) if (states.get(p.address)?.work) out.add(p.id);
+  for (const t of list) {
+    if (!isAgentName(t?.name) || !states.get(t.address)?.work) continue;
+    if (leaderOwner(list, t.name, t.address) === PO_OTHER) { out.add(PO_OTHER); break; }
+  }
+  return out;
+}
 // A short text that changes exactly when something the desk shows from the terminals changes: the status, the wait label and the shown
 // name of every PO and leader, and whether a leader has work below it (a team member working). The 1.5 s poll redraws a copy only when this
 // differs from the last one (no redraw on a quiet second).
@@ -1540,7 +1554,8 @@ function statusSig(terms) {
     if (!lead && !poId(t)) continue;
     rows.push(`${t.address}|${String(t.status ?? "")}|${lead ? waitingKind(t) : ""}|${lead ? liveName(t) : ""}|${lead && hot.has(t.address) ? 1 : 0}|${lead && hot.has(t.address) ? typingLabel(states, t.address) : ""}`);
   }
-  return rows.sort().join("\n");
+  const w = [...roomWorking(terms)].sort().join(",");
+  return rows.sort().join("\n") + (w ? `\n#w:${w}` : ""); // #69: a working terminal that is no PO/leader (a member right under a PO) still moves a room dot
 }
 // ---- images (pasted, picked or dropped in the box; or pasted in the PO terminal and read back by the hook)
 // A picture lives in <app root>/data/inbox/img/ (0600, written by this helper); a line of the desk's message names it as "[image: <path> — ...]"
@@ -1928,7 +1943,7 @@ function readHandoff(dir = inboxDir(), id = "") {
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries};
+module.exports = { DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, boldRanges, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, roomWorking, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, tintHex, tintMiss, selRangeOf, HL_MIN_CONTRAST, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries};
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)
