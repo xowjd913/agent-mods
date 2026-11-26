@@ -19,7 +19,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, ScrollHandle } from "gpui-base";
-import { theme, exec, appHome, checking, window, run, hc, terminals, panes, focused, setBadge, shared, setShared, props, openOverlay, closeOverlay, watchFolder, pickFiles, home, readTextFile } from "herdr";
+import { theme, exec, appHome, checking, window, run, hc, terminals, panes, focused, setBadge, shared, layouts, setShared, props, openOverlay, closeOverlay, watchFolder, pickFiles, home, readTextFile } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
 const ICON = (name) => `mods/workspace-chrome/${name}.svg`;
@@ -1211,7 +1211,8 @@ export default class Inbox extends View {
   init(_props, cx) {
     const mode = safeProps().mode;
     this.windowed = mode === "window"; // the floating window
-    this.paned = mode === "pane"; // a pane of its own; neither is the Dock (no props), which owns the app-icon badge and the slow refresh
+    this.mained = mode === "main"; // the UI-mode layout's main area (`<layout>-ui`, props {mode: "main"}): the whole desk where the terminal would be
+    this.paned = mode === "pane" || this.mained; // a pane of its own; neither is the Dock (no props), which owns the app-icon badge and the slow refresh
     this.badged = ""; // what this app's icon badge shows: only changes are sent, and a 0 at start leaves other mods' badges alone
     this.data = null;
     this.error = null;
@@ -1309,7 +1310,7 @@ export default class Inbox extends View {
     this.usageSig = "";
     this.loadUsage(cx);
     cx.timer.every(USAGE_REFRESH_MS, (cx) => this.loadUsage(cx));
-    this.diag(`init: ${this.windowed ? "window" : this.paned ? "pane" : "dock"}`);
+    this.diag(`init: ${this.windowed ? "window" : this.mained ? "main" : this.paned ? "pane" : "dock"}`);
   }
 
   // Reads the usage file (a file read only) and redraws only when what the line shows (the rows or the tooltip text) changed: a redraw drops a drag-select.
@@ -1693,6 +1694,17 @@ export default class Inbox extends View {
     } catch (e) { this.say(`옆에 열지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); }
   }
 
+  // UI mode -> terminal mode: the layout this `<name>-ui` was made from (the terminals stay alive in the core; only the main area changes).
+  toTerminalMode() {
+    this.msg = null;
+    try {
+      const cur = String(shared("layout") ?? "");
+      const base = cur.endsWith("-ui") ? cur.slice(0, -3) : "";
+      if (!base || !(layouts() ?? []).includes(base)) { this.say("돌아갈 터미널 모드 레이아웃을 찾지 못했습니다.", true); return; }
+      run("layout.switch", { name: base });
+    } catch (e) { this.say(`터미널 모드로 바꾸지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); }
+  }
+
   openWindow() {
     this.msg = null;
     try { openOverlay(WINDOW); } catch (e) { this.say(`창을 열지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); }
@@ -1901,6 +1913,7 @@ export default class Inbox extends View {
     text = cleanText(text); // nothing but plain text is pasted into a PO
     if (!opened && this.opening.has(po)) { this.say(`PO(${po})의 칸을 여는 중입니다. 열리면 먼저 보낸 글이 자동으로 갑니다.`, true); return "busy"; }
     if (!id) id = this.record({ ...rec, line: text }, "sending");
+    if (this.mained) return this.deliverByAddress(po, text, c, rec, ok, id); // UI mode: no terminal block is on screen, so there is no pane to focus or paste into
     try {
       c.write_to_clipboard(text);
       if (!this.backs.has(id)) { let fp = ""; try { fp = focused()?.pane ?? ""; } catch {} this.backs.set(id, fp); } // where the keyboard is now: given back after Enter
@@ -1953,6 +1966,40 @@ export default class Inbox extends View {
   }
 
   isBlocked(po) { return String(this.liveTerms().find((t) => t.address === po)?.status ?? "").toLowerCase() === "blocked"; }
+
+  // UI mode (`main`): the PO terminal has no pane, so nothing is focused, kept, pasted from the clipboard or given the keyboard back. The text goes by terminal
+  // address with `hc send <po> <text> --json` (paste + Enter in one step; the path the #41 restart already uses). Runs in cx.spawn; returns at once:
+  //   "opening"  the send is in flight (the record is "sending"; it turns "sent" and `ok("sent")` runs when `hc send` reports started, else "failed" + the reason)
+  //   "failed"   the PO is on a prompt (`hc send` would refuse; --force is never used): nothing sent
+  // One send per PO at a time (`opening`, same guard as the pane path). Real-app behavior of a hidden terminal is unverified (see docs/mods/inbox.md).
+  deliverByAddress(po, text, c, rec, ok, id) {
+    if (this.isBlocked(po)) {
+      this.mark(id, "failed");
+      this.say(`PO(${po})가 질문에 답을 기다리는 중이라 보내지 않았습니다. 질문에 먼저 답한 뒤 말풍선의 '다시 보내기'를 누르세요.`, true);
+      return "failed";
+    }
+    this.opening.add(po);
+    this.mark(id, "sending");
+    const fail = (why, cx) => {
+      this.opening.delete(po); this.mark(id, "failed");
+      this.say(`PO(${po})에 보내지 못했습니다: ${why}. 말풍선의 '다시 보내기'를 누르세요.`, true);
+      try { cx.notify(); } catch {}
+    };
+    try {
+      c.spawn(async (cx) => {
+        let r = null;
+        try { r = await hc(["send", "--json", "--", po, text]); } catch (e) { r = { code: -1, stdout: "", stderr: String(e?.message ?? e) }; }
+        const res = restartSendResult(r);
+        if (!res.ok) { this.diag(`desk send failed: ${res.detail} (po ${po})`); fail(res.why, cx); return; }
+        this.opening.delete(po);
+        this.mark(id, "sent");
+        try { ok?.("sent"); } catch {}
+        this.say(`PO(${po})에 보냈습니다.`);
+        try { cx.notify(); } catch {}
+      });
+    } catch (e) { fail(String(e?.message ?? e).slice(0, 80), c); return "failed"; }
+    return "opening";
+  }
 
   // Gives the keyboard back after a send (Dock, window and pane alike): the pane that had it before, then this desk's box.
   restore(back, c, id = "", after = 0) {
@@ -2174,7 +2221,7 @@ export default class Inbox extends View {
     const at = Date.now();
     // hc() has no timeout option and exec() has no kill/abort (herdr.d.ts): a started send cannot be recalled or cut short from here; `hc send` itself waits at most
     // 60 s for a person's unfinished draft (draft_wait), then sends. Closing the restart strip only stops the steps after it (gen check).
-    try { r = await hc(["send", po, text, "--json"]); } catch (e) { r = { code: -1, stdout: "", stderr: String(e?.message ?? e) }; }
+    try { r = await hc(["send", "--json", "--", po, text]); } catch (e) { r = { code: -1, stdout: "", stderr: String(e?.message ?? e) }; }
     const res = restartSendResult(r);
     if (!res.ok) { this.diag(`restart send failed: ${res.detail} (po ${po})`); return no(res.why); }
     return { ok: true, why: "", turn: res.turn ?? term.turn, at };
@@ -2968,7 +3015,7 @@ export default class Inbox extends View {
       .on_size_change((size, c) => this.onSize(size.width, c))
       .child(h_flex().h(38).px(this.compact ? 10 : 14).flex_none().items_center().justify_between()
         .child(h_flex().gap(6).items_center()
-          .when(!this.paned, (el) => el.child(div().text_size(15).font_semibold().text_color(t.foreground).child("PO 데스크"))) // a pane's own header already says it
+          .when(!this.paned || this.mained, (el) => el.child(div().text_size(15).font_semibold().text_color(t.foreground).child("PO 데스크"))) // a pane's own header already says it
           .when(!this.windowed && waiting > 0, (el) => el.child(this.tag(t, `대기 ${waiting}`, "blocked")))
           .child(div().id("inbox-refresh").p(3).rounded(5).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
             .on_mouse_down("left", stop).on_click((_e, c) => { this.gen++; this.busy = false; this.load(c); }).tooltip("새로고침")
@@ -2976,7 +3023,8 @@ export default class Inbox extends View {
         .child(h_flex().gap(8).items_center()
           .child(div().text_size(11).text_color(t.dim).child(this.data ? ago(this.data.at) : ""))
           .when(!this.paned, (el) => el.child(this.button(t, "inbox-beside", "옆에 열기", (c) => { this.openBeside(); c.notify(); }, { tip: "리더 옆 창(페인)으로 엽니다. 리더가 없으면 지금 터미널 옆, 이 탭에 이미 있으면 그쪽으로 갑니다" })))
-          .when(!this.windowed, (el) => el.child(this.button(t, "inbox-open", "창 열기", (c) => { this.openWindow(); c.notify(); }, { tip: "PO 데스크 창을 엽니다" })))
+          .when(this.mained, (el) => el.child(this.button(t, "inbox-terminal-mode", "터미널 모드", (c) => { this.toTerminalMode(); c.notify(); }, { tip: "터미널 화면으로 돌아갑니다. 터미널은 꺼지지 않고 그대로 있습니다" })))
+          .when(!this.windowed && !this.mained, (el) => el.child(this.button(t, "inbox-open", "창 열기", (c) => { this.openWindow(); c.notify(); }, { tip: "PO 데스크 창을 엽니다" })))
           .when(this.windowed, (el) => el.child(div().id("inbox-close").p(4).rounded(5).text_color(t.dim).cursor_pointer().hover((x) => x.bg(t.hover).text_color(t.foreground))
             .on_mouse_down("left", stop).on_click((_e, c) => { try { closeOverlay(safeProps().overlay); } catch {} c.notify(); }).tooltip("닫기")
             .child(svg("mods/pane/close.svg").size(13))))))

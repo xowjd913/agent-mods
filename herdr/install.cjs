@@ -344,6 +344,59 @@ function migrateMarks(home) {
   fs.rmSync(old, { force: true });
 }
 
+// UI 모드 레이아웃(<기본 레이아웃>-ui): 기본 레이아웃에서 터미널이 있는 main 칸(content.tab "active", 없으면 id "main")만 PO 데스크로 바꾼 복사본.
+// 터미널 모드(기본 레이아웃)와 `layout.switch`로 오간다. 만든 파일의 해시를 inbox 모드 폴더에 남겨, 사용자가 고친 파일은 다시 쓰지 않는다.
+const UI_SUFFIX = "-ui";
+const UI_MARK = ["inbox", ".ui-layout-hash" ];
+const hashOf = (text) => require("node:crypto").createHash("sha1").update(text).digest("hex");
+const uiMarkFile = (home) => path.join(modDir(home, UI_MARK[0]), UI_MARK[1]);
+const readMark = (home) => { try { return fs.readFileSync(uiMarkFile(home), "utf8").trim(); } catch { return ""; } };
+const uiText = (layout) => JSON.stringify(layout, null, 2) + "\n";
+
+// 기본 레이아웃 객체에서 UI 모드 레이아웃 객체를 만든다. main 칸이 없으면 null.
+function deriveUiLayout(base) {
+  const ui = JSON.parse(JSON.stringify(base));
+  let main = null;
+  walk(ui, (n) => { if (!main && n.type === "block" && n.content?.tab === "active") main = n; });
+  if (!main) walk(ui, (n) => { if (!main && n.type === "block" && n.id === "main") main = n; });
+  if (!main) return null;
+  main.content = { mod: "inbox", props: { mode: "main" } };
+  delete ui.cloned_from;
+  return ui;
+}
+
+function applyUiLayout(home, baseFile, baseLayout) {
+  if (!available(home, "inbox")) return "skipped";
+  const file = path.join(path.dirname(baseFile), path.basename(baseFile, ".json") + UI_SUFFIX + ".json");
+  const ui = deriveUiLayout(baseLayout);
+  if (!ui) { log("UI 모드 레이아웃: main(터미널) 칸을 찾지 못해 만들지 않았습니다."); return "skipped"; }
+  const text = uiText(ui);
+  let current = null;
+  try { current = fs.readFileSync(file, "utf8"); } catch {}
+  if (current === text) { fs.writeFileSync(uiMarkFile(home), hashOf(text) + "\n"); return "same"; }
+  if (current !== null && hashOf(current) !== readMark(home)) {
+    log(`${file} 은(는) 이 설치기가 만들었거나 그대로 둔 파일이 아니라 건드리지 않습니다.`);
+    return "foreign";
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  writeLayout(file, ui);
+  fs.writeFileSync(uiMarkFile(home), hashOf(text) + "\n");
+  log(`UI 모드 레이아웃을 ${current === null ? "만들었습니다" : "다시 만들었습니다"}: ${file} (탭 줄의 "UI 모드" 버튼으로 전환)`);
+  return current === null ? "created" : "updated";
+}
+
+// inbox를 지울 때: 우리가 만든 그대로인 UI 모드 레이아웃만 지운다.
+function removeUiLayout(home, baseFile) {
+  const file = path.join(path.dirname(baseFile), path.basename(baseFile, ".json") + UI_SUFFIX + ".json");
+  let current;
+  try { current = fs.readFileSync(file, "utf8"); } catch { return false; }
+  if (hashOf(current) !== readMark(home)) return false;
+  fs.rmSync(file, { force: true });
+  log(`UI 모드 레이아웃을 지웠습니다: ${file}`);
+  log("UI 모드 화면을 보고 있었다면 Herdr에서 '터미널 모드'로 먼저 돌아오세요(보던 -ui 레이아웃이 없어집니다).");
+  return true;
+}
+
 function applyLayout(home, created) {
   const found = findLayout(home, created);
   if (!found) { log("레이아웃이 아직 없어 레이아웃 단계는 건너뜁니다."); return { changed: [] }; }
@@ -387,7 +440,8 @@ function applyLayout(home, created) {
     step.after?.(home);
     if (applied) log(`레이아웃 반영: ${step.name}`);
   }
-  return { changed: changed.filter((c) => c.applied).map((c) => c.step.mark[1]), file };
+  const ui = applyUiLayout(home, file, layout);
+  return { changed: changed.filter((c) => c.applied).map((c) => c.step.mark[1]), file, ui };
 }
 
 function pendingLayout(home) {
@@ -440,6 +494,7 @@ function revertLayout(home, mods) {
     log(`레이아웃을 읽지 못해 되돌리지 않았습니다: ${found.file} (${e.message})`);
     return;
   }
+  if (mods.includes("inbox")) removeUiLayout(home, found.file);
   const names = [];
   for (const step of STEPS) {
     if (mods.includes(step.mark[0]) && step.undo(layout)) names.push(step.name);
@@ -552,7 +607,7 @@ function hookSettings(home, file, remove = false, now = Date.now()) {
 
 module.exports = {
   CORE, EXTRAS, ALL, MODS, MARK, LEGACY_MARK, LAYOUT_NAME,
-  parseArgs, installMods, applyLayout, pendingLayout, removeMods, listMods,
+  parseArgs, installMods, applyLayout, deriveUiLayout, pendingLayout, removeMods, listMods,
   HOOK_EVENTS, HOOK_SCRIPT, isOurHook, settingsPath, hookScript, hookCommand, mergeHook, hookSettings,
 };
 
