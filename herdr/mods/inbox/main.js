@@ -299,7 +299,10 @@ function staleDrafts(keys, live, seen, now) {
 // #74: a draft mirror. Every change of a text box is copied (`mirror`: {text, content, range}); when the box comes back empty without the
 // person's own key press (`keyAt`, within DRAFT_KEY_MS) and without a clear of ours (which empties the mirror first), the text is put back.
 const DRAFT_KEY_MS = 1000;
-const draftWiped = (mirror, value, keyAt, now) => Boolean(mirror) && String(mirror.text ?? "") !== "" && String(value ?? "") === "" && !(Number(now) - Number(keyAt) < DRAFT_KEY_MS);
+// #112: a mirror of ONE character is never taken for a wipe. A Korean/Japanese/Chinese IME that is composing takes the Backspace itself (the key press
+// never reaches `keyAt`), so deleting the first, still-composed character empties the box with no key just before it: that is the person's edit, and
+// putting the character back made it impossible to delete. (Losing a one-character draft to a rebuild is cheap.)
+const draftWiped = (mirror, value, keyAt, now) => Boolean(mirror) && [...String(mirror.text ?? "")].length > 1 && String(value ?? "") === "" && !(Number(now) - Number(keyAt) < DRAFT_KEY_MS);
 // #66 (draft per room): the unsent chat text each room holds while another room is shown. `cur` = what the box holds now {text, content, range, pics};
 // leaving `from` stores it there (nothing to keep = the room's entry goes), arriving at `to` takes that room's entry out (it is the box again) and
 // returns it as `load` (null = an empty box). A room that was left empty keeps no entry; the map is capped (oldest dropped). Pure (no mutation of `map`).
@@ -463,6 +466,11 @@ function setChatStatus(list, id, status, now = 0) {
   if (i < 0 || list[i].status === status) return null;
   return list.map((x, j) => (j === i ? { ...x, status, at: Number(now) || 0 } : x));
 }
+// The list without record `id` (null when there is no such record). Only a bubble that failed to send may go (see mineActs' "delete").
+function dropChat(list, id) {
+  if (!Array.isArray(list) || !list.some((x) => x && x.id === id)) return null;
+  return list.filter((x) => !(x && x.id === id));
+}
 // The small dim note under a bubble that is not (fully) sent: "" when it was sent. `blocked`: the PO still waits on a prompt; `age`: ms since
 // the status last changed (an Enter button older than ENTER_TTL_MS is gone: the pasted line may not be in the input any more).
 const ENTER_TTL_MS = 10 * 60 * 1000;
@@ -473,12 +481,12 @@ function mineNote(status, blocked = true, age = 0) {
   if (status === "noenter" && old) return "오래되어 입력창에 없을 수 있습니다 — 다시 보내세요";
   return MINE_NOTE[status] ?? "";
 }
-// The buttons a bubble offers, in order: "resend" (nothing reached the PO, or its pasted line is gone: send it again) and "enter" (it is pasted
+// The buttons a bubble offers, in order: "resend" (nothing reached the PO, or its pasted line is gone: send it again; a bubble that failed also offers "delete": drop it for good) and "enter" (it is pasted
 // into a normal prompt: only Enter is missing). A held one offers none while the PO still waits on its question (Enter there would answer the
 // question; that is only offered next to the question itself), and Enter and resend after it was answered. An Enter older than ENTER_TTL_MS
 // becomes a resend.
 function mineActs(status, blocked = false, age = 0) {
-  if (status === "nopane" || status === "failed" || status === "gone") return ["resend"];
+  if (status === "nopane" || status === "failed" || status === "gone") return ["resend", "delete"];
   const fresh = !(Number(age) > ENTER_TTL_MS);
   if (status === "noenter") return fresh ? ["enter"] : ["resend"];
   if (status === "held" && !blocked) return fresh ? ["enter", "resend"] : ["resend"];
@@ -716,6 +724,33 @@ function decisionOptions(body) {
   const options = [...nums].sort((x, y) => x - y);
   if (options.length < 2) return { options: [], recommended: 0 };
   return { options, recommended: options.includes(rec) ? rec : 0 };
+}
+// A decision report that asks several questions (#76): a header line starting with a circled digit ("① 병합 시점", "**② 순서**", "- ③ …") opens a
+// question, and the "N안:" lines below it (until the next header) are that question's options. Only when at least two questions each have
+// at least two options; otherwise [] and the card reads the whole body as one question (decisionOptions). Options above the first header
+// belong to no question and make the body ambiguous, so they also give [].
+// -> [{ label: "①", options: [1, 2], recommended: 2 | 0 }, ...]
+const GROUP_HEAD = /^\s*(?:[-*#>]+\s*)?(?:\*\*)?([①②③④⑤⑥⑦⑧⑨⑩])/;
+function decisionGroups(body) {
+  const segs = [{ label: "", lines: [] }];
+  for (const line of String(body ?? "").split(/\r?\n/)) {
+    const m = line.match(GROUP_HEAD);
+    if (m) segs.push({ label: m[1], lines: [] });
+    else segs[segs.length - 1].lines.push(line);
+  }
+  if (segs.length < 3 || decisionOptions(segs[0].lines.join("\n")).options.length) return [];
+  const groups = segs.slice(1).map((s) => ({ label: s.label, ...decisionOptions(s.lines.join("\n")) }));
+  return groups.every((g) => g.options.length >= 2) && new Set(groups.map((g) => g.label)).size === groups.length ? groups : [];
+}
+// The answer for picks {label: N}: "①1안, ②2안" in the questions' order; "" until every question has a pick that is one of its options.
+function groupAnswer(groups, picks) {
+  const parts = [];
+  for (const g of groups ?? []) {
+    const n = picks?.[g.label];
+    if (!g.options.includes(n)) return "";
+    parts.push(`${g.label}${n}안`);
+  }
+  return parts.join(", ");
 }
 // What a decision report offers when it has no "N안:" lines (#62): its "추천: ..." and "답: ..." lines, shown on the card without opening it,
 // and the quoted answers after "답:" ("둘 다 진행" / "#59만" / "보류", also “…” and 「…」) as answer buttons when there are at least two.
@@ -1437,7 +1472,8 @@ export default class Inbox extends View {
     this.compact = false;
     this.narrow = !this.windowed; // narrower than WIDE_MIN (until the first size report: the dock and a pane start narrow, the window wide)
     this.writing = null; // leader whose answer box is open
-    this.inputs = new Map(); // leader -> InputState
+    this.inputs = new Map(); // leader -> TextareaState (the answer box of a card)
+    this.cardK = new Map(); // leader -> the Enter bookkeeping of that answer box (see cardState)
     this.inputSeen = new Map(); // leader -> last ms its answer box was wanted (a draft is cleared only after DRAFT_GRACE_MS without it)
     this.pickLive = { id: "", at: 0, label: "" }; // the picked room, the last time it was live (a PO missing from one poll keeps its room: #57)
     this.msg = null; // {text, bad}
@@ -2399,6 +2435,14 @@ export default class Inbox extends View {
     if (!id) return;
     try { const next = setChatStatus(shared(CHAT_KEY) ?? [], id, status, Date.now()); if (next) setShared(CHAT_KEY, next); } catch {}
   }
+  // The bubble's "삭제": a bubble that failed to send is removed from the chat for good (it does not come back when the chat is opened again).
+  discard(id, c) {
+    const r = this.recordOf(id);
+    if (!r || !this.recordActs(r, this.recordPo(r)).includes("delete")) return;
+    try { const next = dropChat(shared(CHAT_KEY) ?? [], id); if (next) setShared(CHAT_KEY, next); } catch {}
+    this.backs.delete(id);
+    c.notify();
+  }
   recordOf(id) { try { return (shared(CHAT_KEY) ?? []).find((x) => x?.id === id) ?? null; } catch { return null; } }
 
   // The ask card a send answered (record field `ak`) is marked sent / held, so a resend or Enter that went through closes it like the first send.
@@ -2888,13 +2932,93 @@ export default class Inbox extends View {
   box(leader, cx) {
     let s = this.inputs.get(leader);
     if (!s) {
-      s = InputState.new({ value: "", placeholder: "답을 적고 Enter" });
-      s.on("submit", (_e, c) => { const a = this.asks().find((x) => x.s.leader === leader); if (a) this.send(a, s.value(), c); });
+      s = TextareaState.new({ value: "", rows: 1, placeholder: "답을 적고 Enter — Shift+Enter로 줄바꿈" }); // #110: the same multi-line box as the PO chat (the single-line Input took neither a second line nor Cmd+A)
+      try { s.set_auto_grow(1, INPUT_MAX_LINES); } catch {}
+      s.on("submit", (e, c) => this.cardEnter(leader, e?.shift ? "newline" : "send", c)); // the widget's own submit event: with Shift a line break, else Enter (the key press below says the same; each handler dedupes)
       s.on("paste_other", (_e, c) => this.pastePic(c, leader)); // Cmd+V found no text: take a picture from the clipboard, as the PO box does
-      s.on("change", () => { let v; try { v = s.value(); } catch { return; } if (!this.guard(leader, s, v)) this.keep(leader, s, v); }); // #74: the draft mirror
+      s.on("change", () => this.cardChange(leader, s)); // #74: the draft mirror, #83: the Enter bookkeeping
       this.inputs.set(leader, s);
     }
     return s;
+  }
+
+  // #110: the answer box of a decision card takes Enter the way the PO chat box does (#83): Enter sends from any cursor position without leaving the
+  // widget's own line break in the text, the first Enter after a Korean/Japanese/Chinese IME edit is held once, Shift+Enter is a line break. The chat box
+  // keeps its own copy of this (it also has the "@" menu and chips); both use the same pure rules (strayAt, imeHold, ...).
+  cardState(leader) {
+    let k = this.cardK.get(leader);
+    if (!k) { k = { lastValue: "", core: "", changedAt: 0, editAt: 0, enterAt: 0, heldAt: 0, nlAt: 0, sentAt: 0, brk: null }; this.cardK.set(leader, k); }
+    return k;
+  }
+
+  cardChange(leader, st) {
+    const k = this.cardState(leader);
+    k.changedAt = Date.now();
+    let value = "";
+    try { value = st.value(); } catch { return; }
+    if (this.guard(leader, st, value)) return; // the box was emptied behind the person's back: the text is back
+    this.keep(leader, st, value);
+    const prev = k.lastValue;
+    const brk = strayAt(prev, value);
+    const rep = brk < 0 ? replacedAt(prev, value) : null;
+    k.lastValue = value;
+    if (brk >= 0 && enterPending(k.enterAt, k.changedAt)) { this.cardEdit(st, k, withoutAt(value, brk), { start: brk, end: brk + 1 }, "", { start: brk, end: brk }, k.editAt); return; }
+    if (rep && enterPending(k.enterAt, k.changedAt)) { this.cardEdit(st, k, prev, { start: rep.idx, end: rep.idx + 1 }, prev.slice(rep.idx, rep.end), { start: rep.idx, end: rep.end }, k.editAt); return; }
+    k.brk = brk >= 0 ? { idx: brk, at: k.changedAt, core: k.core, editAt: k.editAt } : rep ? { idx: rep.idx, at: k.changedAt, core: k.core, editAt: k.editAt, rep, prev } : null;
+    const core = editCore(value);
+    if (core !== k.core) { k.core = core; k.editAt = k.changedAt; }
+    if (strayBreak(value, k.sentAt, k.changedAt)) { this.wipe(leader, st); return; } // the Enter that sent left a line break
+    if (strayHeld(value, k.heldAt, k.changedAt)) this.cardEdit(st, k, editCore(value), null, null, { start: editCore(value).length, end: editCore(value).length }, k.editAt); // the held Enter left a line break
+  }
+
+  // Puts the box back to `next` (the text the person meant): replaces `span` with `text` through the widget (so it stays an edit), plain set_value when
+  // the widget does not give `next`, then the cursor/selection to `range`. `span` null: set_value only.
+  cardEdit(st, k, next, span, text, range, editAt) {
+    k.lastValue = next; k.core = editCore(next); k.editAt = editAt; k.brk = null;
+    try {
+      if (span) { st.set_selected_range(span); st.replace(text); }
+      if (st.value() !== next) st.set_value(next);
+      st.set_selected_range(range);
+    } catch {}
+  }
+
+  cardEnter(leader, intent, c) {
+    const k = this.cardState(leader), st = this.inputs.get(leader), now = Date.now();
+    if (!st) return;
+    if (intent === "send") {
+      k.enterAt = now;
+      if (now - k.sentAt <= 250 || now - k.heldAt < 150) return; // (the key and the submit event of one press are one Enter)
+      let value = "", cur = null;
+      try { value = st.value(); } catch {}
+      try { cur = st.selected_range().end; } catch {}
+      const b = k.brk;
+      if (b && now - b.at <= 25 && value[b.idx] === "\n") { // the widget's line break came before this key: it is not the person's text
+        if (b.rep) { value = b.prev; cur = b.rep.end; this.cardEdit(st, k, b.prev, { start: b.rep.idx, end: b.rep.idx + 1 }, b.prev.slice(b.rep.idx, b.rep.end), { start: b.rep.idx, end: b.rep.end }, b.editAt); }
+        else { value = withoutAt(value, b.idx); cur = b.idx; this.cardEdit(st, k, value, { start: b.idx, end: b.idx + 1 }, "", { start: b.idx, end: b.idx }, b.editAt); }
+        k.core = b.core;
+      }
+      if (value.trim() && imeHold(value, k.editAt, k.heldAt, now, atTextEnd(value, cur))) { // maybe the IME's confirming Enter: only this once
+        k.heldAt = now;
+        if (strayHeld(value, now, now) && now - k.changedAt <= 25) { const n = editCore(value); this.cardEdit(st, k, n, null, null, { start: n.length, end: n.length }, k.editAt); }
+        c.notify();
+        return;
+      }
+      const a = this.asks().find((x) => x.s.leader === leader);
+      if (!a) return;
+      k.sentAt = now;
+      this.send(a, value, c);
+    } else if (intent === "newline" && now - k.nlAt > 80) {
+      k.nlAt = now;
+      try { c.timer.after(40, () => { if (needsNewline(k.changedAt, now)) { try { st.replace("\n"); } catch {} } }); } catch {}
+    }
+  }
+
+  answerKey(leader, e, c) {
+    this.keyAt = Date.now();
+    const intent = enterIntent(e?.key, Boolean(e?.modifiers?.shift));
+    if (!intent) return;
+    if (intent === "send") { try { c.stop_propagation(); } catch {} }
+    this.cardEnter(leader, intent, c);
   }
 
   // ---- PO chat: the text goes to the PO's prompt through deliver(), the same path as a panel answer.
@@ -3443,15 +3567,35 @@ export default class Inbox extends View {
       .when(Boolean(extra), (el) => el.child(extra));
   }
 
+  // One button of a multi-question decision card (#76): remember the pick; with every question picked, send "①1안, ②2안" at once and forget them.
+  pickGroup(a, groups, label, n, cx) {
+    const key = this.askKey(a);
+    this.gpick ??= new Map();
+    const cur = this.gpick.get(a.s.leader);
+    const picks = cur?.key === key ? { ...cur.picks, [label]: n } : { [label]: n };
+    const text = groupAnswer(groups, picks);
+    if (!text) { this.gpick.set(a.s.leader, { key, picks }); cx.notify(); return; }
+    this.gpick.delete(a.s.leader);
+    this.send(a, text, cx, "choice");
+  }
+
   // What a waiting leader's message offers: 링크 열기, 확인 완료 (verify), 답 쓰기 with its answer box, and what an answer does.
   askActions(t, a, cx) {
     const { s, kind, item, link } = a;
     const writing = this.writing === s.leader;
     const done = this.sentOf(a);
-    const opts = kind === "decision" ? decisionOptions(item?.body) : { options: [], recommended: 0 }; // once: the chips and the recommended one read the same list
+    const groups = kind === "decision" ? decisionGroups(item?.body) : []; // several questions (#76): one button row per question
+    const opts = kind === "decision" && !groups.length ? decisionOptions(item?.body) : { options: [], recommended: 0 }; // once: the chips and the recommended one read the same list
+    const key = this.askKey(a);
+    const picks = this.gpick?.get(s.leader)?.key === key ? this.gpick.get(s.leader).picks : {};
     // Without "N안:" lines the card still shows what the report offers (#62): its 추천 / 답 lines and the quoted answers as buttons.
-    const hint = kind === "decision" && opts.options.length < 2 ? decisionHints(item?.body) : { lines: [], answers: [], recommended: "" };
+    const hint = kind === "decision" && !groups.length && opts.options.length < 2 ? decisionHints(item?.body) : { lines: [], answers: [], recommended: "" };
     const box = v_flex().min_w(0).gap(6)
+      .children(groups.map((g, gi) => h_flex().id(`grp-${s.leader}-${gi}`).gap(6).items_center().flex_wrap()
+        .child(div().flex_none().text_size(12).font_semibold().text_color(t.foreground).child(g.label))
+        .children(g.options.map((n) => this.button(t, `opt-${s.leader}-${gi}-${n}`, `${n}안${n === g.recommended ? " (추천)" : ""}`, (c) => this.pickGroup(a, groups, g.label, n, c),
+          { primary: picks[g.label] === n, disabled: a.po ? "" : NO_PO(), tip: `${g.label}번 질문에 ${n}안을 고릅니다. 모든 질문을 고르면 한 번에 보냅니다` })))))
+      .when(groups.length > 0 && done === "", (el) => el.child(div().text_size(11).text_color(t.dim).child(`질문마다 하나씩 고르면 한 번에 보냅니다(${groups.filter((g) => !picks[g.label]).map((g) => g.label).join("·")} 남음)`)))
       .children(hint.lines.map((x, i) => div().id(`hint-${s.leader}-${i}`).min_w(0).text_size(12).text_color(t.foreground).child(x)))
       .child(h_flex().gap(6).items_center().flex_wrap()
         .when(Boolean(link) && link !== item?.link, (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", (c) => openUrl(link, c))))
@@ -3466,10 +3610,10 @@ export default class Inbox extends View {
       const row = this.picRow(t, s.leader);
       if (row) box.child(row);
       box.child(h_flex().id(`reply-${s.leader}`).gap(6).items_center()
-        .on_key_down(() => { this.keyAt = Date.now(); })
+        .on_key_down((e, c) => this.answerKey(s.leader, e, c))
         .on_drop((ev, c) => this.dropPics(ev?.paths, c, s.leader))
         .child(this.button(t, `attach-${s.leader}`, "그림", (c) => { this.pickPics(c, s.leader); }, { tip: "그림 파일을 골라 붙입니다(Cmd+V로 붙여넣거나 파일을 끌어다 놓아도 됩니다). 보내면 PO가 파일을 열어 봅니다" }))
-        .child(div().flex_1().min_w(0).on_mouse_down("left", stop).child(Input.new(input).h(30).px(10).items_center().rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
+        .child(div().flex_1().min_w(0).on_mouse_down("left", stop).child(Textarea.new(input).min_h(30).px(10).py(5).rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
         .child(this.button(t, `send-${s.leader}`, "보내기", (c) => this.send(a, input.value(), c), { primary: true, disabled: a.po ? "" : NO_PO(), tip: CLIP })));
     }
     return box;
@@ -3504,7 +3648,7 @@ export default class Inbox extends View {
       const note = mineNote(e.status, blockedNow, age);
       const bad = e.status === "nopane" || e.status === "failed" || e.status === "noenter" || e.status === "gone" || (e.status === "held" && !blockedNow);
       const acts = mineActs(e.status, blockedNow, age);
-      const ACT = { resend: ["다시 보내기", "같은 글을 같은 PO에게 다시 보냅니다(말풍선은 늘지 않습니다)", (c) => this.resend(e.id, c)], enter: ["Enter 누르기", "PO의 입력창에 보낸 글이 아직 있는지 확인한 뒤 Enter만 누릅니다(PO가 질문 중이면 누르지 않습니다)", (c) => this.enterNow(e.id, c)] };
+      const ACT = { resend: ["다시 보내기", "같은 글을 같은 PO에게 다시 보냅니다(말풍선은 늘지 않습니다)", (c) => this.resend(e.id, c)], delete: ["삭제", "보내지 못한 이 말풍선을 채팅에서 지웁니다(되돌릴 수 없습니다)", (c) => this.discard(e.id, c)], enter: ["Enter 누르기", "PO의 입력창에 보낸 글이 아직 있는지 확인한 뒤 Enter만 누릅니다(PO가 질문 중이면 누르지 않습니다)", (c) => this.enterNow(e.id, c)] };
       const root = this.data?.root ?? "";
       const bp = bubbleParts(e.text, e.imgs, root);
       const dims = bp.imgs.map((p) => this.data?.imgd?.[p] ?? this.imgd.get(p));

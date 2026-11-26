@@ -1147,7 +1147,7 @@ test("main.js: 칩은 대기 중인 결정(decision) 말풍선에만, 같은 sen
   const src = mainSrc();
   const a = src.indexOf("  askActions(t, a, cx) {");
   const body = src.slice(a, src.indexOf("    if (!a.po) box.child", a));
-  assert.match(body, /const opts = kind === "decision" \? decisionOptions\(item\?\.body\)/); // 한 번만 계산
+  assert.match(body, /const opts = kind === "decision" && !groups\.length \? decisionOptions\(item\?\.body\)/); // 한 번만 계산
   assert.match(body, /kind === "decision" \? opts\.options\.map/);
   assert.match(body, /`\$\{n\}안 선택`/);
   assert.match(body, /this\.send\(a, `\$\{n\}안 선택`, c, "choice"\)/);
@@ -1184,7 +1184,7 @@ test("main.js: 추천·답 줄과 답 버튼은 N안 칩이 없는 결정 카드
   const src = mainSrc();
   const a = src.indexOf("  askActions(t, a, cx) {");
   const body = src.slice(a, src.indexOf("    if (!a.po) box.child", a));
-  assert.match(body, /const hint = kind === "decision" && opts\.options\.length < 2 \? decisionHints\(item\?\.body\)/);
+  assert.match(body, /const hint = kind === "decision" && !groups\.length && opts\.options\.length < 2 \? decisionHints\(item\?\.body\)/);
   assert.match(body, /hint\.lines\.map/);
   assert.match(body, /hint\.answers\.map/);
   assert.match(body, /this\.send\(a, w, c, "choice"\)/);
@@ -1240,7 +1240,7 @@ test("timeline: 내 글은 그 방(po)에만, 종류·상태·받는 리더를 �
 test("main.js: 모든 데스크 보내기는 deliver 한 곳에서 한 번만 기록하고, 말풍선은 오른쪽(내 것)·왼쪽(리더·PO)에 시간을 바깥 아래에 둔다", () => {
   const src = mainSrc();
   const del = deliverOf(src);
-  assert.equal((src.match(/setShared\(CHAT_KEY/g) ?? []).length, 2); // 쓰는 곳은 record()(새 글)와 mark()(상태 바꿈) 둘뿐
+  assert.equal((src.match(/setShared\(CHAT_KEY/g) ?? []).length, 3); // 쓰는 곳은 record()(새 글)·mark()(상태 바꿈)·discard()(보내지 못한 말풍선 삭제) 셋뿐
   assert.equal((del.match(/this\.record\(/g) ?? []).length, 1); // 새 기록은 deliver 한 곳에서 한 번(다시 보내기는 같은 id로 상태만 바꾼다)
   assert.match(del, /if \(!id\) id = this\.record\(\{ \.\.\.rec, line: text \}, "sending"\)/);
   for (const st of ["failed", "held", "nopane"]) assert.match(del, new RegExp(`this\\.mark\\(id, "${st}"\\)`));
@@ -1271,7 +1271,7 @@ test("setChatStatus: 그 id의 기록만 상태와 시각을 바꾸고, 같은 �
 
 test("mineActs: 아무것도 못 간 것은 다시 보내기, Enter만 빠진 것은 Enter(10분 안)·다시 보내기(오래되면), 질문에 답한 뒤의 held도 버튼이 생긴다", () => {
   const MIN = 60000;
-  for (const st of ["nopane", "failed", "gone"]) assert.deepEqual(I.mineActs(st), ["resend"], st);
+  for (const st of ["nopane", "failed", "gone"]) assert.deepEqual(I.mineActs(st), ["resend", "delete"], st); // 보내지 못한 말풍선만 삭제도 있다
   assert.deepEqual(I.mineActs("noenter", false, 0), ["enter"]);
   assert.deepEqual(I.mineActs("noenter", false, 9 * MIN), ["enter"]);
   assert.deepEqual(I.mineActs("noenter", false, 11 * MIN), ["resend"]); // 10분 지난 Enter 버튼은 사라진다(입력창이 바뀌었을 수 있다)
@@ -1280,6 +1280,7 @@ test("mineActs: 아무것도 못 간 것은 다시 보내기, Enter만 빠진 �
   assert.deepEqual(I.mineActs("held", false, 1000), ["enter", "resend"]); // 질문에 답한 뒤
   assert.deepEqual(I.mineActs("held", false, 11 * MIN), ["resend"]);
   for (const st of ["sent", "sending", "opening"]) assert.deepEqual(I.mineActs(st, false, 0), [], st);
+  for (const [st, blocked, age] of [["noenter", false, 0], ["noenter", false, 11 * MIN], ["held", false, 0], ["held", true, 0], ["held", false, 11 * MIN]]) assert.ok(!I.mineActs(st, blocked, age).includes("delete"), st); // PO 입력창에 글이 남았을 수 있는 것은 지우지 않는다
   assert.equal(I.mineAct, undefined); // 옛 단일 버튼 함수는 없다
 });
 
@@ -2950,6 +2951,52 @@ test("main.js: 프로필을 읽어 온 names를 쓰고, 읽지 못한 이유를 
   const cjs = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8");
   assert.ok(!/\bPO_DIR\b|\bisPoTerm\b|\/\^lead-\/\.test/.test(cjs));
   assert.ok(!/\/\^lead-\/\.test/.test(fs.readFileSync(path.join(__dirname, "../mods/inbox/po-hook.cjs"), "utf8")));
+});
+
+test("dropChat: 그 id의 기록만 빼고 나머지 순서는 그대로, 없는 id·배열 아님은 null", () => {
+  const list = [{ id: "1-a", text: "a" }, { id: "2-b", text: "b" }, { id: "3-c", text: "c" }];
+  assert.deepEqual(I.dropChat(list, "2-b").map((x) => x.id), ["1-a", "3-c"]);
+  assert.equal(list.length, 3); // 원본은 그대로
+  assert.equal(I.dropChat(list, "9-z"), null);
+  assert.equal(I.dropChat(null, "1-a"), null);
+  assert.deepEqual(I.dropChat([{ id: "1-a" }], "1-a"), []);
+});
+
+test("discard: 보내지 못한 말풍선만 지우고(다른 말풍선은 그대로), 보냈거나 보내는 중·Enter만 빠진 것은 지우지 않는다", () => {
+  const src = mainSrc();
+  const mk = (status) => ({ id: "2-b", status, at: Date.now() - 1000, ms: 1, text: "b", line: "b", to: "lead-a", po: "p1" });
+  const store = { list: [] };
+  const setShared = (_k, v) => { store.list = v; };
+  const g = mkGlobals({ dropChat: I.dropChat, CHAT_KEY: "inbox.chat", shared: () => store.list, setShared });
+  const self = { backs: new Map([["2-b", "pane"]]), recordPo: () => "t5", isBlocked: () => false };
+  self.recordOf = (id) => store.list.find((x) => x.id === id) ?? null;
+  self.recordActs = runMethod(src, "  recordActs(r, po", "  // The bubble's \"다시 보내기\"", mkGlobals()).recordActs.bind(self);
+  const { discard } = runMethod(src, "  discard(id, c) {", "  recordOf(id) {", g);
+  let notified = 0;
+  const c = { notify() { notified++; } };
+  for (const st of ["nopane", "failed", "gone"]) {
+    store.list = [{ id: "1-a", status: "sent", at: 1, text: "a" }, mk(st), { id: "3-c", status: "sent", at: 1, text: "c" }];
+    self.backs.set("2-b", "pane");
+    discard.call(self, "2-b", c);
+    assert.deepEqual(store.list.map((x) => x.id), ["1-a", "3-c"], st);
+    assert.equal(self.backs.has("2-b"), false);
+  }
+  assert.equal(notified, 3);
+  for (const st of ["sent", "sending", "opening", "noenter", "held"]) {
+    store.list = [mk(st)];
+    discard.call(self, "2-b", c);
+    assert.equal(store.list.length, 1, st);
+  }
+  store.list = [mk("failed")];
+  discard.call(self, "9-z", c); // 없는 id
+  assert.equal(store.list.length, 1);
+});
+
+test("main.js: 말풍선의 삭제 버튼은 다시 보내기 옆에서 discard를 부른다", () => {
+  const src = mainSrc();
+  assert.match(src, /delete: \["삭제", .*\(c\) => this\.discard\(e\.id, c\)\]/);
+  const row = methodOf(src, "  entryRow(t, e, v, cx) {", "    if (e.who === \"po\") {");
+  assert.match(row, /acts\.map\(\(k, i\) => this\.button\(t, `ma-\$\{k\}-\$\{e\.id\}`/); // 버튼은 mineActs 순서(다시 보내기 → 삭제)대로 그려진다
 });
 
 // ---- 원격 연결 켜기 (#79) ----
