@@ -312,8 +312,8 @@ export default class Tabs extends View {
       .when(enabled.includes("inbox-board"), el => el.child(panelButton("inbox-board", "UI 모드", "mods/workspace-chrome/archive.svg", this.inboxWaiting())))
       .when(Boolean(modeTarget()), el => el.child(h_flex().id("mode-switch").h(26).px(8).flex_none().items_center().rounded(6).text_size(12).bg(t.selected).text_color(t.foreground)
         .hover(s => s.bg(t.hover)).on_mouse_down("left", stop).on_click(() => { const m = modeTarget(); if (m) run("layout.switch", { name: m.name }); })
-        .tooltip(modeTarget()?.ui ? "터미널 화면으로 돌아갑니다. 터미널은 꺼지지 않습니다" : "UI 모드를 메인 화면으로 씁니다. 터미널은 숨겨질 뿐 계속 돕니다")
-        .child(modeTarget()?.ui ? "터미널 모드" : "UI 모드")))
+        .tooltip(modeTarget()?.ui ? "터미널 화면으로 돌아갑니다. 터미널은 꺼지지 않습니다" : "UI 모드를 전체 화면으로 씁니다. 터미널은 숨겨질 뿐 계속 돕니다")
+        .child(modeTarget()?.ui ? "터미널 모드" : "전체 화면")))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/tabs/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));

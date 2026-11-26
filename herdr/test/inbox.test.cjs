@@ -2665,6 +2665,15 @@ test('UI 모드(#59): inbox mode "main"은 페인처럼 전체 메신저 화면�
   assert.match(tabs, /layout\.switch/);
 });
 
+test('UI 모드 전환 버튼: 터미널 모드에서는 "전체 화면", 전체 화면에서는 "터미널 모드"이고, 패널을 여는 탭만 "UI 모드"다(#77)', () => {
+  const tabs = fs.readFileSync(path.join(__dirname, "..", "mods", "tabs-mine", "main.js"), "utf8");
+  assert.match(tabs, /\.child\(modeTarget\(\)\?\.ui \? "터미널 모드" : "전체 화면"\)/);
+  assert.match(tabs, /panelButton\("inbox-board", "UI 모드"/);
+  assert.equal((tabs.match(/"UI 모드"/g) || []).length, 1); // 같은 이름의 버튼이 둘이 되지 않게
+  assert.match(tabs, /UI 모드를 전체 화면으로 씁니다/);
+  assert.match(tabs, /"mode-switch"/); // id는 그대로
+});
+
 // ---- UI 모드(main): 터미널 칸이 없으므로 PO 터미널 주소로 보낸다 (review-59 R1 P2)
 test("main.js: UI 모드(mained)의 deliver는 칸·포커스·클립보드 없이 hc send(터미널 주소)로 보내고, 터미널 모드 경로는 그대로다", () => {
   const src = mainSrc();
