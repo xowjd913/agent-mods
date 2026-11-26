@@ -2,34 +2,7 @@
 
 스페이스에서 쓰는 저장소마다 어떤 GitHub 계정을 쓸지 보고 고릅니다. 고른 계정은 [gh-account](../gh-account.md) 도구가 모든 터미널의 `gh` 명령, `git push` 인증, 커밋 작성자에 씁니다.
 
-```text
- 계정                                   ↻
- 설치
-  설치됨 · ~/.local/bin                [ 업데이트… ] [ 원래대로 되돌리기… ]
- 이 저장소는 어느 계정?
-  [ app (스페이스 폴더)   ▾ ] [ 폴더 경로 또는 owner/repo ] [확인]
-  example-org/app
-    매핑        acct-b · 규칙 example-org/*
-    gh 명령     acct-b · 매핑 계정
-    git push    acct-b · 매핑 계정 토큰
-    커밋 신원   Person B <user@example.com> · acct-b 계정의 신원
-    [ 접속 시험 ]  접속 시험 성공 · acct-b · push 가능
- 저장소 owner
-  ▾ example-org/*      저장소 2  [ acct-b    ▾ ]
-      app                         acct-b
-      tools                       acct-a · 규칙 example-org/tools
-  ▸ acct-a/*           저장소 1  [ 규칙 없음 ▾ ]
- 기본 계정                     [ 없음      ▾ ]
- 로그인된 계정                  [ 계정 추가… ]
-  ● acct-a                        gh 활성
-  ● acct-b
- 규칙
-  1 example-org/tools  [acct-a ▾] ↑ ↓ ✕
-  2 example-org/*      [acct-b ▾] ↑ ↓ ✕
-  [ owner/* 또는 owner/repo ] [계정 ▾] 추가
-```
-
-*패널 모양을 글자로 그린 스케치입니다. 실제 화면은 Herdr 테마 색을 따릅니다.*
+오른쪽 패널의 `계정`을 누르면 위에서 아래로 설치 상태, 고른 저장소의 계정 확인, 저장소 owner별 계정 선택, 로그인된 계정, 규칙 목록이 차례로 나옵니다. 아래 "사용법"이 각 칸을 설명합니다.
 
 ## 사용법
 
