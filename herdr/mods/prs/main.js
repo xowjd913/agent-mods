@@ -38,7 +38,7 @@ function ago(iso) {
 const PANES_FILE = () => `${appHome()}/data/prs/panes.json`;
 let published = null, writing = false;
 function publishPanes(cx) {
-  if (writing || checking()) return;
+  if (writing || checking() || !NAMES.arrangeScript) return; // no arrange script here (the "none" preset, or it is missing): nothing reads the list
   const text = JSON.stringify((panes() ?? []).filter((p) => p.mod === "prs").map((p) => ({ pane: p.pane, tab: p.tab })));
   if (text === published) return;
   writing = true;
@@ -71,6 +71,7 @@ const DEFAULT_NAMES = Object.freeze({
   hubRole: "po", hubIdLabel: "po", hubId: "^[a-z0-9-]{1,40}$", hubDir: "po", // the hub (PO): its `role` value, id label, id pattern, folder
   labelRole: "role", labelWait: "wait", labelWaitLink: "wait-link", labelSession: "session",
   answerLine: 'Panel answer ({kind}) for {agent}: "{text}".{ Target: {link}}',
+  preset: "po", arrangeScript: "~/.claude/skills/leader/herdr-team.sh", // the profile's preset ("none" = no agent / hub naming rules at all, #124) and the PO arrange script ("" = not there: the features that need it hide)
 });
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // a hub id becomes a file name whatever its pattern says
 function compileNames(n) {

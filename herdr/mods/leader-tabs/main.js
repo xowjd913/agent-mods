@@ -22,7 +22,8 @@ import { h_flex } from "gpui-base";
 import { panes, terminals, focused, props, run, theme, home, layout, exec, checking, shared, setShared } from "herdr";
 
 const PANE_ICON = (name) => `mods/pane/${name}.svg`;
-const ARRANGE = 'f="$HOME/.claude/skills/leader/herdr-team.sh"; [ -f "$f" ] || exit 127; HC_TERMINAL_ID="$1" exec sh "$f" arrange';
+// The script comes from the profile (NAMES.arrangeScript, `~` = home; "" = not there). It is passed as $2 so no path is built into the shell text.
+const ARRANGE = 'f="$2"; case "$f" in "~/"*) f="$HOME/${f#"~/"}";; esac; [ -f "$f" ] || exit 127; HC_TERMINAL_ID="$1" exec sh "$f" arrange';
 const HEAL_COOLDOWN = 30000;
 const SETTLE = 10000;
 const HEAL_CHECK = 2000;
@@ -71,6 +72,7 @@ const DEFAULT_NAMES = Object.freeze({
   hubRole: "po", hubIdLabel: "po", hubId: "^[a-z0-9-]{1,40}$", hubDir: "po", // the hub (PO): its `role` value, id label, id pattern, folder
   labelRole: "role", labelWait: "wait", labelWaitLink: "wait-link", labelSession: "session",
   answerLine: 'Panel answer ({kind}) for {agent}: "{text}".{ Target: {link}}',
+  preset: "po", arrangeScript: "~/.claude/skills/leader/herdr-team.sh", // the profile's preset ("none" = no agent / hub naming rules at all, #124) and the PO arrange script ("" = not there: the features that need it hide)
 });
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // a hub id becomes a file name whatever its pattern says
 function compileNames(n) {
@@ -239,7 +241,8 @@ export default class LeaderTabs extends View {
       run("pane.focus", { pane: p.pane });
       run("terminal.keep", { terminal: live[0].address, place: "right" });
     };
-    exec("sh", ["-c", ARRANGE, "sh", po.address], { timeout: 120000 })
+    if (!NAMES.arrangeScript) { keep(); return; } // no arrange script here (the "none" preset, or the file is missing): just keep one leader
+    exec("sh", ["-c", ARRANGE, "sh", po.address, NAMES.arrangeScript], { timeout: 120000 })
       .then((r) => { if (r.code === 127) keep(); })
       .catch(keep);
   }

@@ -1,4 +1,5 @@
 // inbox.cjs 단위 테스트: node --test herdr/test/inbox.test.cjs
+require("./helpers/po-home.cjs"); // a PO machine: a profile without `preset` is "po" (see the helper)
 const test = require("node:test");
 const POSIX = process.platform !== "win32"; // Windows has no POSIX file modes: only the mode asserts are skipped there
 const assert = require("node:assert/strict");
