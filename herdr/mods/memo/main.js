@@ -1,11 +1,12 @@
 // 메모: 메모 하나가 폴더 안의 .md 파일 하나다. 목록·새로 쓰기·고치기·지우기, 폴더 고르기, 그리고 PO에게 보내기(눌러서 확인한 뒤에만).
 // 오른쪽 패널(memo-board)이다. 폴더 설정·목록·파일 이름 만들기·삭제는 memo.cjs(도우미)가 하고, 메모 글을 읽고 쓰는 것은 이 모드가 readTextFile/writeTextFile로 직접 한다
 // (바깥에서 바뀐 파일을 덮어쓰지 않으려는 검사가 거기 들어 있다).
-// 클라우드에는 아무것도 보내지 않는다. Google Drive 등은 그 데스크톱 앱의 동기화 폴더를 메모 폴더로 고르는 방식이다(로그인·업로드 코드 없음).
+// Google Drive 등은 그 데스크톱 앱의 동기화 폴더를 메모 폴더로 고르는 방식이다(로그인·업로드 코드 없음).
+// GitHub에는 메모마다 ‘GitHub에 올리기’를 눌러 확인한 뒤에만 올린다(도우미가 `gh api`로 한다). 로그인은 사용자의 `gh auth login`뿐이고 이 모드는 토큰을 읽지도 저장하지도 않는다.
 // 키: `<모드>.<명령>`은 화면에 보이는 모드에만 닿으므로 항상 보이는 tabs-mine이 `tabs-mine.memo`·`tabs-mine.memo-new`를 받아 패널을 열고 shared 표시(memo.want)를 남긴다.
 
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, TextareaState, Textarea } from "gpui-base";
+import { v_flex, h_flex, TextareaState, Textarea, InputState, Input } from "gpui-base";
 import { theme, exec, appHome, checking, hc, run, panes, focused, terminals, shared, nextCommand, pickFolder, readTextFile, writeTextFile } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/memo/memo.cjs`;
@@ -17,6 +18,10 @@ const RELOAD_MS = 8000;
 const MAX_READ = 1024 * 1024; // readTextFile 한도(1 MiB)
 const NAME_HEAD_CHARS = 400; // 새 메모 파일 이름을 만들 때 도우미에 넘기는 글머리
 
+const GH_UPLOAD_TIMEOUT = 120000; // 올리기는 gh를 여러 번 부른다
+const GH_RESULT_MS = 15000; // 올린 결과(주소가 들어 있다)는 오래 보여 준다
+
+const GH_NOTE = "메모를 열고 ‘GitHub에 올리기’를 누르면 gh(GitHub CLI)로 이 저장소의 폴더에 올립니다. 로그인은 터미널의 gh auth login 하나뿐이고, 이 앱은 토큰을 읽거나 저장하지 않습니다. 같은 이름의 파일이 있으면 수정으로 올립니다.";
 const DRIVE_NOTE = "Google Drive를 쓰려면 Drive 데스크톱 앱에 직접 로그인한 뒤, 그 Drive 폴더 안의 폴더를 메모 폴더로 고르세요. 이 앱은 로그인도 업로드도 하지 않습니다. 동기화는 Drive 앱이 합니다.";
 
 // 글을 base64(UTF-8)로 넘긴다: exec에는 표준 입력이 없고, 글에는 줄바꿈·따옴표가 들어간다.
@@ -96,7 +101,10 @@ export default class Memo extends View {
     this.truncated = false;
     this.msg = null; // {text, error, id}
     this.msgSeq = 0;
-    this.ask = null; // 확인 줄: {kind: "delete" | "po" | "discard" | "overwrite", ...}
+    this.ask = null; // 확인 줄: {kind: "delete" | "po" | "discard" | "overwrite" | "gh", ...}
+    this.gh = null; // GitHub 올리기 설정: {repo, branch, folder, defaultFolder}
+    this.ghOpen = false; // 목록 화면의 GitHub 설정 카드를 펼쳤는가
+    this.focusKey = null;
     this.busy = false; // 목록 읽는 중
     this.working = false; // 저장·삭제·보내기 중
     this.e = null; // 편집 중인 메모: {file, path, orig, isNew, conflict}
@@ -105,6 +113,9 @@ export default class Memo extends View {
     if (checking()) return;
     this.ta = TextareaState.new({ value: "", placeholder: "여기에 메모를 쓰세요. 첫 줄(또는 # 제목)이 메모 이름이 됩니다.", rows: 12 });
     this.ta.on("change", (_e, c) => c.notify());
+    this.ghRepo = this.input("owner/이름 (예: me/notes)");
+    this.ghBranch = this.input("브랜치 (비우면 기본 브랜치)");
+    this.ghFolder = this.input("저장소 안 폴더 (비우면 memos)");
     this.reload(cx);
     cx.timer.every(RELOAD_MS, (cx) => { if (this.screen === "list") this.reload(cx); });
     // 키로 열어 달라는 요청(tabs-mine이 남긴다)을 400ms마다 본다. 패널이 막 열렸을 때도 한 번 본다.
@@ -137,12 +148,19 @@ export default class Memo extends View {
   }
 
   // ---- 메시지
-  setMsg(cx, text, error = false) {
+  setMsg(cx, text, error = false, ms = 3000) {
     const id = ++this.msgSeq;
     this.msg = { text, error, id };
-    if (!error) cx.timer.after(3000, (cx) => { if (this.msg && this.msg.id === id) { this.msg = null; cx.notify(); } });
+    if (!error) cx.timer.after(ms, (cx) => { if (this.msg && this.msg.id === id) { this.msg = null; cx.notify(); } });
   }
-  say(cx, text, error = false) { this.setMsg(cx, text, error); cx.notify(); }
+  say(cx, text, error = false, ms = 3000) { this.setMsg(cx, text, error, ms); cx.notify(); }
+
+  input(placeholder) {
+    const st = InputState.new({ value: "", placeholder });
+    st.on("focus", (_e, cx) => { this.focusKey = st; cx.notify(); });
+    st.on("blur", (_e, cx) => { if (this.focusKey === st) this.focusKey = null; cx.notify(); });
+    return st;
+  }
 
   // ---- 목록
   reload(cx) {
@@ -152,6 +170,8 @@ export default class Memo extends View {
       try {
         const c = await helper(["config"]);
         if (c.ok) this.cfg = { dir: c.dir, defaultDir: c.defaultDir, custom: c.custom };
+        const g = await helper(["gh-config"]);
+        if (g.ok) this.gh = { repo: g.repo, branch: g.branch, folder: g.folder, defaultFolder: g.defaultFolder };
         const d = await helper(["list"]);
         if (d.ok) {
           this.items = d.items; this.exists = d.exists !== false; this.truncated = Boolean(d.truncated);
@@ -328,6 +348,67 @@ export default class Memo extends View {
     try { cx.timer.after(after, press); } catch { press(cx); }
   }
 
+  // ---- GitHub 올리기 (설정은 config.json의 github, 올리기는 도우미의 gh-prepare·gh-upload)
+  toggleGh(cx) {
+    this.ghOpen = !this.ghOpen;
+    if (this.ghOpen) {
+      const g = this.gh ?? { repo: "", branch: "", folder: "" };
+      this.ghRepo.set_value(g.repo); this.ghBranch.set_value(g.branch); this.ghFolder.set_value(g.folder);
+    }
+    cx.notify();
+  }
+  saveGh(cx) {
+    if (this.working) return;
+    this.working = true;
+    const raw = { repo: this.ghRepo.value().trim(), branch: this.ghBranch.value().trim(), folder: this.ghFolder.value().trim() };
+    cx.spawn(async (cx) => {
+      try {
+        const r = await helper(["gh-set", toBase64(JSON.stringify(raw))]);
+        if (!r.ok) { this.say(cx, `GitHub 설정을 저장하지 못했습니다: ${r.error}`, true); return; }
+        this.gh = { repo: r.repo, branch: r.branch, folder: r.folder, defaultFolder: r.defaultFolder };
+        this.ghOpen = false;
+        this.say(cx, r.repo ? `GitHub 올리기 설정을 저장했습니다: ${r.repo}` : "GitHub 올리기 설정을 지웠습니다.");
+      } finally { this.working = false; cx.notify(); }
+    });
+  }
+
+  // 1단계: gh가 설치·로그인돼 있는지와 저장소가 공개인지만 본다(아무것도 쓰지 않는다). 공개 저장소면 확인이 한 번 더 있다.
+  askGh(cx) {
+    const e = this.e;
+    if (!e || e.isNew || this.dirty()) { this.say(cx, "먼저 저장하세요. 저장된 파일 내용이 GitHub에 올라갑니다.", true); return; }
+    if (this.working) return;
+    if (!this.gh?.repo) { this.say(cx, "먼저 목록 화면의 ‘GitHub 올리기 설정’에서 저장소(owner/이름)를 정하세요.", true); return; }
+    this.working = true;
+    this.say(cx, "GitHub 연결을 확인하는 중…");
+    cx.spawn(async (cx) => {
+      try {
+        const r = await helper(["gh-prepare", e.file, e.path], GH_UPLOAD_TIMEOUT);
+        if (this.e !== e) return;
+        if (!r.ok) { this.say(cx, `올리지 못합니다: ${r.error}`, true); return; }
+        if (!r.ready) { this.say(cx, r.message, true); return; } // 터미널에서 gh auth login 안내
+        this.msg = null;
+        this.ask = { kind: "gh", repo: r.repo, branch: r.branch, remote: r.remote, isPublic: r.isPublic, publicOk: false };
+      } finally { this.working = false; cx.notify(); }
+    });
+  }
+  // 2단계: 확인 뒤에 올린다. 도우미가 gh 로그인·공개 여부·경로를 다시 확인하고, 공개 저장소는 확인 표시(1) 없이는 거절한다.
+  sendGh(cx) {
+    const a = this.ask, e = this.e;
+    if (!a || a.kind !== "gh" || !e || this.working) return;
+    this.ask = null;
+    this.working = true;
+    this.say(cx, "GitHub에 올리는 중…");
+    cx.spawn(async (cx) => {
+      try {
+        const r = await helper(["gh-upload", e.file, e.path, a.isPublic && a.publicOk ? "1" : "0"], GH_UPLOAD_TIMEOUT);
+        if (!r.ok) { this.say(cx, `GitHub에 올리지 못했습니다: ${r.error}`, true); return; }
+        const where = `${r.repo} ${r.remote}`;
+        const text = r.unchanged ? `GitHub에 이미 같은 내용이 있습니다: ${where}` : `GitHub에 ${r.created ? "올렸습니다" : "수정해 올렸습니다"}: ${where}`;
+        this.say(cx, r.url ? `${text} · ${r.url}` : text, false, GH_RESULT_MS);
+      } finally { this.working = false; cx.notify(); }
+    });
+  }
+
   // ---- 그리기 공통
   button(t, id, label, onClick, { primary = false, danger = false, disabled = false } = {}) {
     const el = div().id(id).flex_none().h(24).px(9).rounded(6).flex().items_center().justify_center().text_size(11.5).cursor_pointer()
@@ -367,6 +448,27 @@ export default class Memo extends View {
       .child(this.note(t, DRIVE_NOTE));
   }
 
+  textInput(t, state) {
+    return Input.new(state).h(26).px(8).items_center().rounded(6).border(1)
+      .border_color(this.focusKey === state ? t.accent : t.input).bg(t.background).text_size(12).text_color(t.foreground);
+  }
+
+  ghCard(t) {
+    const g = this.gh;
+    const summary = g?.repo ? `${g.repo} · 브랜치 ${g.branch || "(기본)"} · 폴더 ${g.folder || g.defaultFolder || "memos"}` : "저장소를 정하지 않았습니다";
+    return v_flex().flex_none().mx(12).mb(8).p(8).gap(6).rounded(8).bg(t.raised).border(1).border_color(t.border)
+      .child(h_flex().gap(6).items_center()
+        .child(div().flex_none().text_size(11.5).font_semibold().text_color(t.foreground).child("GitHub 올리기"))
+        .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted).tooltip(summary).child(summary))
+        .child(this.button(t, "mm-gh-toggle", this.ghOpen ? "닫기" : "설정", (cx) => this.toggleGh(cx))))
+      .when(this.ghOpen, (el) => el
+        .child(this.textInput(t, this.ghRepo))
+        .child(this.textInput(t, this.ghBranch))
+        .child(this.textInput(t, this.ghFolder))
+        .child(h_flex().gap(6).child(this.button(t, "mm-gh-save", "저장", (cx) => this.saveGh(cx), { primary: true, disabled: this.working })))
+        .child(this.note(t, GH_NOTE)));
+  }
+
   row(t, it, i) {
     return v_flex().id(`mm-row-${i}`).flex_none().mx(12).mb(6).px(10).py(7).gap(2).rounded(8).border(1).border_color(t.border).cursor_pointer()
       .hover((s) => s.bg(t.hover))
@@ -387,6 +489,7 @@ export default class Memo extends View {
       .child(this.header(t, "메모", null, right))
       .when(Boolean(this.banner(t)), (el) => el.child(this.banner(t)))
       .child(this.folderBar(t))
+      .child(this.ghCard(t))
       .when(this.items === null && !this.msg, (el) => el.child(div().px(12).text_size(12).text_color(t.dim).child("불러오는 중…")))
       .when(this.items !== null && !this.exists, (el) => el.child(div().px(12).py(4).text_size(12).text_color(t.dim).child("메모 폴더가 아직 없습니다. 새 메모를 저장하면 만들어집니다.")))
       .when(this.items !== null && this.exists && items.length === 0, (el) => el.child(div().px(12).py(4).text_size(12).text_color(t.dim).child("메모가 없습니다. ‘+ 새 메모’로 시작하세요.")))
@@ -401,9 +504,13 @@ export default class Memo extends View {
     if (!a) return null;
     const text = a.kind === "delete" ? `‘${this.e?.file ?? ""}’ 파일을 지웁니다. 되돌릴 수 없습니다.`
       : a.kind === "discard" ? "저장하지 않은 변경이 있습니다. 버리고 목록으로 갈까요?"
+      : a.kind === "gh" && a.isPublic && !a.publicOk ? `⚠ ${a.repo}는 공개 저장소입니다. 올린 메모는 누구나 볼 수 있고, 올린 뒤에는 기록에서 완전히 지우기 어렵습니다. 계속할까요?`
+      : a.kind === "gh" ? `${a.repo}${a.branch ? ` (${a.branch} 브랜치)` : ""}의 ${a.remote} 로 이 메모를 올립니다. 같은 이름의 파일이 있으면 이 내용으로 수정됩니다. 파일 전체가 GitHub로 전송됩니다.`
       : `PO(${a.label})에게 이 메모를 내가 친 입력처럼 붙여 넣고 Enter까지 누릅니다. 메모 제목·본문·파일 경로가 그 터미널에 전송됩니다.`;
     const ok = a.kind === "delete" ? this.button(t, "mm-ask-ok", "지우기", (cx) => this.remove(cx), { danger: true, disabled: this.working })
       : a.kind === "discard" ? this.button(t, "mm-ask-ok", "버리고 나가기", (cx) => { this.e = null; this.screen = "list"; this.ask = null; this.reload(cx); }, { danger: true })
+      : a.kind === "gh" && a.isPublic && !a.publicOk ? this.button(t, "mm-ask-ok", "공개 저장소임을 알고 계속", (cx) => { this.ask = { ...a, publicOk: true }; cx.notify(); }, { danger: true })
+      : a.kind === "gh" ? this.button(t, "mm-ask-ok", "올리기", (cx) => this.sendGh(cx), { primary: true, disabled: this.working })
       : this.button(t, "mm-ask-ok", "보내기", (cx) => this.sendPo(cx), { primary: true, disabled: this.working });
     return v_flex().flex_none().mx(12).mb(6).p(8).gap(6).rounded(8).bg(t.blocked + "1f").border(1).border_color(t.blocked + "66")
       .child(div().text_size(12).text_color(t.foreground).child(text))
@@ -434,6 +541,7 @@ export default class Memo extends View {
       .child(h_flex().flex_none().px(12).pb(6).gap(6).items_center()
         .when(Boolean(e) && !e.isNew, (el) => el
           .child(this.button(t, "mm-po", "PO에게 보내기", (cx) => this.askPo(cx), { disabled: this.working }))
+          .child(this.button(t, "mm-gh", "GitHub에 올리기", (cx) => this.askGh(cx), { disabled: this.working }))
           .child(this.button(t, "mm-del", "삭제", (cx) => { this.ask = { kind: "delete" }; cx.notify(); }, { danger: true, disabled: this.working })))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(dirty ? "저장하지 않은 변경" : "")))
       .child(div().flex_1().min_h(0).px(12).pb(12)
