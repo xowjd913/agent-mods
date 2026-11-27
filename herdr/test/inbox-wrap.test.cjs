@@ -757,7 +757,7 @@ test("R21 label: statusSig changes with the label (member working -> blocked, ow
 test("R21 label: typingRow draws the label next to the dots (source) and nothing when the label is empty", () => {
   const row = MAIN.slice(MAIN.indexOf("  typingRow(t, x) {"), MAIN.indexOf("  render(cx) {"));
   assert.match(row, /\.child\("···"\)/);
-  assert.match(row, /x\.label \? div\(\)\.flex_none\(\)\.text_size\(11\)[^\n]*\.child\(x\.label\) : div\(\)/);
+  assert.match(row, /x\.label \? div\(\)\.flex_none\(\)\.text_size\(fz\(11\)\)[^\n]*\.child\(x\.label\) : div\(\)/);
   assert.match(row, /x\.label === LABEL_BLOCKED \? t\.blocked : t\.dim/);
 });
 
@@ -815,7 +815,7 @@ test("R21 layout: my bubble is pinned right and capped; the PO and leader bubble
   assert.match(row, /\.w\(width\)\.max_w\(cap \?\? "75%"\)\.min_w\(0\)/);
   assert.match(row, /div\(\)\.flex_1\(\)\.min_w\(0\)\.max_w\(this\.capOf\(\) \?\? "75%"\)\.px\(12\)/, "PO bubble");
   assert.match(row, /div\(\)\.flex_1\(\)\.min_w\(0\)\.max_w\(this\.capOf\(\) \?\? "75%"\)\.child\(this\.bubble\(/, "leader bubble");
-  assert.match(MAIN, /capOf\(minInner = 0\) \{[^}]*bubbleCap\(chatColW\(this\.winW, strip, this\.narrow, ROOM_W, SLIM_W\), minInner\)/);
+  assert.match(MAIN, /capOf\(minInner = 0\) \{[^}]*bubbleCap\(chatColW\(this\.winW, strip, this\.narrow, this\.roomWidthNow\(\), SLIM_W\), minInner\)/);
   const sz = MAIN.slice(MAIN.indexOf("on_size_change"), MAIN.indexOf("on_size_change") + 200);
   assert.match(sz, /this\.onSize\(size\.width, c\)/, "the size event goes to onSize");
 });
@@ -978,7 +978,7 @@ test("R23: a report card carries linkRef next to the leader name; the name itsel
   assert.equal(it.linkRef, "agent-mods#39");
   const [none] = I.parseLines(JSON.stringify({ ts: "2026-01-01T00:00:01Z", leader: "lead-x", kind: "done", title: "[x] 끝", body: "b" }) + "\n").map(I.enrich);
   assert.equal(none.linkRef, "");
-  assert.match(MAIN, /\.when\(!bare && Boolean\(it\?\.linkRef\), \(el\) => el\.child\(div\(\)\.min_w\(0\)\.max_w\(150\)\.truncate\(\)\.text_size\(10\.5\)\.text_color\(t\.dim\)\.child\(it\.linkRef\)\)\)/);
+  assert.match(MAIN, /\.when\(!bare && Boolean\(it\?\.linkRef\), \(el\) => el\.child\(div\(\)\.min_w\(0\)\.max_w\(150\)\.truncate\(\)\.text_size\(fz\(10\.5\)\)\.text_color\(t\.dim\)\.child\(it\.linkRef\)\)\)/);
   assert.match(MAIN, /\.child\(shortName\(s\.leader\)\)\)\)/, "the leader name still comes from shortName/leaderName");
 });
 
@@ -1160,7 +1160,7 @@ test("#74: 소스 — 채팅 상자는 모든 방에서 같은 자리에 그려�
   const box = MAIN.slice(MAIN.indexOf("  chatBox(t, v) {"), MAIN.indexOf("  poHint(t) {"));
   assert.doesNotMatch(box, /chat-none/); // the "PO 모름" room no longer swaps the box out of the tree
   for (const id of ["chat-box", "chat-target", "chat-row", "chat-input"]) assert.match(box, new RegExp(`id\\("${id}"\\)`));
-  assert.match(MAIN, /full\(cx\) \{\n    this\.tvN = 0;\n    this\.noteRedraw\(cx\);\n    this\.guardAll\(\);/);
+  assert.match(MAIN, /full\(cx\) \{\n    syncFont\(\);\n    this\.tvN = 0;\n    this\.noteRedraw\(cx\);\n    this\.guardAll\(\);/);
   assert.match(MAIN, /pinTick\(cx\) \{\n    this\.guardAll\(\);/);
   // the only places that write into the box: our own clears (wipe), the guard's restore, the "@" pick, the held / stray line break (dropAt, dropBreak) and the restore of a selection an Enter swapped for a line break (putBack), the room switch (syncRoom, #66), the draft that comes back after a restart of the mod (applyDraft, #138)
   const writers = MAIN.split("\n").map((l, i) => [i + 1, l]).filter(([, l]) => /this\.chat\.(set_value|replace)\(/.test(l));

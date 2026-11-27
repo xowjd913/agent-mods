@@ -10,12 +10,13 @@ const stub = "const h = () => globalThis.__herdr;" +
   "  if (k === 'when') { if (a[0]) a[1](p); return p; }" +
   "  if (k === 'id') id = a[0];" +
   "  if (k === 'on_click' && id) h().clicks[id] = a[0];" +
+  "  if (k === 'pr' && id) h().pr[id] = a[0];" +
   "  if (k === 'child' || k === 'children') h().texts.push(...[].concat(a[0]).filter((x) => typeof x === 'string'));" +
   "  return p; } }); return p; };" +
   "export const View = class {}; export const div = el; export const svg = el; export const v_flex = el; export const h_flex = el;" +
   "export const Input = { new: el };" +
   "export const Popover = { new: el };" +
-  "export const InputState = { new: (o) => { let v = o.value; return { on() {}, value: () => v, set_value: (x) => { v = x; } }; } };" +
+  "export const InputState = { new: (o) => { let v = o.value; return { on() {}, value: () => v, set_value: (x) => { v = x; }, focus() { h().focused.push(o.placeholder ?? true); } }; } };" +
   "export const theme = () => ({});" +
   "export const appHome = () => '/app';" +
   "export const checking = () => false;" +
@@ -68,7 +69,7 @@ function claudeBase(a) {
 
 function fake(over = {}) {
   globalThis.__herdr = {
-    calls: [], clicks: {}, texts: [],
+    calls: [], clicks: {}, texts: [], pr: {}, focused: [],
     spaces: [{ id: 1, folder: "/w/app", tabs: [{ id: 10 }] }, { id: 2, folder: "/m", machine: true, tabs: [] }],
     panes: [{ tab: 10, cwd: "/w/app" }, { tab: 10, cwd: "/w/notes" }, { tab: 99, cwd: "/elsewhere" }],
     reply: (a) => base(a) ?? { code: 0, stdout: "바꿨습니다", stderr: "" },
@@ -81,7 +82,9 @@ function fake(over = {}) {
 function cxFake() {
   const jobs = [];
   const timers = [];
-  const cx = { notify() {}, timer: { every(ms, fn) { timers.push({ ms, fn }); } }, spawn: (fn) => { jobs.push(fn(cx)); } };
+  const afters = [];
+  const cx = { notify() {}, timer: { every(ms, fn) { timers.push({ ms, fn }); }, after(ms, fn) { afters.push(fn); } }, spawn: (fn) => { jobs.push(fn(cx)); } };
+  cx.fireAfter = () => { while (afters.length) afters.shift()(); };
   cx.tick = (ms) => { for (const t of timers) if (t.ms === ms) t.fn(cx); };
   cx.settle = async () => { while (jobs.length) await jobs.shift(); };
   return cx;
@@ -472,6 +475,47 @@ test("Claude 계정: 계정 추가는 이름을 받아 add 한 뒤 바로 로그
   assert.deepEqual(claudeChanges(h), [["add", "--label", "새계정"], ["login", "start", "--id", "new"]]);
   assert.equal(v.clAsk, false);
   assert.equal(v.clLogin.state, "starting");
+});
+
+test("Claude 계정: 계정 추가… 를 누르면 이름 칸이 계정 줄보다 앞(제목 바로 아래)에 그려지고 이름 칸에 글자 입력이 간다 — 목록 맨 끝에 그려져 안 보이던 문제(#126)", async () => {
+  const { h, cx, v } = await open({});
+  v.render(cx);
+  assert.equal(h.texts.includes("Claude 계정 추가"), false);
+  assert.equal(h.texts.includes("계정 추가…"), true);
+  h.clicks["cl-add"]({}, cx);
+  cx.fireAfter();
+  assert.equal(h.focused.length, 1, "이름 칸에 포커스를 요청한다");
+  h.texts.length = 0;
+  v.render(cx);
+  const at = (s) => h.texts.indexOf(s);
+  const rows = (v.cl.accounts ?? []).map((a) => h.texts.indexOf(a.label ?? "기본 계정", at("Claude 계정"))).filter((i) => i >= 0); // Claude 칸 안에서만 센다(위쪽 gh 칸에도 비슷한 글자가 있다)
+  assert.ok(rows.length > 0, "계정 줄이 그려진다");
+  assert.ok(at("Claude 계정") >= 0 && at("Claude 계정 추가") > at("Claude 계정"), "제목 다음에 이름 카드");
+  for (const i of rows) assert.ok(at("Claude 계정 추가") < i, "이름 카드가 모든 계정 줄보다 앞이다");
+});
+
+test("Claude 계정: 진행 중에는 버튼이 왜 꺼졌는지 글자로 보이고(추가 중… / 로그인 중…), 취소하면 다시 켜진다", async () => {
+  const { h, cx, v } = await open({});
+  v.render(cx);
+  const seen = [];
+  const orig = v.button.bind(v);
+  v.button = (t, id, label, ...r) => { if (id === "cl-add") seen.push(label); return orig(t, id, label, ...r); };
+  v.render(cx);
+  h.clicks["cl-add"]({}, cx);
+  v.render(cx);
+  h.clicks["cl-add-no"]({}, cx);
+  assert.equal(v.clAsk, false);
+  v.render(cx);
+  assert.deepEqual(seen, ["계정 추가…", "추가 중…", "계정 추가…"]);
+  v.clLogin = { id: "x", label: "x", state: "starting", url: null };
+  v.render(cx);
+  assert.equal(seen.at(-1), "로그인 중…");
+});
+
+test("오른쪽 여백: 계정 목록은 스크롤바에 컨트롤이 붙지 않게 설정 창 칸들과 같은 오른쪽 여백을 쓴다(#126)", async () => {
+  const { h, cx, v } = await open({});
+  v.render(cx);
+  assert.equal(h.pr["acct-list"] + 8, 24, "목록 오른쪽 16 + 줄 안쪽 8 = 컨트롤이 바깥에서 24");
 });
 
 test("Claude 로그인: 주소가 오면 복사 단추와 시크릿 창 안내를 보이고, 끝나면 성공·같은 계정 경고·실패를 알린다", async () => {
