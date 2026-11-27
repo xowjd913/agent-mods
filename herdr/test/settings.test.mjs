@@ -5,6 +5,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createRequire } from "node:module";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
 
 const stub = "const h = () => globalThis.__herdr;" +
   "const el = () => { let id = null; const p = new Proxy({}, { get: (_t, k) => (...a) => {" +
@@ -14,6 +17,8 @@ const stub = "const h = () => globalThis.__herdr;" +
   "  if (k === 'child' || k === 'children') h().texts.push(...[].concat(a[0]).filter((x) => typeof x === 'string'));" +
   "  return p; } }); return p; };" +
   "export const View = class {}; export const div = el; export const svg = el; export const v_flex = el; export const h_flex = el;" +
+  "export const InputState = { new: (o) => ({ v: String(o?.value ?? ''), placeholder: o?.placeholder, value() { return this.v; }, set_value(x) { this.v = String(x); }, on() {} }) };" +
+  "export const Input = { new: () => el() };" +
   "export const theme = () => ({});" +
   "export const props = () => h().props;" +
   "export const appHome = () => '/app';" +
@@ -58,7 +63,7 @@ test("설정 창은 키 하나, 제목 줄·칸 목록·내용 블록으로 이�
   // 블록 안의 settingsWindow를 꺼내 쓴다.
   const code = block(SRC.settings).replace(/^\/\/.*$/gm, "");
   const settingsWindow = new Function(`${code}\nreturn settingsWindow;`)();
-  for (const [section, body] of [["accounts", { mod: "gh-accounts" }], ["github", { mod: "gh-accounts" }], ["mods", { mod: "settings", props: { part: "mods" } }], ["nope", { mod: "gh-accounts" }], [undefined, { mod: "gh-accounts" }]]) {
+  for (const [section, body] of [["accounts", { mod: "gh-accounts" }], ["github", { mod: "gh-accounts" }], ["mods", { mod: "settings", props: { part: "mods" } }], ["rules", { mod: "settings", props: { part: "rules" } }], ["nope", { mod: "gh-accounts" }], [undefined, { mod: "gh-accounts" }]]) {
     const w = settingsWindow(section);
     assert.equal(w.kind, "window");
     assert.equal(w.key, "settings");
@@ -82,11 +87,16 @@ test("제목 줄의 닫기는 이 창의 overlay로 closeOverlay를 부른다", 
   assert.deepEqual(h.closed, ["ov-1"]);
 });
 
-test("칸 목록: 계정·모드는 눌러지고, 규칙·Claude 계정·UI 모드 글자 크기는 준비 중이라 눌러지지 않는다", () => {
+test("칸 목록: 계정·규칙·모드는 눌러지고, UI 모드 글자 크기만 준비 중이라 눌러지지 않는다. Claude 계정 줄은 없다(계정 칸에 들어 있다)", () => {
   const { h } = make("nav", { section: "accounts" });
-  assert.deepEqual(Object.keys(h.clicks).sort(), ["settings-nav-accounts", "settings-nav-mods"]);
-  for (const s of ["규칙", "Claude 계정", "UI 모드 글자 크기", "계정", "모드"]) assert.ok(h.texts.includes(s), s);
-  assert.equal(h.texts.filter((x) => x === "준비 중").length, 3);
+  assert.deepEqual(Object.keys(h.clicks).sort(), ["settings-nav-accounts", "settings-nav-mods", "settings-nav-rules"]);
+  for (const s of ["규칙", "UI 모드 글자 크기", "계정", "모드"]) assert.ok(h.texts.includes(s), s);
+  assert.ok(!h.texts.includes("Claude 계정"));
+  assert.equal(h.texts.filter((x) => x === "준비 중").length, 1);
+  const sections = new Function(`${SRC.settings.match(/const SECTIONS = \[[\s\S]*?\n\];/)[0]}\nreturn SECTIONS;`)();
+  const acc = sections.find((x) => x.id === "accounts");
+  assert.ok(/GitHub/.test(acc.hint) && /Claude/.test(acc.hint), "계정 칸 설명이 GitHub와 Claude를 말한다");
+  assert.ok(!sections.some((x) => x.id === "claude"));
 });
 
 test("칸을 누르면 마지막 칸을 기억하고 같은 키의 창을 그 칸으로 다시 연다", () => {
@@ -100,7 +110,7 @@ test("칸을 누르면 마지막 칸을 기억하고 같은 키의 창을 그 �
 
 test("준비 중인 칸은 직접 불러도 창을 열지 않는다", () => {
   const { h, v } = make("nav", { section: "accounts" });
-  for (const id of ["rules", "claude", "fontsize", "없는칸"]) v.open(id);
+  for (const id of ["claude", "fontsize", "없는칸"]) v.open(id);
   assert.deepEqual(h.opened, []);
   assert.deepEqual(h.shared, {});
 });
@@ -322,4 +332,137 @@ test("tabs-mine의 설정 버튼은 settings 창을 열고 계정 패널 버튼�
   assert.match(SRC.tabs, /h_flex\(\)\.id\("settings-open"\)/);
   assert.match(SRC.tabs, /openOverlay\(settingsWindow\(shared\(SETTINGS_SHARED\)\)\)/);
   assert.ok(!/accounts-board/.test(SRC.tabs));
+});
+
+// ---- 규칙 칸(#126) ----
+// exec를 진짜 도우미(rules.cjs)로 이어 임시 HOME·받은편지함 폴더에서 돌린다. 진짜 ~/.claude 나 진짜 프로필은 건드리지 않는다.
+const RULES_CJS = new URL("../mods/settings/rules.cjs", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+function rulesEnv(profile = null) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rules-ui-"));
+  const inbox = path.join(home, "inbox");
+  fs.mkdirSync(inbox);
+  const file = path.join(inbox, "profile.json");
+  if (profile !== null) fs.writeFileSync(file, typeof profile === "string" ? profile : JSON.stringify(profile));
+  const env = { PATH: process.env.PATH, HOME: home, USERPROFILE: home, HERDR_INBOX_DIR: inbox };
+  const calls = [];
+  const execResult = (c, a) => {
+    calls.push(a.slice(1));
+    assert.equal(c, "node");
+    assert.equal(a[0], "/app/mods/settings/rules.cjs");
+    const r = spawnSync(process.execPath, [RULES_CJS, ...a.slice(1)], { env, encoding: "utf8" });
+    return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+  };
+  return { file, calls, execResult };
+}
+async function rulesView(profile, over = {}) {
+  const e = rulesEnv(profile);
+  const h = fake({ props: { part: "rules" }, execResult: e.execResult, ...over });
+  const v = new Settings();
+  const c = cx();
+  v.init(h.props, c);
+  await tick();
+  h.texts.length = 0;
+  v.render(c);
+  return { h, v, c, ...e };
+}
+const redraw = (h, v, c) => { h.texts.length = 0; v.render(c); };
+const typed = (v, id, text) => v.ruleInputs[id].set_value(text);
+
+test("규칙 칸: 열면 프로필을 읽어 지금 쓰는 규칙·이유·파일을 보여 주고 이름 규칙을 공유값에 올린다", async () => {
+  const { h, calls, file } = await rulesView(null);
+  assert.deepEqual(calls, [["show"]]);
+  assert.ok(h.texts.includes("지금 쓰는 규칙: 규칙 없음"), h.texts.join("|"));
+  assert.ok(h.texts.some((x) => x.startsWith("이유: 프로필 파일이 없고")));
+  assert.ok(h.texts.some((x) => x.includes(file) && x.includes("없음")));
+  assert.equal(h.shared["inbox.names"].preset, "none");
+  assert.ok(["rules-save", "rules-preset-po", "rules-preset-none"].every((id) => h.clicks[id]), "저장과 규칙 고르기 버튼");
+  assert.equal(h.clicks["rules-reset"], undefined, "파일이 없으면 되돌릴 것이 없다");
+});
+
+test("규칙 칸: PO 규칙을 골라 저장하면 도우미로 쓰고, 결과·재시작 안내를 보이고, 공유 이름 규칙과 바쁨 표시를 정리한다", async () => {
+  const { h, v, c, file, calls } = await rulesView(null);
+  h.clicks["rules-preset-po"]({}, c);
+  assert.equal(v.ruleInputs["agent.name"].value(), "^lead-[a-z0-9_-]+$", "고른 규칙의 기본값으로 칸이 채워진다");
+  typed(v, "agent.strip", "^boss-");
+  h.clicks["rules-save"]({}, c);
+  assert.equal(h.shared["settings.busy"].action, "save", "저장하는 동안 설치와 같은 잠금을 잡는다");
+  await tick();
+  assert.equal(h.shared["settings.busy"], null);
+  const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(saved.preset, "po");
+  assert.equal(saved.agent.strip, "^boss-");
+  assert.equal(saved.agent.name, undefined, "기본값과 같은 칸은 적지 않는다");
+  assert.equal(calls[1][0], "set");
+  assert.equal(h.shared["inbox.names"].preset, "po");
+  assert.equal(h.shared["inbox.names"].strip, "^boss-");
+  redraw(h, v, c);
+  assert.ok(h.texts.some((x) => x.startsWith("저장했습니다") && x.includes("다시 시작")), h.texts.join("|"));
+  assert.ok(h.texts.includes("지금 쓰는 규칙: PO 규칙"));
+  assert.ok(h.clicks["rules-reset"], "파일이 생겼으니 되돌리기가 보인다");
+});
+
+test("규칙 칸: 다른 설치·제거가 도는 중이면 저장도 되돌리기도 하지 않고 기다린다고 말한다", async () => {
+  const { h, v, c, calls, file } = await rulesView(null);
+  h.shared["settings.busy"] = { name: "work", action: "add", at: Date.now() };
+  redraw(h, v, c);
+  assert.ok(h.texts.some((x) => x === "work 설치 중이라 기다립니다"), h.texts.join("|"));
+  assert.equal(h.clicks["rules-save"] && typeof h.clicks["rules-save"], "function", "이전 그리기의 핸들러가 남아 있어도");
+  h.clicks["rules-save"]({}, c);
+  v.resetRules(c);
+  await tick();
+  assert.deepEqual(calls, [["show"]], "쓰기 명령은 가지 않았다");
+  assert.equal(fs.existsSync(file), false);
+});
+
+test("규칙 칸: 파일이 깨졌으면 오류와 되돌리기만 보이고, 되돌리기는 확인 뒤 .bak으로 옮긴다", async () => {
+  const { h, v, c, file } = await rulesView("{ not json");
+  assert.ok(h.texts.includes("프로필 파일을 읽을 수 없습니다"));
+  assert.equal(h.clicks["rules-save"], undefined, "깨진 파일 위에는 저장하지 않는다");
+  assert.ok(h.texts.some((x) => x.startsWith("profile")) || h.texts.some((x) => /JSON|json/.test(x)), h.texts.join("|"));
+  h.clicks["rules-reset"]({}, c);
+  redraw(h, v, c);
+  assert.equal(fs.existsSync(file), true, "확인 전에는 그대로");
+  h.clicks["rules-reset-yes"]({}, c);
+  await tick();
+  assert.equal(fs.existsSync(file), false);
+  assert.equal(fs.readFileSync(`${file}.bak`, "utf8"), "{ not json");
+  redraw(h, v, c);
+  assert.ok(h.texts.some((x) => x.startsWith("기본값으로 되돌렸습니다")));
+  assert.ok(h.clicks["rules-save"], "되돌린 뒤에는 다시 저장할 수 있다");
+});
+
+test("규칙 칸: 로더가 거절하는 값은 저장하지 못했다고 알리고 파일은 그대로다", async () => {
+  const { h, v, c, file } = await rulesView({ v: 1, preset: "po" });
+  const before = fs.readFileSync(file, "utf8");
+  typed(v, "agent.name", "(");
+  h.clicks["rules-save"]({}, c);
+  await tick();
+  redraw(h, v, c);
+  assert.ok(h.texts.some((x) => x.startsWith("저장하지 못했습니다(파일은 그대로입니다)")), h.texts.join("|"));
+  assert.equal(fs.readFileSync(file, "utf8"), before);
+  assert.equal(h.shared["settings.busy"], null);
+});
+
+test("규칙 칸: node나 도우미를 못 돌리면 오류를 보이고 깨지지 않는다", async () => {
+  const h = fake({ props: { part: "rules" }, execResult: () => { throw new Error("spawn node ENOENT"); } });
+  const v = new Settings();
+  const c = cx();
+  v.init(h.props, c);
+  await tick();
+  redraw(h, v, c);
+  assert.ok(h.texts.some((x) => x.includes("rules.cjs") && x.includes("node")), h.texts.join("|"));
+});
+
+test("규칙 칸 도우미: 이 칸이 보내는 id는 모두 도우미가 알고, busyText는 저장·되돌리기를 말한다", () => {
+  assert.match(SRC.settings, /const BUSY_VERB = \{ remove: "제거", save: "저장", reset: "되돌리기" \}/);
+  assert.match(SRC.settings, /name: "규칙", action: "save"/);
+  assert.match(SRC.settings, /name: "규칙", action: "reset"/);
+});
+
+test("tabs-mine은 아직 아무도 이름 규칙을 올리지 않았을 때만 도우미로 읽어 올린다(바탕: 프로필이 아니라 pickPreset)", async () => {
+  const src = SRC.tabs;
+  assert.match(src, /publishNames\(cx\)/);
+  assert.match(src, /mods\/settings\/rules\.cjs/);
+  assert.match(src, /if \(cur && Object\.keys\(cur\)\.length\) return;/);
+  assert.match(src, /import \{[^}]*\bsetShared\b[^}]*\} from "herdr"/);
 });

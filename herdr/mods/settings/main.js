@@ -1,17 +1,19 @@
 // 설정 창: 탭 줄의 `설정` 버튼이 연다. 창은 하나(key "settings")이고 다시 누르면 그 창으로 간다.
 // 창은 블록 셋으로 이뤄진다(제목 줄 · 왼쪽 칸 목록 · 오른쪽 내용). 이 모드가 제목 줄·칸 목록·`모드` 칸을 그리고,
 // `계정` 칸은 계정 패널(gh-accounts)을 고치지 않고 그대로 블록으로 넣는다. 그래서 계정 패널의 기능은 그대로다.
-// `규칙`(#124)·`Claude 계정`(#123)·`UI 모드 글자 크기`(#103)는 그 일이 합쳐진 뒤 칸을 더한다. 지금은 꺼진 채 "준비 중"으로만 보인다.
+// `UI 모드 글자 크기`(#103)는 그 일이 합쳐진 뒤 칸을 더한다. 지금은 꺼진 채 "준비 중"으로만 보인다. Claude 계정(#123)은 `계정` 칸(gh-accounts)에 들어 있다.
+// `규칙` 칸(#126)은 PO 규칙 / 규칙 없음 중 하나를 고르고 이름 규칙 몇 가지를 고친다. 쓰기는 모두 같은 폴더의 rules.cjs(node)가 하고
+// (프로필 파일을 inbox의 loadProfile로 검사한 뒤 백업하고 한 번에 바꾼다), 이 창은 herdr `exec`로 부르기만 한다.
 // `모드` 칸은 README의 설치 한 줄(curl | sh, Windows는 PowerShell)을 herdr `exec`로 돌려 설치·제거한다(기본 모드는 제거하지 않는다).
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
+import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { theme, props, openOverlay, closeOverlay, setShared, appHome, readTextFile, exec, window, shared } from "herdr";
 
 // settings-window:begin
 // 설정 창의 모양. tabs-mine/main.js와 settings/main.js에 이 블록을 그대로 복사해 둔다(모드끼리 파일을 불러올 수 없다. 테스트가 둘이 같은지 본다).
 // 칸을 바꾸면 SETTINGS_BODY와 settings/main.js의 SECTIONS를 함께 고친다.
 const SETTINGS_SHARED = "settings.section"; // 마지막으로 본 칸. 버튼으로 다시 열면 그 칸으로 연다
-const SETTINGS_BODY = { accounts: { mod: "gh-accounts" }, mods: { mod: "settings", props: { part: "mods" } } };
+const SETTINGS_BODY = { accounts: { mod: "gh-accounts" }, mods: { mod: "settings", props: { part: "mods" } }, rules: { mod: "settings", props: { part: "rules" } } };
 const settingsWindow = (section) => {
   const id = SETTINGS_BODY[section] ? section : "accounts"; // 옛 이름(github)이 기억돼 있어도 계정 칸으로 간다
   return { kind: "window", key: "settings", width: 900, height: 720, layout: { id: "settings", type: "column", children: [
@@ -30,18 +32,17 @@ const settingsWindow = (section) => {
 
 // 칸 목록. soon은 아직 없는 칸(켜지 않는다), issue는 그 칸이 기다리는 이슈다.
 const SECTIONS = [
-  { id: "accounts", label: "계정", hint: "저장소별 GitHub 계정" },
+  { id: "accounts", label: "계정", hint: "GitHub 계정(저장소별)과 Claude 계정" },
   { id: "mods", label: "모드", hint: "설치된 모드를 설치·제거" },
-  { id: "rules", label: "규칙", soon: true, issue: 124 },
-  { id: "claude", label: "Claude 계정", soon: true, issue: 123 },
+  { id: "rules", label: "규칙", hint: "리더·PO 이름 규칙 고르기" },
   { id: "fontsize", label: "UI 모드 글자 크기", soon: true, issue: 103 },
 ];
 
 // install.cjs의 MODS와 같은 이름·설명·기본 여부(테스트가 install.cjs와 같은지 본다). 모드 폴더에서는 install.cjs를 읽을 수 없어 적어 둔다.
 const MODS = [
   { name: "tabs-mine", desc: "탭 줄. 오른쪽 패널 버튼과 설정 버튼을 더하고 예약 실행을 맡는다", core: true },
-  { name: "settings", desc: "설정 창: 계정과 설치된 모드", core: true },
-  { name: "gh-accounts", desc: "계정 패널: 스페이스·저장소마다 쓸 GitHub 계정 고르기 (설정 창 계정 칸)", core: true },
+  { name: "settings", desc: "설정 창: 계정·규칙·설치된 모드", core: true },
+  { name: "gh-accounts", desc: "계정 패널: 스페이스·저장소마다 쓸 GitHub 계정과 Claude 계정 고르기 (설정 창 계정 칸)", core: true },
   { name: "work", desc: "Work 패널: 누가 무엇을 하고 있나", core: true },
   { name: "prs", desc: "PRs 패널: 무엇을 손봐야 하나", core: true },
   { name: "wt-menu", desc: "워크트리 메뉴: Work·PRs에서 워크트리 줄을 누르면 뜨는 팝업", core: true },
@@ -105,6 +106,29 @@ const busyNow = () => {
   return null;
 };
 const setBusy = (v) => { try { setShared(BUSY_KEY, v); } catch {} };
+const BUSY_VERB = { remove: "제거", save: "저장", reset: "되돌리기" }; // 그 밖의 action(add)은 설치다
+const busyText = (b) => `${b.name} ${BUSY_VERB[b.action] ?? "설치"} 중이라 기다립니다`;
+// 규칙 칸: 프로필 파일의 키 중 이 창이 고치는 것(rules.cjs FIELDS와 같은 id). 테스트가 둘이 같은지 본다.
+const RULE_FIELDS = [
+  { id: "agent.name", label: "리더 이름 패턴", hint: "정규식. 이 이름의 터미널을 결과를 보고하는 리더로 봅니다" },
+  { id: "agent.role", label: "리더 role 값", hint: "터미널 role 라벨이 이 값이면 리더로 봅니다" },
+  { id: "agent.titlePrefix", label: "제목 접두어", hint: "탭·카드 제목 앞에서 잘라내는 글자(예: 리더 · )" },
+  { id: "agent.strip", label: "이름 접두어 패턴", hint: "정규식. 리더 이름에서 잘라내 보여 줍니다(예: ^lead-)" },
+  { id: "hub.role", label: "PO role 값", hint: "답을 받는 터미널(PO)의 role 값. 규칙 없음에서는 비웁니다" },
+  { id: "hub.id", label: "PO id 패턴", hint: "정규식. PO 하나를 가리키는 이름의 모양입니다" },
+  { id: "arrangeScript", label: "배치 스크립트", hint: "PO 칸을 다시 앉히는 스크립트 경로. 비우면 이 기능이 꺼집니다" },
+];
+const RULE_PRESETS = [
+  { id: "none", label: "규칙 없음", hint: "이름 규칙을 쓰지 않습니다. 부모 링크와 wait 라벨만으로 보여 줍니다" },
+  { id: "po", label: "PO 규칙", hint: "lead-* 리더와 role=po 허브라는 이름 규칙을 씁니다" },
+];
+const RULE_WHY = {
+  file: "프로필 파일의 preset 값입니다",
+  "file-default": "프로필 파일에 preset이 없어 PO 규칙으로 봅니다",
+  script: "프로필 파일이 없고 PO 배치 스크립트가 있어 PO 규칙으로 봅니다",
+  "no-script": "프로필 파일이 없고 PO 배치 스크립트도 없어 규칙 없음으로 봅니다",
+};
+const NAMES_SHARED = "inbox.names"; // 모드들이 따르는 이름 규칙(NAMES 블록의 공유 값). 저장하면 여기에 바로 올려 열린 패널이 다음 갱신에 따른다
 const lastLine = (r) => [...String(r.stderr || "").split("\n"), ...String(r.stdout || "").split("\n")].map((l) => l.trim()).filter(Boolean).pop() ?? "";
 
 const safeProps = () => { try { return props() ?? {}; } catch { return {}; } };
@@ -121,7 +145,25 @@ export default class Settings extends View {
     this.result = {}; // 모드별 마지막 결과 { ok, text }
     this.installed = null; // { 모드: true|false }, 읽기 전
     this.note = null;
+    this.rules = null; // rules.cjs가 알려 준 상태(읽기 전 null)
+    this.rulesNote = null; // { ok, text }
+    this.rulesAsk = false; // 기본값으로 되돌리기 확인 카드
+    this.rulesRunning = false; // 이 창이 규칙 도우미를 돌리는 중
+    this.preset = null; // 고른 preset(저장 전)
+    this.focusKey = null;
+    this.ruleInputs = {};
+    if (this.part === "rules") {
+      for (const f of RULE_FIELDS) this.ruleInputs[f.id] = this.input(f.id);
+      this.loadRules(cx);
+    }
     if (this.part === "mods") this.load(cx);
+  }
+
+  input(placeholder) {
+    const s = InputState.new({ value: "", placeholder });
+    s.on("focus", (_e, cx) => { this.focusKey = s; cx.notify(); });
+    s.on("blur", (_e, cx) => { if (this.focusKey === s) this.focusKey = null; cx.notify(); });
+    return s;
   }
 
   // 설치 여부: 모드 폴더의 mod.json이 있으면 설치된 것이다(표시 파일은 빈 파일이라 읽기 결과로 구분하기 어렵다).
@@ -210,7 +252,7 @@ export default class Settings extends View {
     const actions = h_flex().gap(6).items_center().flex_wrap();
     const src = sourceText(this.source);
     if (busyHere) actions.child(div().text_size(11).text_color(t.muted).child(busy.action === "remove" ? "제거하는 중…" : "설치하는 중…"));
-    else if (busy) actions.child(div().text_size(11).text_color(t.dim).child(`${busy.name} ${busy.action === "remove" ? "제거" : "설치"} 중이라 기다립니다`));
+    else if (busy) actions.child(div().text_size(11).text_color(t.dim).child(busyText(busy)));
     else if (on && m.core && !ask) actions.child(div().text_size(11).text_color(t.dim).child("기본 모드라 제거하지 않습니다"));
     if (!busy && run) {
       if (ask === "add") {
@@ -262,6 +304,159 @@ export default class Settings extends View {
       .child(v_flex().id("mods-list").flex_1().min_h(0).px(10).pb(10).gap(6).overflow_y_scrollbar().mode("always").children(MODS.map((m) => this.modRow(t, m))));
   }
 
+  // ---- 규칙 칸 ----
+  // rules.cjs(show|set|reset)를 돌려 마지막 줄의 JSON을 돌려준다. 못 돌리면 { ok:false, error }.
+  async runRules(args) {
+    try {
+      const r = await exec("node", [`${String(appHome() ?? "")}/mods/settings/rules.cjs`, ...args], { timeout: 30000 });
+      const line = String(r?.stdout ?? "").trim().split("\n").pop();
+      const out = JSON.parse(line);
+      if (out && typeof out === "object") return out;
+    } catch (e) { return { ok: false, error: `규칙 도우미(rules.cjs)를 돌리지 못했습니다(node와 settings 모드 설치를 확인하세요): ${String(e?.message ?? e).slice(0, 120)}` }; }
+    return { ok: false, error: "규칙 도우미가 알아볼 수 없는 답을 냈습니다" };
+  }
+
+  // 도우미의 상태를 받아 입력 칸과 공유 이름 규칙에 반영한다. 고른 preset이 바뀌었으면 입력 칸을 그 preset의 값으로 채운다.
+  applyRules(state, cx, fresh) {
+    if (!state || typeof state !== "object") return;
+    const prev = this.rules;
+    this.rules = state;
+    if (state.fields && (fresh || !prev?.fields)) {
+      this.preset = state.preset;
+      this.fillInputs(state.preset, state.fileValues ?? {}, cx);
+    }
+    if (state.names && typeof state.names === "object") { try { setShared(NAMES_SHARED, state.names); } catch {} }
+  }
+
+  // 입력 칸 = 파일이 정한 값 ?? 고른 preset의 기본값.
+  fillInputs(preset, fileValues, cx) {
+    const d = this.rules?.defaults?.[preset] ?? {};
+    for (const f of RULE_FIELDS) {
+      const st = this.ruleInputs[f.id];
+      if (!st) continue;
+      const v = fileValues[f.id] ?? d[f.id] ?? "";
+      try { st.set_value(String(v)); } catch {}
+    }
+    cx?.notify();
+  }
+
+  loadRules(cx) {
+    this.runRules(["show"]).then((s) => { if (s.ok === false && !s.file) { this.rulesNote = { ok: false, text: s.error }; } else this.applyRules(s, cx, true); cx.notify(); });
+  }
+
+  pickPreset(id, cx) {
+    if (this.preset === id) return;
+    this.preset = id;
+    this.fillInputs(id, this.rules?.fileValues ?? {}, cx); // 바꾼 preset의 기본값으로(파일이 직접 정한 값은 그대로 둔다)
+    this.rulesNote = null;
+    cx.notify();
+  }
+
+  saveRules(cx) {
+    if (busyNow() || this.rulesRunning || !this.rules || this.rules.broken) return;
+    const fields = {};
+    for (const f of RULE_FIELDS) fields[f.id] = String(this.ruleInputs[f.id]?.value?.() ?? "");
+    this.rulesRunning = true;
+    this.rulesNote = null;
+    setBusy({ name: "규칙", action: "save", at: Date.now() });
+    cx.notify();
+    this.runRules(["set", encodeURIComponent(JSON.stringify({ preset: this.preset, fields }))]).then((s) => {
+      this.applyRules(s, cx, s.saved === true);
+      this.rulesNote = s.saved
+        ? { ok: true, text: `저장했습니다(이전 파일은 ${s.file}.bak). 이미 도는 Work·PRs·리더 탭·에이전트 묶음 같은 패널은 다음 새로고침에 새 규칙을 따릅니다. 바뀌지 않는 패널이 있으면 Herdr를 다시 시작하세요. PO 보고를 쓰는 터미널의 훅은 다음 실행부터 새 규칙을 읽습니다.` }
+        : { ok: false, text: `저장하지 못했습니다(파일은 그대로입니다): ${String(s.error ?? "").slice(0, 200)}` };
+    }).finally(() => { this.rulesRunning = false; setBusy(null); cx.notify(); });
+  }
+
+  resetRules(cx) {
+    if (busyNow() || this.rulesRunning) return;
+    this.rulesAsk = false;
+    this.rulesRunning = true;
+    this.rulesNote = null;
+    setBusy({ name: "규칙", action: "reset", at: Date.now() });
+    cx.notify();
+    this.runRules(["reset"]).then((s) => {
+      this.applyRules(s, cx, s.reset === true);
+      this.rulesNote = s.reset
+        ? { ok: true, text: `기본값으로 되돌렸습니다(프로필 파일은 ${s.file}.bak 으로 옮겼습니다). 파일이 없을 때의 규칙을 따릅니다.` }
+        : { ok: false, text: `되돌리지 못했습니다: ${String(s.error ?? "").slice(0, 200)}` };
+    }).finally(() => { this.rulesRunning = false; setBusy(null); cx.notify(); });
+  }
+
+  textInput(t, state) {
+    return Input.new(state).h(26).px(8).items_center().rounded(6).border(1)
+      .border_color(this.focusKey === state ? t.accent : t.input).bg(t.background).text_size(12).text_color(t.foreground);
+  }
+
+  rulesBody(t) {
+    const r = this.rules;
+    const busy = busyNow();
+    const locked = Boolean(busy) || this.rulesRunning;
+    const btn = (id, label, fn, tone) => {
+      const el = div().id(id).flex_none().h(24).px(10).rounded(5).flex().items_center().text_size(12)
+        .bg(tone === "danger" ? t.blocked : tone === "primary" ? t.accent : t.raised).text_color(tone ? t.foreground : t.muted).on_mouse_down("left", stop);
+      if (locked) return el.opacity(0.5).child(label);
+      return el.cursor_pointer().hover((x) => x.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => fn(cx)).child(label);
+    };
+    const head = h_flex().h(38).px(14).flex_none().items_center().gap(8)
+      .child(div().text_size(15).font_semibold().text_color(t.foreground).child("규칙"))
+      .child(div().id("rules-refresh").p(3).rounded(5).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
+        .on_click((_e, cx) => { this.rules = null; this.loadRules(cx); cx.notify(); }).tooltip("새로고침").child(div().text_size(14).child("↻")));
+    const intro = div().px(14).pb(8).text_size(12).text_color(t.dim)
+      .child("리더·PO 보고를 알아보는 이름 규칙입니다. PO 규칙이 없는 사람은 \"규칙 없음\"으로 두고, 자기 규칙이 있으면 아래에서 맞추세요. 프로필 파일(profile.json)에 저장합니다.");
+    if (!r) {
+      return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13).child(head).child(intro)
+        .child(div().px(14).text_size(12).text_color(this.rulesNote ? t.blocked : t.muted).child(this.rulesNote?.text ?? "프로필을 읽는 중…"));
+    }
+    const status = v_flex().id("rules-status").mx(14).mb(8).px(10).py(8).gap(3).rounded(6).bg(t.chrome).border_1().border_color(t.border)
+      .child(div().text_size(12).text_color(t.foreground).child(r.broken ? "프로필 파일을 읽을 수 없습니다" : `지금 쓰는 규칙: ${r.preset === "none" ? "규칙 없음" : "PO 규칙"}`))
+      .child(div().text_size(11).text_color(t.muted).child(`프로필 파일: ${r.file}${r.source === "env" ? " (HERDR_INBOX_PROFILE)" : ""} · ${r.exists ? "있음" : "없음"}${r.backup ? " · 백업(.bak) 있음" : ""}`))
+      .when(Boolean(r.why) && !r.broken, (el) => el.child(div().text_size(11).text_color(t.muted).child(`이유: ${RULE_WHY[r.why] ?? r.why}`)))
+      .when(Boolean(r.error), (el) => el.child(div().text_size(11).text_color(t.blocked).child(r.error)));
+    const note = this.rulesNote ? div().px(14).pb(8).text_size(11).text_color(this.rulesNote.ok ? t.working : t.blocked).child(this.rulesNote.text) : null;
+    const busyLine = busy && !this.rulesRunning ? div().px(14).pb(8).text_size(11).text_color(t.dim).child(busyText(busy)) : null;
+    if (r.broken) { // 읽을 수 없는 파일은 되돌리기만 된다(덮어써서 망가뜨리지 않는다)
+      return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13).child(head).child(intro).child(status)
+        .child(h_flex().px(14).pb(8).gap(8).items_center().flex_wrap()
+          .child(div().text_size(11).text_color(t.muted).child("파일을 고친 뒤 새로고침하거나, 기본값으로 되돌리면 이 파일을 .bak 으로 옮깁니다."))
+          .child(this.rulesAsk
+            ? h_flex().gap(6).items_center().child(div().text_size(11).text_color(t.muted).child("되돌릴까요?"))
+              .child(btn("rules-reset-yes", "되돌리기", (cx) => this.resetRules(cx), "danger"))
+              .child(btn("rules-reset-no", "취소", (cx) => { this.rulesAsk = false; cx.notify(); }))
+            : btn("rules-reset", "기본값으로 되돌리기", (cx) => { this.rulesAsk = true; cx.notify(); })))
+        .when(Boolean(note), (el) => el.child(note)).when(Boolean(busyLine), (el) => el.child(busyLine));
+    }
+    const presetRow = h_flex().id("rules-presets").px(14).pb(8).gap(8).items_center().flex_wrap()
+      .children(RULE_PRESETS.map((p) => {
+        const on = this.preset === p.id;
+        const el = div().id(`rules-preset-${p.id}`).h(26).px(10).rounded(6).flex().items_center().text_size(12).border_1()
+          .border_color(on ? t.accent : t.border).bg(on ? t.selected : t.raised).text_color(on ? t.foreground : t.muted).on_mouse_down("left", stop).tooltip(p.hint);
+        if (locked) return el.opacity(0.6).child(p.label);
+        return el.cursor_pointer().hover((x) => x.bg(t.hover)).on_click((_e, cx) => this.pickPreset(p.id, cx)).child(p.label);
+      }));
+    const presetHint = RULE_PRESETS.find((p) => p.id === this.preset)?.hint ?? "";
+    const form = v_flex().id("rules-form").flex_1().min_h(0).px(14).pb(10).gap(8).overflow_y_scrollbar().mode("always")
+      .children(RULE_FIELDS.map((f) => v_flex().id(`rules-field-${f.id}`).gap(3)
+        .child(div().text_size(12).text_color(t.foreground).child(f.label))
+        .child(this.textInput(t, this.ruleInputs[f.id]))
+        .child(div().text_size(11).text_color(t.dim).child(f.id === "arrangeScript" && r.fields?.arrangeScript !== undefined && this.ruleInputs[f.id]?.value?.().trim()
+          ? `${f.hint}. ${r.arrangeScriptExists ? "지금 이 경로의 파일이 있습니다" : "지금 이 경로의 파일은 없습니다"}` : f.hint))));
+    return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13).child(head).child(intro).child(status)
+      .child(div().px(14).pb(4).text_size(12).text_color(t.foreground).child("규칙 고르기"))
+      .child(presetRow)
+      .child(div().px(14).pb(8).text_size(11).text_color(t.dim).child(`${presetHint}. 바꾸면 아래 칸이 그 규칙의 기본값으로 채워집니다. 기본값과 같은 칸은 파일에 적지 않습니다.`))
+      .child(form)
+      .child(h_flex().px(14).py(8).gap(8).items_center().flex_wrap().flex_none()
+        .child(btn("rules-save", this.rulesRunning ? "저장하는 중…" : "저장", (cx) => this.saveRules(cx), "primary"))
+        .child(this.rulesAsk
+          ? h_flex().gap(6).items_center().child(div().text_size(11).text_color(t.muted).child("프로필 파일을 .bak 으로 옮길까요?"))
+            .child(btn("rules-reset-yes", "되돌리기", (cx) => this.resetRules(cx), "danger"))
+            .child(btn("rules-reset-no", "취소", (cx) => { this.rulesAsk = false; cx.notify(); }))
+          : r.exists ? btn("rules-reset", "기본값으로 되돌리기", (cx) => { this.rulesAsk = true; cx.notify(); }) : div())
+        .when(Boolean(busyLine), (el) => el.child(busyLine)))
+      .when(Boolean(note), (el) => el.child(note));
+  }
+
   render(cx) {
     const t = theme();
     if (this.part === "mods") { // 다른 창이 돌리던 설치기가 끝나면 목록을 다시 읽는다
@@ -272,6 +467,7 @@ export default class Settings extends View {
     if (this.part === "bar") return this.bar(t);
     if (this.part === "nav") return this.nav(t);
     if (this.part === "pad") return div().size_full().bg(t.chrome);
+    if (this.part === "rules") return this.rulesBody(t);
     return this.modsBody(t);
   }
 }

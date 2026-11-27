@@ -1,7 +1,7 @@
 // Clone of Herdr's shipped `tabs` mod. The PRs button shows a count of PRs needing my action (collect.cjs `attention`: my open PRs with failing CI or changes requested, plus open PRs asking me to review). The layout blocks are "work-board" (mod work) and "pr-board" (mod prs); the id "work" is already a layout column. Changed: the right-panel buttons are Files, Changes, then Work and PRs (added after the stock ones). A 설정 button opens the settings window (mods/settings); the 계정 panel button moved into it.
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, ScrollHandle } from "gpui-base";
-import { spaces, panes, terminals, focused, run, notify, openOverlay, theme, window, shared, layout, settings, exec, appHome, checking, layouts, nextCommand } from "herdr";
+import { spaces, panes, terminals, focused, run, notify, openOverlay, theme, window, shared, setShared, layout, settings, exec, appHome, checking, layouts, nextCommand } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -32,7 +32,7 @@ function label(tab, lead) {
 // 설정 창의 모양. tabs-mine/main.js와 settings/main.js에 이 블록을 그대로 복사해 둔다(모드끼리 파일을 불러올 수 없다. 테스트가 둘이 같은지 본다).
 // 칸을 바꾸면 SETTINGS_BODY와 settings/main.js의 SECTIONS를 함께 고친다.
 const SETTINGS_SHARED = "settings.section"; // 마지막으로 본 칸. 버튼으로 다시 열면 그 칸으로 연다
-const SETTINGS_BODY = { accounts: { mod: "gh-accounts" }, mods: { mod: "settings", props: { part: "mods" } } };
+const SETTINGS_BODY = { accounts: { mod: "gh-accounts" }, mods: { mod: "settings", props: { part: "mods" } }, rules: { mod: "settings", props: { part: "rules" } } };
 const settingsWindow = (section) => {
   const id = SETTINGS_BODY[section] ? section : "accounts"; // 옛 이름(github)이 기억돼 있어도 계정 칸으로 간다
   return { kind: "window", key: "settings", width: 900, height: 720, layout: { id: "settings", type: "column", children: [
@@ -116,9 +116,24 @@ function modeTarget() {
 }
 
 export default class Tabs extends View {
+  // 이름 규칙(#126): 이 모드는 항상 떠 있어서, 아무도 아직 `inbox.names`를 올리지 않았으면(inbox 모드 없이 설치했거나 설정 창을 아직 안 열었을 때) 프로필 규칙을
+  // 한 번 읽어 올린다. 그러면 NAMES 기본값(po) 대신 pickPreset 순서(프로필 파일 → PO 배치 스크립트 유무)가 같이 적용된다. 도우미가 없거나 실패하면 기본값이 그대로다.
+  publishNames(cx) {
+    cx.spawn(async () => {
+      try {
+        const cur = shared(NAMES_SHARED);
+        if (cur && Object.keys(cur).length) return;
+        const r = await exec("node", [`${String(appHome() ?? "")}/mods/settings/rules.cjs`, "show"], { timeout: 20000 });
+        const names = JSON.parse(String(r?.stdout ?? "").trim().split("\n").pop())?.names;
+        if (names && typeof names === "object") adoptNames(names);
+      } catch {}
+    });
+  }
+
   init(_props, cx) {
     this.attention = 0;
     if (!checking()) {
+      this.publishNames(cx);
       this.refresh(cx);
       // collect.cjs caches GitHub for 3 minutes, so asking once a minute is cheap. Without node or gh the badge just stays hidden.
       cx.timer.every(60000, (cx) => this.refresh(cx));
