@@ -32,7 +32,7 @@ const ALL = [...CORE, ...EXTRAS];
 //   gh-accounts: 오른쪽 패널의 계정 버튼은 없어지고 입구는 설정 창뿐이다. gh-account 도구(--gh-account)는 모드가 아니라 따로 설치한다.
 const MODS = {
   "tabs-mine": { desc: "탭 줄. 오른쪽 패널 버튼과 설정 버튼을 더하고 예약 실행을 맡는다", deps: ["settings"] },
-  settings: { desc: "설정 창: 계정과 설치된 모드", deps: ["gh-accounts"] },
+  settings: { desc: "설정 창: 계정·규칙·글자 크기·설치된 모드", deps: ["gh-accounts"] },
   work: { desc: "Work 패널: 누가 무엇을 하고 있나", deps: ["tabs-mine", "wt-menu"] },
   prs: { desc: "PRs 패널: 무엇을 손봐야 하나", deps: ["work", "tabs-mine", "wt-menu"] },
   "wt-menu": { desc: "워크트리 메뉴: Work·PRs에서 워크트리 줄을 누르면 뜨는 팝업", deps: [] },
@@ -41,7 +41,7 @@ const MODS = {
   "agent-groups": { desc: "왼쪽 사이드바 에이전트 목록을 작업별로 묶는다", deps: [] },
   "leader-tabs": { desc: "칸 머리줄에 리더 탭을 보여 준다", deps: [] },
   "path-menu": { desc: "터미널 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄운다", deps: [] },
-  "gh-accounts": { desc: "계정 패널: 스페이스·저장소마다 쓸 GitHub 계정 고르기 (설정 창 계정 칸)", deps: [] },
+  "gh-accounts": { desc: "계정 패널: 스페이스·저장소마다 쓸 GitHub 계정과 Claude 계정 고르기 (설정 창 계정 칸)", deps: [] },
   inbox: { desc: "UI 모드 패널: 리더 결과 보고를 채팅처럼 보고, 결정을 PO에게 답한다", deps: ["tabs-mine"] },
   memo: { desc: "메모 패널: 폴더 안의 .md 파일로 메모를 쓰고, 눌러서 PO에게 보낸다", deps: ["tabs-mine"] },
 };
@@ -56,7 +56,8 @@ const LAYOUT_MARK = ".herdr-installer-layout";
 const SRC = path.join(__dirname, "mods");
 // 모드 폴더 밖에 있지만 모드와 함께 복사할 파일. gh-accounts 패널은 설치·확인·계정 추가에 gh-account 도구를 쓴다.
 const CLAUDE_ACCOUNT = ["claude-account/claude-account.cjs", "claude-account.cjs"]; // 책상에서 고른 Claude 계정(#121)
-const BUNDLE = { "gh-accounts": [["gh-account/gh-account.cjs", "gh-account.cjs"], CLAUDE_ACCOUNT], schedules: [CLAUDE_ACCOUNT], inbox: [CLAUDE_ACCOUNT], work: [["mods/inbox/profile.cjs", "profile.cjs"]] }; // work: collect.cjs reads the inbox profile (names, labels)
+const INBOX_PROFILE = ["mods/inbox/profile.cjs", "profile.cjs"]; // work: collect.cjs reads the inbox profile (names, labels); settings: rules.cjs (규칙 칸) validates and writes it
+const BUNDLE = { "gh-accounts": [["gh-account/gh-account.cjs", "gh-account.cjs"], CLAUDE_ACCOUNT], schedules: [CLAUDE_ACCOUNT], inbox: [CLAUDE_ACCOUNT], work: [INBOX_PROFILE], settings: [INBOX_PROFILE] };
 
 function log(msg) { process.stdout.write(msg + "\n"); }
 
