@@ -1224,6 +1224,16 @@ function selRangeOf(sel, len) {
 const BUBBLE_SHARE = 0.75, BUBBLE_SIDE = 90, BUBBLE_MIN_CAP = 40;
 // The chat column: the view's width less the room list beside it (none in a strip).
 const chatColW = (winW, strip, narrow, roomW, slimW) => { const w = Number(winW); return Number.isFinite(w) && w > 0 ? Math.max(0, w - (strip ? 0 : narrow ? slimW : roomW)) : null; };
+
+// #68: the room list's width, dragged by the person. Kept inside [ROOM_W_MIN, ROOM_W_MAX] and never wider than half the window, so the chat
+// column keeps room; a missing or broken saved value is the default width.
+const ROOM_W_MIN = 120, ROOM_W_MAX = 360, ROOM_W_KEY = "inbox.roomw";
+const roomWidth = (raw, winW, dflt = 168) => {
+  const w = Number(raw), win = Number(winW);
+  const cap = Number.isFinite(win) && win > 0 ? Math.max(ROOM_W_MIN, Math.min(ROOM_W_MAX, Math.floor(win / 2))) : ROOM_W_MAX;
+  const base = Number.isFinite(w) && raw !== "" && raw !== null ? w : dflt; // a dragged-past-zero value is clamped to the minimum, not replaced
+  return Math.max(ROOM_W_MIN, Math.min(cap, Math.round(base)));
+};
 // The px a bubble may take: 75% of the column, and always leaving BUBBLE_SIDE px (the copy chip, the time, the gutters) on its other side, so
 // the bubble and its chip fit the column down to narrow docks (150px column -> 60, 200 -> 110, 260 -> 170); only a column under ~130px gets the
 // BUBBLE_MIN_CAP floor (a few characters), and the cap is never wider than the column itself. `minInner` is the widest picture (with its padding):
@@ -1615,6 +1625,8 @@ export default class Inbox extends View {
     this.busyAt = 0;
     this.gen = 0;
     this.compact = false;
+    this.roomW = roomWidth((() => { try { return shared(ROOM_W_KEY); } catch { return null; } })(), null); // #68: the dragged room list width (saved when the drag ends)
+    this.rdrag = null; // {x, w}: a drag of the room list's edge is going on
     this.narrow = !this.windowed; // narrower than WIDE_MIN (until the first size report: the dock and a pane start narrow, the window wide)
     this.writing = null; // leader whose answer box is open
     this.inputs = new Map(); // leader -> TextareaState (the answer box of a card)
@@ -1870,6 +1882,7 @@ export default class Inbox extends View {
   // desk is a press, so redraws and the bottom pin wait until it is released. The press gate used to live on the list's own mouse-down,
   // which a TextView that handles the press itself never lets through - the pin and redraws then ran under a drag and dropped the selection.
   pointer(e, cx) {
+    if (this.rdrag) { this.roomDrag(e, cx); return; }
     if (e?.pressed_button === "left") { if (!this.ui.press) this.diag("press (left held, window move)", cx); this.ui.press = true; this.ui.pressAt = Date.now(); return; }
     if (this.ui.press) { this.diag("release (move without button)", cx); this.ui.press = false; if (this.dirty) this.softNotify(cx); }
   }
@@ -1988,6 +2001,7 @@ export default class Inbox extends View {
   }
 
   pointerUp(cx, e) {
+    if (this.rdrag) { this.roomDragEnd(cx); return; }
     // A release seen after a settled selection is the clue to what cleared it: a press-and-release a moment after the settle is a second click
     // (the native view clears a selection on any press), not a redraw. Counts and ms only.
     const m = this.selMark, ago = this.ui.selAt ? Date.now() - this.ui.selAt : -1;
@@ -3743,13 +3757,13 @@ export default class Inbox extends View {
 
   // The room list (the wide window): one row per room — a colored initial circle, the project, its badges.
   roomList(t, v) {
-    return v_flex().id("po-rooms").flex_none().w(ROOM_W).h_full().min_h(0).p(6).gap(3).border_r(1).border_color(t.border).overflow_y_scrollbar()
+    return v_flex().id("po-rooms").flex_none().w(this.roomWidthNow()).h_full().min_h(0).p(6).gap(3).border_r(1).border_color(t.border).overflow_y_scrollbar()
       .children(v.tabs.map((x) => {
         const on = x.id === v.pick;
         const color = x.id === PO_OTHER ? t.dim : tint(t, x.id);
         return h_flex().id(`po-${x.id}`).flex_none().h(fz(44)).px(8).gap(8).items_center().rounded(8).cursor_pointer().on_mouse_down("left", stop)
           .bg(on ? t.selected : t.chrome).hover((s) => s.bg(on ? t.selected : t.hover)).on_click((_e, c) => this.pickPo(x.id, c))
-          .tooltip(x.id === PO_OTHER ? OTHER_TIP : `po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
+          .tooltip(x.id === PO_OTHER ? OTHER_TIP : `${x.label} · po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
           .child(this.circle(t, color, x.id === PO_OTHER ? "?" : initial(x.label)))
           .child(v_flex().flex_1().min_w(0)
             .child(div().min_w(0).truncate().text_size(fz(12.5)).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
@@ -3992,10 +4006,37 @@ export default class Inbox extends View {
     if (x !== this.compact || n !== this.narrow || grew) { this.compact = x; this.narrow = n; this.softNotify(cx); }
   }
 
+  // #68: the room list's width now (the dragged one, kept within the window), and the grip on its right edge. A press on the grip starts a
+  // drag; the window's mouse move resizes the list while the left button is held, and the release saves the width (setShared).
+  roomWidthNow() { return roomWidth(this.roomW, this.winW); }
+  roomGrip(t) {
+    return div().id("po-rooms-grip").flex_none().w(5).h_full().cursor_col_resize().hover((s) => s.bg(t.border))
+      .tooltip("끌어서 방 목록 너비 조절")
+      .on_mouse_down("left", (e, c) => { this.rdrag = { x: Number(e?.position?.x) || 0, w: this.roomWidthNow() }; this.ui.press = true; this.ui.pressAt = Date.now(); c.stop_propagation(); });
+  }
+  roomDrag(e, cx) {
+    const d = this.rdrag;
+    if (!d) return;
+    if (e?.pressed_button !== "left") { this.roomDragEnd(cx); return; }
+    const x = Number(e?.position?.x);
+    if (!Number.isFinite(x)) return;
+    const w = roomWidth(d.w + (x - d.x), this.winW);
+    if (w === this.roomW) return;
+    this.roomW = w;
+    try { cx.notify(); } catch {}
+  }
+  roomDragEnd(cx) {
+    this.rdrag = null;
+    this.ui.press = false;
+    try { setShared(ROOM_W_KEY, this.roomW); } catch {}
+    if (this.dirty && !this.ui.sel) this.softNotify(cx);
+    try { cx.notify(); } catch {}
+  }
+
   // The most px a message bubble may take (see bubbleCap). null before the first size report: the bubbles then use a percentage.
   capOf(minInner = 0) {
     const strip = this.windowed && this.narrow;
-    return bubbleCap(chatColW(this.winW, strip, this.narrow, ROOM_W, SLIM_W), minInner);
+    return bubbleCap(chatColW(this.winW, strip, this.narrow, this.roomWidthNow(), SLIM_W), minInner);
   }
 
   // One timeline entry (a grouped entry: `head` says whether the sender's name line is drawn). Leaders and the PO are on the left with a
@@ -4231,7 +4272,7 @@ export default class Inbox extends View {
       .when(strip, (el) => el.child(this.picker(t, v)))
       .when(!strip && !v.tabs.some((x) => x.id !== PO_OTHER), (el) => el.child(this.poHint(t, v)))
       .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(fz(11)).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
-      .child(strip ? room : h_flex().flex_1().min_h(0).items_stretch().child(this.narrow ? this.slimRooms(t, v) : this.roomList(t, v)).child(room))
+      .child(strip ? room : h_flex().flex_1().min_h(0).items_stretch().child(this.narrow ? this.slimRooms(t, v) : this.roomList(t, v)).when(!this.narrow, (el) => el.child(this.roomGrip(t))).child(room))
       // The notice floats over the top of the room: absolute, so it takes no layout space and the chat never moves when it comes or goes.
       .when(Boolean(this.msg), (el) => el.child(h_flex().id("inbox-msg-layer").absolute().top(NOTICE_TOP).left(0).right(0).px(14).justify_center()
         .child(div().id("inbox-msg").max_w(NOTICE_MAX_W).px(12).py(5).rounded(6).bg(t.chrome).shadow_md().text_size(fz(11.5)).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)

@@ -815,7 +815,7 @@ test("R21 layout: my bubble is pinned right and capped; the PO and leader bubble
   assert.match(row, /\.w\(width\)\.max_w\(cap \?\? "75%"\)\.min_w\(0\)/);
   assert.match(row, /div\(\)\.flex_1\(\)\.min_w\(0\)\.max_w\(this\.capOf\(\) \?\? "75%"\)\.px\(12\)/, "PO bubble");
   assert.match(row, /div\(\)\.flex_1\(\)\.min_w\(0\)\.max_w\(this\.capOf\(\) \?\? "75%"\)\.child\(this\.bubble\(/, "leader bubble");
-  assert.match(MAIN, /capOf\(minInner = 0\) \{[^}]*bubbleCap\(chatColW\(this\.winW, strip, this\.narrow, ROOM_W, SLIM_W\), minInner\)/);
+  assert.match(MAIN, /capOf\(minInner = 0\) \{[^}]*bubbleCap\(chatColW\(this\.winW, strip, this\.narrow, this\.roomWidthNow\(\), SLIM_W\), minInner\)/);
   const sz = MAIN.slice(MAIN.indexOf("on_size_change"), MAIN.indexOf("on_size_change") + 200);
   assert.match(sz, /this\.onSize\(size\.width, c\)/, "the size event goes to onSize");
 });
