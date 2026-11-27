@@ -360,8 +360,8 @@ test("main.js: 카드 글자는 모두 선택 가능한 TextView이고, 눌러�
   assert.ok(src.includes("this.heading_text(t, `${id}-h`") && src.includes("this.heading_text(t, key, p.html")); // 제목·소제목: TextView 자체에 굵기를 준 선택 가능한 글
   assert.ok(!src.includes("<strong>"));
   assert.match(src, /it\.parts/); // 펼친 본문
-  // 카드 전체에는 클릭 처리가 없다: toggleOpen은 버튼 한 곳에서만 부른다
-  assert.equal((src.match(/toggleOpen\(/g) ?? []).length, 2); // 정의 1 + 버튼 1
+  // 카드 전체에는 클릭 처리가 없다: toggleOpen은 버튼 한 곳과, 말풍선이 아닌 가운데 알림 줄(#87) 한 곳에서만 부른다
+  assert.equal((src.match(/toggleOpen\(/g) ?? []).length, 3); // 정의 1 + 버튼 1 + 알림 줄 1
   assert.ok(!/linkChip|codeSpan/.test(src));
 });
 
