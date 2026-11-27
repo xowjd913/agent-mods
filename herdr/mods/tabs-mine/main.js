@@ -1,4 +1,4 @@
-// Clone of Herdr's shipped `tabs` mod. The PRs button shows a count of PRs needing my action (collect.cjs `attention`: my open PRs with failing CI or changes requested, plus open PRs asking me to review). The layout blocks are "work-board" (mod work) and "pr-board" (mod prs); the id "work" is already a layout column. Changed: the right-panel buttons are Files, Changes, then Work and PRs (added after the stock ones).
+// Clone of Herdr's shipped `tabs` mod. The PRs button shows a count of PRs needing my action (collect.cjs `attention`: my open PRs with failing CI or changes requested, plus open PRs asking me to review). The layout blocks are "work-board" (mod work) and "pr-board" (mod prs); the id "work" is already a layout column. Changed: the right-panel buttons are Files, Changes, then Work and PRs (added after the stock ones). A 설정 button opens the settings window (mods/settings); the 계정 panel button moved into it.
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, ScrollHandle } from "gpui-base";
 import { spaces, panes, terminals, focused, run, notify, openOverlay, theme, window, shared, layout, settings, exec, appHome, checking, layouts, nextCommand } from "herdr";
@@ -28,6 +28,27 @@ function label(tab, lead) {
   return (tab.name === prog || !tab.named) && telling ? live : base;
 }
 
+// settings-window:begin
+// 설정 창의 모양. tabs-mine/main.js와 settings/main.js에 이 블록을 그대로 복사해 둔다(모드끼리 파일을 불러올 수 없다. 테스트가 둘이 같은지 본다).
+// 칸을 바꾸면 SETTINGS_BODY와 settings/main.js의 SECTIONS를 함께 고친다.
+const SETTINGS_SHARED = "settings.section"; // 마지막으로 본 칸. 버튼으로 다시 열면 그 칸으로 연다
+const SETTINGS_BODY = { accounts: { mod: "gh-accounts" }, mods: { mod: "settings", props: { part: "mods" } } };
+const settingsWindow = (section) => {
+  const id = SETTINGS_BODY[section] ? section : "accounts"; // 옛 이름(github)이 기억돼 있어도 계정 칸으로 간다
+  return { kind: "window", key: "settings", width: 900, height: 720, layout: { id: "settings", type: "column", children: [
+    { id: "settings-bar", type: "block", content: { mod: "settings", props: { part: "bar" } }, size: { px: 40 }, window_drag: true },
+    { id: "settings-main", type: "row", children: [
+      { id: "settings-nav", type: "block", content: { mod: "settings", props: { part: "nav", section: id } }, size: { px: 200 } },
+      // 내용 아래에 여백 칸을 둬서 마지막 줄이 창 아래에 붙지 않게 한다(내용 모드는 고치지 않는다).
+      { id: "settings-body", type: "column", size: { weight: 1 }, children: [
+        { id: "settings-content", type: "block", content: SETTINGS_BODY[id], size: { weight: 1 } },
+        { id: "settings-pad", type: "block", content: { mod: "settings", props: { part: "pad" } }, size: { px: 24 } },
+      ] },
+    ] },
+  ] } };
+};
+// settings-window:end
+
 // names:begin
 // The names this desk recognizes: which terminals are reporting agents and hubs, the labels it reads, the answer line (the profile, docs/inbox-contract.md
 // §9-§10). The defaults are today's behavior; `node inbox.cjs` prints the loaded profile as `names` (profile.cjs namesOf) and the desk applies it
@@ -38,6 +59,7 @@ const DEFAULT_NAMES = Object.freeze({
   hubRole: "po", hubIdLabel: "po", hubId: "^[a-z0-9-]{1,40}$", hubDir: "po", // the hub (PO): its `role` value, id label, id pattern, folder
   labelRole: "role", labelWait: "wait", labelWaitLink: "wait-link", labelSession: "session",
   answerLine: 'Panel answer ({kind}) for {agent}: "{text}".{ Target: {link}}',
+  preset: "po", arrangeScript: "~/.claude/skills/leader/herdr-team.sh", // the profile's preset ("none" = no agent / hub naming rules at all, #124) and the PO arrange script ("" = not there: the features that need it hide)
 });
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // a hub id becomes a file name whatever its pattern says
 function compileNames(n) {
@@ -235,7 +257,8 @@ export default class Tabs extends View {
   }
 
   // 답을 기다리는 리더 수: 대기 라벨(decision|verify)이 붙은 에이전트 이름(기본 lead-*)의 터미널(UI 모드 요약 칸과 같은 규칙, inbox.cjs의 waitingKind). UI 모드 칸이 닫혀 있어도 터미널 라벨만 보므로 늘 맞다.
-  inboxWaiting() { syncNames(); return (terminals() ?? []).filter((t) => waitingKind(t)).length; } // syncNames: the profile the desk published
+  // syncNames: the profile the desk published. With the "none" preset (#124) no name marks a leader, so any terminal carrying the wait label counts.
+  inboxWaiting() { syncNames(); const any = NAMES.preset === "none"; return (terminals() ?? []).filter((t) => (any ? ["decision", "verify"].includes(labelOf(t, "labelWait").toLowerCase()) : waitingKind(t))).length; }
 
   // One tab per wheel notch. A touchpad or smooth-scrolling mouse sends many
   // small events per gesture: a short swipe or one smoothed notch (about
@@ -333,7 +356,7 @@ export default class Tabs extends View {
     // Another mod may set workspace.panels without our ids: always offer the panels this layout actually has,
     // and drop the ones it doesn't (the stock list names Files, which this layout replaced).
     const have = (body?.children ?? []).map(c => c.id);
-    const listed = shared("workspace.panels") ?? ["files", "changes", "work-board", "pr-board", "schedules-board", "accounts-board", "inbox-board"];
+    const listed = shared("workspace.panels") ?? ["files", "changes", "work-board", "pr-board", "schedules-board", "inbox-board"];
     const enabled = [...new Set([...listed.filter(id => !have.length || have.includes(id)), ...have])];
     this.syncPanel(space, panel, body, enabled);
     const panelButton = (id, label, icon, badge) => {
@@ -360,8 +383,10 @@ export default class Tabs extends View {
       .when(enabled.includes("work-board"), el => el.child(panelButton("work-board", "Work", "mods/workspace-chrome/layers.svg")))
       .when(enabled.includes("pr-board"), el => el.child(panelButton("pr-board", "PRs", "mods/workspace-chrome/git-compare.svg", this.attention)))
       .when(enabled.includes("schedules-board"), el => el.child(panelButton("schedules-board", "예약", "mods/workspace-chrome/clock.svg")))
-      .when(enabled.includes("accounts-board"), el => el.child(panelButton("accounts-board", "계정", "mods/workspace-chrome/git-branch.svg")))
       .when(enabled.includes("inbox-board"), el => el.child(panelButton("inbox-board", "UI 모드", "mods/workspace-chrome/archive.svg", this.inboxWaiting())))
+      .child(h_flex().id("settings-open").h(26).px(8).gap(5).flex_none().items_center().rounded(6).text_size(12).bg(t.chrome).text_color(t.muted)
+        .hover(s => s.bg(t.hover)).on_mouse_down("left", stop).tooltip("설정 창: GitHub 계정, 설치된 모드")
+        .on_click(() => { try { openOverlay(settingsWindow(shared(SETTINGS_SHARED))); } catch {} }).child(svg("mods/workspace-chrome/settings.svg").size(14)).child("설정"))
       .when(Boolean(modeTarget()), el => el.child(h_flex().id("mode-switch").h(26).px(8).flex_none().items_center().rounded(6).text_size(12).bg(t.selected).text_color(t.foreground)
         .hover(s => s.bg(t.hover)).on_mouse_down("left", stop).on_click(() => { const m = modeTarget(); if (m) run("layout.switch", { name: m.name }); })
         .tooltip(modeTarget()?.ui ? "터미널 화면으로 돌아갑니다. 터미널은 꺼지지 않습니다" : "UI 모드를 전체 화면으로 씁니다. 터미널은 숨겨질 뿐 계속 돕니다")

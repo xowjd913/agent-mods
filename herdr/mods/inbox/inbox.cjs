@@ -569,7 +569,7 @@ function readPo(dir = inboxDir()) {
 
 // ---- #90 solo mode: a plain Claude terminal (no PO, no leader) is a room of its own. The hook writes its lines to <inbox dir>/solo/<terminal id>.jsonl
 // (same line shape as a PO file) only while the flag file <inbox dir>/solo.on exists. It is off by default: every Claude terminal's prompts would be
-// saved. The desk's "혼자 모드 켜기" button and `install.cjs hook --solo` both set the flag (setSolo); nothing here changes what the desk shows yet.
+// saved. The "none" preset of profile.cjs (no agent or hub name is recognized, #124) is the profile a solo desk starts from. The desk's "혼자 모드 켜기" button and `install.cjs hook --solo` both set the flag (setSolo); nothing here changes what the desk shows yet.
 const SOLO_DIR = "solo", SOLO_FLAG = "solo.on";
 // The file of one terminal's solo lines, or null when `id` is not a safe file name (an id can never reach outside the folder).
 const soloFile = (dir, id) => (SAFE_ID.test(String(id ?? "")) ? path.join(dir, SOLO_DIR, `${id}.jsonl`) : null);
@@ -889,6 +889,7 @@ const DEFAULT_NAMES = Object.freeze({
   hubRole: "po", hubIdLabel: "po", hubId: "^[a-z0-9-]{1,40}$", hubDir: "po", // the hub (PO): its `role` value, id label, id pattern, folder
   labelRole: "role", labelWait: "wait", labelWaitLink: "wait-link", labelSession: "session",
   answerLine: 'Panel answer ({kind}) for {agent}: "{text}".{ Target: {link}}',
+  preset: "po", arrangeScript: "~/.claude/skills/leader/herdr-team.sh", // the profile's preset ("none" = no agent / hub naming rules at all, #124) and the PO arrange script ("" = not there: the features that need it hide)
 });
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // a hub id becomes a file name whatever its pattern says
 function compileNames(n) {
