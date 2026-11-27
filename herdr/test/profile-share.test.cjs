@@ -132,6 +132,21 @@ test("설치기: work 모드에 profile.cjs를 함께 복사하고 인박스 것
   assert.equal(fs.readFileSync(path.join(home, "mods", "work", "profile.cjs"), "utf8"), fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "profile.cjs"), "utf8"));
 });
 
+test("설치기: settings 모드에 profile.cjs와 rules.cjs가 함께 설치되고, 설치된 사본만으로 규칙 도우미가 돈다(#126)", () => {
+  const inst = require("../install.cjs");
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "profile-share-settings-"));
+  const log = console.log; console.log = () => {};
+  try { inst.installMods(home, false); } finally { console.log = log; }
+  const dir = path.join(home, "mods", "settings");
+  assert.equal(fs.readFileSync(path.join(dir, "profile.cjs"), "utf8"), fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "profile.cjs"), "utf8"));
+  assert.ok(fs.existsSync(path.join(dir, "rules.cjs")));
+  const fake = fs.mkdtempSync(path.join(os.tmpdir(), "profile-share-settings-home-"));
+  const r = require("child_process").spawnSync(process.execPath, [path.join(dir, "rules.cjs"), "show"], { env: { PATH: process.env.PATH, HOME: fake, USERPROFILE: fake, HERDR_INBOX_DIR: path.join(fake, "inbox") }, encoding: "utf8" });
+  const out = JSON.parse(r.stdout.trim().split("\n").pop());
+  assert.equal(out.ok, true);
+  assert.equal(out.preset, "none");
+});
+
 test("agent-groups: PO·리더 탭 이름 규칙은 프로필의 허브 이름·접두어를 따른다", () => {
   const src = read("agent-groups/main.js");
   const fn = (name) => { const m = src.match(new RegExp(`^const ${name} = .*$`, "m")); assert.ok(m, name); return m[0]; };
