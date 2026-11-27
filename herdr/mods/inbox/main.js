@@ -801,13 +801,14 @@ function dockTarget(here, f, terms) {
 // "don't recommend" (a negated option is one the report says NOT to pick, so it never gets the "(추천)" mark).
 const REC_MARK = /추천|권장|recommend/i;
 const REC_NEG = /비\s*추천|비\s*권장|(?:추천|권장)\s*(?:하지\s*(?:않|말)|안\s*함|드리지\s*않|할\s*수\s*없)|(?:not|n['’]t|never)\s+(?:be\s+)?recommend|un-?recommend/i;
+const OPT_LINE = /^\s*(?:[-*]\s*)?(?:\*\*)?([1-3])안(?:\*\*)?\s*(?:[(（\[［]([^)）\]］\n]{0,24})[)）\]］])?\s*(?:\*\*)?\s*[:：)]\s*(\S.*)$/; // 1 = number, 2 = marker between number and colon, 3 = the option text
 const recMarked = (txt) => REC_MARK.test(String(txt ?? "")) && !REC_NEG.test(String(txt ?? ""));
 function decisionOptions(body) {
   const nums = new Set();
   let rec = 0;
   for (const line of String(body ?? "").split(/\r?\n/)) {
     // "1안: …", "1안) …", and with a marker between the number and the colon: "1안(추천): …", "1안 (추천): …", "**1안** [권장]: …"
-    let m = line.match(/^\s*(?:[-*]\s*)?(?:\*\*)?([1-3])안(?:\*\*)?\s*(?:[(（\[［]([^)）\]］\n]{0,24})[)）\]］])?\s*(?:\*\*)?\s*[:：)]\s*\S/);
+    let m = line.match(OPT_LINE);
     if (m) {
       const n = Number(m[1]);
       nums.add(n);
@@ -848,6 +849,73 @@ function groupAnswer(groups, picks) {
     parts.push(`${g.label}${n}안`);
   }
   return parts.join(", ");
+}
+// #152: a decision report as a view for the bubble: the question on top, one row per option, the recommended one marked, the "추천: N안" line
+// folded into the row it names. Read with the same rules as decisionOptions / decisionGroups (nothing is guessed): -> null when the body has no
+// options, or when something that is not an option line, a "추천" line or an indented detail sits between the options (then the bubble draws
+// the body as before). A line below the last option that is not its detail stays under the options as "rest".
+// decisionLayout(body) -> { question, options: [{ n, text, detail, recommended }], rest, recommended, reason } | null   (one question)
+// decisionView(body) -> { intro, groups: [{ label, title, question, options, rest, recommended, reason }] } | null   (label "" = a single question)
+const REC_LINE = /^\s*(?:[-*]\s*)?추천\s*[:：]\s*([1-3])안(.*)$/;
+const optText = (s) => String(s ?? "").replace(/\s*[(（\[［][^)）\]］\n]{0,24}[)）\]］]\s*$/, (x) => (recMarked(x.replace(/^\s*[(（\[［]|[)）\]］]\s*$/g, "")) ? "" : x)).replace(/\s*[★⭐]+\s*$/, "").trim();
+const recReason = (s) => {
+  const t = String(s ?? "").trim().replace(/^[\s:：,，.。\-–—~]+/, "").trim();
+  return /^[(（].*[)）]$/.test(t) ? t.slice(1, -1).trim() : t;
+};
+// A text without Markdown marks (bold, `code`, [label](url)) for the option rows, which are drawn as plain text so a press on a row never starts a text selection.
+const mdPlain = (s) => String(s ?? "").replace(/\[([^\]\n]+)\]\([^)\n]*\)/g, "$1").replace(/(\*\*|__|`)/g, "");
+function decisionLayout(body) {
+  const { options, recommended } = decisionOptions(body);
+  if (!options.length) return null;
+  const lines = String(body ?? "").split(/\r?\n/);
+  const found = lines.map((l) => l.match(OPT_LINE));
+  const first = found.findIndex(Boolean);
+  const last = found.length - 1 - [...found].reverse().findIndex(Boolean);
+  const question = [], rest = [], opts = [];
+  let cur = null, gap = false, reason = "";
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const m = found[i];
+    if (m) {
+      const n = Number(m[1]);
+      if (opts.some((o) => o.n === n)) return null; // the same number twice: not clear which is meant
+      cur = { n, text: optText(m[3]) || m[3].trim(), detail: [], recommended: n === recommended };
+      opts.push(cur);
+      gap = false;
+      continue;
+    }
+    const r = line.match(REC_LINE);
+    if (r && Number(r[1]) === recommended) { const t = recReason(r[2]); if (t) reason = reason ? reason + " " + t : t; gap = true; continue; }
+    if (!line.trim()) { if (i < first) question.push(line); else if (i > last) rest.push(line); gap = true; continue; }
+    if (i < first) { question.push(line); continue; }
+    if (cur && !gap && /^(?:\t|\s{2,})\S/.test(line)) { cur.detail.push(line.trim()); continue; }
+    if (i < last) return null;
+    rest.push(line);
+    cur = null;
+  }
+  const join = (a) => a.join("\n").trim();
+  return { question: join(question), options: opts.sort((x, y) => x.n - y.n).map((o) => ({ ...o, detail: o.detail.join("\n") })), rest: join(rest), recommended, reason };
+}
+function decisionView(body) {
+  const groups = decisionGroups(body);
+  if (!groups.length) {
+    const l = decisionLayout(body);
+    return l ? { intro: "", groups: [{ label: "", title: "", ...l }] } : null;
+  }
+  const segs = [{ label: "", head: "", lines: [] }];
+  for (const line of String(body ?? "").split(/\r?\n/)) {
+    const m = line.match(GROUP_HEAD);
+    if (m) segs.push({ label: m[1], head: line, lines: [] });
+    else segs[segs.length - 1].lines.push(line);
+  }
+  const out = [];
+  for (const sg of segs.slice(1)) {
+    const l = decisionLayout(sg.lines.join("\n"));
+    if (!l) return null;
+    const title = sg.head.replace(/^\s*(?:[-*#>]+\s*)?(?:\*\*)?/, "").replace(sg.label, "").replace(/^[\s.:：)]+/, "").replace(/\*\*/g, "").trim();
+    out.push({ label: sg.label, title, ...l });
+  }
+  return { intro: segs[0].lines.join("\n").trim(), groups: out };
 }
 // What a decision report offers when it has no "N안:" lines (#62): its "추천: ..." and "답: ..." lines, shown on the card without opening it,
 // and the quoted answers after "답:" ("둘 다 진행" / "#59만" / "보류", also “…” and 「…」) as answer buttons when there are at least two.
@@ -4064,17 +4132,19 @@ export default class Inbox extends View {
   }
 
   // A speech bubble. Reports with more than a line start collapsed; "자세히" / "접기" flips it (kept per card in shared state).
-  bubble(t, s, it, accent) {
-    const open = it.long && this.isOpen(s, it);
+  bubble(t, s, it, accent, a) {
+    const view = it.kind === "decision" ? decisionView(it.body) : null; // options found (#152): drawn as rows, never collapsed
+    const open = it.long && !view && this.isOpen(s, it);
     const id = `b-${s.leader}-${it.ts}`;
-    const toggle = it.long ? div().id(`tg-${s.leader}-${it.ts}`).flex_none().px(8).h(fz(20)).rounded(10).flex().items_center().text_size(fz(10.5)).cursor_pointer().bg(t.raised)
+    const toggle = it.long && !view ? div().id(`tg-${s.leader}-${it.ts}`).flex_none().px(8).h(fz(20)).rounded(10).flex().items_center().text_size(fz(10.5)).cursor_pointer().bg(t.raised)
       .border(1).border_color(t.border).text_color(t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
       .on_click((_e, c) => { this.toggleOpen(s, it); this.reveal(this.spot(s, it)); c.notify(); }).child(open ? "접기" : "자세히") : null;
     const box = v_flex().min_w(0).px(12).py(9).gap(6).rounded(12).bg(accent ? accent + "1f" : t.raised).border(1).border_color(accent ? accent + "55" : t.border)
       .text_size(fz(12.5)).text_color(t.foreground);
     const headline = it.head || it.lead || it.title;
     box.child(div().min_w(0).child(this.heading_text(t, `${id}-h`, it.headHtml, 16)));
-    if (!open) {
+    if (view) box.child(this.decisionBody(t, s, it, view, id, a));
+    else if (!open) {
       if (it.lead && it.lead !== headline) box.child(div().min_w(0).max_h(34).overflow_hidden().text_size(fz(12)).text_color(t.muted).child(this.text(`${id}-lead`, `<p>${it.leadHtml}</p>`)));
     } else box.child(this.body(t, it, id));
     if (it.linkLabel || toggle) {
@@ -4084,6 +4154,54 @@ export default class Inbox extends View {
         .when(Boolean(toggle), (el) => el.child(toggle)));
     }
     return box;
+  }
+
+  // A decision report with options (#152): the question on top, then one card per option (the "N안" badge, the text, its detail, a 추천 tag and
+  // accent on the recommended one). While the ask is open (`a`) a press on a card sends "N안 선택" (several questions: picks it, see pickGroup).
+  decisionBody(t, s, it, view, id, a) {
+    const head = mdPlain(it.head || "").trim();
+    const dropHead = (q) => { const ls = String(q ?? "").split("\n"); return head && mdPlain(ls[0]).replace(/^[#>\s*-]+/, "").trim() === head ? ls.slice(1).join("\n").trim() : String(q ?? "").trim(); };
+    const multi = view.groups.length > 0 && view.groups[0].label !== "";
+    const groups = multi ? decisionGroups(it.body) : [];
+    const key = a ? this.askKey(a) : "";
+    const picks = a && multi && this.gpick?.get(s.leader)?.key === key ? this.gpick.get(s.leader).picks : {};
+    const done = a ? this.sentOf(a) : "";
+    const live = Boolean(a) && done === ""; // a card only answers while the ask is open and not yet sent
+    const accent = t.working;
+    const row = (g, gi, o) => {
+      const rid = `dopt-${s.leader}-${it.ts}-${gi}-${o.n}`;
+      const picked = multi && picks[g.label] === o.n;
+      const mark = o.recommended || picked;
+      const body = v_flex().flex_1().min_w(0).gap(2)
+        .child(div().min_w(0).text_size(fz(12.5)).text_color(t.foreground).child(mdPlain(o.text)))
+        .children(String(o.detail || "").split("\n").filter(Boolean).map((d, di) => div().id(`${rid}-d${di}`).min_w(0).text_size(fz(11.5)).text_color(t.muted).child(mdPlain(d))))
+        .when(o.recommended && Boolean(g.reason), (el) => el.child(div().min_w(0).text_size(fz(11.5)).text_color(accent).child(`추천 이유: ${mdPlain(g.reason)}`)));
+      let el = h_flex().id(rid).min_w(0).gap(8).items_start().px(10).py(7).rounded(9)
+        .bg(mark ? accent + "1a" : t.background).border(1).border_color(mark ? accent + "88" : t.border)
+        .child(div().flex_none().px(7).h(fz(18)).rounded(5).flex().items_center().text_size(fz(11)).font_semibold().bg(mark ? accent + "33" : t.hover).text_color(mark ? accent : t.muted).child(`${o.n}안`))
+        .child(body)
+        .when(o.recommended, (x) => x.child(this.tag(t, "추천", "working")));
+      if (!a) return el;
+      if (!a.po) return el.opacity(0.5).tooltip(NO_PO()).on_mouse_down("left", stop);
+      if (!live) return el;
+      return el.cursor_pointer().on_mouse_down("left", stop).hover((x) => x.bg(accent + "26"))
+        .tooltip(multi ? `${g.label}번 질문에 ${o.n}안을 고릅니다. 모든 질문을 고르면 한 번에 보냅니다` : `누르면 "${o.n}안 선택"을 PO에 보냅니다`)
+        .on_click((_e, c) => (multi ? this.pickGroup(a, groups, g.label, o.n, c) : this.send(a, `${o.n}안 선택`, c, "choice")));
+    };
+    const out = v_flex().min_w(0).gap(8);
+    const intro = dropHead(view.intro);
+    if (intro) out.child(div().min_w(0).text_size(fz(12.5)).text_color(t.foreground).child(this.md(`${id}-intro`, intro)));
+    view.groups.forEach((g, gi) => {
+      const q = gi === 0 && !multi ? dropHead(g.question) : String(g.question ?? "").trim();
+      out.child(v_flex().min_w(0).gap(5)
+        .when(multi, (el) => el.child(h_flex().min_w(0).gap(6).items_center()
+          .child(div().flex_none().text_size(fz(12.5)).font_semibold().text_color(t.foreground).child(g.label))
+          .child(div().min_w(0).text_size(fz(12.5)).font_semibold().text_color(t.foreground).child(mdPlain(g.title)))))
+        .when(Boolean(q), (el) => el.child(div().min_w(0).text_size(fz(12.5)).text_color(t.foreground).child(this.md(`${id}-q${gi}`, q))))
+        .children(g.options.map((o) => row(g, gi, o)))
+        .when(Boolean(g.rest), (el) => el.child(div().min_w(0).text_size(fz(12)).text_color(t.muted).child(this.md(`${id}-r${gi}`, g.rest)))));
+    });
+    return out;
   }
 
   // A message header: the leader's name (left out when `bare`, a follow-up line), the kind tag and the time.
@@ -4115,6 +4233,7 @@ export default class Inbox extends View {
     const { s, kind, item, link } = a;
     const writing = this.writing === s.leader;
     const done = this.sentOf(a);
+    const view = kind === "decision" ? decisionView(item?.body) : null; // #152: the bubble's option cards take the buttons' place
     const groups = kind === "decision" ? decisionGroups(item?.body) : []; // several questions (#76): one button row per question
     const opts = kind === "decision" && !groups.length ? decisionOptions(item?.body) : { options: [], recommended: 0 }; // once: the chips and the recommended one read the same list
     const key = this.askKey(a);
@@ -4122,7 +4241,7 @@ export default class Inbox extends View {
     // Without "N안:" lines the card still shows what the report offers (#62): its 추천 / 답 lines and the quoted answers as buttons.
     const hint = kind === "decision" && !groups.length && opts.options.length < 2 ? decisionHints(item?.body) : { lines: [], answers: [], recommended: "" };
     const box = v_flex().min_w(0).gap(6)
-      .children(groups.map((g, gi) => h_flex().id(`grp-${s.leader}-${gi}`).gap(6).items_center().flex_wrap()
+      .children((view ? [] : groups).map((g, gi) => h_flex().id(`grp-${s.leader}-${gi}`).gap(6).items_center().flex_wrap()
         .child(div().flex_none().text_size(fz(12)).font_semibold().text_color(t.foreground).child(g.label))
         .children(g.options.map((n) => this.button(t, `opt-${s.leader}-${gi}-${n}`, `${n}안${n === g.recommended ? " (추천)" : ""}`, (c) => this.pickGroup(a, groups, g.label, n, c),
           { primary: picks[g.label] === n, disabled: a.po ? "" : NO_PO(), tip: `${g.label}번 질문에 ${n}안을 고릅니다. 모든 질문을 고르면 한 번에 보냅니다` })))))
@@ -4130,7 +4249,7 @@ export default class Inbox extends View {
       .children(hint.lines.map((x, i) => div().id(`hint-${s.leader}-${i}`).min_w(0).text_size(fz(12)).text_color(t.foreground).child(x)))
       .child(h_flex().gap(6).items_center().flex_wrap()
         .when(Boolean(link) && link !== item?.link, (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", (c) => openUrl(link, c))))
-        .children(kind === "decision" ? opts.options.map((n) => this.button(t, `opt-${s.leader}-${n}`, `${n}안 선택${n === opts.recommended ? " (추천)" : ""}`, (c) => this.send(a, `${n}안 선택`, c, "choice"), { primary: n === opts.recommended, disabled: a.po ? "" : NO_PO(), tip: CLIP })) : [])
+        .children(kind === "decision" && !view ? opts.options.map((n) => this.button(t, `opt-${s.leader}-${n}`, `${n}안 선택${n === opts.recommended ? " (추천)" : ""}`, (c) => this.send(a, `${n}안 선택`, c, "choice"), { primary: n === opts.recommended, disabled: a.po ? "" : NO_PO(), tip: CLIP })) : [])
         .children(hint.answers.map((w, i) => this.button(t, `ans-${s.leader}-${i}`, w, (c) => this.send(a, w, c, "choice"), { primary: w === hint.recommended, disabled: a.po ? "" : NO_PO(), tip: CLIP })))
         .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c, "verify"), { primary: true, disabled: a.po ? "" : NO_PO(), tip: CLIP })))
         .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); this.reveal(this.spot(s, item)); c.notify(); }, { disabled: a.po ? "" : NO_PO() }))
@@ -4274,7 +4393,7 @@ export default class Inbox extends View {
       .child(v_flex().flex_1().min_w(0).gap(4)
         .child(hdr)
         .child(e.it ? h_flex().min_w(0).gap(6).items_end()
-          .child(div().flex_1().min_w(0).max_w(this.capOf() ?? "75%").child(this.bubble(t, e.s, wait, e.waiting ? t.blocked : null)))
+          .child(div().flex_1().min_w(0).max_w(this.capOf() ?? "75%").child(this.bubble(t, e.s, wait, e.waiting ? t.blocked : null, a)))
           .child(when(e.it.ms))
           : div().text_size(fz(12)).text_color(t.dim).child("보고 기록 없이 대기 표시만 있습니다. 링크를 열거나 터미널을 들여다보세요."))
         .when(Boolean(a), (el) => el.child(this.askActions(t, a, cx))));
