@@ -1340,9 +1340,16 @@ const isNotice = (e) => String(e?.who ?? "").startsWith("l:") && Boolean(e.it) &
 // "<name> · <kind> · <first line>" ("kind" = the shown kind word); the first line is the report's headline, whitespace squeezed.
 // A headline that is only the kind word (a leader report titled "[leader] 재개") says nothing new: the first non-empty body line takes its place.
 const noticeLine = (s) => String(s ?? "").replace(/^\s*\[[^\]]*\]\s*/, "").replace(/\s+/g, " ").trim();
+// The body line that stands in for the headline is shown as plain text: leading markdown markers (#'s, quote >, list - * + 1.) and the bold / inline-code
+// marks (** __ `) are taken off, so the user never sees "## " or "**". A line that is only markers (a "---" rule, a code fence) is empty and skipped.
+const noticePlain = (l) => {
+  let s = String(l ?? "").replace(/\s+/g, " ").trim();
+  for (let p = null; p !== s;) { p = s; s = s.replace(/^(?:#{1,6}(?=\s|$)|>|[-*+](?=\s|$)|\d{1,3}[.)](?=\s|$)|-{3,}$|\*{3,}$|_{3,}$)\s*/, ""); }
+  return s.replace(/\*\*|__|`/g, "").replace(/\s+/g, " ").trim();
+};
 const noticeText = (name, kind, it) => {
   let head = noticeLine(it?.head || it?.lead || it?.title);
-  if (!head || head === kind) head = String(it?.body ?? "").replace(/\r/g, "").split("\n").map((l) => l.replace(/\s+/g, " ").trim()).find(Boolean) ?? "";
+  if (!head || head === kind) head = String(it?.body ?? "").replace(/\r/g, "").split("\n").map(noticePlain).find(Boolean) ?? "";
   return [name, kind, head].filter(Boolean).join(" · ");
 };
 // A line pasted into the PO terminal that another terminal sent (`<hc from="t137 lead-x">`) is that terminal's words, not the person's. -> the sender's
