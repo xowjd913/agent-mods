@@ -409,9 +409,18 @@ const isNotice = (e) => String(e?.who ?? "").startsWith("l:") && Boolean(e.it) &
 // "<name> · <kind> · <first line>" ("kind" = the shown kind word); the first line is the report's headline, whitespace squeezed.
 // A headline that is only the kind word (a leader report titled "[leader] 재개") says nothing new: the first non-empty body line takes its place.
 const noticeLine = (s) => String(s ?? "").replace(/^\s*\[[^\]]*\]\s*/, "").replace(/\s+/g, " ").trim();
+// The body line that stands in for the headline is shown as plain text: leading markdown markers (#'s, quote >, list - * + 1.) are taken off the start of the
+// line, and a **bold** or `code` pair is unwrapped, so the user never sees "## " or "**". Nothing mid-line is touched on its own (__init__, a ** b, >= 5 stay).
+// A line that is only markers (a "---" rule) or starts a code fence (```) is empty and skipped.
+const noticePlain = (l) => {
+  let s = String(l ?? "").replace(/\s+/g, " ").trim();
+  if (s.startsWith("```")) return ""; // a code fence line says nothing
+  for (let p = null; p !== s;) { p = s; s = s.replace(/^(?:#{1,6}(?=\s|$)|>+(?=\s|$)|[-*+](?=\s|$)|\d{1,3}[.)](?=\s|$)|-{3,}$|\*{3,}$|_{3,}$)\s*/, ""); }
+  return s.replace(/\*\*(\S|\S.*?\S)\*\*/g, "$1").replace(/`(\S|\S[^`]*?\S)`/g, "$1").replace(/\s+/g, " ").trim();
+};
 const noticeText = (name, kind, it) => {
   let head = noticeLine(it?.head || it?.lead || it?.title);
-  if (!head || head === kind) head = String(it?.body ?? "").replace(/\r/g, "").split("\n").map((l) => l.replace(/\s+/g, " ").trim()).find(Boolean) ?? "";
+  if (!head || head === kind) head = String(it?.body ?? "").replace(/\r/g, "").split("\n").map(noticePlain).find(Boolean) ?? "";
   return [name, kind, head].filter(Boolean).join(" · ");
 };
 // A line pasted into the PO terminal that another terminal sent (`<hc from="t137 lead-x">`) is that terminal's words, not the person's. -> the sender's
@@ -1497,6 +1506,8 @@ const MSG_TICK_MS = 500; // how often the notice is checked for expiry
 // while the box has the keyboard the file is rewritten every DRAFT_BEAT_MS so its "focus" stays fresh; a copy of the desk that starts within DRAFT_FOCUS_MS
 // (inbox.cjs) of the last write gives the keyboard back to the box, once, in the DRAFT_FOCUS_WAIT_MS after its first draw.
 const DRAFT_TICK_MS = 250, DRAFT_SAVE_MS = 600, DRAFT_WAIT_MS = 3000, DRAFT_BEAT_MS = 10000, DRAFT_FOCUS_WAIT_MS = 5000, DRAFT_NOW = 1;
+const DRAFT_TEXT_MAX = 6000, DRAFT_TOTAL_MAX = 20000, DRAFT_PARTS_MAX = 64; // the helper's caps (inbox.cjs): per room and in all, the first rooms listed win
+const DRAFT_ARG_MAX = 3000; // #147: a snapshot longer than this goes to the helper in pieces of this size (Windows: ~32K per command line, each quote can cost 4 characters)
 const PIN_TICK_MS = 250; // how often the timeline checks that it still sits at the newest
 const LOAD_REDRAW_MS = 25000; // an unchanged load still redraws this often (the "5분 전" clocks)
 
@@ -2046,8 +2057,13 @@ export default class Inbox extends View {
     try { text = this.chat.value(); } catch {}
     try { range = this.chat.selected_range(); } catch {}
     const rooms = {};
+    let total = 0;
     for (const [room, d] of [[this.draftRoom, { text, range }], ...[...this.roomDrafts].reverse()]) { // the room shown first, then the newest others
-      if (typeof d?.text === "string" && d.text !== "" && !(room in rooms)) rooms[room] = { text: d.text, range: d.range ?? null };
+      if (typeof d?.text !== "string" || d.text === "" || room in rooms) continue;
+      const t = cutHead(d.text, DRAFT_TEXT_MAX); // #147: the helper's own caps, so a pasted wall of text is not sent just to be cut there
+      if (total + t.length > DRAFT_TOTAL_MAX) continue;
+      total += t.length;
+      rooms[room] = { text: t, range: d.range ?? null };
     }
     const snap = { rooms, focus: this.chatFocus };
     const empty = !snap.focus && !Object.keys(rooms).length;
@@ -2058,9 +2074,20 @@ export default class Inbox extends View {
     this.draftWroteAt = now;
     this.draftOwn = !empty;
     this.draftBusy = true;
-    try {
-      Promise.resolve(exec("node", [HELPER(), "draft-write", sig], { timeout: 5000 })).catch(() => {}).then(() => { this.draftBusy = false; });
-    } catch { this.draftBusy = false; }
+    const done = (ok) => { this.draftBusy = false; if (!ok) this.draftSig = ""; }; // a failed write is tried again with the next change
+    try { this.writeDraft(sig).then(done, () => done(false)); } catch { done(false); }
+  }
+  // #147: one `draft-write` for a short snapshot, else `draft-part` calls one after the other (a piece never cuts a surrogate pair). -> true when the helper did not fail.
+  // `draft-write` answers "none" when there was nothing to clear (fine); a missing or unreadable answer, "failed" and, for a piece, "none" are failures.
+  async writeDraft(sig) {
+    const ok = (r, piece) => { if (r?.code !== 0) return false; try { const v = JSON.parse(r.stdout).r; return v !== "failed" && !(piece && v === "none"); } catch { return false; } };
+    if (sig.length <= DRAFT_ARG_MAX) return ok(await exec("node", [HELPER(), "draft-write", sig], { timeout: 5000 }));
+    const parts = [];
+    for (let i = 0; i < sig.length;) { let j = Math.min(sig.length, i + DRAFT_ARG_MAX); if (j < sig.length && /[\uD800-\uDBFF]/.test(sig[j - 1])) j--; parts.push(sig.slice(i, j)); i = j; }
+    if (parts.length > DRAFT_PARTS_MAX) return false;
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    for (let i = 0; i < parts.length; i++) if (!ok(await exec("node", [HELPER(), "draft-part", id, `${i}/${parts.length}`, parts[i]], { timeout: 5000 }), true)) return false;
+    return true;
   }
   loadDraft() {
     const done = (j) => { this.draftSaved = j; this.draftLoaded = true; this.applyDraft(); };
