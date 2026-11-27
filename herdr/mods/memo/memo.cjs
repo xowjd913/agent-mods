@@ -8,8 +8,8 @@
 //   setdir <b64 dir>  -> saves the folder (created if missing)
 //   list              -> {dir, exists, items: [{file, path, title, mtime, size, preview}], truncated}
 //   name <b64 text>   -> {file, path}: (text = the start of the memo, its title is taken) a safe file name nobody uses yet in the folder (the folder is created if missing)
-//   delete <file>     -> deletes one memo file of the folder
-//   po <file>         -> the line to paste into the PO terminal: "메모 요청: <title> ..." + body + file path
+//   delete <file> [path] -> deletes one memo file of the folder
+//   po <file> [path]  -> the line to paste into the PO terminal: "메모 요청: <title> ..." + body + file path
 // Reading and writing a memo's text is done by the mod itself (readTextFile / writeTextFile: they refuse to overwrite a file that changed meanwhile).
 "use strict";
 const fs = require("node:fs");
@@ -130,6 +130,15 @@ function pathOf(dir, file) {
   return path.join(dir, file);
 }
 
+// The screen passes the full path it opened as well: when the memo folder was changed meanwhile (another window, config.json), a bare file name would point at
+// the same name in the NEW folder, so a delete or a send is refused unless the path still lies in the folder now in use.
+function pathChecked(dir, file, given) {
+  const p = pathOf(dir, file);
+  if (typeof given !== "string" || given === "") throw new Error("메모 경로가 없습니다. 목록을 새로 읽고 다시 하세요");
+  if (path.normalize(given) !== path.normalize(p) || path.dirname(path.resolve(p)) !== path.resolve(dir)) throw new Error("메모 폴더가 바뀌었습니다. 목록을 새로 읽고 다시 하세요");
+  return p;
+}
+
 // ---- the list
 function listMemos(dir) {
   let names;
@@ -186,13 +195,13 @@ function main(argv) {
       return out({ ok: true, dir, file, path: path.join(dir, file) });
     }
     if (cmd === "delete") {
-      const p = pathOf(dir, a[0]);
+      const p = pathChecked(dir, a[0], a[1]);
       if (!fs.statSync(p).isFile()) throw new Error("파일이 아닙니다");
       fs.unlinkSync(p);
       return out({ ok: true });
     }
     if (cmd === "po") {
-      const p = pathOf(dir, a[0]);
+      const p = pathChecked(dir, a[0], a[1]);
       const text = fs.readFileSync(p, "utf8");
       return out({ ok: true, title: titleOf(text), path: p, text: poMessage(titleOf(text), text, p) });
     }
@@ -203,4 +212,4 @@ function main(argv) {
 }
 
 if (require.main === module) main(process.argv.slice(2));
-module.exports = { defaultDir, memoDir, configInfo, setDir, titleOf, previewOf, safeName, fileNameFor, uniqueName, isMemoFile, pathOf, listMemos, poMessage, UNTITLED, MAX_BODY_IN_PO };
+module.exports = { defaultDir, memoDir, configInfo, setDir, titleOf, previewOf, safeName, fileNameFor, uniqueName, isMemoFile, pathOf, pathChecked, listMemos, poMessage, UNTITLED, MAX_BODY_IN_PO };

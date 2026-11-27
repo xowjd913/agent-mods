@@ -180,6 +180,24 @@ test("poMessage: 한 줄, 제목·본문·파일 경로, 길면 자름", () => {
   assert.ok(!/[\u0007‮⁦]/.test(bad));
 });
 
+test("CLI: 폴더를 바꾼 뒤 옛 경로로 delete·po 하면 거절하고 새 폴더 파일은 그대로 둔다", () => {
+  const home = tmp(), d1 = path.join(tmp(), "m1"), d2 = path.join(tmp(), "m2");
+  cli(home, "setdir", b64(d1));
+  fs.writeFileSync(path.join(d1, "a.md"), "# 하나");
+  const oldPath = path.join(d1, "a.md");
+  cli(home, "setdir", b64(d2));
+  fs.writeFileSync(path.join(d2, "a.md"), "# 둘");
+  const del = cli(home, "delete", "a.md", oldPath);
+  assert.equal(del.ok, false);
+  assert.match(del.error, /폴더가 바뀌었/);
+  assert.equal(cli(home, "po", "a.md", oldPath).ok, false);
+  assert.equal(fs.existsSync(path.join(d2, "a.md")), true);
+  assert.equal(fs.existsSync(oldPath), true);
+  // 지금 폴더의 경로를 같이 주면 그대로 된다
+  assert.equal(cli(home, "po", "a.md", path.join(d2, "a.md")).ok, true);
+  assert.equal(cli(home, "delete", "a.md", path.join(d2, "a.md")).ok, true);
+});
+
 test("CLI: config / setdir / list / delete / po", () => {
   const home = tmp(), dir = path.join(tmp(), "m");
   assert.deepEqual(Object.keys(cli(home, "config")).sort(), ["custom", "defaultDir", "dir", "ok"]);
@@ -188,16 +206,27 @@ test("CLI: config / setdir / list / delete / po", () => {
   const l = cli(home, "list");
   assert.equal(l.ok, true);
   assert.equal(l.items[0].title, "첫 메모");
-  const po = cli(home, "po", "a.md");
+  const ap = path.join(dir, "a.md");
+  assert.equal(cli(home, "po", "a.md").ok, false, "경로 없이는 보내지 않는다");
+  assert.equal(cli(home, "delete", "a.md").ok, false, "경로 없이는 지우지 않는다");
+  const po = cli(home, "po", "a.md", ap);
   assert.equal(po.ok, true);
   assert.equal(po.title, "첫 메모");
   assert.equal(po.path, path.join(dir, "a.md"));
   assert.ok(po.text.startsWith("메모 요청: 첫 메모"));
   // 폴더 밖 경로·없는 파일은 거절
-  assert.equal(cli(home, "delete", "../x.md").ok, false);
-  assert.equal(cli(home, "po", "../a.md").ok, false);
-  assert.equal(cli(home, "delete", "없음.md").ok, false);
-  assert.equal(cli(home, "delete", "a.md").ok, true);
+  assert.equal(cli(home, "delete", "../x.md", path.join(dir, "../x.md")).ok, false);
+  assert.equal(cli(home, "po", "../a.md", path.join(dir, "../a.md")).ok, false);
+  assert.equal(cli(home, "delete", "없음.md", path.join(dir, "없음.md")).ok, false);
+  // 폴더 밖 경로(같은 파일 이름)나 하위 폴더 경로를 넘기면 거절하고 파일은 남는다
+  const sub = path.join(dir, "sub"); fs.mkdirSync(sub); fs.writeFileSync(path.join(sub, "a.md"), "x");
+  for (const bad of [path.join(sub, "a.md"), path.join(dir, "sub", "..", "..", "m", "sub", "a.md"), path.join(tmp(), "a.md")]) {
+    assert.equal(cli(home, "delete", "a.md", bad).ok, false, bad);
+    assert.equal(cli(home, "po", "a.md", bad).ok, false, bad);
+  }
+  assert.equal(fs.existsSync(ap), true);
+  assert.equal(fs.existsSync(path.join(sub, "a.md")), true);
+  assert.equal(cli(home, "delete", "a.md", ap).ok, true);
   assert.equal(fs.existsSync(path.join(dir, "a.md")), false);
   assert.equal(cli(home, "nope").ok, false);
   assert.equal(cli(home, "setdir", b64("상대")).ok, false);

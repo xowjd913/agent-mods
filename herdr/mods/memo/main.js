@@ -6,7 +6,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextareaState, Textarea } from "gpui-base";
-import { theme, exec, appHome, checking, hc, terminals, shared, nextCommand, pickFolder, readTextFile, writeTextFile } from "herdr";
+import { theme, exec, appHome, checking, hc, run, panes, focused, terminals, shared, nextCommand, pickFolder, readTextFile, writeTextFile } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/memo/memo.cjs`;
 const ICON = (name) => `mods/workspace-chrome/${name}.svg`;
@@ -80,21 +80,12 @@ function pickPo() {
   if (status === "blocked") return { why: "PO가 질문 중입니다. 답한 뒤에 다시 보내세요" };
   const addr = String(t.address ?? t.name ?? "").trim();
   if (!addr) return { why: "PO 터미널의 주소를 알 수 없습니다" };
+  let paned = false;
+  try { paned = (panes() ?? []).some((x) => x.terminal === addr); } catch {}
+  if (!paned) return { why: "PO 터미널이 칸으로 열려 있지 않아 입력을 붙여 넣을 수 없습니다. PO 칸을 연 뒤 다시 보내세요" };
   return { term: t, addr, label: String(t.name ?? "") && t.name !== addr ? `${t.name} (${addr})` : addr };
 }
-// `hc send --json` 결과: 종료 코드 0이고 started:true일 때만 받은 것이다.
-function sendResult(r) {
-  const code = r && Number.isFinite(Number(r.code)) ? Number(r.code) : -1;
-  let j = null;
-  try { j = JSON.parse(String(r?.stdout ?? "").trim()); } catch {}
-  if (code === 0 && j && j.started === true) return { ok: true };
-  const kind = String(j?.error?.kind ?? "");
-  if (code === 0 && j && j.started === false && !j.error) return { ok: false, why: "PO가 받아 시작하지 않았습니다(PO 입력창에 쓰던 글이 있는지 확인하세요)" };
-  if (kind === "blocked") return { ok: false, why: "PO가 질문 중이라 받지 않았습니다" };
-  if (kind === "status_mismatch") return { ok: false, why: "PO가 일하는 중이라 받지 않았습니다" };
-  if (j?.error?.message) return { ok: false, why: `PO가 받지 않았습니다(${cut(j.error.message, 80)})` };
-  return { ok: false, why: `hc send가 실패했습니다(종료 코드 ${code})` };
-}
+const PASTE_SETTLE_MS = 350; // PO 터미널이 붙여 넣은 글을 받은 뒤에 Enter를 누른다
 
 export default class Memo extends View {
   init(_props, cx) {
@@ -279,7 +270,7 @@ export default class Memo extends View {
     this.working = true;
     cx.spawn(async (cx) => {
       try {
-        const r = await helper(["delete", e.file]);
+        const r = await helper(["delete", e.file, e.path]);
         if (!r.ok) { this.say(cx, `지우지 못했습니다: ${r.error}`, true); return; }
         this.screen = "list"; this.e = null; this.ask = null;
         this.say(cx, "메모를 지웠습니다.");
@@ -288,32 +279,53 @@ export default class Memo extends View {
     });
   }
 
-  // PO에게 보내기: 먼저 확인 줄(받는 터미널 주소를 보여 준다)을 띄우고, 보내기를 눌러야 `hc send`가 나간다.
+  // PO에게 보내기: 사용자가 직접 친 입력처럼 간다(`hc send`는 글을 <hc from=…>로 감싸서 쓰지 않는다). inbox와 같은 길:
+  // 클립보드 -> PO 칸 포커스 -> terminal.paste -> `hc keys <PO> enter` -> 키보드를 원래 칸으로. PO 칸이 없으면 보내지 않는다.
+  // 먼저 도우미가 보낼 글을 만들고(폴더가 바뀌었으면 거절) 확인 줄이 뜬다. 보내기를 눌러야 붙여 넣는다.
   askPo(cx) {
-    if (!this.e || this.e.isNew || this.dirty()) { this.say(cx, "먼저 저장하세요. 저장된 파일 내용이 PO에게 갑니다.", true); return; }
+    const e = this.e;
+    if (!e || e.isNew || this.dirty()) { this.say(cx, "먼저 저장하세요. 저장된 파일 내용이 PO에게 갑니다.", true); return; }
+    if (this.working) return;
     const p = pickPo();
     if (!p.term) { this.say(cx, `보내지 못합니다: ${p.why}`, true); return; }
-    this.ask = { kind: "po", label: p.label };
-    cx.notify();
-  }
-  sendPo(cx) {
-    const e = this.e;
-    if (!e || e.isNew || this.working) return;
-    const p = pickPo(); // 확인 뒤에 상태가 바뀌었을 수 있어 다시 본다
-    if (!p.term) { this.ask = null; this.say(cx, `보내지 못합니다: ${p.why}`, true); return; }
     this.working = true;
     cx.spawn(async (cx) => {
       try {
-        const m = await helper(["po", e.file]);
+        const m = await helper(["po", e.file, e.path]);
         if (!m.ok) { this.say(cx, `보낼 글을 만들지 못했습니다: ${m.error}`, true); return; }
-        let r = null;
-        try { r = await hc(["send", "--json", "--", p.addr, m.text]); } catch (err) { r = { code: -1, stdout: "", stderr: short(err) }; }
-        const res = sendResult(r);
-        this.ask = null;
-        if (res.ok) this.say(cx, `PO(${p.label})에게 보냈습니다.`);
-        else this.say(cx, `PO에게 보내지 못했습니다: ${res.why}`, true);
+        if (this.e !== e) return;
+        this.ask = { kind: "po", label: p.label, addr: p.addr, text: m.text };
       } finally { this.working = false; cx.notify(); }
     });
+  }
+  sendPo(cx) {
+    const a = this.ask;
+    if (!a || a.kind !== "po" || !this.e || this.working) return;
+    const p = pickPo(); // 확인 뒤에 상태가 바뀌었을 수 있어 다시 본다
+    this.ask = null;
+    if (!p.term) { this.say(cx, `보내지 못합니다: ${p.why}`, true); return; }
+    if (p.addr !== a.addr) { this.say(cx, "받을 PO가 바뀌었습니다. 다시 눌러 확인하세요.", true); return; }
+    let back = "";
+    try { back = focused()?.pane ?? ""; } catch {}
+    const restore = () => { if (back) { try { run("pane.focus", { pane: back }); } catch {} } };
+    try {
+      cx.write_to_clipboard(a.text);
+      run("pane.focus", { terminal: p.addr }); // terminal.paste has no terminal argument: it pastes into the focused terminal
+      run("terminal.paste", {});
+    } catch (err) { restore(); this.say(cx, `PO(${p.label})에 붙여 넣지 못해 보내지 않았습니다: ${short(err)}`, true); return; }
+    this.say(cx, `PO(${p.label})에 붙여 넣었습니다. Enter를 누르는 중…`);
+    const press = (c2) => {
+      const again = pickPo();
+      if (!again.term && /질문 중/.test(again.why ?? "")) { restore(); this.say(c2, `PO(${p.label})가 그 사이 질문 중이 되어 Enter를 누르지 않았습니다. 글은 입력칸에 붙어 있습니다.`, true); return; }
+      let r;
+      try { r = hc(["keys", p.addr, "enter"]); } catch (err) { restore(); this.say(c2, `PO에 글은 넣었지만 Enter를 누르지 못했습니다: ${short(err)}`, true); return; }
+      Promise.resolve(r).then((o) => {
+        if (o && o.code !== 0) this.say(c2, `PO에 글은 넣었지만 Enter를 누르지 못했습니다(${cut(String(o.stderr ?? "").trim(), 80)}). PO 칸에서 Enter를 누르세요.`, true);
+        else this.say(c2, `PO(${p.label})에게 보냈습니다.`);
+      }).catch((err) => this.say(c2, `PO에 글은 넣었지만 Enter를 누르지 못했습니다: ${short(err)}`, true)).then(restore);
+    };
+    const after = PASTE_SETTLE_MS + Math.min(600, Math.floor(a.text.length / 2));
+    try { cx.timer.after(after, press); } catch { press(cx); }
   }
 
   // ---- 그리기 공통
@@ -389,7 +401,7 @@ export default class Memo extends View {
     if (!a) return null;
     const text = a.kind === "delete" ? `‘${this.e?.file ?? ""}’ 파일을 지웁니다. 되돌릴 수 없습니다.`
       : a.kind === "discard" ? "저장하지 않은 변경이 있습니다. 버리고 목록으로 갈까요?"
-      : `PO(${a.label})에게 이 메모를 보냅니다. 메모 제목·본문·파일 경로가 그 터미널에 입력되어 전송됩니다.`;
+      : `PO(${a.label})에게 이 메모를 내가 친 입력처럼 붙여 넣고 Enter까지 누릅니다. 메모 제목·본문·파일 경로가 그 터미널에 전송됩니다.`;
     const ok = a.kind === "delete" ? this.button(t, "mm-ask-ok", "지우기", (cx) => this.remove(cx), { danger: true, disabled: this.working })
       : a.kind === "discard" ? this.button(t, "mm-ask-ok", "버리고 나가기", (cx) => { this.e = null; this.screen = "list"; this.ask = null; this.reload(cx); }, { danger: true })
       : this.button(t, "mm-ask-ok", "보내기", (cx) => this.sendPo(cx), { primary: true, disabled: this.working });
