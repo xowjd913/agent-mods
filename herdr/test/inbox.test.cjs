@@ -878,7 +878,12 @@ test("collect: po/<id>.jsonl을 PO별로 읽고, 옛 po.jsonl과 잘못된 파�
   assert.deepEqual(d.po.devnotes.map((x) => [x.text, x.to]), [["안녕하세요", "here"]]);
   assert.deepEqual(d.po.mascoz.map((x) => x.text), ["마스코즈"]);
   assert.deepEqual(I.readPo(dir), d.po);
-  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, dir: path.join(dir, "none"), root: I.appRoot(), leaders: [], po: {}, solo: {}, soloOn: false, imgd: {}, cost: {}, names: I.plainNames(), profileError: "" });
+  // `at` is the clock at the call (collect has no injected clock): it is checked as a valid ISO time near now, never compared with a second call (1 ms apart failed Windows CI, #147).
+  const none = I.collect(path.join(dir, "none"));
+  const { at, ...rest } = none;
+  assert.match(at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  assert.ok(Math.abs(Date.parse(at) - Date.now()) < 60 * 1000, "at is the current time");
+  assert.deepEqual(rest, { dir: path.join(dir, "none"), root: I.appRoot(), leaders: [], po: {}, solo: {}, soloOn: false, imgd: {}, cost: {}, names: I.plainNames(), profileError: "" });
 });
 
 test("chat 블록: main.js가 inbox.cjs와 한 글자도 다르지 않은 같은 블록을 쓴다", () => {
