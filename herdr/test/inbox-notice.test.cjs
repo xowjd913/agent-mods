@@ -100,3 +100,35 @@ test("hcSame: 감싸개·[이름] 머리표·대소문자·공백을 무시하�
   assert.equal(I.hcSame("네", it), false); // 너무 짧은 글은 겹침으로 치지 않는다
   assert.equal(I.hcSame("설치 완료", { title: "", head: "", lead: "" }), false);
 });
+
+test("noticeText: 본문 첫 줄을 대신 쓸 때 마크다운 기호(#, -, 1., >, **, `)를 벗긴다 (#147)", () => {
+  const T = (body) => I.noticeText("x", "재개", { title: "[x] 재개", body });
+  assert.equal(T("## 제목\n둘째"), "x · 재개 · 제목");
+  assert.equal(T("- 항목\n둘째"), "x · 재개 · 항목");
+  assert.equal(T("* 항목"), "x · 재개 · 항목");
+  assert.equal(T("1. 첫째\n2. 둘째"), "x · 재개 · 첫째");
+  assert.equal(T("> 인용"), "x · 재개 · 인용");
+  assert.equal(T("> - 인용 속 항목"), "x · 재개 · 인용 속 항목");
+  assert.equal(T("**굵게** 그리고 `코드`"), "x · 재개 · 굵게 그리고 코드");
+  assert.equal(T("### **굵은 제목**"), "x · 재개 · 굵은 제목");
+  assert.equal(T("---\n```\n## 진짜 첫 줄"), "x · 재개 · 진짜 첫 줄", "marker-only lines are skipped");
+  assert.equal(T("##\n   \n- "), "x · 재개", "only markers -> no headline");
+  assert.equal(T("2026-11-27 정리"), "x · 재개 · 2026-11-27 정리", "a dash or digit inside the text is kept");
+  assert.equal(T("#태그 그대로"), "x · 재개 · #태그 그대로", "# without a space is text");
+  assert.equal(T("snake_case와 a*b"), "x · 재개 · snake_case와 a*b");
+  // nothing is taken off mid-line unless it is a pair around text (#147 review)
+  assert.equal(T("__init__ 수정"), "x · 재개 · __init__ 수정");
+  assert.equal(T("a ** b 계산"), "x · 재개 · a ** b 계산");
+  assert.equal(T(">= 5 이면"), "x · 재개 · >= 5 이면");
+  assert.equal(T("**a** and **b** 끝"), "x · 재개 · a and b 끝");
+  assert.equal(T("`x` 와 ` y ` 와 `"), "x · 재개 · x 와 ` y ` 와 `");
+  assert.equal(T("```js\n## 코드 안 제목"), "x · 재개 · 코드 안 제목", "a fence line is skipped whole, not shown as 'js'");
+  assert.equal(T(">> 겹친 인용"), "x · 재개 · 겹친 인용");
+});
+
+test("noticeText: 머리글이 있으면 그대로 쓰고(마크다운 손대지 않음), inbox.cjs와 main.js의 noticeText 본문은 같다", () => {
+  assert.equal(I.noticeText("x", "완료", { title: "[x] **굵은** 제목", body: "## 본문" }), "x · 완료 · **굵은** 제목");
+  const fs = require("node:fs"), path = require("node:path");
+  const pick = (f) => { const s = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", f), "utf8"); const a = s.indexOf("const noticePlain"); return s.slice(a, s.indexOf("\n};\n", s.indexOf("const noticeText", a)) + 4); };
+  assert.equal(pick("main.js"), pick("inbox.cjs"));
+});
