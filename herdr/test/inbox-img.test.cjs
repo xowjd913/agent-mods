@@ -1,6 +1,7 @@
 // Tests of the picture, bubble-size, scroll-pin and selection rules (PO desk, #36/#37). The visual results (how wide a bubble really draws,
 // whether a drag-select survives in the real app, whether image() takes an absolute path) cannot be tested here; these cover the rules
 // behind them and the shape of the code that uses them.
+require("./helpers/po-home.cjs"); // a PO machine: a profile without `preset` is "po" (see the helper)
 const test = require("node:test");
 const POSIX = process.platform !== "win32"; // Windows has no POSIX file modes: only the mode asserts are skipped there
 const assert = require("node:assert/strict");
