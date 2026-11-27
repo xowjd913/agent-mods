@@ -1339,6 +1339,24 @@ function restartSendBlock(term) {
   if (term.status === "working") return "PO가 일하는 중입니다";
   return "";
 }
+// #133: Esc in the chat box stops the PO's running turn (the way Esc does in its terminal). One Esc only: a second one in a row opens Claude Code's rewind menu,
+// so a press locks the key and the button for STOP_LOCK_MS. Why no Esc goes out now ("" when one can): the terminal must be known, running and working.
+const STOP_LOCK_MS = 2500;
+function stopBlock(term) {
+  if (!term) return "PO 터미널의 상태를 읽지 못해 Esc를 보내지 않았습니다";
+  if (!term.live) return "PO 터미널이 실행 중이 아니라 Esc를 보내지 않았습니다";
+  if (term.status === "blocked") return "PO가 질문 중이라 Esc를 보내지 않았습니다(질문 카드의 Esc를 쓰세요)";
+  if (term.status !== "working") return "PO가 일하는 중이 아니라 Esc를 보내지 않았습니다";
+  return "";
+}
+const stopLocked = (at, now) => Number(at) > 0 && Number(now) - Number(at) >= 0 && Number(now) - Number(at) < STOP_LOCK_MS;
+// Is the Esc key of the chat box a stop? Only with no menu open, an empty box (text is never touched), the room's PO working now and no press just before.
+const stopKey = (key, o) => String(key ?? "").toLowerCase() === "escape" && !o.menu && !String(o.text ?? "").trim() && Boolean(o.working) && !stopLocked(o.at, o.now);
+// The room's PO terminal is working right now (its own hc status), from the live terminals: false for "PO 모름" and for no PO.
+function stopWorking(terms, pick) {
+  const po = pick && pick !== PO_OTHER ? chatTarget(terms, [], pick).po : null;
+  return Boolean(po) && String((terms ?? []).find((t) => t?.address === po)?.status ?? "").trim().toLowerCase() === "working";
+}
 // After `/clear` was sent (`sent` = the turn counter it reported, i.e. from before the command): "wait" while the PO still works or is on a prompt, or the counter
 // has not gone up, "done" once the PO is idle/done and the counter is higher (/clear counts as one turn), "gone" when the terminal is not running any more.
 // `done` counts too: herdr turns a "done" PO "idle" only once someone looks at its pane. That the line sent was really "/clear" is proven by restartClearCheck.
@@ -1604,6 +1622,7 @@ export default class Inbox extends View {
     this.nlAt = 0; // the last Shift+Enter handled (ms)
     this.core = ""; // the box text without trailing line breaks, as of the last change
     this.lastValue = ""; // #83: the box text as of the last change (a line break the widget put at the cursor is found against it)
+    this.stopAt = 0; // #133: when the last Esc stop went out (ms), for the lock
     this.enterAt = 0; // #83: the last plain Enter (key or submit event) in the chat box (ms)
     this.brk = null; // #83: {idx, at, core, editAt}: the line break the widget last put in the text, and the edit state before it
     this.editAt = 0; // the last time that text changed (ms); the IME hold reads this, not changedAt
@@ -3295,10 +3314,35 @@ export default class Inbox extends View {
   inputKey(e, c) {
     this.keyAt = Date.now();
     if (this.menu) { this.menuKey(e, c); return; }
+    if (String(e?.key ?? "").toLowerCase() === "escape") { // #133: Esc with an empty box stops the PO's running turn
+      const v = this.view();
+      let text = ""; try { text = this.chat.value(); } catch {}
+      if (stopKey(e?.key, { menu: false, text, working: stopWorking(v.terms, v.pick), at: this.stopAt, now: Date.now() })) { try { c.stop_propagation(); } catch {} this.stopPo(c); }
+      return;
+    }
     const intent = enterIntent(e?.key, Boolean(e?.modifiers?.shift));
     if (!intent) return;
     if (intent === "send") { try { c.stop_propagation(); } catch {} }
     this.enterBox(intent, c);
+  }
+
+  // #133: one Esc to the room's PO terminal, only after its status is read again and is "working" (never when it cannot be read, is not working or is on a prompt: a short
+  // note says why). The lock is taken before the first await, so a double press or a click on top of a key press sends one Esc; a refusal gives it back.
+  async stopPo(c) {
+    const now = Date.now();
+    if (stopLocked(this.stopAt, now)) return;
+    const v = this.view();
+    const po = v.pick === PO_OTHER ? null : chatTarget(v.terms, [], v.pick).po;
+    const say = (text, bad = false) => { this.say(text, bad); try { c.notify(); } catch {} };
+    if (!po) { say("멈출 PO를 찾지 못했습니다.", true); return; }
+    this.stopAt = now;
+    const term = await this.poTerm(po);
+    const why = stopBlock(term);
+    if (why) { this.stopAt = 0; say(why, true); return; }
+    let k = null; try { k = await hc(["keys", po, "esc"]); } catch {}
+    const ok = Boolean(k && k.code === 0);
+    if (!ok) this.stopAt = 0;
+    say(ok ? `PO(${po})에 Esc를 보냈습니다. 멈추는 데 잠시 걸릴 수 있습니다.` : `PO(${po})에 Esc를 보내지 못했습니다.`, !ok);
   }
 
   // Keys the open menu handles stop here, so they do not also move the cursor, the focus or close the window.
@@ -3473,7 +3517,9 @@ export default class Inbox extends View {
       .on_key_down((e, c) => this.inputKey(e, c))
       .when(Boolean(menu), (el) => el.child(menu))
       .when(holdShown(this.changedAt, this.heldAt), (el) => el.child(div().text_size(fz(11)).text_color(t.working).child("한 번 더 Enter로 보냅니다")))
-      .child(div().id("chat-target").truncate().text_size(fz(10.5)).text_color(t.dim).child(none ? "PO를 알 수 없는 방이라 여기서는 보낼 곳이 없습니다 — 왼쪽에서 PO 방을 고르세요(쓰던 글은 그대로 있습니다)" : target ? `받는 PO: ${target.label}` : ghost ? "PO 터미널을 다시 찾는 중입니다 — 쓰던 글은 그대로 있습니다" : "받는 PO가 없습니다 — PO를 고르세요"))
+      .child(h_flex().id("chat-head").min_w(0).gap(8).items_center()
+        .child(div().id("chat-target").flex_1().min_w(0).truncate().text_size(fz(10.5)).text_color(t.dim).child(none ? "PO를 알 수 없는 방이라 여기서는 보낼 곳이 없습니다 — 왼쪽에서 PO 방을 고르세요(쓰던 글은 그대로 있습니다)" : target ? `받는 PO: ${target.label}` : ghost ? "PO 터미널을 다시 찾는 중입니다 — 쓰던 글은 그대로 있습니다" : "받는 PO가 없습니다 — PO를 고르세요"))
+        .when(stopWorking(v.terms, v.pick), (el) => el.child(this.button(t, "chat-stop", "멈추기", (c) => this.stopPo(c), { tip: "PO의 지금 작업을 멈춥니다(터미널에서 Esc를 누르는 것과 같습니다). 입력칸이 비어 있을 때 Esc 키로도 됩니다" }))))
       .when(this.pics.length > 0 || this.picBusy > 0, (el) => el.child(this.picRow(t, null)))
       .child(h_flex().id("chat-row").gap(6).items_center()
         .on_drop((ev, c) => this.dropPics(ev?.paths, c))
