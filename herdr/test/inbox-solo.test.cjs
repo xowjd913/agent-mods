@@ -1,5 +1,6 @@
 // #90 solo mode, part 1: the enable flag, the solo/<terminal id>.jsonl file, the hook writing it, and `install.cjs hook --solo`.
 // The desk does not read any of this yet (the screen is unchanged), so there is nothing visual here.
+require("./helpers/po-home.cjs"); // a PO machine: a profile without `preset` is "po" (see the helper)
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
