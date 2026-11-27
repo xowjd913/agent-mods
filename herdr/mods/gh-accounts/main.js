@@ -16,6 +16,7 @@ const CAPP = () => `${appHome()}/mods/gh-accounts/claude-account.cjs`;
 const ICON = (name) => `mods/workspace-chrome/${name}.svg`;
 const TIMEOUT = 30000, TEST_TIMEOUT = 60000, REFRESH_MS = 60000, LOGIN_POLL_MS = 2000;
 const NONE = "-none-";
+const INSET_R = 24; // 내용의 오른쪽 여백(px). settings/main.js 의 INSET_R 과 같은 값(스크롤바에 컨트롤이 붙지 않게)
 const PATTERN = /^([A-Za-z0-9_-]+)\/(\*|[A-Za-z0-9_.-]+)$/;
 const REPO = /^[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+$/;
 const RUNNING = new Set(["starting", "waiting"]);
@@ -560,11 +561,11 @@ export default class Accounts extends View {
     const out = [];
     const canAct = Boolean(this.cl);
     out.push(this.heading(t, "Claude 계정", false, "새로 여는 세션이 쓸 Claude 계정을 고릅니다. 지금 돌고 있는 세션은 그대로이고, 새로 여는 세션부터 적용됩니다. 한도가 차도 저절로 바꾸지 않습니다.",
-      this.button(t, "cl-add", "계정 추가…", (cx) => { this.clAsk = true; cx.notify(); }, { disabled: !canAct || this.clAsk || Boolean(this.clLogin) || isWin() })));
+      this.button(t, "cl-add", this.clLogin ? "로그인 중…" : this.clAsk ? "추가 중…" : "계정 추가…", (cx) => this.openClaudeAdd(cx), { disabled: !canAct || this.clAsk || Boolean(this.clLogin) || isWin() })));
     if (isWin()) out.push(div().px(8).text_size(11.5).text_color(t.idle ?? t.dim).child(CL_WIN_NOTE));
     if (this.clMissing) { out.push(div().px(8).text_size(11.5).text_color(t.idle ?? t.dim).child(MISSING_HINT.replace("gh-account.cjs", "claude-account.cjs"))); return out; }
     if (!this.cl) { out.push(div().px(8).text_size(11.5).text_color(t.dim).child("불러오는 중…")); return out; }
-    for (const a of this.cl.accounts) out.push(this.claudeRow(t, a, canAct));
+    // 진행 중인 카드(확인·로그인·이름 입력)는 제목 바로 아래에 둔다. 계정 줄 뒤(목록 맨 끝)에 두면 스크롤 밖으로 밀려 눌러도 아무것도 안 뜬 것처럼 보인다(#126).
     if (this.clConfirm) out.push(this.claudeConfirmCard(t));
     if (this.clLogin) out.push(this.claudeLoginCard(t));
     else if (this.clAsk) {
@@ -576,7 +577,15 @@ export default class Accounts extends View {
           .child(this.button(t, "cl-add-go", "시작", (cx) => this.addClaude(cx), { primary: true }))
           .child(this.button(t, "cl-add-no", "취소", (cx) => { this.clAsk = false; cx.notify(); }))));
     }
+    for (const a of this.cl.accounts) out.push(this.claudeRow(t, a, canAct));
     return out;
+  }
+
+  // 계정 추가… 를 누르면 이름 칸을 열고(제목 바로 아래에 그려진다) 그 칸에 글자 입력을 맞춘다.
+  openClaudeAdd(cx) {
+    this.clAsk = true;
+    cx.notify();
+    try { cx.timer.after(50, () => { try { this.clInput.focus(); } catch {} }); } catch {}
   }
 
   // ---- 공통 그리기 ----
@@ -809,6 +818,6 @@ export default class Accounts extends View {
       .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
       .when(Boolean(this.note), (el) => el.child(div().px(14).pb(6).text_size(11).text_color(this.note.bad ? t.blocked : t.muted).max_h(64).overflow_hidden().child(this.note.text)))
       .when(!d && !this.error && !this.missing, (el) => el.child(div().px(14).text_size(12).text_color(t.dim).child("불러오는 중…")))
-      .child(v_flex().id("acct-list").flex_1().min_h(0).px(4).overflow_y_scrollbar().mode("always").children(body));
+      .child(v_flex().id("acct-list").flex_1().min_h(0).pl(4).pr(INSET_R - 8).overflow_y_scrollbar().mode("always").children(body));
   }
 }

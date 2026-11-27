@@ -31,6 +31,9 @@ const settingsWindow = (section) => {
 };
 // settings-window:end
 
+// 내용의 오른쪽 여백(px). 스크롤바(맨 오른쪽에 겹쳐 그려진다)에 드롭다운·× 버튼·추가 버튼이 붙지 않게 모든 칸이 같은 값을 쓴다. gh-accounts 는 같은 값을 따로 갖는다(테스트가 같은지 본다).
+const INSET_R = 24;
+
 // 칸 목록. soon은 아직 없는 칸(켜지 않는다), issue는 그 칸이 기다리는 이슈다.
 const SECTIONS = [
   { id: "accounts", label: "계정", hint: "GitHub 계정(저장소별)과 Claude 계정" },
@@ -323,11 +326,11 @@ export default class Settings extends View {
         .child(div().text_size(15).font_semibold().text_color(t.foreground).child("모드"))
         .child(div().id("mods-refresh").p(3).rounded(5).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
           .on_click((_e, cx) => { this.installed = null; this.load(cx); cx.notify(); }).tooltip("새로고침").child(div().text_size(14).child("↻"))))
-      .child(div().px(14).pb(8).text_size(12).text_color(t.dim)
+      .child(div().pl(14).pr(INSET_R).pb(8).text_size(12).text_color(t.dim)
         .child("모드를 여기서 바로 설치·제거합니다(README의 설치 한 줄과 같은 설치기를 돌립니다). 바꾼 뒤에는 Herdr를 다시 시작하세요."))
-      .child(div().id("mods-source").px(14).pb(8).text_size(11).text_color(t.muted).child(this.sourceLine()))
-      .when(Boolean(this.note), (el) => el.child(div().px(14).pb(6).text_size(11).text_color(t.muted).max_h(40).overflow_hidden().child(this.note)))
-      .child(v_flex().id("mods-list").flex_1().min_h(0).px(10).pb(10).gap(6).overflow_y_scrollbar().mode("always").children(MODS.map((m) => this.modRow(t, m))));
+      .child(div().id("mods-source").pl(14).pr(INSET_R).pb(8).text_size(11).text_color(t.muted).child(this.sourceLine()))
+      .when(Boolean(this.note), (el) => el.child(div().pl(14).pr(INSET_R).pb(6).text_size(11).text_color(t.muted).max_h(40).overflow_hidden().child(this.note)))
+      .child(v_flex().id("mods-list").flex_1().min_h(0).pl(10).pr(INSET_R).pb(10).gap(6).overflow_y_scrollbar().mode("always").children(MODS.map((m) => this.modRow(t, m))));
   }
 
   // ---- 규칙 칸 ----
@@ -428,22 +431,22 @@ export default class Settings extends View {
       .child(div().text_size(15).font_semibold().text_color(t.foreground).child("규칙"))
       .child(div().id("rules-refresh").p(3).rounded(5).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
         .on_click((_e, cx) => { this.rules = null; this.loadRules(cx); cx.notify(); }).tooltip("새로고침").child(div().text_size(14).child("↻")));
-    const intro = div().px(14).pb(8).text_size(12).text_color(t.dim)
+    const intro = div().pl(14).pr(INSET_R).pb(8).text_size(12).text_color(t.dim)
       .child("리더·PO 보고를 알아보는 이름 규칙입니다. PO 규칙이 없는 사람은 \"규칙 없음\"으로 두고, 자기 규칙이 있으면 아래에서 맞추세요. 프로필 파일(profile.json)에 저장합니다.");
     if (!r) {
       return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13).child(head).child(intro)
-        .child(div().px(14).text_size(12).text_color(this.rulesNote ? t.blocked : t.muted).child(this.rulesNote?.text ?? "프로필을 읽는 중…"));
+        .child(div().pl(14).pr(INSET_R).text_size(12).text_color(this.rulesNote ? t.blocked : t.muted).child(this.rulesNote?.text ?? "프로필을 읽는 중…"));
     }
-    const status = v_flex().id("rules-status").mx(14).mb(8).px(10).py(8).gap(3).rounded(6).bg(t.chrome).border_1().border_color(t.border)
+    const status = v_flex().id("rules-status").ml(14).mr(INSET_R).mb(8).px(10).py(8).gap(3).rounded(6).bg(t.chrome).border_1().border_color(t.border)
       .child(div().text_size(12).text_color(t.foreground).child(r.broken ? "프로필 파일을 읽을 수 없습니다" : `지금 쓰는 규칙: ${r.preset === "none" ? "규칙 없음" : "PO 규칙"}`))
       .child(div().text_size(11).text_color(t.muted).child(`프로필 파일: ${r.file}${r.source === "env" ? " (HERDR_INBOX_PROFILE)" : ""} · ${r.exists ? "있음" : "없음"}${r.backup ? " · 백업(.bak) 있음" : ""}`))
       .when(Boolean(r.why) && !r.broken, (el) => el.child(div().text_size(11).text_color(t.muted).child(`이유: ${RULE_WHY[r.why] ?? r.why}`)))
       .when(Boolean(r.error), (el) => el.child(div().text_size(11).text_color(t.blocked).child(r.error)));
-    const note = this.rulesNote ? div().px(14).pb(8).text_size(11).text_color(this.rulesNote.ok ? t.working : t.blocked).child(this.rulesNote.text) : null;
-    const busyLine = busy && !this.rulesRunning ? div().px(14).pb(8).text_size(11).text_color(t.dim).child(busyText(busy)) : null;
+    const note = this.rulesNote ? div().pl(14).pr(INSET_R).pb(8).text_size(11).text_color(this.rulesNote.ok ? t.working : t.blocked).child(this.rulesNote.text) : null;
+    const busyLine = busy && !this.rulesRunning ? div().pl(14).pr(INSET_R).pb(8).text_size(11).text_color(t.dim).child(busyText(busy)) : null;
     if (r.broken) { // 읽을 수 없는 파일은 되돌리기만 된다(덮어써서 망가뜨리지 않는다)
       return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13).child(head).child(intro).child(status)
-        .child(h_flex().px(14).pb(8).gap(8).items_center().flex_wrap()
+        .child(h_flex().pl(14).pr(INSET_R).pb(8).gap(8).items_center().flex_wrap()
           .child(div().text_size(11).text_color(t.muted).child("파일을 고친 뒤 새로고침하거나, 기본값으로 되돌리면 이 파일을 .bak 으로 옮깁니다."))
           .child(this.rulesAsk
             ? h_flex().gap(6).items_center().child(div().text_size(11).text_color(t.muted).child("되돌릴까요?"))
@@ -452,7 +455,7 @@ export default class Settings extends View {
             : btn("rules-reset", "기본값으로 되돌리기", (cx) => { this.rulesAsk = true; cx.notify(); })))
         .when(Boolean(note), (el) => el.child(note)).when(Boolean(busyLine), (el) => el.child(busyLine));
     }
-    const presetRow = h_flex().id("rules-presets").px(14).pb(8).gap(8).items_center().flex_wrap()
+    const presetRow = h_flex().id("rules-presets").pl(14).pr(INSET_R).pb(8).gap(8).items_center().flex_wrap()
       .children(RULE_PRESETS.map((p) => {
         const on = this.preset === p.id;
         const el = div().id(`rules-preset-${p.id}`).h(26).px(10).rounded(6).flex().items_center().text_size(12).border_1()
@@ -461,18 +464,18 @@ export default class Settings extends View {
         return el.cursor_pointer().hover((x) => x.bg(t.hover)).on_click((_e, cx) => this.pickPreset(p.id, cx)).child(p.label);
       }));
     const presetHint = RULE_PRESETS.find((p) => p.id === this.preset)?.hint ?? "";
-    const form = v_flex().id("rules-form").flex_1().min_h(0).px(14).pb(10).gap(8).overflow_y_scrollbar().mode("always")
+    const form = v_flex().id("rules-form").flex_1().min_h(0).pl(14).pr(INSET_R).pb(10).gap(8).overflow_y_scrollbar().mode("always")
       .children(RULE_FIELDS.map((f) => v_flex().id(`rules-field-${f.id}`).gap(3)
         .child(div().text_size(12).text_color(t.foreground).child(f.label))
         .child(this.textInput(t, this.ruleInputs[f.id]))
         .child(div().text_size(11).text_color(t.dim).child(f.id === "arrangeScript" && r.fields?.arrangeScript !== undefined && this.ruleInputs[f.id]?.value?.().trim()
           ? `${f.hint}. ${r.arrangeScriptExists ? "지금 이 경로의 파일이 있습니다" : "지금 이 경로의 파일은 없습니다"}` : f.hint))));
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13).child(head).child(intro).child(status)
-      .child(div().px(14).pb(4).text_size(12).text_color(t.foreground).child("규칙 고르기"))
+      .child(div().pl(14).pr(INSET_R).pb(4).text_size(12).text_color(t.foreground).child("규칙 고르기"))
       .child(presetRow)
-      .child(div().px(14).pb(8).text_size(11).text_color(t.dim).child(`${presetHint}. 바꾸면 아래 칸이 그 규칙의 기본값으로 채워집니다. 기본값과 같은 칸은 파일에 적지 않습니다.`))
+      .child(div().pl(14).pr(INSET_R).pb(8).text_size(11).text_color(t.dim).child(`${presetHint}. 바꾸면 아래 칸이 그 규칙의 기본값으로 채워집니다. 기본값과 같은 칸은 파일에 적지 않습니다.`))
       .child(form)
-      .child(h_flex().px(14).py(8).gap(8).items_center().flex_wrap().flex_none()
+      .child(h_flex().pl(14).pr(INSET_R).py(8).gap(8).items_center().flex_wrap().flex_none()
         .child(btn("rules-save", this.rulesRunning ? "저장하는 중…" : "저장", (cx) => this.saveRules(cx), "primary"))
         .child(this.rulesAsk
           ? h_flex().gap(6).items_center().child(div().text_size(11).text_color(t.muted).child("프로필 파일을 .bak 으로 옮길까요?"))
@@ -498,23 +501,23 @@ export default class Settings extends View {
       return el.cursor_pointer().text_color(t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => this.setFont(over + d, cx)).child(label);
     };
     const head = h_flex().h(38).px(14).flex_none().items_center().child(div().text_size(15).font_semibold().text_color(t.foreground).child("UI 모드 글자 크기"));
-    const intro = div().px(14).pb(8).text_size(12).text_color(t.dim)
+    const intro = div().pl(14).pr(INSET_R).pb(8).text_size(12).text_color(t.dim)
       .child("UI 모드(리더 결과 보고 패널)의 글자 크기입니다. 기본은 Herdr 글자 크기를 따라가고, 따로 정하면 Herdr 글자 크기와 상관없이 그 크기로 보입니다.");
-    const status = v_flex().id("font-status").mx(14).mb(8).px(10).py(8).gap(3).rounded(6).bg(t.chrome).border_1().border_color(t.border)
+    const status = v_flex().id("font-status").ml(14).mr(INSET_R).mb(8).px(10).py(8).gap(3).rounded(6).bg(t.chrome).border_1().border_color(t.border)
       .child(div().text_size(12).text_color(t.foreground).child(`UI 모드 글자 크기: ${px}px (${over === null ? "Herdr 글자 크기를 따르는 중" : "직접 정한 크기"})`))
       .child(div().text_size(11).text_color(t.muted).child(`지금 Herdr 글자 크기: ${herdr === null ? "알 수 없음" : `${herdr}px`}`));
-    const modes = h_flex().id("font-modes").px(14).pb(8).gap(8).items_center().flex_wrap()
+    const modes = h_flex().id("font-modes").pl(14).pr(INSET_R).pb(8).gap(8).items_center().flex_wrap()
       .child(pill("font-follow", "Herdr 글자 크기 따르기", over === null, (cx) => this.setFont(null, cx), "UI 모드가 Herdr 글자 크기를 그대로 따릅니다(기본)"))
       .child(pill("font-fixed", "UI 모드만 따로 정하기", over !== null, (cx) => this.setFont(over ?? Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(px))), cx), `Herdr 글자 크기와 상관없이 ${FONT_MIN}~${FONT_MAX}px로 정합니다`));
-    const stepper = over === null ? null : h_flex().id("font-stepper").px(14).pb(8).gap(8).items_center()
+    const stepper = over === null ? null : h_flex().id("font-stepper").pl(14).pr(INSET_R).pb(8).gap(8).items_center()
       .child(step("font-minus", "−", -1, over > FONT_MIN))
       .child(div().id("font-value").min_w(56).flex().justify_center().text_size(13).text_color(t.foreground).child(`${over}px`))
       .child(step("font-plus", "+", 1, over < FONT_MAX))
       .child(div().text_size(11).text_color(t.dim).child(`${FONT_MIN}~${FONT_MAX}px`));
-    const sample = v_flex().id("font-sample").mx(14).mb(8).px(10).py(10).gap(4).rounded(6).bg(t.raised).border_1().border_color(t.border)
+    const sample = v_flex().id("font-sample").ml(14).mr(INSET_R).mb(8).px(10).py(10).gap(4).rounded(6).bg(t.raised).border_1().border_color(t.border)
       .child(div().text_size(11).text_color(t.dim).child(`미리보기 (${px}px)`))
       .child(div().text_size(px).text_color(t.foreground).child(FONT_SAMPLE));
-    const note = div().px(14).pb(8).text_size(11).text_color(t.dim)
+    const note = div().pl(14).pr(INSET_R).pb(8).text_size(11).text_color(t.dim)
       .child("고르면 바로 적용됩니다. 열려 있는 UI 모드는 몇 초 안에 바뀌고 다시 시작할 필요가 없습니다. 값은 Herdr가 저장해 다시 시작해도 남습니다. 이 크기는 UI 모드에만 적용되고 Herdr 자체 글자 크기는 바뀌지 않습니다.");
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13).child(head).child(intro).child(status).child(modes)
       .when(Boolean(stepper), (el) => el.child(stepper)).child(sample).child(note);

@@ -14,6 +14,7 @@ const stub = "const h = () => globalThis.__herdr;" +
   "  if (k === 'when') { if (a[0]) a[1](p); return p; }" +
   "  if (k === 'id') id = a[0];" +
   "  if (k === 'on_click' && id) h().clicks[id] = a[0];" +
+  "  if ((k === 'pr' || k === 'mr') && id) h().pr[id] = a[0];" +
   "  if (k === 'child' || k === 'children') h().texts.push(...[].concat(a[0]).filter((x) => typeof x === 'string'));" +
   "  return p; } }); return p; };" +
   "export const View = class {}; export const div = el; export const svg = el; export const v_flex = el; export const h_flex = el;" +
@@ -42,7 +43,7 @@ const SRC = { settings: fs.readFileSync(new URL("../mods/settings/main.js", impo
 const block = (s) => s.match(/\/\/ settings-window:begin\n[\s\S]*?\/\/ settings-window:end/)?.[0];
 
 function fake(over = {}) {
-  globalThis.__herdr = { props: {}, shared: {}, opened: [], closed: [], clicks: {}, texts: [], files: {}, execs: [], ...over };
+  globalThis.__herdr = { props: {}, shared: {}, opened: [], closed: [], clicks: {}, texts: [], pr: {}, files: {}, execs: [], ...over };
   return globalThis.__herdr;
 }
 const cx = () => { const c = { notified: 0, clip: [], timers: [], notify() { this.notified++; }, write_to_clipboard(t) { this.clip.push(t); }, stop_propagation() {} }; c.timer = { every: (ms, fn) => c.timers.push({ ms, fn }) }; return c; };
@@ -571,4 +572,20 @@ test("글자 크기 규칙은 inbox와 같다(FONT_BASE·키·범위·fontOverri
   const b = cut(inbox).split("\n").filter((l) => !l.startsWith("//")).join("\n");
   assert.ok(a.includes("fontOverride") && a.includes("FONT_KEY"));
   assert.equal(a, b);
+});
+
+test("오른쪽 여백: 모드·규칙·글자 크기 칸의 목록·폼·줄이 같은 오른쪽 여백(INSET_R)을 쓰고, 계정 칸(gh-accounts)도 컨트롤이 같은 거리에 놓인다(#126)", async () => {
+  const inset = Number(SRC.settings.match(/^const INSET_R = (\d+);/m)?.[1]);
+  assert.ok(inset >= 20, "스크롤바에 붙지 않을 만큼의 여백");
+  const ghSrc = fs.readFileSync(new URL("../mods/gh-accounts/main.js", import.meta.url), "utf8");
+  assert.equal(Number(ghSrc.match(/^const INSET_R = (\d+);/m)?.[1]), inset, "gh-accounts 의 값이 같다");
+  assert.match(ghSrc, /id\("acct-list"\)[^\n]*\.pr\(INSET_R - 8\)/, "계정 목록: 줄 안쪽 8 + 목록 오른쪽 = INSET_R");
+  const seen = (part, ids) => { const { h } = make(part, {}, { settings: {} }); for (const id of ids) assert.equal(h.pr[id], inset, `${part}/${id}`); };
+  seen("mods", ["mods-list", "mods-source"]);
+  const rv = await rulesView(null);
+  for (const id of ["rules-status", "rules-presets", "rules-form"]) assert.equal(rv.h.pr[id], inset, `rules/${id}`);
+  seen("fontsize", ["font-status", "font-modes", "font-sample"]);
+  // 본문 칸(스크롤 목록 밖 한 줄짜리)에 14 로 굳은 좌우 여백이 남아 있지 않다.
+  const body = SRC.settings.slice(SRC.settings.indexOf("modsBody(t) {"), SRC.settings.indexOf("  render(cx) {"));
+  assert.equal([...body.matchAll(/\.px\(14\)/g)].length, [...body.matchAll(/h\(38\)\.px\(14\)/g)].length, "제목 줄(h(38)) 말고는 px(14)를 쓰지 않는다");
 });
