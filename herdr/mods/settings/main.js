@@ -52,6 +52,31 @@ const MODS = [
   { name: "path-menu", desc: "터미널 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄운다" },
   { name: "inbox", desc: "UI 모드 패널: 리더 결과 보고를 채팅처럼 보고, 결정을 PO에게 답한다" },
 ];
+// install.cjs의 MODS[이름].deps 중 비어 있지 않은 것(테스트가 install.cjs와 같은지 본다). 설치기는 남는 모드가 지우려는 모드를 쓰면 아무것도 지우지 않으므로, 누르기 전에 미리 알린다.
+const DEPS = {
+  "tabs-mine": ["settings"],
+  settings: ["gh-accounts"],
+  work: ["tabs-mine", "wt-menu"],
+  prs: ["work", "tabs-mine", "wt-menu"],
+  schedules: ["tabs-mine"],
+  inbox: ["tabs-mine"],
+};
+// 지울 수 없는 모드와 그 까닭. 설치기는 막지 않지만 지우면 설정 창이나 계정 칸이 깨진다.
+const KEEP = {
+  "tabs-mine": "설정 창을 여는 버튼이 여기 있어서, 지우면 설정 창을 다시 열 길이 없습니다",
+  settings: "지우면 설정 창을 다시 열 길이 없습니다",
+  "gh-accounts": "설정 창의 계정 칸이 쓰는 모드입니다",
+};
+// name이 설치돼 있을 때 그것을 쓰고 있는(함께 설치된 것까지 따라가서) 설치된 모드들. 설치기의 withDeps와 같은 규칙이다.
+const usersOf = (name, installed) => {
+  const need = (m, seen = new Set()) => {
+    for (const d of DEPS[m] ?? []) if (!seen.has(d)) { seen.add(d); need(d, seen); }
+    return seen;
+  };
+  return MODS.map((m) => m.name).filter((m) => m !== name && installed?.[m] === true && need(m).has(name));
+};
+// 설치기가 막았을 때 남기는 "A 이(가) B 을(를) 씁니다." 줄에서 막은 모드 이름들을 꺼낸다(Windows는 막아도 종료 코드가 0이라 출력으로 본다).
+const blockedBy = (r) => [...new Set(`${r.stdout ?? ""}\n${r.stderr ?? ""}`.split("\n").map((l) => l.trim().match(/^(\S+) 이\(가\) .+ 을\(를\) 씁니다\.$/)?.[1]).filter(Boolean))];
 // 설치기 출처. install.cjs가 설치할 때 settings 모드 폴더의 .source.json에 남긴다.
 //   원격(curl|sh, irm): { kind: "remote", ref }  /  저장소 복제본: { kind: "local", dir }  /  기록 없음: 직접 돌리지 않는다(명령 복사만).
 const REPO_RAW = "https://raw.githubusercontent.com/xowjd913/agent-mods";
@@ -183,9 +208,12 @@ export default class Settings extends View {
     let started;
     try { started = Promise.resolve(runInstaller(src, action, name, home)); } catch (e) { started = Promise.reject(e); }
     started.then((r) => {
-      const ok = r.code === 0;
+      const stuck = action === "remove" ? blockedBy(r) : [];
+      const ok = r.code === 0 && !stuck.length;
       const out = lastLine(r);
-      this.result[name] = ok
+      this.result[name] = stuck.length
+        ? { ok: false, text: `이 모드를 쓰는 모드가 있어 아무것도 지우지 않았습니다. ${stuck.join(", ")} 모드를 먼저 지우세요.` }
+        : ok
         ? { ok, text: `${action === "remove" ? "제거했습니다" : "설치했습니다"}. 적용하려면 Herdr를 다시 시작하세요.${out ? ` (${out.slice(0, 90)})` : ""}` }
         : { ok, text: `실패했습니다(${r.code}): ${out.slice(0, 140) || "출력 없음"}` };
     }, (e) => {
@@ -209,9 +237,12 @@ export default class Settings extends View {
     };
     const actions = h_flex().gap(6).items_center().flex_wrap();
     const src = sourceText(this.source);
+    const keep = KEEP[m.name];
+    const users = on && !keep ? usersOf(m.name, this.installed) : [];
     if (busyHere) actions.child(div().text_size(11).text_color(t.muted).child(busy.action === "remove" ? "제거하는 중…" : "설치하는 중…"));
     else if (busy) actions.child(div().text_size(11).text_color(t.dim).child(`${busy.name} ${busy.action === "remove" ? "제거" : "설치"} 중이라 기다립니다`));
-    else if (on && m.core && !ask) actions.child(div().text_size(11).text_color(t.dim).child("기본 모드라 제거하지 않습니다"));
+    else if (on && !ask && keep) actions.child(div().text_size(11).text_color(t.dim).child(`제거할 수 없습니다: ${keep}`));
+    else if (on && !ask && users.length) actions.child(div().text_size(11).text_color(t.dim).child(`${users.join(", ")} 모드를 먼저 지우세요(그 모드가 이 모드를 씁니다)`));
     if (!busy && run) {
       if (ask === "add") {
         actions.child(div().text_size(11).text_color(t.muted).child(`${m.name}을(를) 설치할까요? 설치된 모드 전체를 ${src}에서 다시 복사합니다.`))
@@ -222,7 +253,7 @@ export default class Settings extends View {
           .child(btn("mod-remove-yes", "제거", (cx) => this.run(cx, "remove", m.name), "danger"))
           .child(btn("mod-remove-no", "취소", (cx) => { this.confirm = null; cx.notify(); }));
       } else if (on === false) actions.child(btn("mod-add", "설치", (cx) => { this.confirm = { name: m.name, action: "add" }; cx.notify(); }));
-      else if (on && !m.core) actions.child(btn("mod-remove", "제거", (cx) => { this.confirm = { name: m.name, action: "remove" }; cx.notify(); }));
+      else if (on && !keep && !users.length) actions.child(btn("mod-remove", "제거", (cx) => { this.confirm = { name: m.name, action: "remove" }; cx.notify(); }));
     }
     // 직접 돌리지 못하거나(출처 기록 없음) 돌렸는데 실패했으면 터미널에서 돌릴 한 줄을 복사한다.
     if (on != null && this.source !== undefined && !busy && (!run || (res && !res.ok))) {
