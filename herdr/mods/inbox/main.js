@@ -1504,6 +1504,7 @@ const MSG_TICK_MS = 500; // how often the notice is checked for expiry
 // while the box has the keyboard the file is rewritten every DRAFT_BEAT_MS so its "focus" stays fresh; a copy of the desk that starts within DRAFT_FOCUS_MS
 // (inbox.cjs) of the last write gives the keyboard back to the box, once, in the DRAFT_FOCUS_WAIT_MS after its first draw.
 const DRAFT_TICK_MS = 250, DRAFT_SAVE_MS = 600, DRAFT_WAIT_MS = 3000, DRAFT_BEAT_MS = 10000, DRAFT_FOCUS_WAIT_MS = 5000, DRAFT_NOW = 1;
+const DRAFT_ARG_MAX = 3000; // #147: a snapshot longer than this goes to the helper in pieces of this size (Windows: ~32K per command line, each quote can cost 4 characters)
 const PIN_TICK_MS = 250; // how often the timeline checks that it still sits at the newest
 const LOAD_REDRAW_MS = 25000; // an unchanged load still redraws this often (the "5분 전" clocks)
 
@@ -2065,9 +2066,18 @@ export default class Inbox extends View {
     this.draftWroteAt = now;
     this.draftOwn = !empty;
     this.draftBusy = true;
-    try {
-      Promise.resolve(exec("node", [HELPER(), "draft-write", sig], { timeout: 5000 })).catch(() => {}).then(() => { this.draftBusy = false; });
-    } catch { this.draftBusy = false; }
+    const done = (ok) => { this.draftBusy = false; if (!ok) this.draftSig = ""; }; // a failed write is tried again with the next change
+    try { this.writeDraft(sig).then(done, () => done(false)); } catch { done(false); }
+  }
+  // #147: one `draft-write` for a short snapshot, else `draft-part` calls one after the other (a piece never cuts a surrogate pair). -> true when the helper did not fail.
+  async writeDraft(sig) {
+    const ok = (r) => { if (r?.code !== 0) return false; try { return JSON.parse(r.stdout).r !== "failed"; } catch { return true; } };
+    if (sig.length <= DRAFT_ARG_MAX) return ok(await exec("node", [HELPER(), "draft-write", sig], { timeout: 5000 }));
+    const parts = [];
+    for (let i = 0; i < sig.length;) { let j = Math.min(sig.length, i + DRAFT_ARG_MAX); if (j < sig.length && /[\uD800-\uDBFF]/.test(sig[j - 1])) j--; parts.push(sig.slice(i, j)); i = j; }
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    for (let i = 0; i < parts.length; i++) if (!ok(await exec("node", [HELPER(), "draft-part", id, `${i}/${parts.length}`, parts[i]], { timeout: 5000 }))) return false;
+    return true;
   }
   loadDraft() {
     const done = (j) => { this.draftSaved = j; this.draftLoaded = true; this.applyDraft(); };

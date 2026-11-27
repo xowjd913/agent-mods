@@ -90,8 +90,12 @@ function setup() {
   const clock = { t: 1_000_000 };
   const fakeDate = { now: () => clock.t };
   // The same calls the CLI makes (`inbox.cjs draft-read / draft-write`), but in this process with the fake clock, so ages can be tested.
+  const calls = [];
   const exec = (_cmd, args) => {
+    calls.push(args.slice(1));
     try {
+      // the pieces of a long snapshot go through the REAL command line (its own clock; the file is checked as it lies on disk)
+      if (args[1] === "draft-part") return Promise.resolve({ code: 0, stdout: execFileSync(process.execPath, [HELPER_PATH, ...args.slice(1)], { env, encoding: "utf8" }) });
       if (args[1] === "draft-read") return Promise.resolve({ code: 0, stdout: JSON.stringify(I.chatDraftRead(root, clock.t) ?? { rooms: {}, focus: false }) });
       if (args[1] === "draft-write") { const j = JSON.parse(args[2]); return Promise.resolve({ code: 0, stdout: JSON.stringify({ r: I.chatDraftWrite(I.chatDraftSnap(Object.entries(j.rooms ?? {}), j.focus === true, clock.t), root) }) }); }
     } catch {}
@@ -100,7 +104,7 @@ function setup() {
   const Desk = DeskClass(I.swapDraft, I.editCore, exec, () => HELPER_PATH, fakeDate);
   const file = path.join(root, "data", "inbox", "chat-draft.json");
   const stamp = () => {};
-  return { root, clock, Desk, file, stamp, env };
+  return { root, clock, Desk, file, stamp, env, calls };
 }
 function box(text = "") {
   const h = {};
@@ -365,4 +369,60 @@ test("main.js: init이 focus/blur/change를 듣고 초안을 읽고 틱을 돌�
 test("main.js: 필드 초기화(init)와 이 테스트의 가짜 Desk가 같다", () => {
   const init = grab(MAIN, "  init(_props, cx) {", "    this.load(cx);");
   for (const f of ["chatFocus = false", "draftDue = 0", "draftSince = 0", 'draftSig = ""', "draftWroteAt = 0", "draftBusy = false", "draftOwn = false", "draftLoaded = false", "draftReady = false", "draftSaved = null", "focusWant = 0"]) assert.ok(init.includes(`this.${f};`), f);
+});
+
+// ---- #147: a failed write leaves no .tmp behind; a long quote-heavy snapshot does not travel as one command-line argument
+test("chatDraftWrite: 이름 바꾸기가 실패하면 임시 파일을 지우고 던지지 않는다", () => {
+  const root = tmpRoot();
+  const f = I.chatDraftPath(root);
+  fs.mkdirSync(f, { recursive: true }); // a directory where the file belongs: the rename must fail
+  fs.writeFileSync(path.join(f, "keep"), "x");
+  let r;
+  assert.doesNotThrow(() => { r = I.chatDraftWrite(I.chatDraftSnap([["A", { text: "글" }]], true), root); });
+  assert.equal(r, "failed");
+  assert.deepEqual(fs.readdirSync(path.dirname(f)).filter((n) => n.endsWith(".tmp")), []);
+  // the folder itself cannot be made (a file in its way): also "failed", also no throw
+  const root2 = tmpRoot();
+  fs.writeFileSync(path.join(root2, "data"), "file, not folder");
+  assert.doesNotThrow(() => { r = I.chatDraftWrite(I.chatDraftSnap([["A", { text: "글" }]], true), root2); });
+  assert.equal(r, "failed");
+});
+test("draft-part: 조각을 순서대로 보내면 하나로 이어 쓰고 조각 파일은 남지 않는다", () => {
+  const root = tmpRoot();
+  const env = { ...process.env, HERDR_APP_HOME: root, HOME: root, USERPROFILE: root };
+  const run = (...a) => JSON.parse(execFileSync(process.execPath, [HELPER_PATH, "draft-part", ...a], { env, encoding: "utf8" })).r;
+  const json = JSON.stringify({ rooms: { A: { text: "조각 \"글\"\n둘째 줄", range: { start: 1, end: 1 } } }, focus: true });
+  const cut = [json.slice(0, 20), json.slice(20, 41), json.slice(41)];
+  assert.equal(run("abcdef12", "0/3", cut[0]), "part");
+  assert.equal(run("abcdef12", "1/3", cut[1]), "part");
+  assert.equal(run("abcdef12", "2/3", cut[2]), "written");
+  assert.equal(I.chatDraftRead(root).rooms.A.text, "조각 \"글\"\n둘째 줄");
+  assert.deepEqual(fs.readdirSync(path.join(root, "data", "inbox")).filter((n) => n.endsWith(".part")), []);
+  // bad calls change nothing; a broken earlier try is swept by piece 0
+  assert.equal(run("../evil", "0/1", "{}"), "none");
+  assert.equal(run("abcdef12", "3/3", "x"), "none");
+  assert.equal(run("abcdef12", "0/2", "{\"rooms\":"), "part");
+  assert.equal(run("zzzzzz99", "0/1", JSON.stringify({ rooms: {}, focus: false })), "cleared"); // nothing to keep: the file goes, like draft-write
+  assert.deepEqual(fs.readdirSync(path.join(root, "data", "inbox")).filter((n) => n.endsWith(".part")), []);
+});
+test("긴 초안(따옴표·줄바꿈 가득, 2만 자 남짓)도 명령줄 인자 하나로 보내지 않고 그대로 저장된다", async () => {
+  const s = setup();
+  const d = new s.Desk(box());
+  await start(s, d, "room-a");
+  const text = (tag) => Array.from({ length: 700 }, (_, i) => `"${tag}${i}" said 'x' \\ "q"\n`).join("").slice(0, 6000);
+  const texts = { "room-a": text("a"), "room-b": text("b"), "room-c": text("c") };
+  assert.ok(Object.values(texts).join("").length > 17000 && /"/.test(texts["room-a"]) && /\n/.test(texts["room-a"]));
+  for (const [k, v] of Object.entries(texts)) d.roomDrafts.set(k, { text: v, range: { start: 0, end: 0 } });
+  d.type(texts["room-a"]);
+  s.calls.length = 0;
+  await tick(s, d, 700);
+  await flush(); await flush();
+  const longest = Math.max(...s.calls.map((c) => c.reduce((n, a) => n + a.length, 0)));
+  assert.ok(s.calls.some((c) => c[0] === "draft-part"), "sent in pieces");
+  assert.ok(longest < 4000, `no call carries more than a few K (longest ${longest})`);
+  const saved = JSON.parse(fs.readFileSync(s.file, "utf8"));
+  assert.equal(saved.rooms["room-a"].text, texts["room-a"]);
+  assert.equal(saved.rooms["room-b"]?.text, texts["room-b"]);
+  assert.deepEqual(fs.readdirSync(path.dirname(s.file)).filter((n) => /\.(part|tmp)$/.test(n)), []);
+  assert.equal(d.draftBusy, false);
 });
