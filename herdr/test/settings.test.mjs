@@ -210,6 +210,23 @@ test("종료 코드가 0이어도(Windows 설치기) 막힌 출력이면 제거�
   assert.match(v.result.work.text, /prs 모드를 먼저 지우세요/);
 });
 
+test("종료 코드 0에 한국어 줄이 깨져도 mod.json이 남아 있으면 제거했다고 하지 않는다", async () => {
+  const { h, v, c } = await mods({ execResult: { code: 0, stdout: "?? ??(?) work ??(?) ?????.", stderr: "" } });
+  assert.ok(h.files["/app/mods/work/mod.json"]);
+  v.run(c, "remove", "work");
+  await tick();
+  assert.equal(v.result.work.ok, false);
+  assert.match(v.result.work.text, /^제거되지 않았습니다/);
+});
+
+test("제거할 수 없는 모드와 다른 모드가 쓰는 모드에는 제거 명령 복사 버튼을 주지 않는다", async () => {
+  const { h } = await mods({}, { "/app/mods/settings/mod.json": "{}", "/app/mods/prs/mod.json": "{}" });
+  assert.ok(!h.clicks["mod-copy-tabs-mine"]); // 제거 불가
+  assert.ok(!h.clicks["mod-copy-settings"]); // 제거 불가
+  assert.ok(!h.clicks["mod-copy-work"]); // prs가 씀
+  assert.ok(h.clicks["mod-copy-prs"] && h.clicks["mod-copy-inbox"]);
+});
+
 test("막힘이 아닌 다른 종료 코드 2(잘못된 인자 등)는 기존처럼 실패로 보여 준다", async () => {
   const { v, c } = await mods({ execResult: { code: 2, stdout: "알 수 없는 인자: x", stderr: "" } });
   v.run(c, "remove", "work");

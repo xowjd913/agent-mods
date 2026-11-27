@@ -207,12 +207,19 @@ export default class Settings extends View {
     const home = String(appHome() ?? "");
     let started;
     try { started = Promise.resolve(runInstaller(src, action, name, home)); } catch (e) { started = Promise.reject(e); }
-    started.then((r) => {
+    started.then(async (r) => {
       const stuck = action === "remove" ? blockedBy(r) : [];
-      const ok = r.code === 0 && !stuck.length;
+      // Windows 설치기는 막혀도 종료 코드 0이고 한국어 줄이 깨져 올 수 있어, 제거가 성공으로 보이면 mod.json이 정말 없어졌는지 본다.
+      let left = false;
+      if (action === "remove" && r.code === 0 && !stuck.length) {
+        try { left = (await readTextFile(`${home}/mods/${name}/mod.json`)) != null; } catch { left = false; }
+      }
+      const ok = r.code === 0 && !stuck.length && !left;
       const out = lastLine(r);
       this.result[name] = stuck.length
         ? { ok: false, text: `이 모드를 쓰는 모드가 있어 아무것도 지우지 않았습니다. ${stuck.join(", ")} 모드를 먼저 지우세요.` }
+        : left
+        ? { ok: false, text: `제거되지 않았습니다. 이 모드를 쓰는 모드가 설치돼 있을 수 있습니다${lastLine(r) ? `: ${lastLine(r).slice(0, 100)}` : ""}` }
         : ok
         ? { ok, text: `${action === "remove" ? "제거했습니다" : "설치했습니다"}. 적용하려면 Herdr를 다시 시작하세요.${out ? ` (${out.slice(0, 90)})` : ""}` }
         : { ok, text: `실패했습니다(${r.code}): ${out.slice(0, 140) || "출력 없음"}` };
@@ -256,7 +263,9 @@ export default class Settings extends View {
       else if (on && !keep && !users.length) actions.child(btn("mod-remove", "제거", (cx) => { this.confirm = { name: m.name, action: "remove" }; cx.notify(); }));
     }
     // 직접 돌리지 못하거나(출처 기록 없음) 돌렸는데 실패했으면 터미널에서 돌릴 한 줄을 복사한다.
-    if (on != null && this.source !== undefined && !busy && (!run || (res && !res.ok))) {
+    // 제거할 수 없거나 다른 모드가 쓰는 모드는 제거 명령을 복사해 주지 않는다.
+    const noRemove = on && (keep || users.length);
+    if (on != null && this.source !== undefined && !busy && !noRemove && (!run || (res && !res.ok))) {
       actions.child(btn("mod-copy", "명령 복사", (cx) => this.copy(cx, copyCmd(this.source, on ? "remove" : "add", m.name))));
     }
     return v_flex().id(`mod-${m.name}`).px(10).py(7).gap(4).rounded(6).bg(t.chrome).border_1().border_color(t.border)
