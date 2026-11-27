@@ -1,5 +1,6 @@
 // #90 solo mode, part 1: the enable flag, the solo/<terminal id>.jsonl file, the hook writing it, and `install.cjs hook --solo`.
 // The desk does not read any of this yet (the screen is unchanged), so there is nothing visual here.
+require("./helpers/po-home.cjs"); // a PO machine: a profile without `preset` is "po" (see the helper)
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -199,7 +200,7 @@ test("soloWords: the fixed phrases of the shared blocks read 터미널 in a solo
 
 test("remoteRestore: in a solo room it reads the screens of the solo terminals (the rooms), not the PO list", async () => {
   const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
-  const a = src.indexOf("  remoteRestore(cx, force = false) {"), b = src.indexOf("  // A panel answer: the answer line", a);
+  const a = src.indexOf("  remoteRestore(cx, force = false) {"), b = src.indexOf("  // The claude process of a PO terminal", a);
   const body = src.slice(a, b);
   const reads = [];
   const make = new Function("soloMode", "soloRooms", "poList", `return { ${body.replace(/^\s+remoteRestore\(/, "remoteRestore(")} };`);

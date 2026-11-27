@@ -19,6 +19,7 @@ const DEFAULT_NAMES = Object.freeze({
   hubRole: "po", hubIdLabel: "po", hubId: "^[a-z0-9-]{1,40}$", hubDir: "po", // the hub (PO): its `role` value, id label, id pattern, folder
   labelRole: "role", labelWait: "wait", labelWaitLink: "wait-link", labelSession: "session",
   answerLine: 'Panel answer ({kind}) for {agent}: "{text}".{ Target: {link}}',
+  preset: "po", arrangeScript: "~/.claude/skills/leader/herdr-team.sh", // the profile's preset ("none" = no agent / hub naming rules at all, #124) and the PO arrange script ("" = not there: the features that need it hide)
 });
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // a hub id becomes a file name whatever its pattern says
 function compileNames(n) {
