@@ -749,7 +749,7 @@ test("poProject·poList: 칩 이름은 탭 이름 'PO · <프로젝트>'의 프�
 test("main.js: 칩 줄에 PO 머리말, 이름 'PO 모름', 세션 제목은 툴팁", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /const OTHER_LABEL = "PO 모름"/);
-  assert.match(src, /child\("PO"\)\)\n\s+\.children\(v\.tabs/);
+  assert.match(src, /child\(v\.solo \? "터미널" : "PO"\)\)\n\s+\.children\(v\.tabs/); // #90: "터미널" in solo mode
   assert.match(src, /세션: \$\{x\.title\}/);
   assert.doesNotMatch(src, /label: "기타"|OTHER_LABEL = "기타"/);
 });
@@ -878,7 +878,7 @@ test("collect: po/<id>.jsonl을 PO별로 읽고, 옛 po.jsonl과 잘못된 파�
   assert.deepEqual(d.po.devnotes.map((x) => [x.text, x.to]), [["안녕하세요", "here"]]);
   assert.deepEqual(d.po.mascoz.map((x) => x.text), ["마스코즈"]);
   assert.deepEqual(I.readPo(dir), d.po);
-  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, dir: path.join(dir, "none"), root: I.appRoot(), leaders: [], po: {}, imgd: {}, cost: {}, names: I.plainNames(), profileError: "" });
+  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, dir: path.join(dir, "none"), root: I.appRoot(), leaders: [], po: {}, solo: {}, imgd: {}, cost: {}, names: I.plainNames(), profileError: "" });
 });
 
 test("chat 블록: main.js가 inbox.cjs와 한 글자도 다르지 않은 같은 블록을 쓴다", () => {

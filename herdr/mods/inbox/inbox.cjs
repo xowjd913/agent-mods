@@ -865,7 +865,7 @@ function poCosts(dir = inboxDir(), cacheDir = dir) {
 
 function collect(dir = inboxDir()) {
   let names = [];
-  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== OLD_PO_FILE); } catch { return { at: new Date().toISOString(), dir, leaders: [], po: {}, imgd: {}, cost: {}, root: appRoot(), names: plainNames(), profileError: PROFILE_ERROR }; }
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl") && n !== OLD_PO_FILE); } catch { return { at: new Date().toISOString(), dir, leaders: [], po: {}, solo: {}, imgd: {}, cost: {}, root: appRoot(), names: plainNames(), profileError: PROFILE_ERROR }; }
   const leaders = [];
   for (const n of names) {
     try {
@@ -876,7 +876,7 @@ function collect(dir = inboxDir()) {
   leaders.sort((a, b) => (b.last?.ms ?? 0) - (a.last?.ms ?? 0));
   let cost = {};
   try { cost = poCosts(dir, path.join(appRoot(), "data", "inbox")); } catch {} // a failed cost read never takes the desk's data down
-  return { at: new Date().toISOString(), dir, root: appRoot(), leaders, po: readPo(dir), imgd: imageDims(), cost, names: plainNames(), profileError: PROFILE_ERROR };
+  return { at: new Date().toISOString(), dir, root: appRoot(), leaders, po: readPo(dir), solo: readSolo(dir), imgd: imageDims(), cost, names: plainNames(), profileError: PROFILE_ERROR };
 }
 
 // names:begin
@@ -1241,6 +1241,23 @@ function leaderMenu(terms, memo, query = "", limit = 8, pick = "") {
     .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0)); // code-unit order: the same on every platform
   return [{ id: "here", label: "here", sub: "" }, ...leaders].filter((x) => !q || x.id.toLowerCase().includes(q) || x.label.toLowerCase().includes(q)).slice(0, limit);
 }
+// #90 solo mode: with NO live PO and NO live lead-* leader, every plain Claude terminal the hook has written lines for is a room of its own (the room id
+// is the terminal's address). One PO or one leader anywhere and the desk is the PO structure again (solo rooms are hidden, nothing else changes).
+const soloMode = (terms) => { const l = terms ?? []; return poList(l).length === 0 && !l.some((t) => isAgentName(t?.name)); };
+// A terminal the solo hook records: no agent name, no parent, no role label (the same test the hook makes).
+const soloTerm = (t) => Boolean(t?.address) && !isAgentName(t.name) && !t.parent && !t.labels?.role;
+// The solo rooms, in terminal order, as poList's rows ({id, address, label, title, n}): a live plain terminal with at least one recorded line
+// (`solo` = the collector's {<terminal id>: [lines]}). The name is the terminal's name, else its title, else its address. A closed terminal has no room (its file stays).
+function soloRooms(terms, solo) {
+  const have = solo ?? {};
+  const out = [];
+  for (const t of terms ?? []) {
+    if (!soloTerm(t) || !Array.isArray(have[t.address]) || !have[t.address].length || out.some((r) => r.id === t.address)) continue;
+    const name = String(t.name ?? "").trim(), title = String(t.title ?? "").trim();
+    out.push({ id: t.address, address: t.address, label: name || (title && title !== t.address ? title : "") || t.address, title: "", n: 0 });
+  }
+  return out;
+}
 // The PO terminal a line is pasted into: the PO of the leaders it names (they must share one), else the picked PO (`pick`, a PO id).
 // {po} or {po:null, why:"orphan"|"many"|"none"}.
 function chatTarget(terms, to = [], pick = "") {
@@ -1251,7 +1268,9 @@ function chatTarget(terms, to = [], pick = "") {
     return pos.length > 1 ? { po: null, why: "many" } : { po: pos[0] };
   }
   const p = pick && pick !== PO_OTHER ? poList(list).find((x) => x.id === pick) : null;
-  return p ? { po: p.address } : { po: null, why: "none" };
+  if (p) return { po: p.address };
+  const s = pick && pick !== PO_OTHER && soloMode(list) ? list.find((t) => t.address === pick && soloTerm(t)) : null; // #90: a solo room's terminal
+  return s ? { po: s.address } : { po: null, why: "none" };
 }
 // ---- The messenger timeline of one room (= one PO). Everything below is pure.
 // `leaders` [{s, owner}]: s = a leader's summary (s.leader, s.items), owner = its room (a PO id or PO_OTHER). `says`: the PO's own lines
@@ -1847,6 +1866,11 @@ function typingNow(terms, room, memo, track = null, now = 0) {
     const term = po ? list.find((t) => t.address === po.address) : null;
     if (term && isWorking(term)) out.push({ who: "po", name: po.label, label: LABEL_WORKING });
   }
+  if (soloMode(list)) { // #90: the room is one plain Claude terminal: a single "working" line while it works, and nothing about leaders
+    const row = soloRooms(list, { [room]: [""] })[0];
+    const term = row ? list.find((t) => t.address === row.address) : null;
+    return term && isWorking(term) ? [{ who: "po", solo: true, name: row.label, label: LABEL_WORKING }] : [];
+  }
   const hot = busyAddrs(list), states = workStates(list);
   const seen = new Set();
   const leaders = [];
@@ -2334,7 +2358,7 @@ function readHandoff(dir = inboxDir(), id = "") {
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { STOP_LOCK_MS, stopBlock, stopLocked, stopKey, stopWorking, hookProved, initial, cutPoint, cutHead, cutTail, wellFormed, CLIP_TEXT_MAX, clipText, bangCommand, promptInput, promptParse, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, SEND_PROOF_BACK_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, roomWorking, REMOTE_CMD, REMOTE_POLLS, REMOTE_POLL_MS, remoteBlock, remoteScreen, remoteNote, SOLO_DIR, soloEnabled, readSolo, setSolo, SOLO_FLAG, soloFile, decisionGroups, groupAnswer, dropChat, REMOTE_DIR, remoteRecFile, termPid, procStart, bridgeState, readRemoteRec, clearRemote, markRemote, checkRemote, remoteRooms, FONT_BASE, FONT_KEY, FONT_MIN, FONT_MAX, fontOverride, fontScale, NOTICE_KINDS, isNotice, noticeText, hcSender, HC_REPORT_MS, hcSame };
+module.exports = { soloMode, soloTerm, soloRooms, STOP_LOCK_MS, stopBlock, stopLocked, stopKey, stopWorking, hookProved, initial, cutPoint, cutHead, cutTail, wellFormed, CLIP_TEXT_MAX, clipText, bangCommand, promptInput, promptParse, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, SEND_PROOF_BACK_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, roomWorking, REMOTE_CMD, REMOTE_POLLS, REMOTE_POLL_MS, remoteBlock, remoteScreen, remoteNote, SOLO_DIR, soloEnabled, readSolo, setSolo, SOLO_FLAG, soloFile, decisionGroups, groupAnswer, dropChat, REMOTE_DIR, remoteRecFile, termPid, procStart, bridgeState, readRemoteRec, clearRemote, markRemote, checkRemote, remoteRooms, FONT_BASE, FONT_KEY, FONT_MIN, FONT_MAX, fontOverride, fontScale, NOTICE_KINDS, isNotice, noticeText, hcSender, HC_REPORT_MS, hcSame };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)

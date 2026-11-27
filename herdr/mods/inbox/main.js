@@ -331,6 +331,23 @@ function leaderMenu(terms, memo, query = "", limit = 8, pick = "") {
     .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0)); // code-unit order: the same on every platform
   return [{ id: "here", label: "here", sub: "" }, ...leaders].filter((x) => !q || x.id.toLowerCase().includes(q) || x.label.toLowerCase().includes(q)).slice(0, limit);
 }
+// #90 solo mode: with NO live PO and NO live lead-* leader, every plain Claude terminal the hook has written lines for is a room of its own (the room id
+// is the terminal's address). One PO or one leader anywhere and the desk is the PO structure again (solo rooms are hidden, nothing else changes).
+const soloMode = (terms) => { const l = terms ?? []; return poList(l).length === 0 && !l.some((t) => isAgentName(t?.name)); };
+// A terminal the solo hook records: no agent name, no parent, no role label (the same test the hook makes).
+const soloTerm = (t) => Boolean(t?.address) && !isAgentName(t.name) && !t.parent && !t.labels?.role;
+// The solo rooms, in terminal order, as poList's rows ({id, address, label, title, n}): a live plain terminal with at least one recorded line
+// (`solo` = the collector's {<terminal id>: [lines]}). The name is the terminal's name, else its title, else its address. A closed terminal has no room (its file stays).
+function soloRooms(terms, solo) {
+  const have = solo ?? {};
+  const out = [];
+  for (const t of terms ?? []) {
+    if (!soloTerm(t) || !Array.isArray(have[t.address]) || !have[t.address].length || out.some((r) => r.id === t.address)) continue;
+    const name = String(t.name ?? "").trim(), title = String(t.title ?? "").trim();
+    out.push({ id: t.address, address: t.address, label: name || (title && title !== t.address ? title : "") || t.address, title: "", n: 0 });
+  }
+  return out;
+}
 // The PO terminal a line is pasted into: the PO of the leaders it names (they must share one), else the picked PO (`pick`, a PO id).
 // {po} or {po:null, why:"orphan"|"many"|"none"}.
 function chatTarget(terms, to = [], pick = "") {
@@ -341,7 +358,9 @@ function chatTarget(terms, to = [], pick = "") {
     return pos.length > 1 ? { po: null, why: "many" } : { po: pos[0] };
   }
   const p = pick && pick !== PO_OTHER ? poList(list).find((x) => x.id === pick) : null;
-  return p ? { po: p.address } : { po: null, why: "none" };
+  if (p) return { po: p.address };
+  const s = pick && pick !== PO_OTHER && soloMode(list) ? list.find((t) => t.address === pick && soloTerm(t)) : null; // #90: a solo room's terminal
+  return s ? { po: s.address } : { po: null, why: "none" };
 }
 // ---- The messenger timeline of one room (= one PO). Everything below is pure.
 // `leaders` [{s, owner}]: s = a leader's summary (s.leader, s.items), owner = its room (a PO id or PO_OTHER). `says`: the PO's own lines
@@ -937,6 +956,11 @@ function typingNow(terms, room, memo, track = null, now = 0) {
     const term = po ? list.find((t) => t.address === po.address) : null;
     if (term && isWorking(term)) out.push({ who: "po", name: po.label, label: LABEL_WORKING });
   }
+  if (soloMode(list)) { // #90: the room is one plain Claude terminal: a single "working" line while it works, and nothing about leaders
+    const row = soloRooms(list, { [room]: [""] })[0];
+    const term = row ? list.find((t) => t.address === row.address) : null;
+    return term && isWorking(term) ? [{ who: "po", solo: true, name: row.label, label: LABEL_WORKING }] : [];
+  }
   const hot = busyAddrs(list), states = workStates(list);
   const seen = new Set();
   const leaders = [];
@@ -1391,6 +1415,8 @@ function restartClearCheck(recs, since) {
   return (recs ?? []).some((x) => x && Number(x.ms) >= Number(since)) ? "text" : "clean";
 }
 // chat:end
+// A notice says "터미널(<address>)" for a solo room (there is no PO there); every other notice keeps "PO(<address>)".
+const soloWords = (text) => { let solo = false; try { solo = soloMode(terminals()); } catch {} return solo ? String(text).replace(/PO\(([^)]*)\)/g, "터미널($1)") : text; };
 // What claude-account.cjs needs of a terminal (`hc get <t> --json`): the single CLAUDE_CONFIG_DIR= token of its argv env part (nothing else of
 // the argv) and the pid of its claude. null when unreadable.
 function acctInfo(r) {
@@ -2308,11 +2334,14 @@ export default class Inbox extends View {
   // `raw` = all of it, before the cut to MAX_ENTRIES.
   view() {
     const terms = this.liveTerms();
-    const pos = poList(terms);
+    const solo = soloMode(terms); // #90: no PO and no leader anywhere: the rooms are the plain Claude terminals (no leader parts at all)
+    const soloData = solo ? this.data?.solo ?? {} : {};
+    const pos = solo ? soloRooms(terms, soloData) : poList(terms);
     const all = this.asks();
     this.pruneReply(all);
-    const reps = this.reports(all);
-    const hasOther = all.some((a) => a.owner === PO_OTHER) || reps.some((r) => r.owner === PO_OTHER);
+    const asks = solo ? [] : all; // (a solo room has no leader asks or reports)
+    const reps = solo ? [] : this.reports(all);
+    const hasOther = asks.some((a) => a.owner === PO_OTHER) || reps.some((r) => r.owner === PO_OTHER);
     let last = "";
     try { last = shared(PICK_KEY) ?? ""; } catch {}
     const now = Date.now();
@@ -2325,19 +2354,19 @@ export default class Inbox extends View {
     let mine = [], seen = {};
     try { mine = shared(CHAT_KEY) ?? []; } catch {}
     try { seen = shared(SEEN_KEY) ?? {}; } catch {}
-    const leaders = (this.data?.leaders ?? []).map((s) => ({ s, owner: leaderOwner(terms, s.leader, s.terminal, s.po) }));
-    const waits = (id) => all.filter((a) => a.owner === id).map((a) => ({ leader: a.s.leader, ts: a.item?.ts ?? "", kind: a.kind }));
-    const room = (id) => timeline(id, leaders, id === PO_OTHER ? [] : this.data?.po?.[id] ?? [], mine, waits(id), now);
-    const busy = roomWorking(terms); // #69: the rooms with work going on (a dot beside the name)
+    const leaders = solo ? [] : (this.data?.leaders ?? []).map((s) => ({ s, owner: leaderOwner(terms, s.leader, s.terminal, s.po) }));
+    const waits = (id) => asks.filter((a) => a.owner === id).map((a) => ({ leader: a.s.leader, ts: a.item?.ts ?? "", kind: a.kind }));
+    const room = (id) => timeline(id, leaders, id === PO_OTHER ? [] : (solo ? soloData[id] : this.data?.po?.[id]) ?? [], mine, waits(id), now);
+    const busy = solo ? new Set(pos.filter((p) => isWorking(terms.find((x) => x.address === p.address))).map((p) => p.id)) : roomWorking(terms); // #69: the rooms with work going on (a dot beside the name)
     const remote = remoteRooms(this.rc); // #119: the rooms whose PO has remote on (the subtitle under the name)
-    const rooms = pos.map((p) => ({ id: p.id, label: p.label, title: p.title, blocked: this.isBlocked(p.address), working: busy.has(p.id), remote: remote.has(p.id) }));
+    const rooms = pos.map((p) => ({ id: p.id, label: p.label, title: p.title, blocked: this.isBlocked(p.address), working: busy.has(p.id), remote: remote.has(p.id), solo }));
     if (hasOther) rooms.push({ id: PO_OTHER, label: OTHER_LABEL, title: "", blocked: false, working: busy.has(PO_OTHER) });
     if (settled.ghost && !rooms.some((r) => r.id === pick)) rooms.push({ id: pick, label: this.pickLive.label, title: "", blocked: false, ghost: true }); // held for a moment: the room list does not lose it
     let raw = [];
     const tabs = rooms.map((r) => {
       const entries = room(r.id);
       if (r.id === pick) raw = entries;
-      return { ...r, n: all.filter((a) => a.owner === r.id).length, unread: r.id === pick ? 0 : unreadCount(entries, seen[r.id]) };
+      return { ...r, n: asks.filter((a) => a.owner === r.id).length, unread: r.id === pick ? 0 : unreadCount(entries, seen[r.id]) };
     });
     const filter = pick ? this.filt.get(pick) ?? "all" : "all";
     const choices = aliveLeaders(roomLeaders(raw, (n) => shortName(n)), terms, this.data?.leaders); // #58: the live leaders of the picked room (follows the room; a closed session is dropped, its history stays under 전체)
@@ -2349,7 +2378,7 @@ export default class Inbox extends View {
     const shown = filterEntries(scope, filter, base);
     const keep = keepWaiting(scope, shown); // a leader still waiting on the person stays visible under any chip
     const entries = groupTimeline(keep.filter((e, i) => i >= keep.length - MAX_ENTRIES || e.waiting));
-    return { terms, tabs, pick, raw, shown, filter, who, choices, counts: filterCounts(scope, base), entries, asks: all.filter((a) => a.owner === pick), reports: reps.filter((r) => r.owner === pick) };
+    return { terms, solo, tabs, pick, raw, shown, filter, who, choices, counts: filterCounts(scope, base), entries, asks: asks.filter((a) => a.owner === pick), reports: reps.filter((r) => r.owner === pick) };
   }
 
   // Remembers that the person has the picked room's newest message on screen. Both the window and the dock show a room, so both
@@ -2372,7 +2401,7 @@ export default class Inbox extends View {
   }
   // The chips above a room's timeline: 전체 | 안 읽은 것 | 결정 필요 | 최종 확인 요청 | 결과 | 멈춤, each with its count (0 = dim, still pressable).
   filterBar(t, v) {
-    if (!v.pick || !v.raw.length) return null;
+    if (v.solo || !v.pick || !v.raw.length) return null; // #90: no kind chips in a solo room
     return h_flex().flex_none().min_w(0).px(10).py(5).gap(5).items_center().flex_wrap().border_b(1).border_color(t.border)
       .children(CHAT_FILTERS.map(([k, label]) => {
         const on = v.filter === k, n = v.counts?.[k] ?? 0;
@@ -2728,7 +2757,7 @@ export default class Inbox extends View {
     }).catch(() => say(`PO(${po})에 ${key}를 누르지 못했습니다.`));
   }
   promptPanel(t, v, cx) {
-    const po = v.pick && v.pick !== PO_OTHER ? chatTarget(v.terms, [], v.pick).po : "";
+    const po = !v.solo && v.pick && v.pick !== PO_OTHER ? chatTarget(v.terms, [], v.pick).po : "";
     if (!po || !this.isBlocked(po)) { this.prompt = null; return null; }
     try { this.readPrompt(po, cx); } catch { this.promptBusy = false; this.prompt = { po, at: Date.now(), text: "", failed: true }; }
     const shown = this.prompt?.po === po ? this.prompt : null;
@@ -2901,7 +2930,7 @@ export default class Inbox extends View {
   }
   // The strip above the chat box: the button (idle), the confirm line, or the four steps of the run.
   restartRow(t, v, cx) {
-    if (!v.pick || v.pick === PO_OTHER) return null;
+    if (v.solo || !v.pick || v.pick === PO_OTHER) return null; // #90: the solo "new start" is a later step
     const room = v.pick;
     const po = chatTarget(v.terms, [], room).po ?? "";
     const r = this.rs.get(room);
@@ -3208,7 +3237,7 @@ export default class Inbox extends View {
     try {
       const content = this.chat.content();
       const q = mentionQuery(content.text, this.chat.selected_range().end, content.tokens);
-      const items = q ? leaderMenu(this.liveTerms(), namesMemo(), q.query, 8, this.view().pick) : [];
+      const items = q && !soloMode(this.liveTerms()) ? leaderMenu(this.liveTerms(), namesMemo(), q.query, 8, this.view().pick) : []; // #90: no "@" menu in solo mode (no leaders)
       if (q && items.length) next = { ...q, items, sel: Math.min(this.menu?.sel ?? 0, items.length - 1) };
     } catch {}
     this.menu = next;
@@ -3518,7 +3547,7 @@ export default class Inbox extends View {
       .when(Boolean(menu), (el) => el.child(menu))
       .when(holdShown(this.changedAt, this.heldAt), (el) => el.child(div().text_size(fz(11)).text_color(t.working).child("한 번 더 Enter로 보냅니다")))
       .child(h_flex().id("chat-head").min_w(0).gap(8).items_center()
-        .child(div().id("chat-target").flex_1().min_w(0).truncate().text_size(fz(10.5)).text_color(t.dim).child(none ? "PO를 알 수 없는 방이라 여기서는 보낼 곳이 없습니다 — 왼쪽에서 PO 방을 고르세요(쓰던 글은 그대로 있습니다)" : target ? `받는 PO: ${target.label}` : ghost ? "PO 터미널을 다시 찾는 중입니다 — 쓰던 글은 그대로 있습니다" : "받는 PO가 없습니다 — PO를 고르세요"))
+        .child(div().id("chat-target").flex_1().min_w(0).truncate().text_size(fz(10.5)).text_color(t.dim).child(none ? "PO를 알 수 없는 방이라 여기서는 보낼 곳이 없습니다 — 왼쪽에서 PO 방을 고르세요(쓰던 글은 그대로 있습니다)" : target ? `${v.solo ? "받는 터미널" : "받는 PO"}: ${target.label}` : ghost ? "PO 터미널을 다시 찾는 중입니다 — 쓰던 글은 그대로 있습니다" : v.solo ? "받는 터미널이 없습니다 — 왼쪽에서 방을 고르세요" : "받는 PO가 없습니다 — PO를 고르세요"))
         .when(stopWorking(v.terms, v.pick), (el) => el.child(this.button(t, "chat-stop", "멈추기", (c) => this.stopPo(c), { tip: "PO의 지금 작업을 멈춥니다(터미널에서 Esc를 누르는 것과 같습니다). 입력칸이 비어 있을 때 Esc 키로도 됩니다" }))))
       .when(this.pics.length > 0 || this.picBusy > 0, (el) => el.child(this.picRow(t, null)))
       .child(h_flex().id("chat-row").gap(6).items_center()
@@ -3526,10 +3555,12 @@ export default class Inbox extends View {
         .child(this.button(t, "chat-attach", "그림", (c) => { this.pickPics(c); }, { tip: "그림 파일을 골라 붙입니다(Cmd+V로 붙여넣거나 파일을 끌어다 놓아도 됩니다). 보내면 PO가 파일을 열어 봅니다" }))
         .child(div().id("chat-input").flex_1().min_w(0).on_mouse_down("left", stop)
           .child(Textarea.new(this.chat).token((ctx) => chip(ctx)).min_h(fz(30)).px(10).py(5).rounded(8).border(1).border_color(t.input).bg(t.background).text_size(fz(12.5)).text_color(t.foreground)))
-        .child(this.button(t, "chat-send", "PO에 보내기", (c) => this.sendChat(c), { primary: true, tip: "고른 PO 터미널에 글을 붙여 넣고 Enter까지 눌러 보냅니다(글은 클립보드를 거칩니다). Shift+Enter는 줄바꿈" })));
+        .child(this.button(t, "chat-send", v.solo ? "보내기" : "PO에 보내기", (c) => this.sendChat(c), { primary: true, tip: "고른 PO 터미널에 글을 붙여 넣고 Enter까지 눌러 보냅니다(글은 클립보드를 거칩니다). Shift+Enter는 줄바꿈" })));
   }
 
-  poHint(t) {
+  poHint(t, v = null) {
+    if (v?.solo) return div().id("po-hint").flex_none().px(this.compact ? 10 : 14).pb(6).text_size(fz(11)).text_color(t.muted)
+      .child("아직 기록된 Claude 터미널 대화가 없습니다. 혼자 모드가 켜져 있으면 터미널에서 보낸 프롬프트부터 여기에 방으로 나타납니다.");
     return div().id("po-hint").flex_none().px(this.compact ? 10 : 14).pb(6).text_size(fz(11)).text_color(t.muted)
       .child(`PO 터미널에 ${hubTag()}, ${NAMES.hubIdLabel}=<id> 라벨을 달면 PO별로 나뉩니다. 지금은 PO가 없어 채팅을 보낼 수 없습니다.`);
   }
@@ -3549,6 +3580,7 @@ export default class Inbox extends View {
   // The small line under a room's name in the wide room list: "PO", and "PO · 원격" while its PO has remote on.
   roomSub(t, x) {
     if (x.id === PO_OTHER) return div().min_w(0).truncate().text_size(fz(10)).text_color(t.dim).child("채팅 없음");
+    if (x.solo) return this.roomRemote(t, x, "터미널 · 원격") ?? div().min_w(0).truncate().text_size(fz(10)).text_color(t.dim).child("터미널");
     return this.roomRemote(t, x, "PO · 원격") ?? div().min_w(0).truncate().text_size(fz(10)).text_color(t.dim).child("PO");
   }
 
@@ -3563,9 +3595,9 @@ export default class Inbox extends View {
 
   // The room strip (the dock, and the window when narrow): one chip per room — the live POs by project, and "PO 모름" while something belongs to none.
   picker(t, v) {
-    if (!v.tabs.some((x) => x.id !== PO_OTHER)) return this.poHint(t);
+    if (!v.tabs.some((x) => x.id !== PO_OTHER)) return this.poHint(t, v);
     return h_flex().id("po-picker").flex_none().px(this.compact ? 10 : 14).pb(6).gap(5).flex_wrap().items_center()
-      .child(div().flex_none().text_size(fz(10.5)).font_semibold().text_color(t.dim).child("PO"))
+      .child(div().flex_none().text_size(fz(10.5)).font_semibold().text_color(t.dim).child(v.solo ? "터미널" : "PO"))
       .children(v.tabs.map((x) => {
         const on = x.id === v.pick;
         return h_flex().id(`po-${x.id}`).h(fz(24)).px(9).gap(5).items_center().rounded(12).cursor_pointer().on_mouse_down("left", stop)
@@ -3944,9 +3976,9 @@ export default class Inbox extends View {
     const po = x.who === "po";
     const color = po ? t.working : tint(t, x.who.slice(2));
     return h_flex().id(`typing-${tlId(x.who)}`).flex_none().px(10).pt(18).gap(8).items_start()
-      .child(po ? this.circle(t, t.working, "P") : this.avatar(t, x.who.slice(2)))
+      .child(po ? this.circle(t, t.working, x.solo ? String(x.name).slice(0, 1).toUpperCase() : "P") : this.avatar(t, x.who.slice(2)))
       .child(v_flex().min_w(0).gap(3)
-        .child(div().min_w(0).truncate().text_size(fz(12)).font_semibold().text_color(color).child(po ? "PO" : x.name))
+        .child(div().min_w(0).truncate().text_size(fz(12)).font_semibold().text_color(color).child(po && !x.solo ? "PO" : x.name))
         .child(h_flex().min_w(0).gap(6).items_center()
           .child(div().px(14).py(5).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(fz(16)).text_color(t.dim).child("···"))
           .child(x.label ? div().flex_none().text_size(fz(11)).text_color(x.label === LABEL_BLOCKED ? t.blocked : t.dim).child(x.label) : div())));
@@ -3986,7 +4018,7 @@ export default class Inbox extends View {
     }
     if (!blocks.length) {
       blocks.push(div().flex_none().p(14).text_size(fz(12)).text_color(t.dim)
-        .child(!this.data ? "불러오는 중…" : v.pick ? "이 방에는 아직 대화가 없습니다." : "PO가 없습니다."));
+        .child(!this.data ? "불러오는 중…" : v.pick ? "이 방에는 아직 대화가 없습니다." : v.solo ? "기록된 Claude 터미널 대화가 없습니다." : "PO가 없습니다."));
     }
     // The "···" bubbles of whoever is writing now (the room's PO and leaders whose hc status is working): in EVERY filter (a chip hides
     // messages, not what is happening), after the last message, and nothing else reads them (not the unread counts, not `seenNext`, not the
@@ -4047,14 +4079,14 @@ export default class Inbox extends View {
     const bar = this.filterBar(t, v);
     const lbar = this.leaderBar(t, v);
     const rrow = this.restartRow(t, v, cx); // "PO 새로 시작": the button, its confirm line or its steps (null in the other-PO room)
-    const rpo = v.pick && v.pick !== PO_OTHER ? chatTarget(v.terms, [], v.pick).po ?? "" : "";
+    const rpo = !v.solo && v.pick && v.pick !== PO_OTHER ? chatTarget(v.terms, [], v.pick).po ?? "" : ""; // (no remote button in a solo room yet)
     const rcb = rpo ? this.remoteButton(t, v.pick, rpo, String(v.terms.find((x) => x.address === rpo)?.status ?? "")) : null; // "원격 연결 켜기" (#79): in the room header
     const usage = this.usageLine(t, v.pick); // null before the first read (and when there is no cost to show either)
     const panel = this.promptPanel(t, v, cx); // a blocked PO's screen + its keys (null while the room's PO is not waiting on a prompt)
     const room = v_flex().flex_1().min_w(0).min_h(0).when(!strip, (el) => el.h_full()) // beside the rooms the column must fill the row (h_flex centers children)
       .when(!strip && Boolean(head), (el) => el.child(h_flex().flex_none().h(fz(30)).px(14).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().min_w(0).truncate().text_size(fz(13)).font_semibold().text_color(t.foreground).child(head))
-        .child(div().flex_none().text_size(fz(10.5)).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : `리더 ${v.choices?.length ?? 0}명`))
+        .child(div().flex_none().text_size(fz(10.5)).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : v.solo ? "터미널" : `리더 ${v.choices?.length ?? 0}명`))
         .when(Boolean(rcb), (el) => el.child(rcb))))
       .when(strip && Boolean(rcb), (el) => el.child(h_flex().flex_none().min_w(0).px(14).pb(4).justify_end().child(rcb))) // the picker layout has no room header
       .when(Boolean(usage), (el) => el.child(usage))
@@ -4084,12 +4116,12 @@ export default class Inbox extends View {
             .on_mouse_down("left", stop).on_click((_e, c) => { try { closeOverlay(safeProps().overlay); } catch {} c.notify(); }).tooltip("닫기")
             .child(svg("mods/pane/close.svg").size(13))))))
       .when(strip, (el) => el.child(this.picker(t, v)))
-      .when(!strip && !v.tabs.some((x) => x.id !== PO_OTHER), (el) => el.child(this.poHint(t)))
+      .when(!strip && !v.tabs.some((x) => x.id !== PO_OTHER), (el) => el.child(this.poHint(t, v)))
       .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(fz(11)).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
       .child(strip ? room : h_flex().flex_1().min_h(0).items_stretch().child(this.narrow ? this.slimRooms(t, v) : this.roomList(t, v)).child(room))
       // The notice floats over the top of the room: absolute, so it takes no layout space and the chat never moves when it comes or goes.
       .when(Boolean(this.msg), (el) => el.child(h_flex().id("inbox-msg-layer").absolute().top(NOTICE_TOP).left(0).right(0).px(14).justify_center()
         .child(div().id("inbox-msg").max_w(NOTICE_MAX_W).px(12).py(5).rounded(6).bg(t.chrome).shadow_md().text_size(fz(11.5)).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
-          .on_mouse_down("left", stop).on_click((_e, c) => { this.msg = null; c.notify(); }).tooltip("눌러서 닫기").child(this.msg.text))));
+          .on_mouse_down("left", stop).on_click((_e, c) => { this.msg = null; c.notify(); }).tooltip("눌러서 닫기").child(soloWords(this.msg.text)))));
   }
 }

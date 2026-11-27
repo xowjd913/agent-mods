@@ -81,7 +81,7 @@ test("readSolo: empty without the folder; skips files with unsafe names and ids 
   assert.deepEqual(Object.keys(I.readSolo(d)), ["t9"]);
 });
 
-test("the desk code does not read solo data yet (the screen stays unchanged)", () => {
+test("the desk code never reads the solo files itself (the collector does) and only reads them as data", () => {
   const main = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
   assert.equal(/readSolo|soloFile|solo\.on/.test(main), false);
 });
@@ -112,4 +112,77 @@ test("install hook --solo turns the flag on (and --remove --solo off); without -
   assert.equal(ours(), 2); // --remove --solo only turns solo off: the PO hook is still there
   r = run("--remove");
   assert.equal(ours(), 0); // a plain --remove still takes the PO hook out
+});
+
+// ---- #90 part 2: the solo room view (pure helpers; the screen wiring is pinned by source text below)
+const term = (address, o = {}) => ({ address, name: "", title: "", status: "idle", ...o });
+const po = (address, id) => term(address, { labels: { role: "po", po: id } });
+
+test("soloMode: only with no live PO and no live lead-* leader; one of either brings the PO structure back", () => {
+  assert.equal(I.soloMode([]), true);
+  assert.equal(I.soloMode(undefined), true);
+  assert.equal(I.soloMode([term("t1"), term("t2", { name: "api" })]), true);
+  assert.equal(I.soloMode([term("t1"), po("t2", "mine")]), false);
+  assert.equal(I.soloMode([term("t1"), term("t3", { name: "lead-a" })]), false);
+});
+
+test("soloRooms: a live plain terminal with a recorded line is a room (name, else title, else address); closed ones, PO/leader/child terminals and empty files are not", () => {
+  const list = [term("t1", { name: "작업" }), term("t2", { title: "제목" }), term("t3"), term("t4"), term("t5", { parent: "t1" }), term("t6", { labels: { role: "po" } }), term("t7", { name: "lead-x" })];
+  const solo = { t1: ["a"], t2: ["b"], t3: ["c"], t4: [], t5: ["d"], t6: ["e"], t7: ["f"], gone: ["g"] };
+  assert.deepEqual(I.soloRooms(list, solo).map((r) => [r.id, r.label]), [["t1", "작업"], ["t2", "제목"], ["t3", "t3"]]);
+  assert.deepEqual(I.soloRooms(list, {}), []);
+  assert.deepEqual(I.soloRooms(null, null), []);
+  assert.equal(I.soloRooms([term("t9", { title: "t9" })], { t9: ["x"] })[0].label, "t9"); // a title that is only the address adds nothing
+});
+
+test("chatTarget: in solo mode the picked room id (a terminal address) is the target; with a PO around it is not", () => {
+  const list = [term("t1"), term("t2", { parent: "t1" })];
+  assert.deepEqual(I.chatTarget(list, [], "t1"), { po: "t1" });
+  assert.deepEqual(I.chatTarget(list, [], "t2"), { po: null, why: "none" }); // a child terminal is not a room
+  assert.deepEqual(I.chatTarget(list, [], "zz"), { po: null, why: "none" });
+  assert.deepEqual(I.chatTarget([...list, po("t3", "mine")], [], "t1"), { po: null, why: "none" }); // PO structure: unchanged
+  assert.deepEqual(I.chatTarget([...list, po("t3", "mine")], [], "mine"), { po: "t3" });
+});
+
+test("typingNow: solo shows one working line only while that terminal works; the PO structure keeps its own lines", () => {
+  const idle = [term("t1", { name: "a" })], busy = [term("t1", { name: "a", status: "working" })];
+  assert.deepEqual(I.typingNow(idle, "t1", {}, null, 0), []);
+  const rows = I.typingNow(busy, "t1", {}, null, 0);
+  assert.equal(rows.length, 1);
+  assert.deepEqual([rows[0].who, rows[0].name, rows[0].label], ["po", "a", I.LABEL_WORKING]);
+  assert.deepEqual(I.typingNow(busy, "t2", {}, null, 0), []); // another room
+  const withPo = [...busy, term("t3", { labels: { role: "po", po: "mine" }, status: "working" })];
+  assert.equal(I.typingNow(withPo, "t1", {}, null, 0).length, 0); // not a PO room, not solo mode
+  assert.equal(I.typingNow(withPo, "mine", {}, null, 0).length, 1);
+});
+
+test("collect: returns the solo lines per terminal (empty without the folder)", () => {
+  const d = tmp();
+  assert.deepEqual(I.collect(d).solo, {});
+  fs.mkdirSync(path.join(d, "solo"));
+  fs.writeFileSync(path.join(d, "solo", "t4.jsonl"), JSON.stringify({ ts: "2026-01-01T00:00:00Z", kind: "say", text: "hi" }) + "\n");
+  assert.deepEqual(Object.keys(I.collect(d).solo), ["t4"]);
+});
+
+test("main.js: solo mode hides every leader part (chips, @ menu, cards, restart, remote, permission panel) and the PO structure stays as it was", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const view = src.slice(src.indexOf("  view() {"), src.indexOf("  view() {") + 6000);
+  assert.match(view, /const solo = soloMode\(terms\)/);
+  assert.match(view, /solo \? soloRooms\(/); // rooms come from the solo data only in solo mode
+  assert.match(view, /const asks = solo \? \[\] : all/);
+  assert.match(src, /q && !soloMode\(this\.liveTerms\(\)\) \? leaderMenu\(/); // no @ menu
+  assert.match(src, /if \(v\.solo \|\| !v\.pick \|\| !v\.raw\.length\) return null;/); // the filter chips
+  assert.match(src, /if \(v\.solo \|\| !v\.pick \|\| v\.pick === PO_OTHER\) return null;/); // the restart row
+  assert.match(src, /const po = !v\.solo && v\.pick && v\.pick !== PO_OTHER \? chatTarget/); // the permission-question panel
+  assert.match(src, /const rpo = !v\.solo && v\.pick/); // the remote button
+  assert.match(src, /soloWords\(this\.msg\.text\)/); // notices say 터미널, not PO
+  assert.equal(/\bsolo\b/.test(src.slice(src.indexOf("  badge() {"), src.indexOf("  // The \"pasted into the PO\""))), false); // the badge counts leaders as before
+});
+
+test("soloWords: PO(x) becomes 터미널(x) in notices only while solo", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
+  const fn = src.match(/^const soloWords = .*$/m)[0];
+  const make = (solo) => new Function("soloMode", "terminals", `${fn}; return soloWords;`)(() => solo, () => []);
+  assert.equal(make(true)("PO(abc)에 붙여넣었어요"), "터미널(abc)에 붙여넣었어요");
+  assert.equal(make(false)("PO(abc)에 붙여넣었어요"), "PO(abc)에 붙여넣었어요");
 });
