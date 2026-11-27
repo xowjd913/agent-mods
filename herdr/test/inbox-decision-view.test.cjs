@@ -114,3 +114,9 @@ test("askActions: 카드가 선택지를 그릴 때는 같은 선택지 버튼�
   assert.match(body, /kind === "decision" && !view \? opts\.options\.map/);
   for (const s of ["링크 열기", "답 쓰기", "확인 완료", "hint.answers.map"]) assert.ok(body.includes(s), s);
 });
+
+test("decisionLayout: 추천과 같은 번호의 추천 줄이 여러 번 와도 이유가 사라지지 않는다", () => {
+  const v = I.decisionLayout("질문?\n1안: A\n2안: B\n추천: 2안 — 이유1\n추천: 2안 — 이유2");
+  assert.ok(v);
+  assert.ok(v.reason.includes("이유1") && v.reason.includes("이유2"), v.reason);
+});

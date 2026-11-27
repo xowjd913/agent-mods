@@ -1816,7 +1816,7 @@ function decisionLayout(body) {
       continue;
     }
     const r = line.match(REC_LINE);
-    if (r && Number(r[1]) === recommended) { if (!reason) reason = recReason(r[2]); gap = true; continue; }
+    if (r && Number(r[1]) === recommended) { const t = recReason(r[2]); if (t) reason = reason ? reason + " " + t : t; gap = true; continue; }
     if (!line.trim()) { if (i < first) question.push(line); else if (i > last) rest.push(line); gap = true; continue; }
     if (i < first) { question.push(line); continue; }
     if (cur && !gap && /^(?:\t|\s{2,})\S/.test(line)) { cur.detail.push(line.trim()); continue; }
