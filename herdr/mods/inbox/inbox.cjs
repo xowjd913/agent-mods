@@ -82,12 +82,12 @@ const HANGUL = /[ㄱ-ㆎ가-힣]/;
 // Short label of a URL: "PR #26", "issue #25", "comment" (an #issuecomment anchor), else host/path shortened.
 function linkLabel(url) {
   let u;
-  try { u = new URL(url); } catch { return String(url).slice(0, 28); }
+  try { u = new URL(url); } catch { return cutHead(url, 28); }
   if (/^#issuecomment-/.test(u.hash) || /^#discussion_r/.test(u.hash) || /^#pullrequestreview-/.test(u.hash)) return "comment";
   const m = u.pathname.match(/\/(pull|issues)\/(\d+)/);
   if (m) return `${m[1] === "pull" ? "PR" : "issue"} #${m[2]}`;
   const path = (u.host + u.pathname).replace(/\/+$/, "");
-  return path.length > 28 ? `${path.slice(0, 27)}…` : path;
+  return path.length > 28 ? `${cutHead(path, 27)}…` : path;
 }
 
 // "agent-mods#39" from a GitHub PR/issue URL (repo name + number, the owner left out); "" for anything else. Shown next to the
@@ -248,7 +248,7 @@ function enrich(it) {
   let lead = first ? plain(first.segs) : "";
   if (!it.head && !lead) lead = plain(it.blocks.find((b) => b.t === "h")?.segs) || it.title;
   it.leadFull = lead.length > MAX_LEAD;
-  it.lead = it.leadFull ? `${lead.slice(0, MAX_LEAD - 1)}…` : lead;
+  it.lead = it.leadFull ? `${cutHead(lead, MAX_LEAD - 1)}…` : lead;
   const content = it.blocks.filter((b) => b.t !== "gap");
   it.headHtml = escapeHtml(it.head || it.lead || it.title);
   it.leadHtml = escapeHtml(it.lead);
@@ -316,7 +316,7 @@ function parsePoLines(text) {
     if (!body.trim()) continue;
     const ms = Date.parse(o.ts);
     if (!(ms > 0)) continue;
-    out.push({ ts: new Date(ms).toISOString(), ms, text: body.trim().slice(0, MAX_PO_TEXT), to: typeof o.to === "string" ? o.to.trim() : "", ...(o.kind === "me" ? { me: true } : {}), pid: typeof o.pid === "string" ? o.pid : "" });
+    out.push({ ts: new Date(ms).toISOString(), ms, text: cutHead(body.trim(), MAX_PO_TEXT), to: typeof o.to === "string" ? o.to.trim() : "", ...(o.kind === "me" ? { me: true } : {}), pid: typeof o.pid === "string" ? o.pid : "" });
   }
   // An image line belongs to the prompt with its prompt id, else to the latest prompt within 2 minutes before it.
   for (const g of pics) {
@@ -546,7 +546,7 @@ function hookLine(payload, now = Date.now()) {
   if (stop && payload.stop_hook_active) return null;
   let text = cleanText(stop ? payload.last_assistant_message : payload.prompt).trim();
   if (!text || (!stop && HARNESS_PROMPT.test(text))) return null;
-  if (text.length > MAX_PO_TEXT) text = text.slice(0, MAX_PO_TEXT - 1) + "…";
+  if (text.length > MAX_PO_TEXT) text = cutHead(text, MAX_PO_TEXT - 1) + "…";
   return { ts: new Date(Number(now) || Date.now()).toISOString(), kind: stop ? "say" : "me", text, src: "hook", pid: typeof payload.prompt_id === "string" ? payload.prompt_id.slice(0, 80) : "" };
 }
 
@@ -569,7 +569,7 @@ function readPo(dir = inboxDir()) {
 
 // ---- #90 solo mode: a plain Claude terminal (no PO, no leader) is a room of its own. The hook writes its lines to <inbox dir>/solo/<terminal id>.jsonl
 // (same line shape as a PO file) only while the flag file <inbox dir>/solo.on exists. It is off by default: every Claude terminal's prompts would be
-// saved. The desk's "혼자 모드 켜기" button and `install.cjs hook --solo` both set the flag (setSolo); nothing here changes what the desk shows yet.
+// saved. The "none" preset of profile.cjs (no agent or hub name is recognized, #124) is the profile a solo desk starts from. The desk's "혼자 모드 켜기" button and `install.cjs hook --solo` both set the flag (setSolo); nothing here changes what the desk shows yet.
 const SOLO_DIR = "solo", SOLO_FLAG = "solo.on";
 // The file of one terminal's solo lines, or null when `id` is not a safe file name (an id can never reach outside the folder).
 const soloFile = (dir, id) => (SAFE_ID.test(String(id ?? "")) ? path.join(dir, SOLO_DIR, `${id}.jsonl`) : null);
@@ -738,6 +738,86 @@ function readPoSession(dir, id) {
   if (!file) return null;
   try { const o = JSON.parse(fs.readFileSync(file, "utf8")); return sessionRecord({ transcript_path: o?.path, session_id: o?.sid }); } catch { return null; }
 }
+// ---- #109: Remote Control stays on after the desk (or the whole Herdr app) restarts, because the PO's `claude` process keeps running in the terminal host. The desk
+// writes a record <inbox dir>/po-remote/<po id>.json = {pid, start, sid, url, ms} when it SEES remote on, and a later start restores "on" from it only while the
+// same process is still running (same pid AND same process start time: a restarted or resumed claude is a new process), the session is the same, and the transcript's
+// newest `bridge-session` line is not the empty one a clean disconnect leaves (a non-empty line alone proves nothing: an exit or a resume leaves it behind).
+const REMOTE_DIR = "po-remote";
+const REMOTE_BRIDGE_MAX = 8 << 20; // the transcript's last 8 MiB are searched for the newest bridge-session line
+const remoteRecFile = (dir, id) => (cleanPoId(id) ? path.join(dir, REMOTE_DIR, `${cleanPoId(id)}.json`) : null);
+// When process `pid` started, as ps prints it in the C locale (the same string for the same process, whatever the user's language), or null: not running, ps
+// failed, or Windows (no ps; there the restore is simply off and the screen stays the only source).
+function procStart(pid, platform = process.platform, psRun = null) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 1 || platform === "win32") return null;
+  try {
+    const ps = psRun ?? ((x) => require("child_process").execFileSync("ps", ["-o", "lstart=", "-p", String(x)], { timeout: 3000, stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, LC_ALL: "C", LANG: "C" } }).toString("utf8"));
+    return String(ps(n)).trim() || null;
+  } catch { return null; }
+}
+// The newest bridge-session line of a transcript: "on" (it names a bridge session), "off" (empty id: a clean disconnect), "none" (no such line in the last 8 MiB).
+function bridgeState(file, max = REMOTE_BRIDGE_MAX) {
+  let fd = -1;
+  try {
+    fd = fs.openSync(file, "r");
+    const size = fs.fstatSync(fd).size, len = Math.min(size, max);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    const lines = buf.toString("utf8").split("\n");
+    if (size > len) lines.shift(); // the cut first line
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i].includes('"bridge-session"')) continue;
+      let o = null;
+      try { o = JSON.parse(lines[i]); } catch { continue; }
+      if (o?.type === "bridge-session") return typeof o.bridgeSessionId === "string" && o.bridgeSessionId ? "on" : "off";
+    }
+  } catch {} finally { if (fd >= 0) try { fs.closeSync(fd); } catch {} }
+  return "none";
+}
+function readRemoteRec(dir, id) {
+  const file = remoteRecFile(dir, id);
+  if (!file) return null;
+  try { const o = JSON.parse(fs.readFileSync(file, "utf8")); return o && o.on === true && Number.isInteger(o.pid) && typeof o.start === "string" && o.start ? o : null; } catch { return null; }
+}
+function clearRemote(dir, id) {
+  const file = remoteRecFile(dir, id);
+  if (!file) return false;
+  try { fs.unlinkSync(file); return true; } catch { return false; }
+}
+// Records that PO `id`'s claude process `pid` has remote on (the desk saw it). Not written without a process start time (Windows, a dead pid) or when it is the same
+// as the record already there. Returns true when written.
+function markRemote(dir, id, pid, { url = "", now = Date.now(), psRun = null, platform = process.platform } = {}) {
+  const file = remoteRecFile(dir, id);
+  const start = procStart(pid, platform, psRun);
+  if (!file || !start) return false;
+  const ses = readPoSession(dir, id);
+  const u = typeof url === "string" && /^https:\/\/claude\.ai\//.test(url) && url.length <= 500 ? url : "";
+  const rec = { on: true, pid: Number(pid), start, sid: ses?.sid ?? "", url: u, ms: Number(now) || Date.now() };
+  const old = readRemoteRec(dir, id);
+  if (old && old.pid === rec.pid && old.start === rec.start && old.sid === rec.sid && (old.url ?? "") === rec.url) return false;
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(rec), { mode: 0o600 });
+  fs.renameSync(tmp, file);
+  return true;
+}
+// Is remote still on for PO `id` whose claude process is `pid`? {on, why, url}. All of these must hold: a record, the same pid, the same process start time (a
+// dead pid has none), the same session, and the transcript's newest bridge-session line is not the empty one. A record that fails is deleted (it can never be true again).
+function checkRemote(dir, id, pid, { psRun = null, platform = process.platform, bridge = bridgeState } = {}) {
+  const rec = readRemoteRec(dir, id);
+  if (!rec) return { on: false, why: "norecord", url: "" };
+  const off = (why) => { clearRemote(dir, id); return { on: false, why, url: "" }; };
+  if (rec.pid !== Number(pid)) return off("pid");
+  const start = procStart(pid, platform, psRun);
+  if (!start) return off("dead");
+  if (start !== rec.start) return off("start");
+  const ses = readPoSession(dir, id);
+  if (rec.sid && !ses) return off("session"); // the session record the desk saw is gone: the transcript cannot be checked
+  if (rec.sid && ses?.sid && ses.sid !== rec.sid) return off("session");
+  // Only a non-empty newest bridge line backs the record. "none" (no line at all, or none inside the 8 MiB tail read: a disconnect may be buried further back) is not enough.
+  if (ses && bridge(ses.path) !== "on") return off("bridge");
+  return { on: true, why: "", url: typeof rec.url === "string" ? rec.url : "" };
+}
 // {<po id>: {usd, unknown:[model ids not in the table], sub:<sub-agent transcripts counted>, partial}} for every PO that has a session record
 // whose transcript can be read. A PO without a record (it started before the hook recorded sessions) is simply absent: nothing is shown.
 // `cacheDir` is where the read-position cache lives: the desk watches the inbox folder (and reloads on any change in it), so collect() keeps the
@@ -809,6 +889,7 @@ const DEFAULT_NAMES = Object.freeze({
   hubRole: "po", hubIdLabel: "po", hubId: "^[a-z0-9-]{1,40}$", hubDir: "po", // the hub (PO): its `role` value, id label, id pattern, folder
   labelRole: "role", labelWait: "wait", labelWaitLink: "wait-link", labelSession: "session",
   answerLine: 'Panel answer ({kind}) for {agent}: "{text}".{ Target: {link}}',
+  preset: "po", arrangeScript: "~/.claude/skills/leader/herdr-team.sh", // the profile's preset ("none" = no agent / hub naming rules at all, #124) and the PO arrange script ("" = not there: the features that need it hide)
 });
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // a hub id becomes a file name whatever its pattern says
 function compileNames(n) {
@@ -972,6 +1053,20 @@ function findPo(terms, leaderName, address) {
 
 
 // chat:begin
+// Cutting and passing on text (#113): JS strings are UTF-16, so a plain slice(0, n) can split an emoji (a surrogate pair) and leave a lone
+// half, which is not valid UTF-8: a TextView / element id that carries one makes the whole view fail ("invalid utf-8 sequence").
+// cutPoint(s, n) is n, or n - 1 when n falls between the two halves of a pair; cutHead/cutTail never leave half a pair; wellFormed turns
+// any lone half into U+FFFD (the engine's toWellFormed when it has one). Every cut of a person's / a PO's text goes through these.
+function cutPoint(s, n) {
+  const a = s.charCodeAt(n - 1), b = s.charCodeAt(n);
+  return n > 0 && n < s.length && a >= 0xd800 && a <= 0xdbff && b >= 0xdc00 && b <= 0xdfff ? n - 1 : n;
+}
+const cutHead = (v, n) => { const s = String(v ?? ""); return s.slice(0, cutPoint(s, Math.max(0, n))); };
+const cutTail = (v, n) => { const s = String(v ?? ""); const at = s.length - Math.max(0, n); return at <= 0 ? s : s.slice(at === cutPoint(s, at) ? at : at + 1); };
+const HALF_SURROGATE = /[\ud800-\udfff]/, SURROGATES = /([\ud800-\udbff][\udc00-\udfff])|[\ud800-\udfff]/g;
+const wellFormed = (v) => { const s = String(v ?? ""); return HALF_SURROGATE.test(s) ? s.replace(SURROGATES, (m, pair) => (pair ? m : "\ufffd")) : s; };
+// The first character as a capital (an avatar letter), a whole emoji when it starts with one, never half of it.
+const initial = (v) => (Array.from(String(v ?? ""))[0] ?? "").toUpperCase();
 // The chat box of the window: "@" mentions, the menu of live leaders and which PO a line goes to. Pure. The mods cannot require a
 // .cjs file, so this block is copied verbatim between the markers into inbox/main.js (a test keeps them identical).
 const MENTION_END = "(?=$|[\\s.,!?:;)])";
@@ -1116,7 +1211,10 @@ function staleDrafts(keys, live, seen, now) {
 // #74: a draft mirror. Every change of a text box is copied (`mirror`: {text, content, range}); when the box comes back empty without the
 // person's own key press (`keyAt`, within DRAFT_KEY_MS) and without a clear of ours (which empties the mirror first), the text is put back.
 const DRAFT_KEY_MS = 1000;
-const draftWiped = (mirror, value, keyAt, now) => Boolean(mirror) && String(mirror.text ?? "") !== "" && String(value ?? "") === "" && !(Number(now) - Number(keyAt) < DRAFT_KEY_MS);
+// #112: a mirror of ONE character is never taken for a wipe. A Korean/Japanese/Chinese IME that is composing takes the Backspace itself (the key press
+// never reaches `keyAt`), so deleting the first, still-composed character empties the box with no key just before it: that is the person's edit, and
+// putting the character back made it impossible to delete. (Losing a one-character draft to a rebuild is cheap.)
+const draftWiped = (mirror, value, keyAt, now) => Boolean(mirror) && [...String(mirror.text ?? "")].length > 1 && String(value ?? "") === "" && !(Number(now) - Number(keyAt) < DRAFT_KEY_MS);
 // #66 (draft per room): the unsent chat text each room holds while another room is shown. `cur` = what the box holds now {text, content, range, pics};
 // leaving `from` stores it there (nothing to keep = the room's entry goes), arriving at `to` takes that room's entry out (it is the box again) and
 // returns it as `load` (null = an empty box). A room that was left empty keeps no entry; the map is capped (oldest dropped). Pure (no mutation of `map`).
@@ -1200,6 +1298,23 @@ const hcSame = (text, it) => {
   if (body.length < 3) return false;
   return [it?.title, it?.head, it?.lead].map(sq).some((r) => r.length >= 3 && (body.includes(r) || r.includes(body)));
 };
+// The PO hook's copy of a submitted line (kind "me") against a desk record: compared without wrapper tags, whitespace squeezed, and (second chance) by words +
+// pictures; a hook line ending in "…" (the hook keeps 2000 characters, #49) matches a record that starts with what is left. The hook line is the proof that a
+// line really reached the PO's model, whatever the desk's own status says.
+const tlNorm = (v) => cutHead(String(v ?? "").replace(/\s+/g, " ").trim(), 2000);
+const tlFull = (v) => tlMemoGet("f", v, (s) => tlNorm(unwrapTags(s)));
+const tlCore = (v) => tlMemoGet("c", v, (s) => { const sp = splitImgs(s); return `${tlNorm(sp.text)}|${sp.imgs.join(",")}`; });
+// "" when the line is not such a cut (a short line that merely ends in "…" must not hide a longer send).
+const tlCut = (v) => { const s = String(v ?? ""); if (!s.endsWith("…")) return ""; const p = tlFull(s.slice(0, -1)); return p.length >= TL_CUT_MIN ? p : ""; };
+const hookKey = (v) => ({ t: tlFull(v), c: tlCore(v), p: tlCut(v) });
+const tlMatches = (k, m) => tlFull(m.line) === k.t || tlFull(m.text) === k.t || (k.c.length > 1 && (tlCore(m.line) === k.c || tlCore(m.text) === k.c)) || (k.p && (tlFull(m.line).startsWith(k.p) || tlFull(m.text).startsWith(k.p)));
+// A hook line belongs to a desk record when it came from up to 11 minutes (the Enter button's life) after the record's time to 1 minute before it.
+const tlWindow = (xms, mms, back = 60000) => (xms - mms) >= -back && (xms - mms) <= 11 * 60000;
+// recs = [{ms, text}] (the PO's "me" lines); m = the desk record ({line, text, ms}); since = where its window starts (default: the record's own time).
+// True when the PO's hook saw that record's text submitted (#111: a send that looked failed but reached the PO is proven by this). `back` = how far before `since` a line still counts (the send path passes a few seconds: an identical line from before this send, e.g. a repeated "네", proves nothing).
+function hookProved(recs, m, since = Number(m?.ms ?? m?.at) || 0, back = 60000) {
+  return (recs ?? []).some((x) => x && typeof x.text === "string" && tlWindow(Number(x.ms) || 0, since, back) && tlMatches(hookKey(x.text), m ?? {}));
+}
 function timeline(room, leaders, says, mine, waits = [], now = 0) {
   const out = [];
   const seen = new Set();
@@ -1222,16 +1337,15 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
   // own sends are pasted into that terminal too, so the hook sees them as well: such a line is dropped when a desk record that reached the PO
   // (not failed / nopane / gone) has the same text (its `line` or its `text`, whitespace ignored) and came from up to 11 minutes (the Enter
   // button's life) before to 1 minute after it. One desk record covers one typed line.
-  const sentBy = (mine ?? []).filter((m) => m.po === room && !["failed", "nopane", "gone"].includes(m.status));
+  // A record the desk marked failed / nopane / gone did not reach the PO as far as the desk knew, so it is matched only after every other record (a hand
+  // retyped copy must not turn a failed bubble "sent" while a good record has the same text). When the hook did see its text (#111: the desk's check of
+  // the PO's screen can miss a line the PO queued while it was busy), the record IS delivered: it is covered like any other and shown "sent".
+  const DESK_BAD = ["failed", "nopane", "gone"];
+  const own = (mine ?? []).filter((m) => m.po === room);
+  const sentBy = own.filter((m) => !DESK_BAD.includes(m.status)).concat(own.filter((m) => DESK_BAD.includes(m.status)));
+  const proven = new Set();
   const taken = new Set();
-  const tnorm = (v) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 2000);
-  // Compared without wrapper tags (the terminal's paste wrapper must not make a copy look different) and, as a second chance, by words + pictures.
-  const full = (v) => tlMemoGet("f", v, (s) => tnorm(unwrapTags(s)));
-  const core = (v) => tlMemoGet("c", v, (s) => { const sp = splitImgs(s); return `${tnorm(sp.text)}|${sp.imgs.join(",")}`; });
-  // The PO hook keeps at most 2000 characters of a typed line and ends a longer one in "…" (#49), so its copy of a long desk send is only the
-  // start of that send: a line ending in "…" also matches a record whose text starts with what is left (at least TL_CUT_MIN characters after
-  // whitespace is squeezed, so a short line that merely ends in "…" does not hide a longer send). "" when the line is not such a cut.
-  const cut = (v) => { const s = String(v ?? ""); if (!s.endsWith("…")) return ""; const p = full(s.slice(0, -1)); return p.length >= TL_CUT_MIN ? p : ""; };
+  const full = tlFull, core = tlCore, cut = tlCut;
   // The PO's reply to a line the desk sent to a leader (#58): the hook gives a prompt and its reply the same pid, and the prompt matched a desk
   // record that has a `to`. Only the 1:1 view reads it (`about`); the bubble does not say "→ leader", since the reply is to the person.
   const about = new Map();
@@ -1244,15 +1358,15 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
         const r = out.findIndex((e, k) => e.leader === from && e.it && !coveredReports.has(k) && Math.abs(x.ms - e.ms) <= HC_REPORT_MS && hcSame(x.text, e.it));
         if (r >= 0) { coveredReports.add(r); continue; }
       }
-      const t = full(x.text), c = core(x.text), p = cut(x.text);
-      const i = sentBy.findIndex((m, j) => !taken.has(j) && (x.ms - (Number(m.ms) || 0)) >= -60000 && (x.ms - (Number(m.ms) || 0)) <= 11 * 60000 && (full(m.line) === t || full(m.text) === t || (c.length > 1 && (core(m.line) === c || core(m.text) === c)) || (p && (full(m.line).startsWith(p) || full(m.text).startsWith(p)))));
-      if (i >= 0) { taken.add(i); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); continue; }
+      const k = hookKey(x.text);
+      const i = sentBy.findIndex((m, j) => !taken.has(j) && tlWindow(x.ms, Number(m.ms) || 0) && tlMatches(k, m));
+      if (i >= 0) { taken.add(i); proven.add(sentBy[i]); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); continue; }
       out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
       continue;
     }
     out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: x.to || "", ...(!x.to && x.pid && about.get(x.pid) ? { about: about.get(x.pid) } : {}) });
   }
-  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", ...(x.tos?.length ? { tos: x.tos } : {}), kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
+  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", ...(x.tos?.length ? { tos: x.tos } : {}), kind: x.kind || "chat", status: proven.has(x) ? "sent" : liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
   // Two entries with the same key (the same text at the same ms) would share one element id: the later ones get a #n suffix.
   const used = new Map();
   for (const e of out) {
@@ -1281,7 +1395,7 @@ function chatRecord(rec, status, now = 0, seq = "") {
   if ((!text && !imgs.length) || !rec?.po) return null;
   const ms = Number(now) || 0;
   const tos = [...new Set((Array.isArray(rec?.tos) ? rec.tos : []).map((x) => String(x ?? "")).filter(Boolean))].slice(0, 8); // every leader the line names (#58); `to` stays the first
-  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, ...(imgs.length ? { imgs } : {}), line: cleanText(rec.line ?? text).slice(0, 4000), to: String(rec.to ?? ""), ...(tos.length > 1 ? { tos } : {}), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", ak: String(rec.ak ?? ""), status: CHAT_STATUS.includes(status) ? status : "failed" };
+  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, ...(imgs.length ? { imgs } : {}), line: cutHead(cleanText(rec.line ?? text), 4000), to: String(rec.to ?? ""), ...(tos.length > 1 ? { tos } : {}), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", ak: String(rec.ak ?? ""), status: CHAT_STATUS.includes(status) ? status : "failed" };
 }
 // The list with record `id` set to `status` at `now` (null when there is no such record or it already has it).
 function setChatStatus(list, id, status, now = 0) {
@@ -1289,6 +1403,11 @@ function setChatStatus(list, id, status, now = 0) {
   const i = list.findIndex((x) => x && x.id === id);
   if (i < 0 || list[i].status === status) return null;
   return list.map((x, j) => (j === i ? { ...x, status, at: Number(now) || 0 } : x));
+}
+// The list without record `id` (null when there is no such record). Only a bubble that failed to send may go (see mineActs' "delete").
+function dropChat(list, id) {
+  if (!Array.isArray(list) || !list.some((x) => x && x.id === id)) return null;
+  return list.filter((x) => !(x && x.id === id));
 }
 // The small dim note under a bubble that is not (fully) sent: "" when it was sent. `blocked`: the PO still waits on a prompt; `age`: ms since
 // the status last changed (an Enter button older than ENTER_TTL_MS is gone: the pasted line may not be in the input any more).
@@ -1300,12 +1419,12 @@ function mineNote(status, blocked = true, age = 0) {
   if (status === "noenter" && old) return "오래되어 입력창에 없을 수 있습니다 — 다시 보내세요";
   return MINE_NOTE[status] ?? "";
 }
-// The buttons a bubble offers, in order: "resend" (nothing reached the PO, or its pasted line is gone: send it again) and "enter" (it is pasted
+// The buttons a bubble offers, in order: "resend" (nothing reached the PO, or its pasted line is gone: send it again; a bubble that failed also offers "delete": drop it for good) and "enter" (it is pasted
 // into a normal prompt: only Enter is missing). A held one offers none while the PO still waits on its question (Enter there would answer the
 // question; that is only offered next to the question itself), and Enter and resend after it was answered. An Enter older than ENTER_TTL_MS
 // becomes a resend.
 function mineActs(status, blocked = false, age = 0) {
-  if (status === "nopane" || status === "failed" || status === "gone") return ["resend"];
+  if (status === "nopane" || status === "failed" || status === "gone") return ["resend", "delete"];
   const fresh = !(Number(age) > ENTER_TTL_MS);
   if (status === "noenter") return fresh ? ["enter"] : ["resend"];
   if (status === "held" && !blocked) return fresh ? ["enter", "resend"] : ["resend"];
@@ -1324,7 +1443,7 @@ const badgeTurn = (lease, id, now, ttl = 65000) => (!lease || lease.id === id ||
 // A spinner / timer row of the PO ("✻ Waiting (12s)", "✻ Thinking… (3s · esc to interrupt)"): it changes every second without the question
 // changing, so it is neither shown nor part of the signature.
 const PROMPT_TIMER = /^[\s│┃|]*[^\p{L}\p{N}\s]?\s*\p{L}[\p{L}\s'-]{0,30}[….]*\s*\((?:\d+\s*[hms]\s*)+[^)]*\)[\s│┃|]*$/u;
-const promptTail = (text, n = 10) => cleanText(text).split("\n").map((l) => l.trimEnd()).filter((l) => l.trim() && !PROMPT_TIMER.test(l)).slice(-n).map((l) => (l.length > 140 ? `${l.slice(0, 139)}…` : l));
+const promptTail = (text, n = 10) => cleanText(text).split("\n").map((l) => l.trimEnd()).filter((l) => l.trim() && !PROMPT_TIMER.test(l)).slice(-n).map((l) => (l.length > 140 ? `${cutHead(l, 139)}…` : l));
 const PROMPT_NUM = /^[\s│┃|]*([❯>›])?\s*(\d{1,2})[.)]\s+(\S.*?)[\s│┃|]*$/;
 const promptFooter = (l) => /^[^\p{L}\p{N}]*$/u.test(l) || (l.length <= 140 && /\b(esc|enter|tab|ctrl|shift|alt)\b|^\s*[↑↓←→]|\? for shortcuts/i.test(l));
 // {options: [{key, label, on}], head: the up to 2 lines right above the choices, tabs: the tab bar line of a multi-question prompt or ""}.
@@ -1360,7 +1479,7 @@ function promptParse(text) {
     rows.push(prev);
   }
   rows.reverse();
-  const options = rows.map((j) => { const m = num[j]; return { key: m[2], label: m[3].trim().slice(0, 80), on: m[1] === "❯" || m[1] === "›" }; });
+  const options = rows.map((j) => { const m = num[j]; return { key: m[2], label: cutHead(m[3].trim(), 80), on: m[1] === "❯" || m[1] === "›" }; });
   if (options.length < 2 || !options.every((o, i) => Number(o.key) === i + 1)) return none;
   const start = rows[0];
   const tabs = lines.slice(Math.max(0, start - 5), start).reverse().find((l) => PROMPT_TABS.test(l) && PROMPT_MARK.test(l)) ?? ""; // only near the question: an arrow line far up is output
@@ -1383,8 +1502,8 @@ function inputHas(screen, line) {
   const want = squeeze(cleanText(line)).replace(/^!\s*/, ""); // bash mode draws the "!" apart from the command
   if (!want) return false;
   const hay = squeeze(cleanText(screen).split("\n").filter((l) => l.trim()).slice(-14).join("\n"));
-  if (/\n/.test(cleanText(line).trim()) || want.length > 200) return /\[Pasted text/i.test(hay) || hay.includes(want.slice(0, 24)) || hay.includes(want.slice(-24));
-  return hay.includes(want.slice(0, 24)) || hay.includes(want.slice(-24));
+  if (/\n/.test(cleanText(line).trim()) || want.length > 200) return /\[Pasted text/i.test(hay) || hay.includes(cutHead(want, 24)) || hay.includes(cutTail(want, 24));
+  return hay.includes(cutHead(want, 24)) || hay.includes(cutTail(want, 24));
 }
 // A desk line that is a shell command for the PO's own prompt ("!ls": Claude Code's bash mode starts with "!"). null for any other text,
 // "" for a bare "!"; "!!" is not one. The command is the rest of the line, trimmed.
@@ -1473,10 +1592,10 @@ function snapStep(snaps, room, seen, now, ttl = SNAP_TTL_MS) {
 // The element id of a timeline row: the entry key, which ends in the "#n" of a duplicate; a long key keeps its start and gets a hash of the whole.
 function tlId(key) {
   const k = String(key ?? "");
-  if (k.length <= 80) return `tl-${k}`;
+  if (k.length <= 80) return `tl-${wellFormed(k)}`;
   let h = 5381;
   for (const ch of k) h = (Math.imul(h, 33) ^ ch.codePointAt(0)) >>> 0;
-  return `tl-${k.slice(0, 64)}~${h.toString(16).padStart(8, "0")}`;
+  return `tl-${wellFormed(cutHead(k, 64))}~${h.toString(16).padStart(8, "0")}`;
 }
 // {all, unread, decision, verify, done, stop}: how many entries each chip shows.
 const filterCounts = (entries, seen) => Object.fromEntries(CHAT_FILTERS.map(([k]) => [k, filterEntries(entries, k, seen).length]));
@@ -1544,6 +1663,33 @@ function decisionOptions(body) {
   if (options.length < 2) return { options: [], recommended: 0 };
   return { options, recommended: options.includes(rec) ? rec : 0 };
 }
+// A decision report that asks several questions (#76): a header line starting with a circled digit ("① 병합 시점", "**② 순서**", "- ③ …") opens a
+// question, and the "N안:" lines below it (until the next header) are that question's options. Only when at least two questions each have
+// at least two options; otherwise [] and the card reads the whole body as one question (decisionOptions). Options above the first header
+// belong to no question and make the body ambiguous, so they also give [].
+// -> [{ label: "①", options: [1, 2], recommended: 2 | 0 }, ...]
+const GROUP_HEAD = /^\s*(?:[-*#>]+\s*)?(?:\*\*)?([①②③④⑤⑥⑦⑧⑨⑩])/;
+function decisionGroups(body) {
+  const segs = [{ label: "", lines: [] }];
+  for (const line of String(body ?? "").split(/\r?\n/)) {
+    const m = line.match(GROUP_HEAD);
+    if (m) segs.push({ label: m[1], lines: [] });
+    else segs[segs.length - 1].lines.push(line);
+  }
+  if (segs.length < 3 || decisionOptions(segs[0].lines.join("\n")).options.length) return [];
+  const groups = segs.slice(1).map((s) => ({ label: s.label, ...decisionOptions(s.lines.join("\n")) }));
+  return groups.every((g) => g.options.length >= 2) && new Set(groups.map((g) => g.label)).size === groups.length ? groups : [];
+}
+// The answer for picks {label: N}: "①1안, ②2안" in the questions' order; "" until every question has a pick that is one of its options.
+function groupAnswer(groups, picks) {
+  const parts = [];
+  for (const g of groups ?? []) {
+    const n = picks?.[g.label];
+    if (!g.options.includes(n)) return "";
+    parts.push(`${g.label}${n}안`);
+  }
+  return parts.join(", ");
+}
 // What a decision report offers when it has no "N안:" lines (#62): its "추천: ..." and "답: ..." lines, shown on the card without opening it,
 // and the quoted answers after "답:" ("둘 다 진행" / "#59만" / "보류", also “…” and 「…」) as answer buttons when there are at least two.
 // Read strictly from the body; "답" must start a word (not "정답:" / "답변:"). The "추천" line may carry the "답:" part after it on the same line.
@@ -1552,7 +1698,7 @@ function decisionHints(body) {
   const lines = [];
   let answers = [];
   let rec = "";
-  const cut = (s) => (s.length > 160 ? `${s.slice(0, 159)}…` : s);
+  const cut = (s) => (s.length > 160 ? `${cutHead(s, 159)}…` : s);
   for (const raw of String(body ?? "").split(/\r?\n/)) {
     const line = raw.replace(/^\s*(?:[-*]\s*)?/, "").trim();
     const r = line.match(/^추천\s*[:：]\s*(.*?)(?:\s*[.。]?\s+답\s*[:：].*)?$/);
@@ -1709,10 +1855,17 @@ function roomWorking(terms) {
   }
   return out;
 }
+// #119: the rooms whose PO has remote on, as a Set of room ids, from the desk's remote states (room -> {phase}). Only "on" / "already" count: sending, failed and
+// unknown (and a room with no state yet) are off, so the mark never claims more than the last screen check or restore saw.
+function remoteRooms(rc) {
+  const out = new Set();
+  for (const [room, r] of rc ?? []) if (r && (r.phase === "on" || r.phase === "already")) out.add(room);
+  return out;
+}
 // A short text that changes exactly when something the desk shows from the terminals changes: the status, the wait label and the shown
 // name of every PO and leader, and whether a leader has work below it (a team member working). The 1.5 s poll redraws a copy only when this
 // differs from the last one (no redraw on a quiet second).
-function statusSig(terms) {
+function statusSig(terms, remote) {
   const rows = [];
   const hot = busyAddrs(terms), states = workStates(terms);
   for (const t of terms ?? []) {
@@ -1721,7 +1874,8 @@ function statusSig(terms) {
     rows.push(`${t.address}|${String(t.status ?? "")}|${lead ? waitingKind(t) : ""}|${lead ? liveName(t) : ""}|${lead && hot.has(t.address) ? 1 : 0}|${lead && hot.has(t.address) ? typingLabel(states, t.address) : ""}`);
   }
   const w = [...roomWorking(terms)].sort().join(",");
-  return rows.sort().join("\n") + (w ? `\n#w:${w}` : ""); // #69: a working terminal that is no PO/leader (a member right under a PO) still moves a room dot
+  const r = [...(remote ?? [])].sort().join(","); // #119: a room's remote mark comes and goes with the desk's own state, not with a terminal
+  return rows.sort().join("\n") + (w ? `\n#w:${w}` : "") + (r ? `\n#r:${r}` : ""); // #69: a working terminal that is no PO/leader (a member right under a PO) still moves a room dot
 }
 // ---- images (pasted, picked or dropped in the box; or pasted in the PO terminal and read back by the hook)
 // A picture lives in <app root>/data/inbox/img/ (0600, written by this helper); a line of the desk's message names it as "[image: <path> — ...]"
@@ -1762,6 +1916,7 @@ function clipLong(text) {
   const s = String(text ?? "");
   let end = Math.min(s.length, LONG_CHARS), n = 0, i = -1;
   while ((i = s.indexOf("\n", i + 1)) !== -1 && i < end) if (++n >= LONG_LINES) { end = i; break; }
+  end = cutPoint(s, end);
   if (end >= s.length) return { text: s, cut: false, more: 0 };
   return { text: s.slice(0, end).trimEnd(), cut: true, more: s.length - end };
 }
@@ -1975,7 +2130,7 @@ function remoteBlock({ po = "", status = "", running = false, sending = false } 
 const REMOTE_POLLS = 5, REMOTE_POLL_MS = 1000; // after the send: this many screen reads, this far apart (~5 s)
 const REMOTE_URL = /https:\/\/claude\.ai\/code\/[^\s)\]>"'`]+/g;
 // What the PO's screen says about Remote Control. `menu` = Claude Code's "already connected" menu (Disconnect this session / Show QR code / Continue), `active` = the
-// footer says it is on, `url` = the last session link on screen. Text copied from Claude Code's UI and NOT verified against a real terminal (UNVERIFIED).
+// footer says it is on, `url` = the last session link on screen, `off` = a disconnect line is on screen after the last on line (#109: that clears the saved on-record). Text copied from Claude Code's UI and NOT verified against a real terminal (UNVERIFIED).
 function remoteScreen(text) {
   const clean = cleanText(text);
   const lines = clean.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim());
@@ -1989,7 +2144,7 @@ function remoteScreen(text) {
   let on = -1, off = -1;
   lines.forEach((l, i) => { if (/\/?remote[- ]control (is )?(active|connected)/i.test(l)) on = i; if (/remote[- ]control (is )?(disconnected|off|stopped|inactive)|disconnected (this )?session/i.test(l)) off = i; });
   const urls = clean.match(REMOTE_URL) ?? [];
-  return { menu, active, seen: active || (on >= 0 && on > off), url: urls.length ? urls[urls.length - 1].replace(/[.,;:]+$/, "") : "" };
+  return { menu, active, seen: active || (on >= 0 && on > off), off: !active && off >= 0 && off > on, url: urls.length ? urls[urls.length - 1].replace(/[.,;:]+$/, "") : "" };
 }
 // The one-line system note for the room's chat. kind: on | already | fail | unknown.
 function remoteNote(kind, { url = "", why = "" } = {}) {
@@ -2035,7 +2190,7 @@ function restartSendResult(r) {
   const out = String(r?.stdout ?? "").trim(), err = String(r?.stderr ?? "").trim();
   let j = null;
   try { j = JSON.parse(out); } catch {}
-  const detail = `code ${code}; stdout ${out.slice(0, 160)}; stderr ${err.slice(0, 160)}`.replace(/\s+/g, " ");
+  const detail = `code ${code}; stdout ${cutHead(out, 160)}; stderr ${cutHead(err, 160)}`.replace(/\s+/g, " ");
   if (code === 0 && j && j.started === true) {
     const turn = Number(j.turn);
     return { ok: true, turn: Number.isFinite(turn) ? turn : null, status: String(j.status ?? ""), why: "", detail };
@@ -2045,7 +2200,7 @@ function restartSendResult(r) {
   if (code === 0 && j && j.started === false && !j.error) return { ok: false, notStarted: true, turn: null, status: "", why: "PO가 받아 시작하지 않았습니다(입력창에 쓰던 글이 있는지 확인하세요)", detail };
   const why = kind === "blocked" ? "PO가 질문 중이라 받지 않았습니다"
     : kind === "status_mismatch" ? "PO가 일하는 중이라 받지 않았습니다"
-    : j?.error?.message ? `PO가 받지 않았습니다(${String(j.error.message).slice(0, 80)})`
+    : j?.error?.message ? `PO가 받지 않았습니다(${cutHead(String(j.error.message), 80)})`
     : `hc send가 실패했습니다(종료 코드 ${code})`;
   return { ok: false, turn: null, status: "", why, detail };
 }
@@ -2057,6 +2212,15 @@ function restartTerm(r) {
   if (!j || typeof j !== "object") return null;
   const turn = Number(j.turn);
   return { live: String(j.state ?? "") === "live" && (j.exit_code === null || j.exit_code === undefined), status: String(j?.status?.state ?? "").trim().toLowerCase(), turn: Number.isFinite(turn) ? turn : null };
+}
+// The claude process of a terminal from `hc get <t> --json` ({code, stdout}): its foreground process when that is claude, else null (a shell prompt, a child in front).
+function termPid(r) {
+  if (!r || Number(r.code) !== 0) return null;
+  let j = null;
+  try { j = JSON.parse(String(r.stdout ?? "")); } catch { return null; }
+  const f = j?.foreground, pid = Number(f?.pid);
+  const name = String(f?.name ?? (Array.isArray(f?.argv) ? f.argv[0] : "") ?? "");
+  return Number.isInteger(pid) && pid > 1 && /(^|[\\/])claude(\.exe)?$/i.test(name) ? pid : null;
 }
 // Why nothing is sent now ("" when it can be): the terminal must be known and running, not on a prompt, not working (idle or done are both fine).
 function restartSendBlock(term) {
@@ -2084,6 +2248,7 @@ function restartDraft(mine, room, now) {
 // What the PO's hook recorded as submitted (UserPromptSubmit -> kind "me" lines of po/<id>.jsonl) is the proof of what `hc send` really sent.
 // The step-1 request must come back as exactly itself: a draft left in the input box is sent in front of it ("<draft><request>"), and the run stops.
 // recs = [{ms, text}] ("me" lines); since = ms just before the send. "wait" = no record yet, "ok", "mismatch" (something else was submitted).
+const SEND_PROOF_BACK_MS = 2000; // a hook line counts as proof of THIS send only from this long before the send started (clock slack); an older identical line is another send
 const RESTART_REC_MS = 12 * 1000; // how long the desk waits for the record of a send (the hook writes it when the prompt is submitted)
 const restartNorm = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 function restartSubmitCheck(recs, since, expected) {
@@ -2110,7 +2275,7 @@ function diagAppend(lines, root = appRoot()) {
   let size = 0;
   try { size = fs.statSync(f).size; } catch {}
   if (size > DIAG_MAX) fs.renameSync(f, f + ".1");
-  const text = (Array.isArray(lines) ? lines : []).slice(0, 60).map((x) => String(x).replace(/[\r\n]+/g, " ").slice(0, 300)).join("\n") + "\n";
+  const text = (Array.isArray(lines) ? lines : []).slice(0, 60).map((x) => cutHead(String(x).replace(/[\r\n]+/g, " "), 300)).join("\n") + "\n";
   const fd = fs.openSync(f, "a", 0o600);
   try { try { fs.fchmodSync(fd, 0o600); } catch {} fs.writeSync(fd, text); } finally { fs.closeSync(fd); }
   return f;
@@ -2128,16 +2293,17 @@ function readHandoff(dir = inboxDir(), id = "") {
   try {
     const st = fs.statSync(file);
     if (!st.isFile()) return { path: shown, exists: false, ms: 0, size: 0, text: "" };
-    return { path: shown, exists: true, ms: Math.floor(st.mtimeMs), size: st.size, text: cleanText(fs.readFileSync(file, "utf8").slice(0, HANDOFF_MAX)) };
+    return { path: shown, exists: true, ms: Math.floor(st.mtimeMs), size: st.size, text: cleanText(cutHead(fs.readFileSync(file, "utf8"), HANDOFF_MAX)) };
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { CLIP_TEXT_MAX, clipText, bangCommand, promptInput, promptParse, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, roomWorking, REMOTE_CMD, REMOTE_POLLS, REMOTE_POLL_MS, remoteBlock, remoteScreen, remoteNote, SOLO_DIR, soloEnabled, readSolo, setSolo, SOLO_FLAG, soloFile, NOTICE_KINDS, isNotice, noticeText, hcSender, HC_REPORT_MS, hcSame };
+module.exports = { hookProved, initial, cutPoint, cutHead, cutTail, wellFormed, CLIP_TEXT_MAX, clipText, bangCommand, promptInput, promptParse, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, SEND_PROOF_BACK_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, roomWorking, REMOTE_CMD, REMOTE_POLLS, REMOTE_POLL_MS, remoteBlock, remoteScreen, remoteNote, SOLO_DIR, soloEnabled, readSolo, setSolo, SOLO_FLAG, soloFile, decisionGroups, groupAnswer, dropChat, REMOTE_DIR, remoteRecFile, termPid, procStart, bridgeState, readRemoteRec, clearRemote, markRemote, checkRemote, remoteRooms, NOTICE_KINDS, isNotice, noticeText, hcSender, HC_REPORT_MS, hcSame };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)
   // `node inbox.cjs clipimg`    -> {"path": <saved picture of the clipboard>|null}
   // `node inbox.cjs handoff <po id>` -> {path, exists, ms, size, text} of that PO's handoff note
+  // `node inbox.cjs remote-check <po id> <pid>` -> {on, why, url}; `remote-mark <po id> <pid> [url]` / `remote-clear <po id>` -> {ok} (#109)
   // `node inbox.cjs addimg <f>` -> {"path": <saved copy of the picture file f>|null}
   const [cmd, arg] = process.argv.slice(2);
   loadNames(); // every subcommand reads the profile (hub folder, id pattern); a broken one is reported in the data (`profileError`)
@@ -2147,6 +2313,9 @@ if (require.main === module) {
   else if (cmd === "diag") { try { diagAppend(JSON.parse(arg)); } catch {} process.stdout.write("{}"); }
   else if (cmd === "po-me") { let me = []; try { const f = poFile(inboxDir(), arg); if (f) me = parsePoLines(readTail(f)).filter((x) => x.me).slice(-20).map((x) => ({ ms: x.ms, text: x.text })); } catch {} process.stdout.write(JSON.stringify(me)); }
   else if (cmd === "handoff") process.stdout.write(JSON.stringify(readHandoff(inboxDir(), arg)));
+  else if (cmd === "remote-check") { let r = { on: false, why: "error", url: "" }; try { r = checkRemote(inboxDir(), arg, Number(process.argv[4])); } catch {} process.stdout.write(JSON.stringify(r)); }
+  else if (cmd === "remote-mark") { let ok = false; try { ok = markRemote(inboxDir(), arg, Number(process.argv[4]), { url: process.argv[5] ?? "" }); } catch {} process.stdout.write(JSON.stringify({ ok })); }
+  else if (cmd === "remote-clear") { let ok = false; try { ok = clearRemote(inboxDir(), arg); } catch {} process.stdout.write(JSON.stringify({ ok })); }
   else if (cmd === "addimg") process.stdout.write(JSON.stringify(shown(importImage(arg))));
   else process.stdout.write(JSON.stringify(collect()));
 }
