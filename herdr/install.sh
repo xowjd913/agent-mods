@@ -1,7 +1,7 @@
 #!/bin/sh
 # Herdr 모드를 설치·갱신한다(macOS·Linux). 다시 실행해도 된다.
 #   기본 모드: tabs-mine, settings, gh-accounts, work, prs, wt-menu, schedules
-#   추가 모드(--extras): usage-status, agent-groups, leader-tabs, path-menu, inbox
+#   추가 모드(--extras): usage-status, agent-groups, leader-tabs, path-menu, inbox, memo
 #   인자 없이 실행하면 설치된 모드만 갱신한다(처음이면 기본 모드를 설치한다).
 #   --only work,prs / --add usage-status / --remove leader-tabs / --list 로 모드를 고를 수 있다.
 #   --gh-account / --gh-account-uninstall 은 모드가 아니라 저장소별 GitHub 계정 도구(gh-account)를 설치·제거한다.

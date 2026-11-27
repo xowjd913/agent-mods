@@ -51,6 +51,7 @@ const MODS = [
   { name: "leader-tabs", desc: "칸 머리줄에 리더 탭을 보여 준다" },
   { name: "path-menu", desc: "터미널 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄운다" },
   { name: "inbox", desc: "UI 모드 패널: 리더 결과 보고를 채팅처럼 보고, 결정을 PO에게 답한다" },
+  { name: "memo", desc: "메모 패널: 폴더 안의 .md 파일로 메모를 쓰고, 눌러서 PO에게 보낸다" },
 ];
 // 설치기 출처. install.cjs가 설치할 때 settings 모드 폴더의 .source.json에 남긴다.
 //   원격(curl|sh, irm): { kind: "remote", ref }  /  저장소 복제본: { kind: "local", dir }  /  기록 없음: 직접 돌리지 않는다(명령 복사만).
