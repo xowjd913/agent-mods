@@ -360,8 +360,8 @@ test("main.js: 카드 글자는 모두 선택 가능한 TextView이고, 눌러�
   assert.ok(src.includes("this.heading_text(t, `${id}-h`") && src.includes("this.heading_text(t, key, p.html")); // 제목·소제목: TextView 자체에 굵기를 준 선택 가능한 글
   assert.ok(!src.includes("<strong>"));
   assert.match(src, /it\.parts/); // 펼친 본문
-  // 카드 전체에는 클릭 처리가 없다: toggleOpen은 버튼 한 곳에서만 부른다
-  assert.equal((src.match(/toggleOpen\(/g) ?? []).length, 2); // 정의 1 + 버튼 1
+  // 카드 전체에는 클릭 처리가 없다: toggleOpen은 버튼 한 곳과, 말풍선이 아닌 가운데 알림 줄(#87) 한 곳에서만 부른다
+  assert.equal((src.match(/toggleOpen\(/g) ?? []).length, 3); // 정의 1 + 버튼 1 + 알림 줄 1
   assert.ok(!/linkChip|codeSpan/.test(src));
 });
 
@@ -428,7 +428,7 @@ test("main.js: 페인 모드: 같은 메신저 화면, 자기 제목줄을 쓰�
   assert.match(open, /if \(this\.windowed\) \{ try \{ closeOverlay/); // 창에서 열면 창을 닫는다
   assert.ok(!/hc send|hc\(/.test(open));
   // 머리줄: 페인은 제목·옆에 열기가 없고(페인 머리줄·이미 페인), 닫기 버튼도 만들지 않는다
-  assert.match(src, /\.when\(!this\.paned \|\| this\.mained, \(el\) => el\.child\(div\(\)\.text_size\(15\)[^\n]*UI 모드/); // 페인은 자기 제목줄이 있고, UI 모드 main 칸은 없어서 제목을 그린다
+  assert.match(src, /\.when\(!this\.paned \|\| this\.mained, \(el\) => el\.child\(div\(\)\.text_size\(fz\(15\)\)[^\n]*UI 모드/); // 페인은 자기 제목줄이 있고, UI 모드 main 칸은 없어서 제목을 그린다
   assert.match(src, /\.when\(!this\.paned, \(el\) => el\.child\(this\.button\(t, "inbox-beside", "옆에 열기"/);
   assert.match(src, /\.when\(this\.windowed, \(el\) => el\.child\(div\(\)\.id\("inbox-close"\)/);
   // 갱신·뱃지: 창과 페인은 5초(페인은 그려지는 동안만), Dock만 30초, 뱃지는 창만 건너뛴다
@@ -2188,7 +2188,7 @@ function fakeDiv() {
 
 test("main.js: 방 목록 원격 표시(#119) — 켜짐일 때만 강조색 글자와 툴팁을 내고, 꺼짐·모름은 평소 'PO'", () => {
   const src = mainSrc();
-  const g = { div: fakeDiv, PO_OTHER: I.PO_OTHER };
+  const g = { div: fakeDiv, PO_OTHER: I.PO_OTHER, fz: (n) => n };
   const make = (head, next) => runMethod(src, head, next, g);
   const { roomRemote } = make("  roomRemote(t, x, text) {", "  // The small line under a room's name");
   const { roomSub } = make("  roomSub(t, x) {", "  // The count badges of a room");

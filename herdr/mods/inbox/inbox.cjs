@@ -1298,6 +1298,44 @@ function tlMemoGet(kind, v, make) {
   return r;
 }
 const TL_CUT_MIN = 500;
+// #80: the UI mode's text follows Herdr's text size. Every size written in the code is for FONT_BASE (13, Herdr's setting when #80 was made) and is
+// multiplied by settings().font_size / FONT_BASE, so 13 looks as before. A missing or odd value is 13; the factor is held within 0.6..2.5.
+// #126: the settings window can fix the UI mode's size instead (shared "settings.uiFontSize", persisted by Herdr): a number of px within 10..24 wins over
+// Herdr's value; anything else (unset, null, text, out of range) is ignored and the UI mode follows Herdr as before.
+const FONT_BASE = 13;
+const FONT_KEY = "settings.uiFontSize", FONT_MIN = 10, FONT_MAX = 24;
+const fontOverride = (v) => { const n = typeof v === "number" ? v : NaN; return Number.isFinite(n) && n >= FONT_MIN && n <= FONT_MAX ? Math.round(n) : null; };
+const fontScale = (st, override) => {
+  const o = fontOverride(override);
+  if (o !== null) return o / FONT_BASE;
+  const n = Number(st?.font_size);
+  return Number.isFinite(n) && n > 0 ? Math.min(2.5, Math.max(0.6, n / FONT_BASE)) : 1;
+};
+// #87: a report that is an announcement (finished / started / resumed / stopped) is drawn as one centered line, not a bubble; the ones that
+// need an answer (decision, verify) stay cards. `start` is not a shown report today (tlShown), so it only matters if that ever changes.
+const NOTICE_KINDS = new Set(["start", "done", "resume", "stop"]);
+const isNotice = (e) => String(e?.who ?? "").startsWith("l:") && Boolean(e.it) && NOTICE_KINDS.has(e.it.kind) && !e.waiting && !e.wait;
+// "<name> · <kind> · <first line>" ("kind" = the shown kind word); the first line is the report's headline, whitespace squeezed.
+// A headline that is only the kind word (a leader report titled "[leader] 재개") says nothing new: the first non-empty body line takes its place.
+const noticeLine = (s) => String(s ?? "").replace(/^\s*\[[^\]]*\]\s*/, "").replace(/\s+/g, " ").trim();
+const noticeText = (name, kind, it) => {
+  let head = noticeLine(it?.head || it?.lead || it?.title);
+  if (!head || head === kind) head = String(it?.body ?? "").replace(/\r/g, "").split("\n").map((l) => l.replace(/\s+/g, " ").trim()).find(Boolean) ?? "";
+  return [name, kind, head].filter(Boolean).join(" · ");
+};
+// A line pasted into the PO terminal that another terminal sent (`<hc from="t137 lead-x">`) is that terminal's words, not the person's. -> the sender's
+// hc name ("lead-x", the last word of `from`), "" when the line is not such a message.
+const hcSender = (text) => { const m = /^\s*<hc\s+from="([^"]*)"/.exec(String(text ?? "")); return m ? (m[1].trim().split(/\s+/).pop() ?? "") : ""; };
+const HC_REPORT_MS = 5 * 60 * 1000; // an hc line and the report it carries are written within this gap
+// Is this <hc> line a copy of that report? Its words (wrapper and a leading "[leader]" tag removed, spaces squeezed, case ignored) must overlap the
+// report's title / head / lead (one contains the other, at least 3 characters): the same leader within 5 minutes is not enough, since an unrelated
+// message of that leader (a question, say) must stay on the desk.
+const hcSame = (text, it) => {
+  const sq = (v) => String(v ?? "").replace(/\s+/g, " ").trim().toLowerCase().replace(/^\[[^\]]*\]\s*/, "");
+  const body = sq(unwrapTags(text));
+  if (body.length < 3) return false;
+  return [it?.title, it?.head, it?.lead].map(sq).some((r) => r.length >= 3 && (body.includes(r) || r.includes(body)));
+};
 // The PO hook's copy of a submitted line (kind "me") against a desk record: compared without wrapper tags, whitespace squeezed, and (second chance) by words +
 // pictures; a hook line ending in "…" (the hook keeps 2000 characters, #49) matches a record that starts with what is left. The hook line is the proof that a
 // line really reached the PO's model, whatever the desk's own status says.
@@ -1349,8 +1387,15 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
   // The PO's reply to a line the desk sent to a leader (#58): the hook gives a prompt and its reply the same pid, and the prompt matched a desk
   // record that has a `to`. Only the 1:1 view reads it (`about`); the bubble does not say "→ leader", since the reply is to the person.
   const about = new Map();
+  const coveredReports = new Set(); // indexes into `out` of the reports an hc copy was matched to
   if (room && room !== PO_OTHER) for (const x of says ?? []) {
     if (x.me) {
+      // #87: the PO hook also records a leader's report that arrived as `<hc from=...>`; the report is already on the desk (card or notice), so that copy is not a bubble of the person. One report covers one such line.
+      const from = hcSender(x.text);
+      if (from) {
+        const r = out.findIndex((e, k) => e.leader === from && e.it && !coveredReports.has(k) && Math.abs(x.ms - e.ms) <= HC_REPORT_MS && hcSame(x.text, e.it));
+        if (r >= 0) { coveredReports.add(r); continue; }
+      }
       const k = hookKey(x.text);
       const i = sentBy.findIndex((m, j) => !taken.has(j) && tlWindow(x.ms, Number(m.ms) || 0) && tlMatches(k, m));
       if (i >= 0) { taken.add(i); proven.add(sentBy[i]); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); continue; }
@@ -2228,6 +2273,24 @@ function restartSendBlock(term) {
   if (term.status === "working") return "PO가 일하는 중입니다";
   return "";
 }
+// #133: Esc in the chat box stops the PO's running turn (the way Esc does in its terminal). One Esc only: a second one in a row opens Claude Code's rewind menu,
+// so a press locks the key and the button for STOP_LOCK_MS. Why no Esc goes out now ("" when one can): the terminal must be known, running and working.
+const STOP_LOCK_MS = 2500;
+function stopBlock(term) {
+  if (!term) return "PO 터미널의 상태를 읽지 못해 Esc를 보내지 않았습니다";
+  if (!term.live) return "PO 터미널이 실행 중이 아니라 Esc를 보내지 않았습니다";
+  if (term.status === "blocked") return "PO가 질문 중이라 Esc를 보내지 않았습니다(질문 카드의 Esc를 쓰세요)";
+  if (term.status !== "working") return "PO가 일하는 중이 아니라 Esc를 보내지 않았습니다";
+  return "";
+}
+const stopLocked = (at, now) => Number(at) > 0 && Number(now) - Number(at) >= 0 && Number(now) - Number(at) < STOP_LOCK_MS;
+// Is the Esc key of the chat box a stop? Only with no menu open, an empty box (text is never touched), the room's PO working now and no press just before.
+const stopKey = (key, o) => String(key ?? "").toLowerCase() === "escape" && !o.menu && !String(o.text ?? "").trim() && Boolean(o.working) && !stopLocked(o.at, o.now);
+// The room's PO terminal is working right now (its own hc status), from the live terminals: false for "PO 모름" and for no PO.
+function stopWorking(terms, pick) {
+  const po = pick && pick !== PO_OTHER ? chatTarget(terms, [], pick).po : null;
+  return Boolean(po) && String((terms ?? []).find((t) => t?.address === po)?.status ?? "").trim().toLowerCase() === "working";
+}
 // After `/clear` was sent (`sent` = the turn counter it reported, i.e. from before the command): "wait" while the PO still works or is on a prompt, or the counter
 // has not gone up, "done" once the PO is idle/done and the counter is higher (/clear counts as one turn), "gone" when the terminal is not running any more.
 // `done` counts too: herdr turns a "done" PO "idle" only once someone looks at its pane. That the line sent was really "/clear" is proven by restartClearCheck.
@@ -2295,7 +2358,7 @@ function readHandoff(dir = inboxDir(), id = "") {
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { hookProved, initial, cutPoint, cutHead, cutTail, wellFormed, CLIP_TEXT_MAX, clipText, bangCommand, promptInput, promptParse, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, SEND_PROOF_BACK_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, roomWorking, REMOTE_CMD, REMOTE_POLLS, REMOTE_POLL_MS, remoteBlock, remoteScreen, remoteNote, SOLO_DIR, soloEnabled, readSolo, setSolo, SOLO_FLAG, soloFile, decisionGroups, groupAnswer, dropChat, REMOTE_DIR, remoteRecFile, termPid, procStart, bridgeState, readRemoteRec, clearRemote, markRemote, checkRemote, remoteRooms, soloMode, soloTerm, soloRooms };
+module.exports = { soloMode, soloTerm, soloRooms, STOP_LOCK_MS, stopBlock, stopLocked, stopKey, stopWorking, hookProved, initial, cutPoint, cutHead, cutTail, wellFormed, CLIP_TEXT_MAX, clipText, bangCommand, promptInput, promptParse, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, SEND_PROOF_BACK_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, roomWorking, REMOTE_CMD, REMOTE_POLLS, REMOTE_POLL_MS, remoteBlock, remoteScreen, remoteNote, SOLO_DIR, soloEnabled, readSolo, setSolo, SOLO_FLAG, soloFile, decisionGroups, groupAnswer, dropChat, REMOTE_DIR, remoteRecFile, termPid, procStart, bridgeState, readRemoteRec, clearRemote, markRemote, checkRemote, remoteRooms, FONT_BASE, FONT_KEY, FONT_MIN, FONT_MAX, fontOverride, fontScale, NOTICE_KINDS, isNotice, noticeText, hcSender, HC_REPORT_MS, hcSame };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)
