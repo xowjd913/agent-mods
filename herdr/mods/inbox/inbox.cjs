@@ -2271,13 +2271,61 @@ function readHandoff(dir = inboxDir(), id = "") {
   } catch { return { path: shown, exists: false, ms: 0, size: 0, text: "" }; }
 }
 
-module.exports = { hookProved, initial, cutPoint, cutHead, cutTail, wellFormed, CLIP_TEXT_MAX, clipText, bangCommand, promptInput, promptParse, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, SEND_PROOF_BACK_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, roomWorking, REMOTE_CMD, REMOTE_POLLS, REMOTE_POLL_MS, remoteBlock, remoteScreen, remoteNote, SOLO_DIR, soloEnabled, readSolo, setSolo, SOLO_FLAG, soloFile, decisionGroups, groupAnswer, dropChat, REMOTE_DIR, remoteRecFile, termPid, procStart, bridgeState, readRemoteRec, clearRemote, markRemote, checkRemote, remoteRooms };
+// #138: the unsent chat draft survives a re-init of the mod (a rewrite of the mod's files starts a new copy of the desk, whose box is empty and
+// has no focus). One small file, <app root>/data/inbox/chat-draft.json, 0600: {v, at, focus, rooms: {<room id>: {text, range}}}. It is the room
+// drafts of main.js (the box of the room shown + `roomDrafts`) written down, not a second store. Text only: mention chips come back as plain text and
+// pictures are not kept. `focus` is true only while the chat box had the keyboard, and counts only while it is fresh (DRAFT_FOCUS_MS): the new copy
+// takes the keyboard back for the box only then, never on a normal start and never when the person was typing elsewhere.
+const CHAT_DRAFT_FILE = "chat-draft.json";
+const DRAFT_FOCUS_MS = 30 * 1000;
+const DRAFT_KEEP_MS = 12 * 3600 * 1000;
+const DRAFT_TEXT_MAX = 6000, DRAFT_TOTAL_MAX = 20000; // the file travels as ONE command-line argument (Windows allows ~32K): per room and in all, the first rooms listed win
+const chatDraftPath = (root = appRoot()) => path.join(root, "data", "inbox", CHAT_DRAFT_FILE);
+const draftRange = (r) => (r && Number.isInteger(r.start) && Number.isInteger(r.end) && r.start >= 0 && r.end >= 0 ? { start: r.start, end: r.end } : null);
+// The file's content from the drafts to keep: `drafts` is a Map or an array of [room, {text, range}]; empty texts are left out. `focus`: the box has the keyboard now.
+function chatDraftSnap(drafts, focus, now = Date.now()) {
+  const rooms = {};
+  let total = 0;
+  for (const [room, d] of drafts instanceof Map ? drafts : Array.isArray(drafts) ? drafts : []) {
+    const text = typeof d?.text === "string" ? cutHead(d.text, DRAFT_TEXT_MAX) : "";
+    if (!room || text === "" || total + text.length > DRAFT_TOTAL_MAX) continue;
+    total += text.length;
+    rooms[String(room)] = { text, range: draftRange(d.range) };
+  }
+  return { v: 1, at: now, focus: Boolean(focus), rooms };
+}
+// Writes the snapshot (atomically); a snapshot with no draft and no focus removes the file. Returns "written" | "cleared" | "none" (nothing there to clear).
+function chatDraftWrite(snap, root = appRoot()) {
+  const f = chatDraftPath(root);
+  if (!snap || (!snap.focus && !Object.keys(snap.rooms ?? {}).length)) {
+    try { fs.unlinkSync(f); return "cleared"; } catch { return "none"; }
+  }
+  fs.mkdirSync(path.dirname(f), { recursive: true, mode: 0o700 });
+  const tmp = `${f}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(snap), { mode: 0o600 });
+  fs.renameSync(tmp, f);
+  return "written";
+}
+// What the file says now: {rooms: {<room>: {text, range}}, focus} or null (missing, broken, or older than DRAFT_KEEP_MS). `focus` also needs the file to be fresh.
+function chatDraftRead(root = appRoot(), now = Date.now()) {
+  let j = null;
+  try { j = JSON.parse(fs.readFileSync(chatDraftPath(root), "utf8")); } catch { return null; }
+  if (!j || j.v !== 1 || !Number.isFinite(j.at) || now - j.at > DRAFT_KEEP_MS || j.at - now > 60 * 1000) return null;
+  const rooms = {};
+  for (const [room, d] of Object.entries(j.rooms && typeof j.rooms === "object" ? j.rooms : {})) {
+    if (typeof d?.text === "string" && d.text !== "") rooms[room] = { text: cutHead(d.text, DRAFT_TEXT_MAX), range: draftRange(d.range) };
+  }
+  return { rooms, focus: j.focus === true && now - j.at < DRAFT_FOCUS_MS };
+}
+
+module.exports = { hookProved, initial, cutPoint, cutHead, cutTail, wellFormed, CLIP_TEXT_MAX, clipText, bangCommand, promptInput, promptParse, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, SEND_PROOF_BACK_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, roomWorking, REMOTE_CMD, REMOTE_POLLS, REMOTE_POLL_MS, remoteBlock, remoteScreen, remoteNote, SOLO_DIR, soloEnabled, readSolo, setSolo, SOLO_FLAG, soloFile, decisionGroups, groupAnswer, dropChat, REMOTE_DIR, remoteRecFile, termPid, procStart, bridgeState, readRemoteRec, clearRemote, markRemote, checkRemote, remoteRooms , CHAT_DRAFT_FILE, DRAFT_FOCUS_MS, DRAFT_KEEP_MS, chatDraftPath, chatDraftSnap, chatDraftWrite, chatDraftRead };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)
   // `node inbox.cjs clipimg`    -> {"path": <saved picture of the clipboard>|null}
   // `node inbox.cjs handoff <po id>` -> {path, exists, ms, size, text} of that PO's handoff note
   // `node inbox.cjs remote-check <po id> <pid>` -> {on, why, url}; `remote-mark <po id> <pid> [url]` / `remote-clear <po id>` -> {ok} (#109)
+  // `node inbox.cjs draft-read` -> {rooms, focus} of the saved chat draft (#138); `draft-write <json {rooms, focus}>` saves it (no draft and no focus removes the file)
   // `node inbox.cjs addimg <f>` -> {"path": <saved copy of the picture file f>|null}
   const [cmd, arg] = process.argv.slice(2);
   loadNames(); // every subcommand reads the profile (hub folder, id pattern); a broken one is reported in the data (`profileError`)
@@ -2285,6 +2333,8 @@ if (require.main === module) {
   if (cmd === "clipimg") process.stdout.write(JSON.stringify(shown(clipImage())));
   else if (cmd === "cliptext") { const x = clipText(); process.stdout.write(JSON.stringify({ text: typeof x === "string" && x.length <= CLIP_TEXT_MAX ? x : null })); }
   else if (cmd === "diag") { try { diagAppend(JSON.parse(arg)); } catch {} process.stdout.write("{}"); }
+  else if (cmd === "draft-read") { let r = null; try { r = chatDraftRead(); } catch {} process.stdout.write(JSON.stringify(r ?? { rooms: {}, focus: false })); }
+  else if (cmd === "draft-write") { let r = "none"; try { const j = JSON.parse(arg); r = chatDraftWrite(chatDraftSnap(Object.entries(j?.rooms ?? {}), j?.focus === true)); } catch {} process.stdout.write(JSON.stringify({ r })); }
   else if (cmd === "po-me") { let me = []; try { const f = poFile(inboxDir(), arg); if (f) me = parsePoLines(readTail(f)).filter((x) => x.me).slice(-20).map((x) => ({ ms: x.ms, text: x.text })); } catch {} process.stdout.write(JSON.stringify(me)); }
   else if (cmd === "handoff") process.stdout.write(JSON.stringify(readHandoff(inboxDir(), arg)));
   else if (cmd === "remote-check") { let r = { on: false, why: "error", url: "" }; try { r = checkRemote(inboxDir(), arg, Number(process.argv[4])); } catch {} process.stdout.write(JSON.stringify(r)); }
