@@ -32,7 +32,7 @@ const ALL = [...CORE, ...EXTRAS];
 //   gh-accounts: 오른쪽 패널의 계정 버튼은 없어지고 입구는 설정 창뿐이다. gh-account 도구(--gh-account)는 모드가 아니라 따로 설치한다.
 const MODS = {
   "tabs-mine": { desc: "탭 줄. 오른쪽 패널 버튼과 설정 버튼을 더하고 예약 실행을 맡는다", deps: ["settings"] },
-  settings: { desc: "설정 창: 계정·규칙·설치된 모드", deps: ["gh-accounts"] },
+  settings: { desc: "설정 창: 계정·규칙·글자 크기·설치된 모드", deps: ["gh-accounts"] },
   work: { desc: "Work 패널: 누가 무엇을 하고 있나", deps: ["tabs-mine", "wt-menu"] },
   prs: { desc: "PRs 패널: 무엇을 손봐야 하나", deps: ["work", "tabs-mine", "wt-menu"] },
   "wt-menu": { desc: "워크트리 메뉴: Work·PRs에서 워크트리 줄을 누르면 뜨는 팝업", deps: [] },

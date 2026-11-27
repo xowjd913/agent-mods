@@ -1,19 +1,20 @@
 // 설정 창: 탭 줄의 `설정` 버튼이 연다. 창은 하나(key "settings")이고 다시 누르면 그 창으로 간다.
 // 창은 블록 셋으로 이뤄진다(제목 줄 · 왼쪽 칸 목록 · 오른쪽 내용). 이 모드가 제목 줄·칸 목록·`모드` 칸을 그리고,
 // `계정` 칸은 계정 패널(gh-accounts)을 고치지 않고 그대로 블록으로 넣는다. 그래서 계정 패널의 기능은 그대로다.
-// `UI 모드 글자 크기`(#103)는 그 일이 합쳐진 뒤 칸을 더한다. 지금은 꺼진 채 "준비 중"으로만 보인다. Claude 계정(#123)은 `계정` 칸(gh-accounts)에 들어 있다.
+// `UI 모드 글자 크기` 칸(#103·#126)은 UI 모드(inbox)의 글자 크기를 Herdr 글자 크기에 맞출지(기본) 10~24px로 따로 정할지 고른다.
+// 고른 값은 herdr 공유 값(settings.uiFontSize, Herdr가 저장한다)에 올려 inbox가 다시 시작하지 않아도 따른다. Claude 계정(#123)은 `계정` 칸(gh-accounts)에 들어 있다.
 // `규칙` 칸(#126)은 PO 규칙 / 규칙 없음 중 하나를 고르고 이름 규칙 몇 가지를 고친다. 쓰기는 모두 같은 폴더의 rules.cjs(node)가 하고
 // (프로필 파일을 inbox의 loadProfile로 검사한 뒤 백업하고 한 번에 바꾼다), 이 창은 herdr `exec`로 부르기만 한다.
 // `모드` 칸은 README의 설치 한 줄(curl | sh, Windows는 PowerShell)을 herdr `exec`로 돌려 설치·제거한다(기본 모드는 제거하지 않는다).
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { theme, props, openOverlay, closeOverlay, setShared, appHome, readTextFile, exec, window, shared } from "herdr";
+import { theme, props, openOverlay, closeOverlay, setShared, appHome, readTextFile, exec, window, shared, settings } from "herdr";
 
 // settings-window:begin
 // 설정 창의 모양. tabs-mine/main.js와 settings/main.js에 이 블록을 그대로 복사해 둔다(모드끼리 파일을 불러올 수 없다. 테스트가 둘이 같은지 본다).
 // 칸을 바꾸면 SETTINGS_BODY와 settings/main.js의 SECTIONS를 함께 고친다.
 const SETTINGS_SHARED = "settings.section"; // 마지막으로 본 칸. 버튼으로 다시 열면 그 칸으로 연다
-const SETTINGS_BODY = { accounts: { mod: "gh-accounts" }, mods: { mod: "settings", props: { part: "mods" } }, rules: { mod: "settings", props: { part: "rules" } } };
+const SETTINGS_BODY = { accounts: { mod: "gh-accounts" }, mods: { mod: "settings", props: { part: "mods" } }, rules: { mod: "settings", props: { part: "rules" } }, fontsize: { mod: "settings", props: { part: "fontsize" } } };
 const settingsWindow = (section) => {
   const id = SETTINGS_BODY[section] ? section : "accounts"; // 옛 이름(github)이 기억돼 있어도 계정 칸으로 간다
   return { kind: "window", key: "settings", width: 900, height: 720, layout: { id: "settings", type: "column", children: [
@@ -35,13 +36,13 @@ const SECTIONS = [
   { id: "accounts", label: "계정", hint: "GitHub 계정(저장소별)과 Claude 계정" },
   { id: "mods", label: "모드", hint: "설치된 모드를 설치·제거" },
   { id: "rules", label: "규칙", hint: "리더·PO 이름 규칙 고르기" },
-  { id: "fontsize", label: "UI 모드 글자 크기", soon: true, issue: 103 },
+  { id: "fontsize", label: "UI 모드 글자 크기", hint: "UI 모드 글자를 Herdr 크기에 맞추거나 따로 정하기" },
 ];
 
 // install.cjs의 MODS와 같은 이름·설명·기본 여부(테스트가 install.cjs와 같은지 본다). 모드 폴더에서는 install.cjs를 읽을 수 없어 적어 둔다.
 const MODS = [
   { name: "tabs-mine", desc: "탭 줄. 오른쪽 패널 버튼과 설정 버튼을 더하고 예약 실행을 맡는다", core: true },
-  { name: "settings", desc: "설정 창: 계정·규칙·설치된 모드", core: true },
+  { name: "settings", desc: "설정 창: 계정·규칙·글자 크기·설치된 모드", core: true },
   { name: "gh-accounts", desc: "계정 패널: 스페이스·저장소마다 쓸 GitHub 계정과 Claude 계정 고르기 (설정 창 계정 칸)", core: true },
   { name: "work", desc: "Work 패널: 누가 무엇을 하고 있나", core: true },
   { name: "prs", desc: "PRs 패널: 무엇을 손봐야 하나", core: true },
@@ -128,6 +129,17 @@ const RULE_WHY = {
   script: "프로필 파일이 없고 PO 배치 스크립트가 있어 PO 규칙으로 봅니다",
   "no-script": "프로필 파일이 없고 PO 배치 스크립트도 없어 규칙 없음으로 봅니다",
 };
+// UI 모드 글자 크기 칸. inbox의 FONT_BASE·FONT_KEY·fontOverride·fontScale과 같은 규칙이다(테스트가 둘이 같은지 본다).
+const FONT_BASE = 13;
+const FONT_KEY = "settings.uiFontSize", FONT_MIN = 10, FONT_MAX = 24;
+const fontOverride = (v) => { const n = typeof v === "number" ? v : NaN; return Number.isFinite(n) && n >= FONT_MIN && n <= FONT_MAX ? Math.round(n) : null; };
+const fontScale = (st, override) => {
+  const o = fontOverride(override);
+  if (o !== null) return o / FONT_BASE;
+  const n = Number(st?.font_size);
+  return Number.isFinite(n) && n > 0 ? Math.min(2.5, Math.max(0.6, n / FONT_BASE)) : 1;
+};
+const FONT_SAMPLE = "리더 보고를 채팅처럼 봅니다 · Aa 가나다 0123";
 const NAMES_SHARED = "inbox.names"; // 모드들이 따르는 이름 규칙(NAMES 블록의 공유 값). 저장하면 여기에 바로 올려 열린 패널이 다음 갱신에 따른다
 const lastLine = (r) => [...String(r.stderr || "").split("\n"), ...String(r.stdout || "").split("\n")].map((l) => l.trim()).filter(Boolean).pop() ?? "";
 
@@ -157,6 +169,20 @@ export default class Settings extends View {
       this.loadRules(cx);
     }
     if (this.part === "mods") this.load(cx);
+    if (this.part === "fontsize") { // Herdr 글자 크기는 바뀜 알림이 없어 몇 초마다 다시 읽고, 달라졌을 때만 다시 그린다
+      this.herdrPx = this.herdrFont();
+      cx.timer.every(2000, (cx) => { const n = this.herdrFont(); if (n !== this.herdrPx) { this.herdrPx = n; cx.notify(); } });
+    }
+  }
+
+  herdrFont() { try { const n = Number(settings()?.font_size); return Number.isFinite(n) && n > 0 ? n : null; } catch { return null; } }
+
+  // 글자 크기를 정한다: 10~24px(그 밖은 무시), null이면 Herdr 글자 크기를 따른다. 공유 값이라 열려 있는 UI 모드가 다시 시작하지 않아도 따른다.
+  setFont(v, cx) {
+    const next = v === null ? null : fontOverride(v);
+    if (v !== null && next === null) return;
+    try { setShared(FONT_KEY, next); } catch {}
+    cx.notify();
   }
 
   input(placeholder) {
@@ -457,6 +483,43 @@ export default class Settings extends View {
       .when(Boolean(note), (el) => el.child(note));
   }
 
+  // UI 모드 글자 크기 칸: Herdr 글자 크기를 따르거나(기본) 10~24px로 정한다. 값은 공유 값(FONT_KEY)이 쥐고 있어 이 창은 상태를 따로 두지 않는다.
+  fontBody(t) {
+    const st = (() => { try { return settings(); } catch { return null; } })();
+    const over = fontOverride(shared(FONT_KEY));
+    const herdr = this.herdrFont();
+    const px = Math.round(FONT_BASE * fontScale(st, over) * 10) / 10; // inbox가 지금 쓰는 크기(13px 기준 글자에 곱하는 값 × 13)
+    const pill = (id, label, on, fn, tip) => div().id(id).h(26).px(10).rounded(6).flex().items_center().text_size(12).border_1()
+      .border_color(on ? t.accent : t.border).bg(on ? t.selected : t.raised).text_color(on ? t.foreground : t.muted).on_mouse_down("left", stop).tooltip(tip)
+      .cursor_pointer().hover((x) => x.bg(t.hover)).on_click((_e, cx) => fn(cx)).child(label);
+    const step = (id, label, d, ok) => {
+      const el = div().id(id).flex_none().w(28).h(26).rounded(6).flex().items_center().justify_center().text_size(14).bg(t.raised).on_mouse_down("left", stop);
+      if (!ok) return el.opacity(0.4).text_color(t.dim).child(label);
+      return el.cursor_pointer().text_color(t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => this.setFont(over + d, cx)).child(label);
+    };
+    const head = h_flex().h(38).px(14).flex_none().items_center().child(div().text_size(15).font_semibold().text_color(t.foreground).child("UI 모드 글자 크기"));
+    const intro = div().px(14).pb(8).text_size(12).text_color(t.dim)
+      .child("UI 모드(리더 결과 보고 패널)의 글자 크기입니다. 기본은 Herdr 글자 크기를 따라가고, 따로 정하면 Herdr 글자 크기와 상관없이 그 크기로 보입니다.");
+    const status = v_flex().id("font-status").mx(14).mb(8).px(10).py(8).gap(3).rounded(6).bg(t.chrome).border_1().border_color(t.border)
+      .child(div().text_size(12).text_color(t.foreground).child(`UI 모드 글자 크기: ${px}px (${over === null ? "Herdr 글자 크기를 따르는 중" : "직접 정한 크기"})`))
+      .child(div().text_size(11).text_color(t.muted).child(`지금 Herdr 글자 크기: ${herdr === null ? "알 수 없음" : `${herdr}px`}`));
+    const modes = h_flex().id("font-modes").px(14).pb(8).gap(8).items_center().flex_wrap()
+      .child(pill("font-follow", "Herdr 글자 크기 따르기", over === null, (cx) => this.setFont(null, cx), "UI 모드가 Herdr 글자 크기를 그대로 따릅니다(기본)"))
+      .child(pill("font-fixed", "UI 모드만 따로 정하기", over !== null, (cx) => this.setFont(over ?? Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(px))), cx), `Herdr 글자 크기와 상관없이 ${FONT_MIN}~${FONT_MAX}px로 정합니다`));
+    const stepper = over === null ? null : h_flex().id("font-stepper").px(14).pb(8).gap(8).items_center()
+      .child(step("font-minus", "−", -1, over > FONT_MIN))
+      .child(div().id("font-value").min_w(56).flex().justify_center().text_size(13).text_color(t.foreground).child(`${over}px`))
+      .child(step("font-plus", "+", 1, over < FONT_MAX))
+      .child(div().text_size(11).text_color(t.dim).child(`${FONT_MIN}~${FONT_MAX}px`));
+    const sample = v_flex().id("font-sample").mx(14).mb(8).px(10).py(10).gap(4).rounded(6).bg(t.raised).border_1().border_color(t.border)
+      .child(div().text_size(11).text_color(t.dim).child(`미리보기 (${px}px)`))
+      .child(div().text_size(px).text_color(t.foreground).child(FONT_SAMPLE));
+    const note = div().px(14).pb(8).text_size(11).text_color(t.dim)
+      .child("고르면 바로 적용됩니다. 열려 있는 UI 모드는 몇 초 안에 바뀌고 다시 시작할 필요가 없습니다. 값은 Herdr가 저장해 다시 시작해도 남습니다. 이 크기는 UI 모드에만 적용되고 Herdr 자체 글자 크기는 바뀌지 않습니다.");
+    return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13).child(head).child(intro).child(status).child(modes)
+      .when(Boolean(stepper), (el) => el.child(stepper)).child(sample).child(note);
+  }
+
   render(cx) {
     const t = theme();
     if (this.part === "mods") { // 다른 창이 돌리던 설치기가 끝나면 목록을 다시 읽는다
@@ -468,6 +531,7 @@ export default class Settings extends View {
     if (this.part === "nav") return this.nav(t);
     if (this.part === "pad") return div().size_full().bg(t.chrome);
     if (this.part === "rules") return this.rulesBody(t);
+    if (this.part === "fontsize") return this.fontBody(t);
     return this.modsBody(t);
   }
 }

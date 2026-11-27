@@ -28,6 +28,7 @@ const stub = "const h = () => globalThis.__herdr;" +
   "export const closeOverlay = (id) => { h().closed.push(id); };" +
   "export const readTextFile = async (p) => (h().files[p] ?? null);" +
   "export const exec = async (c, a, o) => { h().execs.push({ c, a, o }); const r = h().execResult; return typeof r === 'function' ? r(c, a) : (r ?? { code: 0, stdout: '', stderr: '' }); };" +
+  "export const settings = () => { const s = h().settings; if (s === 'boom') throw new Error('x'); return s ?? {}; };" +
   "export const window = () => ({ platform: h().platform ?? 'macos' });";
 const hooks = `data:text/javascript,${encodeURIComponent(`
 export async function resolve(s, c, n) { return ["gpui-kit","gpui-base","herdr"].includes(s) ? { url: "stub:" + s, shortCircuit: true } : n(s, c); }
@@ -44,7 +45,7 @@ function fake(over = {}) {
   globalThis.__herdr = { props: {}, shared: {}, opened: [], closed: [], clicks: {}, texts: [], files: {}, execs: [], ...over };
   return globalThis.__herdr;
 }
-const cx = () => ({ notified: 0, clip: [], notify() { this.notified++; }, write_to_clipboard(t) { this.clip.push(t); }, stop_propagation() {} });
+const cx = () => { const c = { notified: 0, clip: [], timers: [], notify() { this.notified++; }, write_to_clipboard(t) { this.clip.push(t); }, stop_propagation() {} }; c.timer = { every: (ms, fn) => c.timers.push({ ms, fn }) }; return c; };
 const make = (part, extra = {}, over = {}) => {
   const h = fake({ props: { part, ...extra }, ...over });
   const v = new Settings();
@@ -63,7 +64,7 @@ test("설정 창은 키 하나, 제목 줄·칸 목록·내용 블록으로 이�
   // 블록 안의 settingsWindow를 꺼내 쓴다.
   const code = block(SRC.settings).replace(/^\/\/.*$/gm, "");
   const settingsWindow = new Function(`${code}\nreturn settingsWindow;`)();
-  for (const [section, body] of [["accounts", { mod: "gh-accounts" }], ["github", { mod: "gh-accounts" }], ["mods", { mod: "settings", props: { part: "mods" } }], ["rules", { mod: "settings", props: { part: "rules" } }], ["nope", { mod: "gh-accounts" }], [undefined, { mod: "gh-accounts" }]]) {
+  for (const [section, body] of [["accounts", { mod: "gh-accounts" }], ["github", { mod: "gh-accounts" }], ["mods", { mod: "settings", props: { part: "mods" } }], ["rules", { mod: "settings", props: { part: "rules" } }], ["fontsize", { mod: "settings", props: { part: "fontsize" } }], ["nope", { mod: "gh-accounts" }], [undefined, { mod: "gh-accounts" }]]) {
     const w = settingsWindow(section);
     assert.equal(w.kind, "window");
     assert.equal(w.key, "settings");
@@ -87,13 +88,14 @@ test("제목 줄의 닫기는 이 창의 overlay로 closeOverlay를 부른다", 
   assert.deepEqual(h.closed, ["ov-1"]);
 });
 
-test("칸 목록: 계정·규칙·모드는 눌러지고, UI 모드 글자 크기만 준비 중이라 눌러지지 않는다. Claude 계정 줄은 없다(계정 칸에 들어 있다)", () => {
+test("칸 목록: 계정·모드·규칙·UI 모드 글자 크기가 모두 눌러지고 준비 중인 칸은 없다. Claude 계정 줄은 없다(계정 칸에 들어 있다)", () => {
   const { h } = make("nav", { section: "accounts" });
-  assert.deepEqual(Object.keys(h.clicks).sort(), ["settings-nav-accounts", "settings-nav-mods", "settings-nav-rules"]);
+  assert.deepEqual(Object.keys(h.clicks).sort(), ["settings-nav-accounts", "settings-nav-fontsize", "settings-nav-mods", "settings-nav-rules"]);
   for (const s of ["규칙", "UI 모드 글자 크기", "계정", "모드"]) assert.ok(h.texts.includes(s), s);
   assert.ok(!h.texts.includes("Claude 계정"));
-  assert.equal(h.texts.filter((x) => x === "준비 중").length, 1);
+  assert.equal(h.texts.filter((x) => x === "준비 중").length, 0);
   const sections = new Function(`${SRC.settings.match(/const SECTIONS = \[[\s\S]*?\n\];/)[0]}\nreturn SECTIONS;`)();
+  assert.ok(!sections.some((x) => x.soon), "준비 중 칸이 남아 있지 않다");
   const acc = sections.find((x) => x.id === "accounts");
   assert.ok(/GitHub/.test(acc.hint) && /Claude/.test(acc.hint), "계정 칸 설명이 GitHub와 Claude를 말한다");
   assert.ok(!sections.some((x) => x.id === "claude"));
@@ -108,11 +110,14 @@ test("칸을 누르면 마지막 칸을 기억하고 같은 키의 창을 그 �
   assert.deepEqual(h.opened[0].layout.children[1].children[1].children[0].content, { mod: "settings", props: { part: "mods" } });
 });
 
-test("준비 중인 칸은 직접 불러도 창을 열지 않는다", () => {
+test("없는 칸은 직접 불러도 창을 열지 않고, 글자 크기 칸은 그 내용으로 연다", () => {
   const { h, v } = make("nav", { section: "accounts" });
-  for (const id of ["claude", "fontsize", "없는칸"]) v.open(id);
+  for (const id of ["claude", "없는칸"]) v.open(id);
   assert.deepEqual(h.opened, []);
   assert.deepEqual(h.shared, {});
+  v.open("fontsize");
+  assert.equal(h.shared["settings.section"], "fontsize");
+  assert.deepEqual(h.opened[0].layout.children[1].children[1].children[0].content, { mod: "settings", props: { part: "fontsize" } });
 });
 
 test("MODS 목록은 install.cjs의 모드·설명·기본 여부와 같다", () => {
@@ -465,4 +470,105 @@ test("tabs-mine은 아직 아무도 이름 규칙을 올리지 않았을 때만 
   assert.match(src, /mods\/settings\/rules\.cjs/);
   assert.match(src, /if \(cur && Object\.keys\(cur\)\.length\) return;/);
   assert.match(src, /import \{[^}]*\bsetShared\b[^}]*\} from "herdr"/);
+});
+
+// ---- UI 모드 글자 크기 칸(#126) ----
+const KEY = "settings.uiFontSize";
+const has = (h, re) => h.texts.some((x) => re.test(x));
+
+test("글자 크기 칸: 기본은 Herdr 글자 크기를 따르고, 지금 Herdr 크기와 UI 모드 크기를 보여 준다(직접 정하는 줄은 없다)", () => {
+  const { h } = make("fontsize", {}, { settings: { font_size: 16 } });
+  assert.ok(h.texts.includes("UI 모드 글자 크기"));
+  assert.ok(h.texts.includes("Herdr 글자 크기 따르기") && h.texts.includes("UI 모드만 따로 정하기"));
+  assert.ok(has(h, /^UI 모드 글자 크기: 16px \(Herdr 글자 크기를 따르는 중\)$/), h.texts.join(" | "));
+  assert.ok(h.texts.includes("지금 Herdr 글자 크기: 16px"));
+  assert.ok(h.texts.includes("미리보기 (16px)"));
+  assert.ok(has(h, /미리보기|리더 보고/));
+  assert.equal(h.clicks["font-plus"], undefined);
+  assert.equal(h.clicks["font-minus"], undefined);
+  assert.ok(!has(h, /준비 중/));
+});
+
+test("글자 크기 칸: 직접 정한 크기는 Herdr 값을 이기고, 거기서 -/+로 10~24px 안에서만 움직인다", () => {
+  const { h, v, c } = make("fontsize", {}, { settings: { font_size: 16 }, shared: { [KEY]: 18 } });
+  assert.ok(has(h, /^UI 모드 글자 크기: 18px \(직접 정한 크기\)$/), h.texts.join(" | "));
+  assert.ok(h.texts.includes("지금 Herdr 글자 크기: 16px"));
+  assert.ok(h.texts.includes("18px") && h.texts.includes("미리보기 (18px)"));
+  h.clicks["font-plus"]({}, c);
+  assert.equal(h.shared[KEY], 19);
+  h.clicks["font-minus"]({}, c);
+  h.clicks["font-minus"]({}, c);
+  assert.equal(h.shared[KEY], 17);
+  assert.ok(c.notified >= 3);
+  h.shared[KEY] = 24;
+  h.clicks = {};
+  v.render(c);
+  assert.equal(h.clicks["font-plus"], undefined, "24px에서는 더 키우지 못한다");
+  assert.equal(typeof h.clicks["font-minus"], "function");
+  h.shared[KEY] = 10;
+  h.clicks = {};
+  v.render(c);
+  assert.equal(h.clicks["font-minus"], undefined, "10px에서는 더 줄이지 못한다");
+  assert.equal(typeof h.clicks["font-plus"], "function");
+});
+
+test("글자 크기 칸: 정하기는 지금 크기로 시작하고(10~24로 맞춤), 따르기는 값을 지운다", () => {
+  const { h, c } = make("fontsize", {}, { settings: { font_size: 16 } });
+  h.clicks["font-fixed"]({}, c);
+  assert.equal(h.shared[KEY], 16);
+  h.clicks["font-follow"]({}, c);
+  assert.equal(h.shared[KEY], null);
+  const big = make("fontsize", {}, { settings: { font_size: 40 } });
+  big.h.clicks["font-fixed"]({}, big.c);
+  assert.equal(big.h.shared[KEY], 24);
+  const small = make("fontsize", {}, { settings: { font_size: 6 } });
+  small.h.clicks["font-fixed"]({}, small.c);
+  assert.equal(small.h.shared[KEY], 10);
+  const none = make("fontsize", {}, { settings: "boom" });
+  none.h.clicks["font-fixed"]({}, none.c);
+  assert.equal(none.h.shared[KEY], 13, "Herdr 값을 못 읽으면 13px에서 시작한다");
+});
+
+test("글자 크기 칸: 잘못된 값은 무시한다(저장된 값이 깨졌으면 따르기로 본다, 입력은 받지 않는다)", () => {
+  for (const bad of ["18", "x", 99, 9, 0, -3, NaN, {}, true]) {
+    const { h } = make("fontsize", {}, { settings: { font_size: 20 }, shared: { [KEY]: bad } });
+    assert.ok(has(h, /^UI 모드 글자 크기: 20px \(Herdr 글자 크기를 따르는 중\)$/), `bad: ${JSON.stringify(bad)}`);
+    assert.equal(h.clicks["font-plus"], undefined);
+  }
+  const { h, v, c } = make("fontsize", {}, { shared: { [KEY]: 15 } });
+  for (const bad of [99, 9, NaN, "20", {}, undefined, Infinity]) v.setFont(bad, c);
+  assert.equal(h.shared[KEY], 15);
+  v.setFont(30.4, c);
+  assert.equal(h.shared[KEY], 15);
+  v.setFont(12.4, c);
+  assert.equal(h.shared[KEY], 12);
+});
+
+test("글자 크기 칸: Herdr 글자 크기를 못 읽어도 그린다(알 수 없음, 13px 기준)", () => {
+  const { h } = make("fontsize", {}, { settings: "boom" });
+  assert.ok(h.texts.includes("지금 Herdr 글자 크기: 알 수 없음"));
+  assert.ok(has(h, /^UI 모드 글자 크기: 13px/));
+});
+
+test("글자 크기 칸: Herdr 글자 크기는 몇 초마다 다시 읽고 달라졌을 때만 다시 그린다", () => {
+  const { h, c } = make("fontsize", {}, { settings: { font_size: 13 } });
+  assert.equal(c.timers.length, 1);
+  assert.equal(c.timers[0].ms, 2000);
+  const before = c.notified;
+  c.timers[0].fn(c);
+  assert.equal(c.notified, before, "그대로면 다시 그리지 않는다");
+  h.settings = { font_size: 18 };
+  c.timers[0].fn(c);
+  assert.equal(c.notified, before + 1);
+  const rules = make("rules");
+  assert.equal(rules.c.timers.length, 0, "다른 칸은 타이머를 쓰지 않는다");
+});
+
+test("글자 크기 규칙은 inbox와 같다(FONT_BASE·키·범위·fontOverride·fontScale이 한 글자도 다르지 않다)", () => {
+  const cut = (t) => t.slice(t.indexOf("const FONT_BASE"), t.indexOf("\n};\n", t.indexOf("const fontScale")) + 4).replace(/\r\n/g, "\n");
+  const inbox = fs.readFileSync(new URL("../mods/inbox/inbox.cjs", import.meta.url), "utf8");
+  const a = cut(SRC.settings).split("\n").filter((l) => !l.startsWith("//")).join("\n");
+  const b = cut(inbox).split("\n").filter((l) => !l.startsWith("//")).join("\n");
+  assert.ok(a.includes("fontOverride") && a.includes("FONT_KEY"));
+  assert.equal(a, b);
 });

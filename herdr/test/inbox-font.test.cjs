@@ -36,20 +36,55 @@ test("main.js: the factor is read at draw and by a timer that redraws only when 
   assert.match(MAIN, /cx\.timer\.every\(FONT_POLL_MS, \(cx\) => \{ if \(syncFont\(true\)\) this\.softNotify\(cx\); \}\);/);
 });
 
-test("syncFont: reads settings(), returns true only when the factor moved, a throwing settings() falls back to 1", () => {
+test("fontScale: the settings window's fixed size (#126) wins over Herdr's value, follow (no value) falls back to Herdr's", () => {
+  assert.equal(I.FONT_KEY, "settings.uiFontSize");
+  assert.equal(I.fontScale({ font_size: 26 }, 13), 1);
+  assert.equal(I.fontScale({ font_size: 13 }, 20), 20 / 13);
+  assert.equal(I.fontScale({ font_size: 13 }, 10), 10 / 13);
+  assert.equal(I.fontScale({ font_size: 13 }, 24), 24 / 13);
+  assert.equal(I.fontScale({ font_size: 20 }, 16.4), 16 / 13); // a fraction is rounded to whole px
+  for (const v of [undefined, null]) assert.equal(I.fontScale({ font_size: 26 }, v), 2, `follow: ${v}`);
+  assert.equal(I.fontScale(undefined, 18), 18 / 13); // an override needs no Herdr value at all
+});
+
+test("fontScale: a bad override is ignored (the UI mode follows Herdr), nothing throws", () => {
+  for (const v of ["16", "x", "", NaN, Infinity, -Infinity, 0, -5, 9.4, 9, 24.6, 25, 100, {}, [], [16], true, false]) {
+    assert.equal(I.fontScale({ font_size: 26 }, v), 2, `bad: ${JSON.stringify(v)}`);
+    assert.equal(I.fontOverride(v), null, `bad: ${JSON.stringify(v)}`);
+  }
+  assert.equal(I.fontOverride(10), 10);
+  assert.equal(I.fontOverride(24), 24);
+  assert.equal(I.fontOverride(9.6), null); // below the limit before rounding
+});
+
+test("syncFont: reads settings() and the shared override, returns true only when the factor moved, a throwing read falls back to 1", () => {
   const blk = MAIN.slice(MAIN.indexOf("// chat:begin"), MAIN.indexOf("// chat:end"));
   const st = MAIN.slice(MAIN.indexOf("let FS = 1"), MAIN.indexOf("\n};\n", MAIN.indexOf("const syncFont")) + 4);
-  const fontScale = blk.slice(blk.indexOf("const FONT_BASE"), blk.indexOf("\n", blk.indexOf("const fontScale")) + 1);
-  let cur = { font_size: 13 };
-  const mk = new Function("settings", `${fontScale}${st}; return { fz, sync: syncFont, fs: () => FS };`);
-  const f = mk(() => { if (cur === "boom") throw new Error("x"); return cur; });
+  const fontCode = blk.slice(blk.indexOf("const FONT_BASE"), blk.indexOf("\n};\n", blk.indexOf("const fontScale")) + 4);
+  let cur = { font_size: 13 }, over;
+  const mk = new Function("settings", "shared", `${fontCode}${st}; return { fz, sync: syncFont, fs: () => FS };`);
+  const f = mk(() => { if (cur === "boom") throw new Error("x"); return cur; }, (k) => (k === "settings.uiFontSize" ? over : undefined));
   assert.equal(f.sync(true), false);
   assert.equal(f.fz(10.5), 10.5);
   cur = { font_size: 26 };
   assert.equal(f.sync(true), true);
   assert.equal(f.fz(10.5), 21);
   assert.equal(f.sync(true), false);
+  over = 13; // the settings window fixes 13 px: wins over Herdr's 26, no restart (the next read picks it up)
+  assert.equal(f.sync(true), true);
+  assert.equal(f.fz(10.5), 10.5);
+  over = "junk"; // a bad value: follow Herdr again
+  assert.equal(f.sync(true), true);
+  assert.equal(f.fz(10.5), 21);
+  over = null;
+  assert.equal(f.sync(true), false);
   cur = "boom";
   assert.equal(f.sync(true), true);
   assert.equal(f.fs(), 1);
+});
+
+test("inbox.cjs and the main.js chat block hold the same font code", () => {
+  const cjs = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8").replace(/\r\n/g, "\n");
+  const cut = (t) => t.slice(t.indexOf("const FONT_BASE"), t.indexOf("\n};\n", t.indexOf("const fontScale")) + 4);
+  assert.equal(cut(MAIN), cut(cjs));
 });

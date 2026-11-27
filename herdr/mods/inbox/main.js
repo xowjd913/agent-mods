@@ -371,8 +371,17 @@ function tlMemoGet(kind, v, make) {
 const TL_CUT_MIN = 500;
 // #80: the UI mode's text follows Herdr's text size. Every size written in the code is for FONT_BASE (13, Herdr's setting when #80 was made) and is
 // multiplied by settings().font_size / FONT_BASE, so 13 looks as before. A missing or odd value is 13; the factor is held within 0.6..2.5.
+// #126: the settings window can fix the UI mode's size instead (shared "settings.uiFontSize", persisted by Herdr): a number of px within 10..24 wins over
+// Herdr's value; anything else (unset, null, text, out of range) is ignored and the UI mode follows Herdr as before.
 const FONT_BASE = 13;
-const fontScale = (st) => { const n = Number(st?.font_size); return Number.isFinite(n) && n > 0 ? Math.min(2.5, Math.max(0.6, n / FONT_BASE)) : 1; };
+const FONT_KEY = "settings.uiFontSize", FONT_MIN = 10, FONT_MAX = 24;
+const fontOverride = (v) => { const n = typeof v === "number" ? v : NaN; return Number.isFinite(n) && n >= FONT_MIN && n <= FONT_MAX ? Math.round(n) : null; };
+const fontScale = (st, override) => {
+  const o = fontOverride(override);
+  if (o !== null) return o / FONT_BASE;
+  const n = Number(st?.font_size);
+  return Number.isFinite(n) && n > 0 ? Math.min(2.5, Math.max(0.6, n / FONT_BASE)) : 1;
+};
 // The PO hook's copy of a submitted line (kind "me") against a desk record: compared without wrapper tags, whitespace squeezed, and (second chance) by words +
 // pictures; a hook line ending in "…" (the hook keeps 2000 characters, #49) matches a record that starts with what is left. The hook line is the proof that a
 // line really reached the PO's model, whatever the desk's own status says.
@@ -1351,7 +1360,8 @@ function acctInfo(r) {
 const ACCT_TTL_MS = 5 * 60 * 1000, ACCT_RETRY_MS = 60 * 1000;
 
 // #80: the text-size factor (see fontScale). `fz(n)` is a size written for 13 px made right for the setting now. The setting has no change event,
-// so it is read again at each draw (at most once a second) and by a 2-second timer that redraws only when the factor moved.
+// so it is read again at each draw (at most once a second) and by a 2-second timer that redraws only when the factor moved. #126: the settings
+// window's fixed size (shared FONT_KEY) is read in the same place, so a change there reaches the open UI mode with no restart.
 const FONT_POLL_MS = 2000;
 let FS = 1, fsAt = 0;
 const fz = (n) => Math.round(n * FS * 10) / 10;
@@ -1360,7 +1370,7 @@ const syncFont = (force = false) => {
   if (!force && now - fsAt < 1000) return false;
   fsAt = now;
   const before = FS;
-  try { FS = fontScale(settings()); } catch { FS = 1; }
+  try { FS = fontScale(settings(), shared(FONT_KEY)); } catch { FS = 1; }
   return FS !== before;
 };
 

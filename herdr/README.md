@@ -28,7 +28,7 @@
 | 모드 | 한 줄 | 기본/추가 | 문서 |
 | --- | --- | --- | --- |
 | 패널 버튼 (`tabs-mine`) | 탭 줄에 Work·PRs·예약 버튼과 `설정` 버튼을 붙이고, 손봐야 할 PR 수를 띄웁니다 | 기본 | [tabs-mine](../docs/mods/tabs-mine.md) |
-| 설정 (`settings`) | 탭 줄의 `설정` 버튼으로 여는 창입니다. GitHub·Claude 계정(아래 계정 패널 그대로), 이름 규칙(프로필), 설치된 모드를 한곳에서 봅니다 | 기본 | [settings](../docs/mods/settings.md) |
+| 설정 (`settings`) | 탭 줄의 `설정` 버튼으로 여는 창입니다. GitHub·Claude 계정(아래 계정 패널 그대로), 이름 규칙(프로필), UI 모드 글자 크기, 설치된 모드를 한곳에서 봅니다 | 기본 | [settings](../docs/mods/settings.md) |
 | Work (`work`) | 세션마다 맡은 이슈, 워크트리, PR, CI를 한 트리로 봅니다 | 기본 | [work](../docs/mods/work.md) |
 | PRs (`prs`) | 저장소별 열린 PR과 리뷰 상태, 정리할 워크트리를 봅니다 | 기본 | [prs](../docs/mods/prs.md) |
 | 예약 (`schedules`) | 정해진 시각에 Claude나 Codex 세션을 띄워 프롬프트를 보냅니다 | 기본 | [schedules](../docs/mods/schedules.md) |
