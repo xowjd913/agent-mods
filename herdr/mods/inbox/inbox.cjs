@@ -1308,7 +1308,10 @@ const tlNorm = (v) => cutHead(String(v ?? "").replace(/\s+/g, " ").trim(), 2000)
 const tlFull = (v) => tlMemoGet("f", v, (s) => tlNorm(unwrapTags(s)));
 const tlCore = (v) => tlMemoGet("c", v, (s) => { const sp = splitImgs(s); return `${tlNorm(sp.text)}|${sp.imgs.join(",")}`; });
 // "" when the line is not such a cut (a short line that merely ends in "…" must not hide a longer send).
-const tlCut = (v) => { const s = String(v ?? ""); if (!s.endsWith("…")) return ""; const p = tlFull(s.slice(0, -1)); return p.length >= TL_CUT_MIN ? p : ""; };
+// The hook cuts the wrapped paste at 2000 characters, so the cut often lands inside the closing tag ("…\n</pasted_…"): a half tag at the end is not text the desk
+// record has, so it is dropped before the prefix is compared (unwrapTags only strips whole tags).
+const TL_HALF_TAG = /[ \t\n]*<\\?\/?[A-Za-z_]{0,14}$/;
+const tlCut = (v) => { const s = String(v ?? ""); if (!s.endsWith("…")) return ""; const p = tlFull(s.slice(0, -1).replace(TL_HALF_TAG, "")); return p.length >= TL_CUT_MIN ? p : ""; };
 const hookKey = (v) => ({ t: tlFull(v), c: tlCore(v), p: tlCut(v) });
 const tlMatches = (k, m) => tlFull(m.line) === k.t || tlFull(m.text) === k.t || (k.c.length > 1 && (tlCore(m.line) === k.c || tlCore(m.text) === k.c)) || (k.p && (tlFull(m.line).startsWith(k.p) || tlFull(m.text).startsWith(k.p)));
 // A hook line belongs to a desk record when it came from up to 11 minutes (the Enter button's life) after the record's time to 1 minute before it.
@@ -1352,17 +1355,18 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
   // The PO's reply to a line the desk sent to a leader (#58): the hook gives a prompt and its reply the same pid, and the prompt matched a desk
   // record that has a `to`. Only the 1:1 view reads it (`about`); the bubble does not say "→ leader", since the reply is to the person.
   const about = new Map();
+  const fwdOf = new Map(); // desk record -> the forwards of the hook line it matched (the hook line is not drawn then, so the mark moves onto the desk bubble)
   if (room && room !== PO_OTHER) for (const x of says ?? []) {
     if (x.me) {
       const k = hookKey(x.text);
       const i = sentBy.findIndex((m, j) => !taken.has(j) && tlWindow(x.ms, Number(m.ms) || 0) && tlMatches(k, m));
-      if (i >= 0) { taken.add(i); proven.add(sentBy[i]); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); continue; }
+      if (i >= 0) { taken.add(i); proven.add(sentBy[i]); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); if (x.fwd?.length) fwdOf.set(sentBy[i], x.fwd); continue; }
       out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}), ...(x.fwd?.length ? { fwd: x.fwd } : {}) });
       continue;
     }
     out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: x.to || "", ...(!x.to && x.pid && about.get(x.pid) ? { about: about.get(x.pid) } : {}) });
   }
-  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", ...(x.tos?.length ? { tos: x.tos } : {}), kind: x.kind || "chat", status: proven.has(x) ? "sent" : liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
+  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", ...(x.tos?.length ? { tos: x.tos } : {}), kind: x.kind || "chat", status: proven.has(x) ? "sent" : liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}), ...(fwdOf.get(x)?.length ? { fwd: fwdOf.get(x) } : {}) });
   // Two entries with the same key (the same text at the same ms) would share one element id: the later ones get a #n suffix.
   const used = new Map();
   for (const e of out) {
