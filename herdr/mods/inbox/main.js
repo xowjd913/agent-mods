@@ -668,10 +668,24 @@ function seenNext(seenMap, room, entries) {
 // 전체. The person's own lines are only under 전체; the made-up "waiting" entry (no report) counts by the kind the leader waits on.
 const CHAT_FILTERS = [["all", "전체"], ["unread", "안 읽은 것"], ["decision", "결정 필요"], ["verify", "최종 확인 요청"], ["done", "결과"], ["stop", "멈춤"]];
 const entryKind = (e) => (e?.who === "po" || e?.who === "me" ? "" : e?.waiting || e?.it?.kind || "");
+// #140: a decision report is closed (so it leaves the 결정 필요 chip and its count; it stays under 전체) when (1) its own `it.answered` is set (a later
+// "answered" line of that leader, markAnswered), or (2) a LATER line of the person is addressed to that leader: a chat line (`to` / `tos`) or one the PO
+// forwarded (`fwd`, #82), judged from `entries` (the same set the chips are made from). A later report (done/resume/stop) or a PO line without `fwd`
+// does not close it, and neither does a line to another leader. The made-up "waiting" entry is never closed. Any later line to that leader closes it,
+// even one that is not an answer: a stale count is better than a hidden question only when it is rare, so this stays this narrow.
+function decisionClosed(e, entries) {
+  if (e?.waiting || e?.wait || entryKind(e) !== "decision") return false;
+  if (e.it?.answered) return true;
+  const leader = entryLeader(e);
+  const ms = Number(e.ms) || 0;
+  return Boolean(leader) && (entries ?? []).some((x) => x?.who === "me" && (Number(x.ms) || 0) > ms
+    && (x.to === leader || (x.tos ?? []).includes(leader) || (x.fwd ?? []).some((f) => f.to === leader)));
+}
 function filterEntries(entries, filter, seen) {
   const list = entries ?? [];
   if (!filter || filter === "all" || !CHAT_FILTERS.some((f) => f[0] === filter)) return list;
   if (filter === "unread") return list.filter((e) => e.who !== "me" && !e.wait && e.ms > (Number(seen) || 0));
+  if (filter === "decision") return list.filter((e) => entryKind(e) === "decision" && !decisionClosed(e, list));
   return list.filter((e) => entryKind(e) === filter);
 }
 // What the timeline draws under a filter: the filtered entries, and always the pending "waiting" ones (a leader still waiting on the person must not
