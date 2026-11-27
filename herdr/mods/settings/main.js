@@ -66,6 +66,7 @@ const DEPS = {
   prs: ["work", "tabs-mine", "wt-menu"],
   schedules: ["tabs-mine"],
   inbox: ["tabs-mine"],
+  memo: ["tabs-mine"],
 };
 // 지울 수 없는 모드와 그 까닭. 설치기는 막지 않지만 지우면 설정 창이나 계정 칸이 깨진다.
 const KEEP = {
