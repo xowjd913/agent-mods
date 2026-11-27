@@ -190,7 +190,7 @@ test("기본 설치 뒤 --extras로 다시 설치하면 추가 모드 블록만 
 // 예전 설치: 모든 모드에 예전 표시·기록, layouts/agent-groups.json, 레이아웃 이름 기록 없음.
 // full이면 예전 --extras 설치처럼 모든 블록이 바뀐 레이아웃을 만든다.
 // 예전 설치기에는 path-menu·gh-accounts·inbox·settings가 없었다.
-const LEGACY_MODS = inst.ALL.filter((m) => !["path-menu", "gh-accounts", "inbox", "settings"].includes(m));
+const LEGACY_MODS = inst.ALL.filter((m) => !["path-menu", "gh-accounts", "inbox", "settings", "memo"].includes(m));
 function legacyHome(full) {
   const home = tempHome();
   for (const m of LEGACY_MODS) {
@@ -433,6 +433,22 @@ test("inbox는 tabs-mine과 함께 설치돼 오른쪽 패널에 inbox-board를 
   quiet(() => inst.applyLayout(home, false));
   assert.equal(count(), 1);
   quiet(() => inst.removeMods(home, ["inbox"]));
+  assert.equal(count(), 0);
+});
+
+test("memo는 tabs-mine과 함께 설치돼 오른쪽 패널에 memo-board를 한 번만 더하고, 제거하면 뺀다", () => {
+  const home = tempHome();
+  quiet(() => inst.installMods(home, { only: ["memo"] }));
+  assert.ok(fs.existsSync(path.join(home, "mods", "tabs-mine", "main.js")));
+  assert.ok(fs.existsSync(path.join(home, "mods", "memo", "memo.cjs")));
+  const file = cloneInto(home, inst.LAYOUT_NAME);
+  quiet(() => inst.applyLayout(home, true));
+  const count = () => (JSON.stringify(readJson(file)).match(/"mod":\s*"memo"/g) ?? []).length;
+  assert.equal(count(), 1);
+  assert.ok(fs.existsSync(path.join(home, "mods", "memo", ".board-added")));
+  quiet(() => inst.applyLayout(home, false));
+  assert.equal(count(), 1);
+  quiet(() => inst.removeMods(home, ["memo"]));
   assert.equal(count(), 0);
 });
 

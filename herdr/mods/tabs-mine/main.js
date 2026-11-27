@@ -146,13 +146,31 @@ export default class Tabs extends View {
       cx.timer.every(2000, () => this.adoptSchedules());
       cx.timer.every(150, () => this.restoreAdopted());
       // keys.json의 "tabs-mine.mode"(예: "cmd-shift-u": "tabs-mine.mode")로도 같은 전환을 한다.
-      cx.spawn(async () => { for (;;) { const c = String(await nextCommand()); if (c === "mode") { const m = modeTarget(); if (m) run("layout.switch", { name: m.name }); } } });
+      // "tabs-mine.memo" / "tabs-mine.memo-new"(메모 모드): 키는 화면에 보이는 모드에만 닿는데 메모 패널은 닫혀 있으면 안 보이므로 늘 보이는 이 탭 줄이 받는다. 패널을 열고, 메모 모드가 읽을 깃발을 남긴다.
+      cx.spawn(async () => {
+        for (;;) {
+          const c = String(await nextCommand());
+          if (c === "mode") { const m = modeTarget(); if (m) run("layout.switch", { name: m.name }); }
+          else if (c === "memo" || c === "memo-new") this.openMemo(c === "memo-new");
+        }
+      });
     }
     this.pressed = null;
     this.scroll = ScrollHandle.new();
     try { this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}"); } catch { this.panels = {}; }
     if (!this.panels || typeof this.panels !== "object" || Array.isArray(this.panels)) this.panels = {};
     this.swipe = { acc: 0, steps: 0, at: 0, last: 0 };
+  }
+
+  // 오른쪽 패널의 메모 칸을 열고 메모 모드에 깃발을 남긴다(new: 새 메모 화면으로). 메모 모드(또는 그 칸)가 없으면 조용히 넘어간다.
+  openMemo(isNew) {
+    try {
+      const body = find(layout(), "panel-body");
+      if (!(body?.children ?? []).some(c => c.id === "memo-board")) return;
+      run("layout.select", { stack: "panel-body", child: "memo-board" });
+      run("layout.show", { id: "panel" });
+      setShared("memo.want", { new: Boolean(isNew), at: Date.now() });
+    } catch {}
   }
 
   // schedules.cjs tick은 실행할 때가 된 예약을 잠금 아래에서 골라 따로 띄우고 바로 끝난다. 이전 tick이 안 끝났으면 건너뛴다.
@@ -371,7 +389,7 @@ export default class Tabs extends View {
     // Another mod may set workspace.panels without our ids: always offer the panels this layout actually has,
     // and drop the ones it doesn't (the stock list names Files, which this layout replaced).
     const have = (body?.children ?? []).map(c => c.id);
-    const listed = shared("workspace.panels") ?? ["files", "changes", "work-board", "pr-board", "schedules-board", "inbox-board"];
+    const listed = shared("workspace.panels") ?? ["files", "changes", "work-board", "pr-board", "schedules-board", "inbox-board", "memo-board"];
     const enabled = [...new Set([...listed.filter(id => !have.length || have.includes(id)), ...have])];
     this.syncPanel(space, panel, body, enabled);
     const panelButton = (id, label, icon, badge) => {
@@ -398,6 +416,7 @@ export default class Tabs extends View {
       .when(enabled.includes("work-board"), el => el.child(panelButton("work-board", "Work", "mods/workspace-chrome/layers.svg")))
       .when(enabled.includes("pr-board"), el => el.child(panelButton("pr-board", "PRs", "mods/workspace-chrome/git-compare.svg", this.attention)))
       .when(enabled.includes("schedules-board"), el => el.child(panelButton("schedules-board", "예약", "mods/workspace-chrome/clock.svg")))
+      .when(enabled.includes("memo-board"), el => el.child(panelButton("memo-board", "메모", "mods/workspace-chrome/file-text.svg")))
       .when(enabled.includes("inbox-board"), el => el.child(panelButton("inbox-board", "UI 모드", "mods/workspace-chrome/archive.svg", this.inboxWaiting())))
       .child(h_flex().id("settings-open").h(26).px(8).gap(5).flex_none().items_center().rounded(6).text_size(12).bg(t.chrome).text_color(t.muted)
         .hover(s => s.bg(t.hover)).on_mouse_down("left", stop).tooltip("설정 창: GitHub 계정, 설치된 모드")

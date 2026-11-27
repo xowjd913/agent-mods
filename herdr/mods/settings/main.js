@@ -56,6 +56,7 @@ const MODS = [
   { name: "leader-tabs", desc: "칸 머리줄에 리더 탭을 보여 준다" },
   { name: "path-menu", desc: "터미널 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄운다" },
   { name: "inbox", desc: "UI 모드 패널: 리더 결과 보고를 채팅처럼 보고, 결정을 PO에게 답한다" },
+  { name: "memo", desc: "메모 패널: 폴더 안의 .md 파일로 메모를 쓰고, 눌러서 PO에게 보낸다" },
 ];
 // install.cjs의 MODS[이름].deps 중 비어 있지 않은 것(테스트가 install.cjs와 같은지 본다). 설치기는 남는 모드가 지우려는 모드를 쓰면 아무것도 지우지 않으므로, 누르기 전에 미리 알린다.
 const DEPS = {

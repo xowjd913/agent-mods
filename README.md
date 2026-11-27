@@ -30,6 +30,7 @@ Herdr는 터미널 작업 공간 앱이고, 모드는 그 화면에 패널과 �
 | 경로 메뉴 (`path-menu`) | 터미널의 파일 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄웁니다 | 추가 | [path-menu](docs/mods/path-menu.md) |
 | 계정 (`gh-accounts`) | 스페이스·저장소마다 쓸 GitHub 계정을 보고 고릅니다([gh-account](docs/gh-account.md) 도구 필요). 설정 창의 계정 칸으로 열립니다 | 기본 | [gh-accounts](docs/mods/gh-accounts.md) |
 | UI 모드 (`inbox`) | 리더 결과 보고를 채팅처럼 보여 주고, 결정이 필요한 보고에 답하거나 채팅칸에서 `@리더`로 말하면 PO 터미널에 입력으로 전해 줍니다 | 추가 | [inbox](docs/mods/inbox.md), [인박스 계약](docs/inbox-contract.md) |
+| 메모 (`memo`) | 오른쪽 패널에서 폴더 안의 `.md` 파일로 메모를 쓰고, 버튼 하나로 PO 터미널에 보냅니다. Google Drive 동기화 폴더도 메모 폴더로 고를 수 있습니다 | 추가 | [memo](docs/mods/memo.md) |
 
 <!-- 새 모드: docs/mods/<모드>.md를 만들고 이 표와 herdr/README.md 모드 표에 한 줄씩 더합니다. -->
 

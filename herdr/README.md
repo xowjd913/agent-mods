@@ -39,6 +39,7 @@
 | 경로 메뉴 (`path-menu`) | 터미널의 파일 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄웁니다 | 추가 | [path-menu](../docs/mods/path-menu.md) |
 | 계정 (`gh-accounts`) | 스페이스·저장소마다 쓸 GitHub 계정을 보고 고릅니다([gh-account](../docs/gh-account.md) 도구 필요). 설정 창의 계정 칸으로 열립니다 | 기본 | [gh-accounts](../docs/mods/gh-accounts.md) |
 | UI 모드 (`inbox`) | 리더 결과 보고를 채팅처럼 보여 주고, 결정이 필요한 보고에 답하거나 채팅칸에서 `@리더`로 말하면 PO 터미널에 입력으로 전해 줍니다 | 추가 | [inbox](../docs/mods/inbox.md), [인박스 계약](../docs/inbox-contract.md) |
+| 메모 (`memo`) | 오른쪽 패널에서 폴더 안의 `.md` 파일로 메모를 쓰고, 버튼 하나로 PO 터미널에 보냅니다. Google Drive 동기화 폴더도 메모 폴더로 고를 수 있습니다 | 추가 | [memo](../docs/mods/memo.md) |
 
 <!-- 새 모드: docs/mods/<모드>.md를 같은 틀(제목, 한 줄 소개, 스크린샷, 사용법, 필요한 것, 설치, 돌아가기 링크)로 만들고 위 표와 ../README.md 모드 표에 한 줄씩 더합니다. -->
 
@@ -172,6 +173,7 @@ $env:AGENT_MODS_REF = 'feature/x'
   - `prs`: `work`, `tabs-mine`, `wt-menu`
   - `schedules`: `tabs-mine`
   - `inbox`: `tabs-mine`
+  - `memo`: `tabs-mine`
 - 남은 모드가 쓰는 모드는 지우지 않습니다.
   - 예: `work`가 설치돼 있으면 `--remove wt-menu`는 아무것도 지우지 않고, 함께 지울 이름을 알려 줍니다.
 - `--remove`(Windows는 `-Remove`)는 고른 모드 폴더를 지우고, 그 모드가 바꾼 레이아웃 블록을 되돌립니다.
@@ -270,7 +272,7 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
    - `main`을 복제하고, 그 레이아웃으로 바꿉니다.
 3. **블록 넣기**: `dashboard`에 설치된 모드의 블록을 넣습니다.
    - `tabs-mine`: 탭 줄 `tabs`를 `tabs-mine`으로 바꿉니다.
-   - `work`·`prs`·`schedules`·`inbox`: 오른쪽 패널에 `work-board`, `pr-board`, `schedules-board`, `inbox-board`를 더합니다. `gh-accounts`는 더하지 않습니다(입구가 설정 창뿐이라서). 예전에 들어간 `accounts-board`는 갱신할 때 한 번 빼고(`.board-dropped` 기록), `--remove`도 남은 것을 되돌립니다.
+   - `work`·`prs`·`schedules`·`inbox`·`memo`: 오른쪽 패널에 `work-board`, `pr-board`, `schedules-board`, `inbox-board`, `memo-board`를 더합니다. `gh-accounts`는 더하지 않습니다(입구가 설정 창뿐이라서). 예전에 들어간 `accounts-board`는 갱신할 때 한 번 빼고(`.board-dropped` 기록), `--remove`도 남은 것을 되돌립니다.
    - `agent-groups`: `agents`를 `agent-groups`로 바꿉니다.
    - `usage-status`: `workspace-status`를 `usage-status`로 바꿉니다.
    - `leader-tabs`: 칸 머리줄 `pane`을 `leader-tabs`로 바꿉니다.
@@ -303,6 +305,7 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
 | `<설정 폴더>/cache/collect.json` | Work·PRs 캐시 | 언제든. 다시 만들어집니다 |
 | `<설정 폴더>/schedules/` | 예약(`automations.json`)과 실행 기록(`runs.json`) | 지우면 예약이 사라집니다 |
 | `<설정 폴더>/data/prs/` | PRs `옆에 열기` 상태 | 언제든 |
+| `<설정 폴더>/memo/config.json` | memo가 고른 메모 폴더 | 지우면 기본 폴더(`~/Documents/Herdr Memos`)로 돌아갑니다. 메모 파일은 그 폴더에 있고 제거해도 남습니다 |
 | `~/.claude/settings.json` (또는 `$CLAUDE_CONFIG_DIR/settings.json`) | `inbox` 설치 때 `hook` 명령이 `Stop`·`UserPromptSubmit` 두 이벤트에 더하는 PO 답 훅 명령 하나(`po-hook.cjs`) | 설치기가 쓰기 전에 `settings.json.bak-herdr-<시각>`으로 백업합니다. `--remove inbox`나 `node install.cjs hook --remove`가 우리 줄만 뺍니다 |
 | `<설정 폴더>/gh-accounts.json` | gh-account 저장소별 계정 매핑 | 지우면 매핑이 사라집니다. 제거해도 남습니다 |
 | `<설정 폴더>/gh-account/` | gh-account 프로그램, 설치 상태, 계정별 커밋 신원 파일 | gh-account 제거할 때 지웁니다 |

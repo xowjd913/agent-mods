@@ -23,7 +23,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const CORE = ["tabs-mine", "settings", "gh-accounts", "work", "prs", "wt-menu", "schedules"];
-const EXTRAS = ["usage-status", "agent-groups", "leader-tabs", "path-menu", "inbox"];
+const EXTRAS = ["usage-status", "agent-groups", "leader-tabs", "path-menu", "inbox", "memo"];
 const ALL = [...CORE, ...EXTRAS];
 // 모드 설명과 꼭 함께 있어야 하는 모드. deps는 코드에서 확인한 것만 적는다.
 //   work·prs: wt-menu 팝업을 연다(work/main.js, prs/main.js의 openOverlay). 패널 버튼은 tabs-mine에만 있다.
@@ -43,6 +43,7 @@ const MODS = {
   "path-menu": { desc: "터미널 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄운다", deps: [] },
   "gh-accounts": { desc: "계정 패널: 스페이스·저장소마다 쓸 GitHub 계정과 Claude 계정 고르기 (설정 창 계정 칸)", deps: [] },
   inbox: { desc: "UI 모드 패널: 리더 결과 보고를 채팅처럼 보고, 결정을 PO에게 답한다", deps: ["tabs-mine"] },
+  memo: { desc: "메모 패널: 폴더 안의 .md 파일로 메모를 쓰고, 눌러서 PO에게 보낸다", deps: ["tabs-mine"] },
 };
 const MARK = ".installed-by-herdr-installer";
 // 예전 설치 스크립트가 남긴 표시. 이 표시가 있는 폴더도 우리 것으로 보고 덮어쓴다.
@@ -332,6 +333,14 @@ const STEPS = [
     done: () => false,
     apply: (l) => addPanel(l, "inbox-board", "inbox"),
     undo: (l) => dropPanel(l, "inbox"),
+  },
+  {
+    name: "오른쪽 패널 메모(memo)",
+    needs: ["memo"],
+    mark: ["memo", ".board-added"],
+    done: () => false,
+    apply: (l) => addPanel(l, "memo-board", "memo"),
+    undo: (l) => dropPanel(l, "memo"),
   },
   {
     name: "칸 머리줄(leader-tabs)",
