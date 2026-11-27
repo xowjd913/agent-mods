@@ -70,7 +70,7 @@ const syncSrc = grab(MAIN, "  syncRoom(pick) {", "  wipe(key, st) {");
 const wipeSrc = grab(MAIN, "  wipe(key, st) {", "  guard(key, st, value) {");
 const draftSrc = grab(MAIN, "  draftDirty() {", "  // Every box is looked at once per draw");
 const consts = grab(MAIN, "const DRAFT_TICK_MS", "const PIN_TICK_MS");
-const DeskClass = new Function("swapDraft", "editCore", "exec", "HELPER", "Date", `${consts}
+const DeskClass = new Function("swapDraft", "editCore", "exec", "HELPER", "Date", "cutHead", `${consts}
 return class Desk {
   constructor(box) { this.chat = box; this.mirror = new Map(); this.roomDrafts = new Map(); this.picBusyBy = new Map(); this.picBusy = 0; this.draftRoom = null; this.pics = []; this.menu = null; this.heldAt = 0; this.lastValue = ""; this.core = ""; this.brk = null; this.log = [];
     this.chatFocus = false; this.draftDue = 0; this.draftSince = 0; this.draftSig = ""; this.draftWroteAt = 0; this.draftBusy = false; this.draftOwn = false; this.draftLoaded = false; this.draftReady = false; this.draftSaved = null; this.focusWant = 0; this.drawnAt = 0;
@@ -101,7 +101,7 @@ function setup() {
     } catch {}
     return Promise.resolve({ code: 1, stdout: "" });
   };
-  const Desk = DeskClass(I.swapDraft, I.editCore, exec, () => HELPER_PATH, fakeDate);
+  const Desk = DeskClass(I.swapDraft, I.editCore, exec, () => HELPER_PATH, fakeDate, I.cutHead);
   const file = path.join(root, "data", "inbox", "chat-draft.json");
   const stamp = () => {};
   return { root, clock, Desk, file, stamp, env, calls };
@@ -399,11 +399,13 @@ test("draft-part: 조각을 순서대로 보내면 하나로 이어 쓰고 조�
   assert.equal(I.chatDraftRead(root).rooms.A.text, "조각 \"글\"\n둘째 줄");
   assert.deepEqual(fs.readdirSync(path.join(root, "data", "inbox")).filter((n) => n.endsWith(".part")), []);
   // bad calls change nothing; a broken earlier try is swept by piece 0
-  assert.equal(run("../evil", "0/1", "{}"), "none");
-  assert.equal(run("abcdef12", "3/3", "x"), "none");
+  assert.equal(run("../evil", "0/1", "{}"), "failed");
+  assert.equal(run("abcdef12", "3/3", "x"), "failed");
   assert.equal(run("abcdef12", "0/2", "{\"rooms\":"), "part");
-  assert.equal(run("zzzzzz99", "0/1", JSON.stringify({ rooms: {}, focus: false })), "cleared"); // nothing to keep: the file goes, like draft-write
-  assert.deepEqual(fs.readdirSync(path.join(root, "data", "inbox")).filter((n) => n.endsWith(".part")), []);
+  const left = () => fs.readdirSync(path.join(root, "data", "inbox")).filter((n) => n.endsWith(".part"));
+  assert.deepEqual(left(), ["chat-draft.abcdef12.0.part"]); // a young piece of another try is left alone by a different id
+  assert.equal(run("abcdef12", "0/1", JSON.stringify({ rooms: {}, focus: false })), "cleared"); // nothing to keep: the file goes, like draft-write; the same id starting over sweeps its own
+  assert.deepEqual(left(), []);
 });
 test("긴 초안(따옴표·줄바꿈 가득, 2만 자 남짓)도 명령줄 인자 하나로 보내지 않고 그대로 저장된다", async () => {
   const s = setup();
@@ -425,4 +427,61 @@ test("긴 초안(따옴표·줄바꿈 가득, 2만 자 남짓)도 명령줄 인�
   assert.equal(saved.rooms["room-b"]?.text, texts["room-b"]);
   assert.deepEqual(fs.readdirSync(path.dirname(s.file)).filter((n) => /\.(part|tmp)$/.test(n)), []);
   assert.equal(d.draftBusy, false);
+});
+test("draft-part: 오류는 던지지 않고 failed, 마지막 조각이 깨져 있어도 조각 파일은 남지 않는다", () => {
+  const root = tmpRoot();
+  assert.equal(I.chatDraftPart("abcdef12", 0, 2, "{not", root), "part");
+  assert.equal(I.chatDraftPart("abcdef12", 1, 2, " json", root), "failed"); // the joined text is not JSON
+  const dir = path.join(root, "data", "inbox");
+  assert.deepEqual(fs.readdirSync(dir).filter((n) => n.endsWith(".part")), []);
+  assert.equal(I.chatDraftPart("abcdef12", 0, 65, "x", root), "failed"); // more pieces than allowed
+  fs.chmodSync(dir, 0o500); // no write permission: skipped where the OS ignores it (root, Windows)
+  let r;
+  try { assert.doesNotThrow(() => { r = I.chatDraftPart("abcdef12", 0, 1, "{}", root); }); } finally { fs.chmodSync(dir, 0o700); }
+  assert.ok(r === "failed" || r === "none" || r === "cleared");
+});
+test("낡은 조각은 다음 저장·읽기 때 지워지고, 젊은 조각(다른 복사본이 쓰는 중)은 건드리지 않는다", () => {
+  const root = tmpRoot();
+  const dir = path.join(root, "data", "inbox");
+  fs.mkdirSync(dir, { recursive: true });
+  const old = path.join(dir, "chat-draft.oldoldold.0.part"), young = path.join(dir, "chat-draft.youngyoung.0.part");
+  fs.writeFileSync(old, "x"); fs.writeFileSync(young, "y");
+  const longAgo = new Date(Date.now() - I.DRAFT_PART_STALE_MS - 60 * 1000);
+  fs.utimesSync(old, longAgo, longAgo);
+  I.chatDraftRead(root); // init
+  assert.equal(fs.existsSync(old), false);
+  assert.equal(fs.existsSync(young), true);
+  // a second copy starting its own pieces leaves the first copy's pieces alone
+  assert.equal(I.chatDraftPart("newnewnew", 0, 2, "{", root), "part");
+  assert.equal(fs.existsSync(young), true);
+  // and an empty save (the draft file goes) sweeps the old ones too
+  fs.writeFileSync(old, "x"); fs.utimesSync(old, longAgo, longAgo);
+  assert.equal(I.chatDraftWrite(I.chatDraftSnap([], false), root), "none");
+  assert.equal(fs.existsSync(old), false);
+});
+test("긴 글 붙여넣기: 헬퍼 상한(방당 6000자, 합계 2만 자)으로 먼저 자르고 보낸다 (조각이 한 자릿수)", async () => {
+  const s = setup();
+  const d = new s.Desk(box());
+  await start(s, d, "room-a");
+  const big = '"붙여넣기"\n'.repeat(30000); // ~300K characters
+  d.type(big);
+  s.calls.length = 0;
+  await tick(s, d, 700);
+  await flush(); await flush();
+  const parts = s.calls.filter((c) => c[0] === "draft-part");
+  assert.ok(parts.length >= 1 && parts.length <= 9, `pieces: ${parts.length}`);
+  assert.equal(JSON.parse(fs.readFileSync(s.file, "utf8")).rooms["room-a"].text, I.cutHead(big, 6000));
+  assert.equal(d.draftSig === "", false);
+});
+test("저장이 실패하면(조각 호출이 none/failed/오류) 기억한 내용을 지워 다음 틱에 다시 쓴다", async () => {
+  for (const answer of [{ code: 0, stdout: '{"r":"none"}' }, { code: 0, stdout: '{"r":"failed"}' }, { code: 1, stdout: "" }, { code: 0, stdout: "" }]) {
+    const s = setup();
+    const Desk = DeskClass(I.swapDraft, I.editCore, () => Promise.resolve(answer), () => HELPER_PATH, { now: () => s.clock.t }, I.cutHead);
+    const x = new Desk(box());
+    x.draftReady = true; x.draftRoom = "room-a";
+    x.type('"x"\n'.repeat(1500));
+    s.clock.t += 700; x.draftTick(); await flush(); await flush();
+    assert.equal(x.draftSig, "", JSON.stringify(answer));
+    assert.equal(x.draftBusy, false);
+  }
 });

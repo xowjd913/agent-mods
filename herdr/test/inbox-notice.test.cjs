@@ -116,6 +116,14 @@ test("noticeText: 본문 첫 줄을 대신 쓸 때 마크다운 기호(#, -, 1.,
   assert.equal(T("2026-11-27 정리"), "x · 재개 · 2026-11-27 정리", "a dash or digit inside the text is kept");
   assert.equal(T("#태그 그대로"), "x · 재개 · #태그 그대로", "# without a space is text");
   assert.equal(T("snake_case와 a*b"), "x · 재개 · snake_case와 a*b");
+  // nothing is taken off mid-line unless it is a pair around text (#147 review)
+  assert.equal(T("__init__ 수정"), "x · 재개 · __init__ 수정");
+  assert.equal(T("a ** b 계산"), "x · 재개 · a ** b 계산");
+  assert.equal(T(">= 5 이면"), "x · 재개 · >= 5 이면");
+  assert.equal(T("**a** and **b** 끝"), "x · 재개 · a and b 끝");
+  assert.equal(T("`x` 와 ` y ` 와 `"), "x · 재개 · x 와 ` y ` 와 `");
+  assert.equal(T("```js\n## 코드 안 제목"), "x · 재개 · 코드 안 제목", "a fence line is skipped whole, not shown as 'js'");
+  assert.equal(T(">> 겹친 인용"), "x · 재개 · 겹친 인용");
 });
 
 test("noticeText: 머리글이 있으면 그대로 쓰고(마크다운 손대지 않음), inbox.cjs와 main.js의 noticeText 본문은 같다", () => {

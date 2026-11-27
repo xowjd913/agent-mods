@@ -1340,12 +1340,14 @@ const isNotice = (e) => String(e?.who ?? "").startsWith("l:") && Boolean(e.it) &
 // "<name> · <kind> · <first line>" ("kind" = the shown kind word); the first line is the report's headline, whitespace squeezed.
 // A headline that is only the kind word (a leader report titled "[leader] 재개") says nothing new: the first non-empty body line takes its place.
 const noticeLine = (s) => String(s ?? "").replace(/^\s*\[[^\]]*\]\s*/, "").replace(/\s+/g, " ").trim();
-// The body line that stands in for the headline is shown as plain text: leading markdown markers (#'s, quote >, list - * + 1.) and the bold / inline-code
-// marks (** __ `) are taken off, so the user never sees "## " or "**". A line that is only markers (a "---" rule, a code fence) is empty and skipped.
+// The body line that stands in for the headline is shown as plain text: leading markdown markers (#'s, quote >, list - * + 1.) are taken off the start of the
+// line, and a **bold** or `code` pair is unwrapped, so the user never sees "## " or "**". Nothing mid-line is touched on its own (__init__, a ** b, >= 5 stay).
+// A line that is only markers (a "---" rule) or starts a code fence (```) is empty and skipped.
 const noticePlain = (l) => {
   let s = String(l ?? "").replace(/\s+/g, " ").trim();
-  for (let p = null; p !== s;) { p = s; s = s.replace(/^(?:#{1,6}(?=\s|$)|>|[-*+](?=\s|$)|\d{1,3}[.)](?=\s|$)|-{3,}$|\*{3,}$|_{3,}$)\s*/, ""); }
-  return s.replace(/\*\*|__|`/g, "").replace(/\s+/g, " ").trim();
+  if (s.startsWith("```")) return ""; // a code fence line says nothing
+  for (let p = null; p !== s;) { p = s; s = s.replace(/^(?:#{1,6}(?=\s|$)|>+(?=\s|$)|[-*+](?=\s|$)|\d{1,3}[.)](?=\s|$)|-{3,}$|\*{3,}$|_{3,}$)\s*/, ""); }
+  return s.replace(/\*\*(\S|\S.*?\S)\*\*/g, "$1").replace(/`(\S|\S[^`]*?\S)`/g, "$1").replace(/\s+/g, " ").trim();
 };
 const noticeText = (name, kind, it) => {
   let head = noticeLine(it?.head || it?.lead || it?.title);
@@ -2441,9 +2443,24 @@ function chatDraftSnap(drafts, focus, now = Date.now()) {
   }
   return { v: 1, at: now, focus: Boolean(focus), rooms };
 }
+// #147: a snapshot too long for one command-line argument (Windows allows ~32K for the whole line, and every quote of the JSON costs up to 4 characters there)
+// reaches the helper in pieces: `draft-part <id> <i>/<n> <piece>`, kept as chat-draft.<id>.<i>.part beside the draft file. Piece 0 removes the pieces of its own id;
+// every save and every read removes pieces older than DRAFT_PART_STALE_MS (a try that broke off), never a younger one: a second copy of the desk may be mid-write.
+const DRAFT_PART_RE = /^chat-draft\.([a-z0-9]{6,20})\.\d+\.part$/, DRAFT_PART_STALE_MS = 5 * 60 * 1000, DRAFT_PART_MAX = 64;
+function sweepDraftParts(dir, own = null) {
+  try {
+    for (const n of fs.readdirSync(dir)) {
+      const m = DRAFT_PART_RE.exec(n);
+      if (!m) continue;
+      const p = path.join(dir, n);
+      try { if (m[1] === own || Date.now() - fs.statSync(p).mtimeMs > DRAFT_PART_STALE_MS) fs.unlinkSync(p); } catch {}
+    }
+  } catch {}
+}
 // Writes the snapshot (atomically); a snapshot with no draft and no focus removes the file. Returns "written" | "cleared" | "none" (nothing there to clear) | "failed" (never throws).
 function chatDraftWrite(snap, root = appRoot()) {
   const f = chatDraftPath(root);
+  sweepDraftParts(path.dirname(f));
   if (!snap || (!snap.focus && !Object.keys(snap.rooms ?? {}).length)) {
     try { fs.unlinkSync(f); return "cleared"; } catch { return "none"; }
   }
@@ -2455,27 +2472,9 @@ function chatDraftWrite(snap, root = appRoot()) {
   } catch { try { fs.unlinkSync(tmp); } catch {} return "failed"; } // #147: a failed write or rename leaves no .tmp behind, and nothing is thrown at the caller
   return "written";
 }
-// #147: a snapshot too long for one command-line argument (Windows allows ~32K for the whole line, and every quote of the JSON costs up to 4 characters there)
-// reaches the helper in pieces: `draft-part <id> <i>/<n> <piece>`. Piece 0 first removes the pieces a broken earlier try left; the last piece joins them,
-// removes them and writes the snapshot like `draft-write` does. Returns "part" (more to come), else what chatDraftWrite returns ("none" for a bad call).
-const DRAFT_PART_RE = /^chat-draft\.[a-z0-9]{6,20}\.\d+\.part$/;
-function chatDraftPart(id, idx, count, piece, root = appRoot()) {
-  if (!/^[a-z0-9]{6,20}$/.test(String(id)) || !Number.isInteger(idx) || !Number.isInteger(count) || idx < 0 || count < 1 || count > 64 || idx >= count || typeof piece !== "string") return "none";
-  const dir = path.dirname(chatDraftPath(root));
-  const part = (i) => path.join(dir, `chat-draft.${id}.${i}.part`);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  if (idx === 0) for (const n of fs.readdirSync(dir)) if (DRAFT_PART_RE.test(n)) { try { fs.unlinkSync(path.join(dir, n)); } catch {} }
-  fs.writeFileSync(part(idx), piece, { mode: 0o600 });
-  if (idx < count - 1) return "part";
-  try {
-    let json = "";
-    for (let i = 0; i < count; i++) json += fs.readFileSync(part(i), "utf8");
-    const j = JSON.parse(json);
-    return chatDraftWrite(chatDraftSnap(Object.entries(j?.rooms ?? {}), j?.focus === true), root);
-  } finally { for (let i = 0; i < count; i++) { try { fs.unlinkSync(part(i)); } catch {} } }
-}
 // What the file says now: {rooms: {<room>: {text, range}}, focus} or null (missing, broken, or older than DRAFT_KEEP_MS). `focus` also needs the file to be fresh.
 function chatDraftRead(root = appRoot(), now = Date.now()) {
+  sweepDraftParts(path.dirname(chatDraftPath(root)));
   let j = null;
   try { j = JSON.parse(fs.readFileSync(chatDraftPath(root), "utf8")); } catch { return null; }
   if (!j || j.v !== 1 || !Number.isFinite(j.at) || now - j.at > DRAFT_KEEP_MS || j.at - now > 60 * 1000) return null;
@@ -2485,8 +2484,25 @@ function chatDraftRead(root = appRoot(), now = Date.now()) {
   }
   return { rooms, focus: j.focus === true && now - j.at < DRAFT_FOCUS_MS };
 }
+// One piece of a long snapshot (see DRAFT_PART_RE): "part" (more to come), else what chatDraftWrite returns; "failed" for a bad call or any error (never throws).
+function chatDraftPart(id, idx, count, piece, root = appRoot()) {
+  if (!/^[a-z0-9]{6,20}$/.test(String(id)) || !Number.isInteger(idx) || !Number.isInteger(count) || idx < 0 || count < 1 || count > DRAFT_PART_MAX || idx >= count || typeof piece !== "string") return "failed";
+  const dir = path.dirname(chatDraftPath(root));
+  const part = (i) => path.join(dir, `chat-draft.${id}.${i}.part`);
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (idx === 0) sweepDraftParts(dir, id);
+    fs.writeFileSync(part(idx), piece, { mode: 0o600 });
+    if (idx < count - 1) return "part";
+    let json = "";
+    for (let i = 0; i < count; i++) json += fs.readFileSync(part(i), "utf8");
+    const j = JSON.parse(json);
+    return chatDraftWrite(chatDraftSnap(Object.entries(j?.rooms ?? {}), j?.focus === true), root);
+  } catch { return "failed"; }
+  finally { if (idx === count - 1) for (let i = 0; i < count; i++) { try { fs.unlinkSync(part(i)); } catch {} } }
+}
 
-module.exports = { fwdHash, fwdMarks, ROOM_W_MIN, ROOM_W_MAX, ROOM_W_KEY, roomWidth, soloMode, soloTerm, soloRooms, STOP_LOCK_MS, stopBlock, stopLocked, stopKey, stopWorking, hookProved, initial, cutPoint, cutHead, cutTail, wellFormed, CLIP_TEXT_MAX, clipText, bangCommand, promptInput, promptParse, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, SEND_PROOF_BACK_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, decisionClosed, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, roomWorking, REMOTE_CMD, REMOTE_POLLS, REMOTE_POLL_MS, remoteBlock, remoteScreen, remoteNote, SOLO_DIR, soloEnabled, readSolo, setSolo, SOLO_FLAG, soloFile, decisionGroups, groupAnswer, dropChat, REMOTE_DIR, remoteRecFile, termPid, procStart, bridgeState, readRemoteRec, clearRemote, markRemote, checkRemote, remoteRooms, FONT_BASE, FONT_KEY, FONT_MIN, FONT_MAX, fontOverride, fontScale, NOTICE_KINDS, isNotice, noticeText, hcSender, HC_REPORT_MS, hcSame, CHAT_DRAFT_FILE, DRAFT_FOCUS_MS, DRAFT_KEEP_MS, chatDraftPath, chatDraftSnap, chatDraftWrite, chatDraftRead, chatDraftPart };
+module.exports = { fwdHash, fwdMarks, ROOM_W_MIN, ROOM_W_MAX, ROOM_W_KEY, roomWidth, soloMode, soloTerm, soloRooms, STOP_LOCK_MS, stopBlock, stopLocked, stopKey, stopWorking, hookProved, initial, cutPoint, cutHead, cutTail, wellFormed, CLIP_TEXT_MAX, clipText, bangCommand, promptInput, promptParse, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, SEND_PROOF_BACK_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, decisionClosed, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, roomWorking, REMOTE_CMD, REMOTE_POLLS, REMOTE_POLL_MS, remoteBlock, remoteScreen, remoteNote, SOLO_DIR, soloEnabled, readSolo, setSolo, SOLO_FLAG, soloFile, decisionGroups, groupAnswer, dropChat, REMOTE_DIR, remoteRecFile, termPid, procStart, bridgeState, readRemoteRec, clearRemote, markRemote, checkRemote, remoteRooms, FONT_BASE, FONT_KEY, FONT_MIN, FONT_MAX, fontOverride, fontScale, NOTICE_KINDS, isNotice, noticeText, hcSender, HC_REPORT_MS, hcSame, CHAT_DRAFT_FILE, DRAFT_FOCUS_MS, DRAFT_KEEP_MS, chatDraftPath, chatDraftSnap, chatDraftWrite, chatDraftRead, chatDraftPart, DRAFT_PART_STALE_MS };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)
@@ -2503,7 +2519,7 @@ if (require.main === module) {
   else if (cmd === "diag") { try { diagAppend(JSON.parse(arg)); } catch {} process.stdout.write("{}"); }
   else if (cmd === "draft-read") { let r = null; try { r = chatDraftRead(); } catch {} process.stdout.write(JSON.stringify(r ?? { rooms: {}, focus: false })); }
   else if (cmd === "draft-write") { let r = "none"; try { const j = JSON.parse(arg); r = chatDraftWrite(chatDraftSnap(Object.entries(j?.rooms ?? {}), j?.focus === true)); } catch {} process.stdout.write(JSON.stringify({ r })); }
-  else if (cmd === "draft-part") { let r = "none"; try { const [i, n] = String(process.argv[4]).split("/").map(Number); r = chatDraftPart(arg, i, n, process.argv[5]); } catch {} process.stdout.write(JSON.stringify({ r })); }
+  else if (cmd === "draft-part") { let r = "failed"; try { const [i, n] = String(process.argv[4]).split("/").map(Number); r = chatDraftPart(arg, i, n, process.argv[5]); } catch { r = "failed"; } process.stdout.write(JSON.stringify({ r })); }
   else if (cmd === "po-me") { let me = []; try { const f = poFile(inboxDir(), arg); if (f) me = parsePoLines(readTail(f)).filter((x) => x.me).slice(-20).map((x) => ({ ms: x.ms, text: x.text })); } catch {} process.stdout.write(JSON.stringify(me)); }
   else if (cmd === "solo-me") { let me = []; try { const f = soloFile(inboxDir(), arg); if (f) me = parsePoLines(readTail(f)).filter((x) => x.me).slice(-20).map((x) => ({ ms: x.ms, text: x.text })); } catch {} process.stdout.write(JSON.stringify(me)); } // a solo terminal's "me" records (what its hook saw submitted)
   else if (cmd === "solo-on") { let on = false, error = ""; try { on = setSolo(inboxDir(), true); } catch (e) { error = String(e?.message ?? e).slice(0, 120); } process.stdout.write(JSON.stringify({ on, error })); } // the same flag as `install.cjs hook --solo`
