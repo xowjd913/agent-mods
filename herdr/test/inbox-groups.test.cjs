@@ -66,7 +66,7 @@ test("askActions: 여러 질문 카드는 질문마다 버튼 줄을 그리고 p
   const a = main.indexOf("  askActions(t, a, cx) {");
   const body = main.slice(a, main.indexOf("    if (!a.po) box.child", a));
   assert.match(body, /decisionGroups\(item\?\.body\)/);
-  assert.match(body, /groups\.map\(\(g, gi\)/);
+  assert.match(body, /\(view \? \[\] : groups\)\.map\(\(g, gi\)/);
   assert.match(body, /this\.pickGroup\(a, groups, g\.label, n, c\)/);
   assert.match(body, /primary: picks\[g\.label\] === n/);
   assert.match(body, /disabled: a\.po \? "" : NO_PO\(\)/);
