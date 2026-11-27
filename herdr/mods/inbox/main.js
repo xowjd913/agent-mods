@@ -22,6 +22,7 @@ import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, S
 import { theme, exec, appHome, checking, window, run, hc, terminals, panes, focused, setBadge, shared, layouts, setShared, props, openOverlay, closeOverlay, watchFolder, pickFiles, home, readTextFile } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
+const ACCT = () => `${appHome()}/mods/inbox/claude-account.cjs`; // which Claude account a session runs on (#121); bundled by the installer
 const ICON = (name) => `mods/workspace-chrome/${name}.svg`;
 const LOAD_TIMEOUT = 20000, LOAD_STALL_MS = 30000, WINDOW_REFRESH_MS = 5000, PANE_REFRESH_MS = 30000, STATUS_POLL_MS = 1500, WATCH_DEBOUNCE_MS = 250;
 const KIND = { done: ["완료", "working"], decision: ["결정", "blocked"], verify: ["확인", "blocked"], stop: ["중단", "idle"], resume: ["재개", "dim"], other: ["알림", "dim"], start: ["시작", "dim"] };
@@ -1327,6 +1328,23 @@ function restartClearCheck(recs, since) {
   return (recs ?? []).some((x) => x && Number(x.ms) >= Number(since)) ? "text" : "clean";
 }
 // chat:end
+// What claude-account.cjs needs of a terminal (`hc get <t> --json`): the single CLAUDE_CONFIG_DIR= token of its argv env part (nothing else of
+// the argv) and the pid of its claude. null when unreadable.
+function acctInfo(r) {
+  if (!r || Number(r.code) !== 0) return null;
+  let j = null;
+  try { j = JSON.parse(String(r.stdout ?? "")); } catch { return null; }
+  if (!j || typeof j !== "object" || j.state !== "live") return null;
+  const argv = [];
+  for (const t of Array.isArray(j.argv) ? j.argv : []) {
+    if (typeof t !== "string") continue;
+    if (t === "claude" || t.startsWith("-")) break; // the env part ends at the program
+    if (t.startsWith("CLAUDE_CONFIG_DIR=")) { argv.push(t.slice(0, 600)); break; }
+  }
+  const f = j.foreground, pid = Number(f?.pid);
+  return { argv, pid: Number.isInteger(pid) && pid > 1 ? pid : null };
+}
+const ACCT_TTL_MS = 5 * 60 * 1000, ACCT_RETRY_MS = 60 * 1000;
 
 // The pending-question card: the screen lines scroll inside it (all options stay reachable), the buttons stay under them.
 const PROMPT_LINES_H = 240, PROMPT_MAX_H = 340;
@@ -1602,6 +1620,35 @@ export default class Inbox extends View {
     this.loadUsage(cx);
     cx.timer.every(USAGE_REFRESH_MS, (cx) => this.loadUsage(cx));
     this.diag(`init: ${this.windowed ? "window" : this.mained ? "main" : this.paned ? "pane" : "dock"}`);
+  }
+
+  // "이 세션 계정" (#121): which Claude account each live leader runs on, read from its terminal (`hc get`: the env part of argv, else the process env) and
+  // resolved by claude-account.cjs. Cached by terminal; an unknown answer is asked again sooner. Nothing secret is read: only the one variable.
+  loadAccounts(cx) {
+    let list = [];
+    try { list = terminals() ?? []; } catch {}
+    this.accts ??= new Map();
+    const now = Date.now();
+    for (const t of list) {
+      if (!isAgentName(t?.name) || !t.address) continue;
+      const e = this.accts.get(t.name);
+      if (e && e.busy && now - e.at < 30000) continue;
+      if (e && e.addr === t.address && !e.busy && now - e.at < (e.label === null ? ACCT_RETRY_MS : ACCT_TTL_MS)) continue;
+      this.accts.set(t.name, { addr: t.address, label: e?.addr === t.address ? e.label : null, at: now, busy: true });
+      cx.spawn(async (cx) => {
+        let label = null;
+        try {
+          const info = acctInfo(await hc(["get", t.address, "--json"]));
+          if (info) {
+            const r = await exec("node", [ACCT(), "label", "--info", JSON.stringify(info)], { timeout: 8000 });
+            if (r.code === 0) { const l = JSON.parse(r.stdout).label; label = typeof l === "string" && l ? l : null; }
+          }
+        } catch {}
+        const prev = this.accts.get(t.name);
+        this.accts.set(t.name, { addr: t.address, label, at: Date.now(), busy: false });
+        if (label !== (prev?.label ?? null)) this.softNotify(cx);
+      });
+    }
   }
 
   // Reads the usage file (a file read only) and redraws only when what the line shows (the rows or the tooltip text) changed: a redraw drops a drag-select.
@@ -2118,6 +2165,7 @@ export default class Inbox extends View {
         this.data = d;
         this.error = err;
         rememberLeaders();
+        this.loadAccounts(cx);
         this.markSeen();
         this.remoteRestore(cx);
         if (this.drawing()) this.startWatch(cx);
@@ -3621,6 +3669,7 @@ export default class Inbox extends View {
     return h_flex().gap(6).items_center().min_w(0)
       .when(!bare, (el) => el.child(div().id(`peek-${s.leader}-${it?.ts ?? ""}`).min_w(0).truncate().text_size(12).font_semibold().text_color(tint(t, s.leader)).cursor_pointer()
         .hover((x) => x.text_color(t.foreground)).on_mouse_down("left", stop).on_click(() => this.peek(s)).tooltip("그 리더 터미널 들여다보기").child(shortName(s.leader))))
+      .when(!bare && Boolean(this.accts?.get(s.leader)?.label), (el) => el.child(div().flex_none().max_w(150).truncate().text_size(10.5).text_color(t.dim).tooltip("이 리더 세션이 쓰는 Claude 계정").child(`이 세션 계정: ${this.accts.get(s.leader).label}`)))
       .when(!bare && Boolean(it?.linkRef), (el) => el.child(div().min_w(0).max_w(150).truncate().text_size(10.5).text_color(t.dim).child(it.linkRef)))
       .when(Boolean(it), (el) => el.child(this.kindTag(t, it, it.kind, waiting)))
       .when(!bare, (el) => el.child(div().flex_1()))

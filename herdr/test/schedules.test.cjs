@@ -996,3 +996,16 @@ test("기록 저장소: 예약별 계정은 기록 파일에 적지 않는다", 
   const text = fs.readFileSync(path.join(f.repo, "herdr-schedules", "주간-점검-a1b2c3d4.json"), "utf8");
   assert.ok(!text.includes("acct-b"), text);
 });
+
+test("execute: Claude 계정 선택을 읽지 못하면 기록 note 에 경고 한 줄을 남기고 기본 계정(변수 없음)으로 시작한다", () => {
+  reset();
+  const now = { t: utc("2026-03-02T09:00:00Z") };
+  const a = { id: "cccccccc", createdAt: now.t, ...auto({ program: "claude" }) };
+  seed([a], { cccccccc: [{ id: "r1", automationId: "cccccccc", trigger: "수동", scheduledAt: now.t, startedAt: now.t, status: "실행 중" }] });
+  const { deps, calls } = fakeDeps(now, { hc: () => ({ code: 1, stdout: "", stderr: "no hc" }) });
+  deps.claudeAccount = () => ({ dir: null, warning: "계정 선택을 읽지 못해 기본 계정으로 시작합니다" });
+  S.execute("r1", deps);
+  const run = readRuns().cccccccc[0];
+  assert.match(run.note, /계정 선택을 읽지 못해 기본 계정으로 시작합니다/);
+  assert.ok(!calls.hc.find((c) => c[0] === "run").join(" ").includes("CLAUDE_CONFIG_DIR"));
+});
