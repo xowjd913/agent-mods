@@ -68,10 +68,11 @@ function parseNames(value, flag) {
 }
 
 function parseArgs(argv) {
-  const out = { cmd: argv[0], home: null, extras: false, only: null, add: null, mods: null, created: false, settings: null, remove: false, solo: false };
+  const out = { cmd: argv[0], home: null, ref: null, extras: false, only: null, add: null, mods: null, created: false, settings: null, remove: false, solo: false };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--home") out.home = argv[++i];
+    else if (a === "--ref") { out.ref = argv[++i]; if (!REF_RE.test(out.ref ?? "")) throw new Error("--ref 뒤에는 브랜치 이름(영문·숫자·. _ / -)이 필요합니다."); }
     else if (a === "--extras") out.extras = true;
     else if (a === "--only") out.only = parseNames(argv[++i], a);
     else if (a === "--add") out.add = parseNames(argv[++i], a);
@@ -88,6 +89,11 @@ function parseArgs(argv) {
   return out;
 }
 
+// 내려받은 브랜치로 쓸 수 있는 글자(셸·주소에 그대로 넣어도 안전한 것만)
+const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,99}$/;
+// 설정 창이 모드를 설치·제거할 때 어느 설치기를 돌릴지 알도록, 설치한 출처를 settings 모드 폴더에 남긴다.
+//   원격(curl|sh, irm): { kind: "remote", ref: <브랜치> }  /  저장소 복제본에서 실행: { kind: "local", dir: <그 herdr 폴더> }
+const SOURCE_FILE = ".source.json";
 const modDir = (home, mod) => path.join(home, "mods", mod);
 const ours = (dir) => fs.existsSync(path.join(dir, MARK)) || fs.existsSync(path.join(dir, LEGACY_MARK));
 // 레이아웃에 넣어도 되는 모드: 우리 표시가 있고 main.js가 있는 폴더.
@@ -134,6 +140,10 @@ function installMods(home, opts = {}) {
     fs.cpSync(path.join(SRC, mod), target, { recursive: true, force: true });
     for (const [from, to] of BUNDLE[mod] || []) fs.copyFileSync(path.join(__dirname, from), path.join(target, to));
     fs.writeFileSync(path.join(target, MARK), "");
+    if (mod === "settings") {
+      const source = opts.ref ? { kind: "remote", ref: opts.ref } : { kind: "local", dir: __dirname };
+      fs.writeFileSync(path.join(target, SOURCE_FILE), JSON.stringify(source) + "\n");
+    }
     log(`모드 설치: ${target}`);
     result.installed.push(mod);
   }
@@ -618,7 +628,7 @@ function soloSetting(on, dir) {
 }
 
 module.exports = {
-  CORE, EXTRAS, ALL, MODS, MARK, LEGACY_MARK, LAYOUT_NAME,
+  CORE, EXTRAS, ALL, MODS, MARK, LEGACY_MARK, LAYOUT_NAME, SOURCE_FILE,
   parseArgs, installMods, applyLayout, deriveUiLayout, pendingLayout, removeMods, listMods,
   HOOK_EVENTS, HOOK_SCRIPT, isOurHook, settingsPath, hookScript, hookCommand, mergeHook, hookSettings, soloSetting,
 };

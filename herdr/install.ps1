@@ -12,7 +12,12 @@
 param([switch]$Extras, [string[]]$Only, [string[]]$Add, [string[]]$Remove, [switch]$List)
 $ErrorActionPreference = 'Stop'
 $RepoUrl = 'https://github.com/xowjd913/agent-mods'
-$Branch = 'main'
+# 받을 브랜치. 설정 창이 설치한 출처와 같은 브랜치로 다시 돌리도록 AGENT_MODS_REF로 바꿀 수 있다(기본 main).
+$Branch = if ($env:AGENT_MODS_REF) { $env:AGENT_MODS_REF } else { 'main' }
+if ($Branch -notmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*$') {
+  Write-Host "AGENT_MODS_REF($Branch)는 브랜치 이름(영문·숫자·. _ / -)이어야 합니다."
+  return
+}
 $AppHome = if ($env:HERDR_APP_HOME) { $env:HERDR_APP_HOME } else { Join-Path $HOME '.config\herdr-app' }
 
 # 고르는 옵션은 하나만 받는다.
@@ -34,7 +39,9 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 # 저장소 안에서 실행했으면 그 파일을 쓰고, 아니면(irm) 압축 파일을 받아 임시 폴더에 푼다.
 $Dir = $PSScriptRoot
 $Tmp = $null
+$Remote = $false
 if (-not $Dir -or -not (Test-Path (Join-Path $Dir 'install.cjs'))) {
+  $Remote = $true
   $Tmp = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
   New-Item -ItemType Directory -Force -Path $Tmp | Out-Null
   Write-Host "내려받는 중: $RepoUrl ($Branch)"
@@ -87,6 +94,8 @@ try {
   if ($Extras) { $ModArgs += '--extras' }
   elseif ($Only) { $ModArgs += @('--only', ($Only -join ',')) }
   elseif ($Add) { $ModArgs += @('--add', ($Add -join ',')) }
+  # 받아서 돌린 경우에만 브랜치를 넘긴다(복제본에서 돌렸으면 그 폴더가 기록된다).
+  if ($Remote) { $ModArgs += @('--ref', $Branch) }
   $R = Invoke-Helper $ModArgs
   Write-Host -NoNewline $R.Out
   if ($R.Code -eq 2) { return }

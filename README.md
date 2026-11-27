@@ -92,6 +92,7 @@ curl -fsSL https://raw.githubusercontent.com/xowjd913/agent-mods/main/herdr/inst
 
 - Windows는 `-Only`, `-Add`, `-Remove`, `-List`를 붙입니다.
 - 필요한 모드는 함께 설치됩니다. 예를 들어 `prs`를 고르면 `work`, `tabs-mine`, `wt-menu`도 들어갑니다.
+- `main`이 아닌 가지에서 받으려면 `AGENT_MODS_REF=<가지>`를 주고, 설정 창의 모드 칸은 설치할 때 기록된 같은 출처의 설치기를 돌립니다. 자세한 내용은 [herdr/README.md](herdr/README.md)에 있습니다.
 - 옵션은 한 번에 하나만 씁니다.
 - 자세한 동작과 Windows 예시는 [모드 골라 설치](herdr/README.md#모드-골라-설치)에 있습니다.
 

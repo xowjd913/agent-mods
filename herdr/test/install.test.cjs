@@ -786,3 +786,42 @@ test("UI 모드: 표시 없는 같은 이름 레이아웃은 건드리지 않고
   assert.ok(!fs.existsSync(uiFile(home)));
   assert.match(gone.out, /터미널 모드'로 먼저 돌아오세요/); // 보던 -ui 레이아웃이 사라지니 먼저 돌아오라는 안내(review-59 R1 P3)
 });
+
+// 설정 창이 같은 출처의 설치기를 다시 돌리도록, 설치기는 출처를 settings 모드 폴더(.source.json)에 남긴다.
+const sourceOf = (home) => readJson(path.join(home, "mods", "settings", inst.SOURCE_FILE));
+test("출처 기록: 저장소 복제본에서 돌리면 그 herdr 폴더가, --ref를 주면 원격 브랜치가 남는다", () => {
+  const home = tempHome();
+  assert.equal(cli("mods", "--home", home, "--only", "inbox").status, 0);
+  assert.deepEqual(sourceOf(home), { kind: "local", dir: path.join(__dirname, "..") });
+  assert.equal(cli("mods", "--home", home, "--only", "inbox", "--ref", "feature/126-settings").status, 0);
+  assert.deepEqual(sourceOf(home), { kind: "remote", ref: "feature/126-settings" });
+  // 다시 복제본에서 갱신하면 복제본으로 돌아온다
+  assert.equal(cli("mods", "--home", home).status, 0);
+  assert.equal(sourceOf(home).kind, "local");
+});
+
+test("--ref는 셸·주소에 안전한 브랜치 이름만 받는다", () => {
+  const home = tempHome();
+  for (const bad of ["", "main; rm -rf ~", "-x", "a b", "$(id)", "a`b`"]) {
+    const r = cli("mods", "--home", home, "--ref", bad);
+    assert.equal(r.status, 2, JSON.stringify(bad));
+  }
+  assert.equal(cli("mods", "--home", home, "--ref").status, 2);
+  assert.ok(!fs.existsSync(path.join(home, "mods", "settings", inst.SOURCE_FILE)));
+  assert.equal(cli("mods", "--home", home, "--ref", "release/1.2-x_y").status, 0);
+});
+
+test("install.sh는 AGENT_MODS_REF를 받고 이상한 값은 거절하며, 복제본에서 돌리면 복제본 경로를 남긴다", { skip: process.platform === "win32" }, () => {
+  const home = tempHome();
+  const sh = path.join(__dirname, "..", "install.sh");
+  // inbox 같은 훅 모드는 Claude 설정을 건드리므로 쓰지 않고, 만약을 위해 설정 폴더도 임시 폴더로 돌린다.
+  const run = (env, ...a) => spawnSync("sh", [sh, ...a], { encoding: "utf8", env: { ...process.env, HERDR_APP_HOME: home, CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "herdr-claude-")), ...env } });
+  const bad = run({ AGENT_MODS_REF: "main; echo hi" }, "--list");
+  assert.equal(bad.status, 2);
+  assert.match(bad.stdout, /AGENT_MODS_REF/);
+  const ok = run({ AGENT_MODS_REF: "feature/x" }, "--only", "work");
+  assert.equal(ok.status, 0);
+  assert.deepEqual(sourceOf(home), { kind: "local", dir: path.join(__dirname, "..") }, "복제본에서 돌렸으니 브랜치 환경 변수와 상관없이 복제본이 출처다");
+  assert.ok(/BRANCH="\$\{AGENT_MODS_REF:-main\}"/.test(fs.readFileSync(sh, "utf8")));
+  assert.match(fs.readFileSync(path.join(__dirname, "..", "install.ps1"), "utf8"), /\$env:AGENT_MODS_REF/);
+});

@@ -5,7 +5,7 @@
 // `모드` 칸은 README의 설치 한 줄(curl | sh, Windows는 PowerShell)을 herdr `exec`로 돌려 설치·제거한다(기본 모드는 제거하지 않는다).
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { theme, props, openOverlay, closeOverlay, setShared, appHome, readTextFile, exec, window } from "herdr";
+import { theme, props, openOverlay, closeOverlay, setShared, appHome, readTextFile, exec, window, shared } from "herdr";
 
 // settings-window:begin
 // 설정 창의 모양. tabs-mine/main.js와 settings/main.js에 이 블록을 그대로 복사해 둔다(모드끼리 파일을 불러올 수 없다. 테스트가 둘이 같은지 본다).
@@ -52,24 +52,59 @@ const MODS = [
   { name: "path-menu", desc: "터미널 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄운다" },
   { name: "inbox", desc: "UI 모드 패널: 리더 결과 보고를 채팅처럼 보고, 결정을 PO에게 답한다" },
 ];
-// README의 설치 한 줄과 같은 원격 형태라 저장소를 받지 않은 폴더에서도 그대로 돌아간다.
-const RAW = "https://raw.githubusercontent.com/xowjd913/agent-mods/main/herdr";
-const cmdSh = (flag, mod) => `curl -fsSL ${RAW}/install.sh | sh -s -- ${flag} ${mod}`;
-const cmdPs = (flag, mod) => `& ([scriptblock]::Create((irm ${RAW}/install.ps1))) ${flag} ${mod}`;
-const cmdAdd = (mod) => cmdSh("--add", mod);
-const cmdAddWin = (mod) => cmdPs("-Add", mod);
-const cmdRemove = (mod) => cmdSh("--remove", mod);
-const cmdRemoveWin = (mod) => cmdPs("-Remove", mod);
+// 설치기 출처. install.cjs가 설치할 때 settings 모드 폴더의 .source.json에 남긴다.
+//   원격(curl|sh, irm): { kind: "remote", ref }  /  저장소 복제본: { kind: "local", dir }  /  기록 없음: 직접 돌리지 않는다(명령 복사만).
+const REPO_RAW = "https://raw.githubusercontent.com/xowjd913/agent-mods";
+const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/;
 const isWin = () => { try { return window()?.platform === "windows"; } catch { return false; } };
-// 설치기를 이 컴퓨터에서 돌린다. HERDR_APP_HOME을 이 Herdr 설정 폴더로 맞춰 터미널에서 돌린 것과 같은 곳을 고친다.
-const runInstaller = (action, mod, home) => {
+const shq = (x) => `'${String(x).replace(/'/g, `'\\''`)}'`;
+const psq = (x) => `'${String(x).replace(/'/g, "''")}'`;
+const rawOf = (ref) => `${REPO_RAW}/${ref}/herdr`;
+const joinDir = (dir, file) => `${String(dir).replace(/[\\/]+$/, "")}${isWin() ? "\\" : "/"}${file}`;
+const readSource = async (home) => {
+  try {
+    const rec = JSON.parse(await readTextFile(`${home}/mods/settings/.source.json`));
+    if (rec?.kind === "remote" && REF_RE.test(String(rec.ref))) return { kind: "remote", ref: String(rec.ref) };
+    if (rec?.kind === "local" && typeof rec.dir === "string" && rec.dir) {
+      const script = joinDir(rec.dir, isWin() ? "install.ps1" : "install.sh");
+      return (await readTextFile(script)) != null ? { kind: "local", dir: rec.dir, script } : { kind: "gone", dir: rec.dir };
+    }
+  } catch {}
+  return null;
+};
+const canRun = (src) => src?.kind === "local" || src?.kind === "remote";
+const sourceText = (src) => (src?.kind === "local" ? `로컬 ${src.dir}` : src?.kind === "remote" ? `원격 ${src.ref}` : "알 수 없음");
+// 터미널에서 직접 돌릴 한 줄. 출처를 모르면 README의 main 한 줄이다(어느 버전이 깔릴지 모르는 줄이라 직접 돌리지 않는다).
+const copyCmd = (src, action, mod) => {
+  const flag = (action === "remove" ? "Remove" : "Add");
+  if (src?.kind === "local") return isWin() ? `& ${psq(src.script)} -${flag} ${mod}` : `sh ${shq(src.script)} --${action} ${mod}`;
+  const ref = src?.kind === "remote" ? src.ref : "main";
+  const raw = rawOf(ref);
+  if (isWin()) return `${src?.kind === "remote" ? `$env:AGENT_MODS_REF=${psq(ref)}; ` : ""}& ([scriptblock]::Create((irm ${raw}/install.ps1))) -${flag} ${mod}`;
+  return `curl -fsSL ${raw}/install.sh | ${src?.kind === "remote" ? `AGENT_MODS_REF=${ref} ` : ""}sh -s -- --${action} ${mod}`;
+};
+// 설치기를 이 컴퓨터에서 돌린다. 설치한 출처 그대로(복제본이면 그 스크립트, 원격이면 기록된 브랜치의 한 줄)이고, HERDR_APP_HOME을 이 Herdr 설정 폴더로 맞춰 같은 곳을 고친다.
+const runInstaller = (src, action, mod, home) => {
   const flag = action === "remove" ? "Remove" : "Add";
   if (isWin()) {
-    const q = (x) => String(x).replace(/'/g, "''");
-    return exec("powershell.exe", ["-NoProfile", "-Command", `$env:HERDR_APP_HOME='${q(home)}'; ${cmdPs("-" + flag, mod)}`], { timeout: 600000 });
+    const pre = `$env:HERDR_APP_HOME=${psq(home)}; `;
+    if (src.kind === "local") return exec("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", `${pre}& ${psq(src.script)} -${flag} ${mod}`], { timeout: 600000 });
+    return exec("powershell.exe", ["-NoProfile", "-Command", `${pre}$env:AGENT_MODS_REF=${psq(src.ref)}; & ([scriptblock]::Create((irm ${rawOf(src.ref)}/install.ps1))) -${flag} ${mod}`], { timeout: 600000 });
   }
-  return exec("env", [`HERDR_APP_HOME=${home}`, "sh", "-c", cmdSh("--" + action, mod)], { timeout: 600000 });
+  if (src.kind === "local") return exec("env", [`HERDR_APP_HOME=${home}`, "sh", src.script, `--${action}`, mod], { timeout: 600000 });
+  return exec("env", [`HERDR_APP_HOME=${home}`, `AGENT_MODS_REF=${src.ref}`, "sh", "-c", `curl -fsSL ${rawOf(src.ref)}/install.sh | sh -s -- --${action} ${mod}`], { timeout: 600000 });
 };
+// 도는 중 표시는 창을 닫았다 열어도 남도록 공유 값에 둔다. 10분이 지난 표시는 죽은 것으로 보고 무시한다.
+const BUSY_KEY = "settings.busy";
+const BUSY_TTL = 600000;
+const busyNow = () => {
+  try {
+    const b = shared(BUSY_KEY);
+    if (b && typeof b === "object" && Date.now() - Number(b.at) < BUSY_TTL) return b;
+  } catch {}
+  return null;
+};
+const setBusy = (v) => { try { setShared(BUSY_KEY, v); } catch {} };
 const lastLine = (r) => [...String(r.stderr || "").split("\n"), ...String(r.stdout || "").split("\n")].map((l) => l.trim()).filter(Boolean).pop() ?? "";
 
 const safeProps = () => { try { return props() ?? {}; } catch { return {}; } };
@@ -80,8 +115,9 @@ export default class Settings extends View {
   init(p, cx) {
     this.part = (p ?? safeProps()).part ?? "mods";
     this.section = (p ?? safeProps()).section ?? "accounts";
-    this.busy = null; // { name, action } 설치기가 도는 중
-    this.confirm = null; // 제거 확인을 기다리는 모드 이름
+    this.wasBusy = false; // 도는 중이던 표시가 사라지면(다른 창이 끝냄) 목록을 다시 읽는다
+    this.confirm = null; // 확인을 기다리는 { name, action }
+    this.source = undefined; // 설치 출처(읽기 전 undefined, 기록 없음 null)
     this.result = {}; // 모드별 마지막 결과 { ok, text }
     this.installed = null; // { 모드: true|false }, 읽기 전
     this.note = null;
@@ -95,6 +131,7 @@ export default class Settings extends View {
       try { return [m.name, (await readTextFile(`${home}/mods/${m.name}/mod.json`)) != null]; } catch { return [m.name, false]; }
     });
     Promise.all(reads).then((rows) => { this.installed = Object.fromEntries(rows); cx.notify(); });
+    readSource(home).then((src) => { this.source = src; cx.notify(); });
   }
 
   open(id) {
@@ -136,13 +173,16 @@ export default class Settings extends View {
 
   // 설치기를 돌린다. 끝나면 설치 여부를 다시 읽고, 모드를 바꿨으니 Herdr를 다시 시작하라고 알린다.
   run(cx, action, name) {
-    if (this.busy) return;
-    this.busy = { name, action };
+    const src = this.source;
+    if (busyNow() || !canRun(src)) return;
+    setBusy({ name, action, at: Date.now() });
     this.confirm = null;
     delete this.result[name];
     cx.notify();
     const home = String(appHome() ?? "");
-    runInstaller(action, name, home).then((r) => {
+    let started;
+    try { started = Promise.resolve(runInstaller(src, action, name, home)); } catch (e) { started = Promise.reject(e); }
+    started.then((r) => {
       const ok = r.code === 0;
       const out = lastLine(r);
       this.result[name] = ok
@@ -150,13 +190,16 @@ export default class Settings extends View {
         : { ok, text: `실패했습니다(${r.code}): ${out.slice(0, 140) || "출력 없음"}` };
     }, (e) => {
       this.result[name] = { ok: false, text: `설치기를 시작하지 못했습니다: ${String(e?.message ?? e).slice(0, 140)}` };
-    }).finally(() => { this.busy = null; this.load(cx); cx.notify(); });
+    }).finally(() => { setBusy(null); this.load(cx); cx.notify(); });
   }
 
   modRow(t, m) {
     const on = this.installed ? this.installed[m.name] : null;
-    const busyHere = this.busy?.name === m.name;
-    const locked = Boolean(this.busy) || on == null;
+    const busy = busyNow();
+    const busyHere = busy?.name === m.name;
+    const run = canRun(this.source);
+    const locked = Boolean(busy) || on == null || this.source === undefined;
+    const ask = this.confirm?.name === m.name ? this.confirm.action : null;
     const res = this.result[m.name];
     const btn = (id, label, fn, tone) => {
       const el = div().id(`${id}-${m.name}`).flex_none().h(22).px(8).rounded(5).flex().items_center().text_size(11)
@@ -165,15 +208,26 @@ export default class Settings extends View {
       return el.cursor_pointer().hover((x) => x.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => fn(cx)).child(label);
     };
     const actions = h_flex().gap(6).items_center().flex_wrap();
-    if (busyHere) actions.child(div().text_size(11).text_color(t.muted).child(this.busy.action === "remove" ? "제거하는 중…" : "설치하는 중…"));
-    else if (on === false) actions.child(btn("mod-add", "설치", (cx) => this.run(cx, "add", m.name)));
-    else if (on && m.core) actions.child(div().text_size(11).text_color(t.dim).child("기본 모드라 제거하지 않습니다"));
-    else if (on && this.confirm === m.name) {
-      actions.child(div().text_size(11).text_color(t.muted).child(`${m.name}을(를) 제거할까요?`))
-        .child(btn("mod-remove-yes", "제거", (cx) => this.run(cx, "remove", m.name), "danger"))
-        .child(btn("mod-remove-no", "취소", (cx) => { this.confirm = null; cx.notify(); }));
-    } else if (on) actions.child(btn("mod-remove", "제거", (cx) => { this.confirm = m.name; cx.notify(); }));
-    if (res && !res.ok) actions.child(btn("mod-copy", "명령 복사", (cx) => this.copy(cx, isWin() ? (on ? cmdRemoveWin(m.name) : cmdAddWin(m.name)) : on ? cmdRemove(m.name) : cmdAdd(m.name))));
+    const src = sourceText(this.source);
+    if (busyHere) actions.child(div().text_size(11).text_color(t.muted).child(busy.action === "remove" ? "제거하는 중…" : "설치하는 중…"));
+    else if (busy) actions.child(div().text_size(11).text_color(t.dim).child(`${busy.name} ${busy.action === "remove" ? "제거" : "설치"} 중이라 기다립니다`));
+    else if (on && m.core && !ask) actions.child(div().text_size(11).text_color(t.dim).child("기본 모드라 제거하지 않습니다"));
+    if (!busy && run) {
+      if (ask === "add") {
+        actions.child(div().text_size(11).text_color(t.muted).child(`${m.name}을(를) 설치할까요? 설치된 모드 전체를 ${src}에서 다시 복사합니다.`))
+          .child(btn("mod-add-yes", "설치", (cx) => this.run(cx, "add", m.name)))
+          .child(btn("mod-add-no", "취소", (cx) => { this.confirm = null; cx.notify(); }));
+      } else if (ask === "remove") {
+        actions.child(div().text_size(11).text_color(t.muted).child(`${m.name}을(를) 제거할까요? (설치기 출처: ${src})`))
+          .child(btn("mod-remove-yes", "제거", (cx) => this.run(cx, "remove", m.name), "danger"))
+          .child(btn("mod-remove-no", "취소", (cx) => { this.confirm = null; cx.notify(); }));
+      } else if (on === false) actions.child(btn("mod-add", "설치", (cx) => { this.confirm = { name: m.name, action: "add" }; cx.notify(); }));
+      else if (on && !m.core) actions.child(btn("mod-remove", "제거", (cx) => { this.confirm = { name: m.name, action: "remove" }; cx.notify(); }));
+    }
+    // 직접 돌리지 못하거나(출처 기록 없음) 돌렸는데 실패했으면 터미널에서 돌릴 한 줄을 복사한다.
+    if (on != null && this.source !== undefined && !busy && (!run || (res && !res.ok))) {
+      actions.child(btn("mod-copy", "명령 복사", (cx) => this.copy(cx, copyCmd(this.source, on ? "remove" : "add", m.name))));
+    }
     return v_flex().id(`mod-${m.name}`).px(10).py(7).gap(4).rounded(6).bg(t.chrome).border_1().border_color(t.border)
       .child(h_flex().gap(8).items_center()
         .child(div().flex_none().size(8).rounded(4).bg(on == null ? t.dim : on ? t.working : t.border))
@@ -185,6 +239,16 @@ export default class Settings extends View {
       .when(Boolean(res), (el) => el.child(div().text_size(11).text_color(res.ok ? t.working : t.blocked).child(res.text)));
   }
 
+  // 설치기 출처를 한 줄로. 설치(--add)는 설치된 모드 전체를 이 출처에서 다시 복사한다.
+  sourceLine() {
+    const src = this.source;
+    if (src === undefined) return "설치 출처 확인 중…";
+    if (src?.kind === "local") return `설치 출처: 로컬 ${src.dir}. 설치는 설치된 모드 전체를 여기서 다시 복사합니다.`;
+    if (src?.kind === "remote") return `설치 출처: 원격 ${src.ref} 브랜치. 설치는 설치된 모드 전체를 그 브랜치에서 다시 복사합니다.`;
+    if (src?.kind === "gone") return `설치 출처(${src.dir})의 설치 스크립트가 없어 직접 돌리지 않습니다. 아래 명령 복사로 터미널에서 돌리세요(main 기준 한 줄입니다).`;
+    return "설치 출처 기록(.source.json)이 없어 직접 돌리지 않습니다. 아래 명령 복사로 터미널에서 돌리면 기록이 남습니다(main 기준 한 줄입니다).";
+  }
+
   modsBody(t) {
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .child(h_flex().h(38).px(14).flex_none().items_center().gap(8)
@@ -193,12 +257,18 @@ export default class Settings extends View {
           .on_click((_e, cx) => { this.installed = null; this.load(cx); cx.notify(); }).tooltip("새로고침").child(div().text_size(14).child("↻"))))
       .child(div().px(14).pb(8).text_size(12).text_color(t.dim)
         .child("모드를 여기서 바로 설치·제거합니다(README의 설치 한 줄과 같은 설치기를 돌립니다). 바꾼 뒤에는 Herdr를 다시 시작하세요."))
+      .child(div().id("mods-source").px(14).pb(8).text_size(11).text_color(t.muted).child(this.sourceLine()))
       .when(Boolean(this.note), (el) => el.child(div().px(14).pb(6).text_size(11).text_color(t.muted).max_h(40).overflow_hidden().child(this.note)))
       .child(v_flex().id("mods-list").flex_1().min_h(0).px(10).pb(10).gap(6).overflow_y_scrollbar().mode("always").children(MODS.map((m) => this.modRow(t, m))));
   }
 
-  render(_cx) {
+  render(cx) {
     const t = theme();
+    if (this.part === "mods") { // 다른 창이 돌리던 설치기가 끝나면 목록을 다시 읽는다
+      const b = busyNow();
+      if (this.wasBusy && !b && cx) this.load(cx);
+      this.wasBusy = Boolean(b);
+    }
     if (this.part === "bar") return this.bar(t);
     if (this.part === "nav") return this.nav(t);
     if (this.part === "pad") return div().size_full().bg(t.chrome);

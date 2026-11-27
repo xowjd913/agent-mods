@@ -150,6 +150,17 @@ Windows(PowerShell) 예:
 저장소를 받았다면 `sh agent-mods/herdr/install.sh --only usage-status`처럼 씁니다.
 Windows는 `.\agent-mods\herdr\install.ps1 -Only usage-status`입니다.
 
+`main`이 아닌 가지·태그에서 받으려면 환경 변수 `AGENT_MODS_REF`를 줍니다(기본 `main`). 영문자·숫자·`.`·`_`·`/`·`-`만 허용하고 맨 앞은 영문자나 숫자여야 합니다.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/xowjd913/agent-mods/feature/x/herdr/install.sh | AGENT_MODS_REF=feature/x sh -s -- --add prs
+```
+
+```powershell
+$env:AGENT_MODS_REF = 'feature/x'
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/xowjd913/agent-mods/feature/x/herdr/install.ps1))) -Add prs
+```
+
 알아 둘 점:
 
 - 옵션은 한 번에 하나만 씁니다. 둘을 함께 주면 아무것도 하지 않고 안내만 출력합니다.
@@ -253,6 +264,7 @@ Get-ChildItem (Join-Path $H 'mods') -Directory |
 1. **모드 복사**: `herdr/mods/<모드>/`를 `<설정 폴더>/mods/<모드>/`에 복사합니다.
    - `.installed-by-herdr-installer` 표시 파일을 남깁니다.
    - 표시가 없는 같은 이름 폴더는 직접 만든 모드로 보고 덮어쓰지 않습니다.
+   - `settings`를 복사할 때 설치 출처를 `<설정 폴더>/mods/settings/.source.json`에 적습니다. 저장소에서 돌렸으면 `{"kind":"local","dir":"<저장소의 herdr 폴더>"}`, 원격 한 줄로 돌렸으면 `{"kind":"remote","ref":"<AGENT_MODS_REF>"}`입니다. 설정 창의 모드 칸이 이 출처의 설치기를 돌립니다(`main`으로 못 박지 않음). 원격 실행에서만 스크립트가 `--ref`를 `install.cjs`에 넘깁니다.
    - `inbox`는 Claude Code 설정(`~/.claude/settings.json`)에 PO 답 훅 한 줄도 더합니다(다른 훅은 그대로 두고, 쓰기 전에 백업하며, `--remove inbox`가 우리 줄만 뺍니다). 이미 켜진 PO 세션은 다시 시작해야 합니다. 규칙은 [inbox](../docs/mods/inbox.md#po-답-훅)에 있습니다.
 2. **레이아웃 만들기**: `dashboard` 레이아웃이 없으면 실행 중인 앱에 `herdr-app do layout.clone`을 보냅니다.
    - `main`을 복제하고, 그 레이아웃으로 바꿉니다.
