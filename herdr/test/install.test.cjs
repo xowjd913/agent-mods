@@ -136,6 +136,29 @@ test("--extras 설치: 에이전트 목록·상태 줄·칸 머리줄도 바꾼�
   for (const x of ["agents", "workspace-status", "pane", "tabs"]) assert.ok(!m.includes(x), x);
 });
 
+// 설정 창(#126): 설치된 탭 줄에 설정 버튼이 없으면 사용자가 설정 창(글자 크기 포함)을 열 길이 없다. 설치한 파일 자체를 확인한다.
+const SW = /\/\/ settings-window:begin[\s\S]*?\/\/ settings-window:end/;
+for (const [label, opts] of [["기본 설치", false], ["--extras 설치", true]]) {
+  test(`${label}: 설치된 tabs-mine에 설정 버튼이 있고 settings 모드가 함께 있으며 레이아웃이 tabs-mine을 쓴다`, () => {
+    const home = tempHome();
+    quiet(() => inst.installMods(home, opts));
+    const file = cloneInto(home, inst.LAYOUT_NAME);
+    quiet(() => inst.applyLayout(home, true));
+    const tabs = fs.readFileSync(path.join(home, "mods", "tabs-mine", "main.js"), "utf8");
+    const set = fs.readFileSync(path.join(home, "mods", "settings", "main.js"), "utf8");
+    assert.match(tabs, /\.id\("settings-open"\)/);
+    assert.match(tabs, /openOverlay\(settingsWindow\(shared\(SETTINGS_SHARED\)\)\)/);
+    assert.match(tabs, /child\("설정"\)/);
+    assert.match(tabs, /fontsize: \{ mod: "settings", props: \{ part: "fontsize" \} \}/, "글자 크기 칸이 설정 창 목록에 있다");
+    assert.equal(tabs.match(SW)?.[0], set.match(SW)?.[0], "두 모드의 설정 창 블록이 같다");
+    assert.ok(fs.existsSync(path.join(home, "mods", "settings", inst.MARK)));
+    assert.ok(fs.existsSync(path.join(home, "mods", "settings", "rules.cjs")));
+    assert.match(set, /part === "fontsize"/);
+    assert.ok(mods(readJson(file)).includes("tabs-mine"), "탭 줄 자리에 tabs-mine이 들어갔다");
+    assert.ok(!mods(readJson(file)).includes("tabs"));
+  });
+}
+
 test("두 번 실행해도 레이아웃이 같고, 되돌린 블록은 다시 바꾸지 않는다", () => {
   const home = tempHome();
   quiet(() => inst.installMods(home, true));
