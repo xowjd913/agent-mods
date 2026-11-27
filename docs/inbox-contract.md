@@ -249,7 +249,7 @@ node herdr/tools/inbox-write.cjs say --hub main --to lead-demo --text "배포는
 
 - 잘못된 프로필(JSON 오류, 모르는 버전, 깨진 정규식, 폴더 이름에 `/`나 `..`, 계약 종류를 별칭으로 덮어쓰기 등)은 **오류로 끝납니다.** 오타가 나도 조용히 기본 이름으로 쓰여 엉뚱한 파일이 생기는 일을 막습니다.
 - 모르는 키는 무시합니다.
-- **지금 적용 범위**: 쓰기 도구, 데스크(`inbox`: `inbox.cjs`·`main.js`), PO 훅(`po-hook.cjs`)은 프로필을 따릅니다. 한 로더(`herdr/mods/inbox/profile.cjs`)가 읽고, 데스크는 `node inbox.cjs`가 내는 JSON의 `names`로 받으며 프로필이 깨졌으면 화면에 오류 문구를 보이고 기본 이름으로 보여 줍니다(PO 훅은 깨진 프로필이면 아무것도 쓰지 않습니다). `tabs-mine`·`leader-tabs`·`agent-groups`·`work`·`prs`도 같은 이름 블록(모드는 `.cjs`를 `require`할 수 없어 파일마다 복사하고, 테스트가 한 글자도 다르지 않음을 지킵니다)으로 프로필을 따릅니다. 이름을 어디서 받는지는 [10.4](#104-다른-모드가-프로필을-받는-길)에 있습니다. 프로필을 바꾼 뒤에는 데스크(또는 `work` 패널)가 한 번 새로 읽어야 다른 모드에도 퍼집니다.
+- **지금 적용 범위**: 쓰기 도구, 데스크(`inbox`: `inbox.cjs`·`main.js`), PO 훅(`po-hook.cjs`)은 프로필을 따릅니다. 한 로더(`herdr/mods/inbox/profile.cjs`)가 읽고, 데스크는 `node inbox.cjs`가 내는 JSON의 `names`로 받으며 프로필이 깨졌으면 화면에 오류 문구를 보이고 기본 이름으로 보여 줍니다(PO 훅은 깨진 프로필이면 아무것도 쓰지 않습니다). `tabs-mine`·`leader-tabs`·`agent-groups`·`work`·`prs`도 같은 이름 블록(모드는 `.cjs`를 `require`할 수 없어 파일마다 복사하고, 테스트가 한 글자도 다르지 않음을 지킵니다)으로 프로필을 따릅니다. 이름을 어디서 받는지는 [10.4](#104-다른-모드가-프로필을-받는-길)에 있습니다. 프로필을 바꾼 뒤에는 데스크(또는 `work` 패널)가 한 번 새로 읽어야 다른 모드에도 퍼집니다. 프로필은 손으로 고치는 대신 설정 창의 `규칙` 칸에서 고칠 수도 있습니다([settings](mods/settings.md#규칙-칸)): 도우미(`settings/rules.cjs`)가 같은 로더로 새 내용을 먼저 검사하고, 옛 파일을 `.bak`으로 두고, 바꾼 키 말고는(모르는 키 포함) 그대로 둔 채 임시 파일로 바꿔치기합니다.
 
 ## 10. 데스크가 프로필을 읽게 하는 설계 (후속 PR)
 
@@ -303,6 +303,7 @@ node herdr/tools/inbox-write.cjs say --hub main --to lead-demo --text "배포는
 
 - **읽는 곳은 셋**: 데스크(`inbox`)는 `node inbox.cjs`가 내는 JSON의 `names`로, `work`와 `prs`는 `collect.cjs`가 같은 로더(설치기가 `work` 폴더에 `profile.cjs`를 함께 복사)로 읽어 낸 `names`로 받습니다. 셋 다 프로필이 깨졌으면 `profileError`로 이유를 알리고 기본 이름으로 보입니다. 이 가운데 하나라도 켜져 있으면 되고, 모두 없으면 기본 이름입니다.
 - **나눠 쓰는 길**: 읽은 쪽(`inbox`·`work`·`prs`)이 공유 상태 `inbox.names`(프로필의 `names` JSON 그대로)에 올립니다(`adoptNames`). `leader-tabs`·`agent-groups`·`tabs-mine`·`prs`는 그릴 때와 타이머 때 이 키를 읽어 자기 이름 블록에 적용합니다(`syncNames`). 같은 내용이면 다시 쓰지 않습니다.
+- **`inbox`를 설치하지 않은 경우(#126)**: 읽는 곳이 없으면 이름 블록은 코드에 적힌 `po` 기본 이름이 되어 `규칙 없음`/내 규칙이 반영되지 않았습니다. 이제 설정 창(`settings`)이 규칙을 읽거나 저장·되돌릴 때 `inbox.names`에 올리고, `tabs-mine`은 시작할 때 `inbox.names`가 비어 있으면 도우미(`rules.cjs show`)로 한 번 읽어 올립니다. 도우미가 없거나 실패하면 조용히 `po` 기본 이름이 남습니다(오류 문구는 설정 창의 규칙 칸에서 봅니다).
 - **다른 공유 키와 섞이지 않습니다**: `inbox.po`는 고른 PO 방, `leader.names`는 리더 이름 기억, `inbox.names`는 프로필 이름입니다.
 - **지금 한계**: 프로필 파일을 고친 뒤 `inbox`·`work`·`prs`가 다시 읽기 전까지는 옛 이름이 남습니다. 아직 프로필을 따르지 않는 곳은 **데스크의 PO 탭 이름에서 프로젝트 이름을 떼는 `/^PO\s*[·:\-]?\s*(\S.*)$/`(`inbox/main.js` `poProject`)** 하나입니다(PO 시작 흐름이 만드는 `PO · <프로젝트>` 탭 이름 규칙이고, 화면 문구 `PO`·`리더`는 프로필 대상이 아닙니다).
 - **기본 이름이 조금 더 엄격해졌습니다**: 리더 이름 기본값이 `^lead-[a-z0-9_-]+$`라 대문자·점이 든 이름(`lead-Foo`, `lead-a.b`)은 이제 리더로 세지 않습니다. 인박스는 앞선 PR에서 이미 같은 규칙이고, `tabs-mine`·`leader-tabs`도 이제 같아졌습니다.
