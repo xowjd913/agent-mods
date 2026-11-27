@@ -190,12 +190,12 @@ function pictureDesk(execImpl) {
   const b = MAIN.indexOf("  // The thumbnail chips of a box");
   assert.ok(a > 0 && b > a, "the picture methods are found");
   const body = MAIN.slice(a, b);
-  const make = new Function("exec", "HELPER", "MAX_IMGS", "pickFiles", `return class Desk {
+  const make = new Function("exec", "HELPER", "MAX_IMGS", "pickFiles", "cutHead", `return class Desk {
     constructor() { this.pics = []; this.picBusy = 0; this.picBusyBy = new Map(); this.draftRoom = null; this.roomDrafts = new Map(); this.replyPics = new Map(); this.replyBusy = new Map(); this.imgd = new Map(); this.msg = "x"; this.said = []; }
     say(m, bad) { this.said.push([m, Boolean(bad)]); }
     ${body}
   }`);
-  return new (make(execImpl, () => "helper.cjs", 4, async () => ["/f/a.png"]))();
+  return new (make(execImpl, () => "helper.cjs", 4, async () => ["/f/a.png"], I.cutHead))();
 }
 const fakeCx = () => ({ notify() {} });
 const okExec = async (_cmd, args) => ({ code: 0, stdout: JSON.stringify({ path: `data/inbox/img/${args[args.length - 1].replace(/\W/g, "")}.png`, w: 10, h: 20 }), stderr: "" });
@@ -1156,7 +1156,7 @@ test("#74: 답변 상자의 글도 같은 방식으로 지켜진다", () => {
 });
 
 test("#74: 소스 — 채팅 상자는 모든 방에서 같은 자리에 그려지고(id 고정), 상태는 한 번만 만들며, 다시 그리기 경로가 상자를 비우지 않는다", () => {
-  assert.equal((MAIN.match(/TextareaState\.new\(/g) ?? []).length, 1);
+  assert.equal((MAIN.match(/TextareaState\.new\(/g) ?? []).length, 2); // the chat box and, since #110, the answer box of a card (made once per leader in box())
   const box = MAIN.slice(MAIN.indexOf("  chatBox(t, v) {"), MAIN.indexOf("  poHint(t) {"));
   assert.doesNotMatch(box, /chat-none/); // the "PO 모름" room no longer swaps the box out of the tree
   for (const id of ["chat-box", "chat-target", "chat-row", "chat-input"]) assert.match(box, new RegExp(`id\\("${id}"\\)`));

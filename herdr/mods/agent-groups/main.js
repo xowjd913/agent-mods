@@ -78,7 +78,10 @@ const MEMBER = /^(dev|review|integration)-(\d+)(?:-(.*))?$/;
 // A name that breaks the convention (e.g. rev-302-...) falls back to the tab name "<개발|리뷰|통합>[(Opus 상향)][(교체 N)] · #<issue> ...".
 const TAB_MEMBER = /^(개발|리뷰|통합)(?:\([^)]*\))*\s*·\s*#(\d+)(?:\s+(.*))?$/;
 const TAB_ROLE = { 개발: "dev", 리뷰: "review", 통합: "integration" };
-function memberOf(name, tabName) {
+// With the "none" preset (#124) no naming rule applies: any terminal that has a parent (hc spawn) is a member, grouped under its nearest ancestor
+// that has children, with no issue number (issue ""). `term` is the terminal; it is only read for that preset.
+function memberOf(name, tabName, term) {
+  if (NAMES.preset === "none") return term?.parent ? { role: "dev", issue: "", summary: "" } : null;
   const m = MEMBER.exec(name ?? "");
   if (m) return { role: m[1], issue: m[2], summary: m[3] ?? "" };
   const t = TAB_MEMBER.exec(tabName ?? "");
@@ -126,6 +129,7 @@ const DEFAULT_NAMES = Object.freeze({
   hubRole: "po", hubIdLabel: "po", hubId: "^[a-z0-9-]{1,40}$", hubDir: "po", // the hub (PO): its `role` value, id label, id pattern, folder
   labelRole: "role", labelWait: "wait", labelWaitLink: "wait-link", labelSession: "session",
   answerLine: 'Panel answer ({kind}) for {agent}: "{text}".{ Target: {link}}',
+  preset: "po", arrangeScript: "~/.claude/skills/leader/herdr-team.sh", // the profile's preset ("none" = no agent / hub naming rules at all, #124) and the PO arrange script ("" = not there: the features that need it hide)
 });
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // a hub id becomes a file name whatever its pattern says
 function compileNames(n) {
@@ -217,7 +221,7 @@ export function paneless(real, all, listed = new Map(), memo = {}) {
     if (t.state !== "live" || byAddr.has(t.address)) return;
     const session = String(t.labels?.[NAMES.labelSession] ?? "").trim();
     const leader = isLeader(t);
-    if (!leader && !memberOf(t.name, session)) return;
+    if (!leader && !memberOf(t.name, session, t)) return;
     const home = seat(t);
     if (!home) return;
     // A leader's row reads like a real leader's: the full `session` label ("리더 · ..."), else "리더 · " + the
@@ -272,7 +276,7 @@ export function taskPlan(agentList, all, tabNames = new Map(), memo = {}) {
     const team = [];
     for (const a of members) {
       const t = term.get(a.address);
-      const m = memberOf(t?.name, tabNames.get(a.address));
+      const m = memberOf(t?.name, tabNames.get(a.address), t);
       if (t?.labels?.[SCHEDULE]) scheduled.push(a);
       // A labelled terminal is classified by its label, never by the tab it sits in; then the lead- name;
       // only then the team-member name and the tab name / "has child terminals".
@@ -309,6 +313,7 @@ export function taskPlan(agentList, all, tabNames = new Map(), memo = {}) {
     // Members with no leader: one group per issue number (ascending), as before.
     const issues = new Map();
     for (const x of orphans) {
+      if (!x.issue) { others.push(x.a); continue; } // no issue number (the "none" preset): there is no group to name, so it is just another agent
       if (!issues.has(x.issue)) issues.set(x.issue, []);
       issues.get(x.issue).push(x);
     }
@@ -444,7 +449,7 @@ export default class Agents extends View {
     // In the task view the leader's listed team members sit in their own groups, not under the leader.
     // A paneless member has an entry of its own (this.ghosts) and a group row too. Any other one not in
     // agents() (no pane, no status report) has no group row, so it stays a sub-row.
-    const kids = all.filter((k) => k.parent === addr && k.state === "live" && !(this.tasks && (this.listed.has(k.address) || this.ghosts.has(k.address)) && (memberOf(k.name, this.tabNames.get(k.address)) || isLeader(k))));
+    const kids = all.filter((k) => k.parent === addr && k.state === "live" && !(this.tasks && (this.listed.has(k.address) || this.ghosts.has(k.address)) && (memberOf(k.name, this.tabNames.get(k.address), k) || isLeader(k))));
     return kids.flatMap((k, i) => {
       const last = i === kids.length - 1;
       return [
