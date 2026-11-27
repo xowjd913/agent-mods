@@ -1493,6 +1493,10 @@ const NOTICE_TOP = 44; // just under the 38px header
 const NOTICE_MAX_W = 560;
 const MSG_MS = 5000; // how long a floating notice stays before it hides itself (a click hides it sooner)
 const MSG_TICK_MS = 500; // how often the notice is checked for expiry
+// #138: the chat draft file (see chatDraftWrite in inbox.cjs). A change is written after DRAFT_SAVE_MS of quiet (at most DRAFT_WAIT_MS of typing later);
+// while the box has the keyboard the file is rewritten every DRAFT_BEAT_MS so its "focus" stays fresh; a copy of the desk that starts within DRAFT_FOCUS_MS
+// (inbox.cjs) of the last write gives the keyboard back to the box, once, in the DRAFT_FOCUS_WAIT_MS after its first draw.
+const DRAFT_TICK_MS = 250, DRAFT_SAVE_MS = 600, DRAFT_WAIT_MS = 3000, DRAFT_BEAT_MS = 10000, DRAFT_FOCUS_WAIT_MS = 5000, DRAFT_NOW = 1;
 const PIN_TICK_MS = 250; // how often the timeline checks that it still sits at the newest
 const LOAD_REDRAW_MS = 25000; // an unchanged load still redraws this often (the "5분 전" clocks)
 
@@ -1708,6 +1712,20 @@ export default class Inbox extends View {
     this.lastIdx = 0; // index of the last child of the list
     this.sigData = ""; // what the last load drew (without its clock)
     this.errSig = "";
+    this.chatFocus = false; // #138: the chat box has the keyboard (focus / blur events of the box)
+    this.draftDue = 0; // #138: when the draft file is to be written (0: nothing to write; DRAFT_NOW: at the next tick)
+    this.draftSince = 0; // the first change not written yet (ms)
+    this.draftSig = ""; // what the file holds now (from this copy)
+    this.draftWroteAt = 0;
+    this.draftBusy = false;
+    this.draftOwn = false; // this copy wrote (or restored) a draft: only then does an empty box remove the file (a copy that never had a draft must not wipe another's)
+    this.draftLoaded = false; // the file was read ...
+    this.draftReady = false; // ... and applied (after the room is known): nothing is written before, or the empty new box would replace the saved draft
+    this.draftSaved = null;
+    this.focusWant = 0; // #138: until when the box is to take the keyboard once (the saved focus was fresh); 0: not wanted
+    try { this.chat.on("focus", () => { this.chatFocus = true; this.draftDirty(); }); } catch {}
+    try { this.chat.on("blur", () => { this.chatFocus = false; this.draftDirty(); }); } catch {}
+    this.chat.on("change", () => this.draftDirty()); // #138: its own listener (the one below returns early in several places)
     this.chat.on("paste_other", (_e, c) => this.pastePic(c)); // Cmd+V found no text: take a picture from the clipboard
     this.chat.on("change", (_e, c) => {
       this.changedAt = Date.now();
@@ -1748,6 +1766,8 @@ export default class Inbox extends View {
     this.sig = null; // statusSig of the terminals at the last status poll
     this.typingAt = new Map(); // leader hc name -> {at, rep, stop, on}: who worked lately (the grace of the "···" bubble), see typingSync
     this.load(cx);
+    this.loadDraft();
+    cx.timer.every(DRAFT_TICK_MS, () => this.draftTick());
     // The Dock owns the slow refresh and (with any pane) the badge; the window and a pane are read on screen, so they refresh faster,
     // a pane only while it is being drawn (a pane in a tab nobody looks at does not poll).
     cx.timer.every(this.refreshMs(), (cx) => { if (!this.paned || this.drawing()) this.load(cx); });
@@ -1982,6 +2002,7 @@ export default class Inbox extends View {
   }
   wipe(key, st) {
     this.mirror.delete(key);
+    if (key === "chat") this.draftDue = 1; // #138 (1 = DRAFT_NOW, a plain number: this method is run on its own in tests): a cleared box (sent, stale) leaves no draft behind, at once: a re-init right after must not bring the sent text back
     try { st.set_value(""); } catch {}
   }
   guard(key, st, value) {
@@ -1995,6 +2016,91 @@ export default class Inbox extends View {
     } catch { try { st.set_value(m.text); } catch {} }
     this.diag(`draft restored in ${key === "chat" ? "chat" : "answer box"} (${m.text.length} chars)`);
     return true;
+  }
+  // #138: the unsent chat text survives a re-init of the mod. The file is the room drafts written down (the box of the room shown + roomDrafts, text and cursor only),
+  // not a second store; it is read once at start (loadDraft), applied at the first look at the room (applyDraft, from syncRoom) and kept up to date by draftTick.
+  draftDirty() {
+    const now = Date.now();
+    if (!this.draftSince) this.draftSince = now;
+    this.draftDue = this.draftDue === DRAFT_NOW ? DRAFT_NOW : Math.min(now + DRAFT_SAVE_MS, this.draftSince + DRAFT_WAIT_MS);
+  }
+  draftTick() {
+    const now = Date.now();
+    this.applyDraft(); // once, as soon as the file is read and the room is known (the first draw sets it)
+    if (this.focusWant) {
+      if (now > this.focusWant) this.focusWant = 0; // the first draw did not come in time: the keyboard is not taken later
+      else if (this.drawnAt && now - this.drawnAt < 2000) { // the box is on screen: once
+        this.focusWant = 0;
+        if (!this.chatFocus) { try { this.chat.focus(); this.diag("draft: the chat box had the keyboard before the restart, given back"); } catch {} }
+      }
+    }
+    if (this.chatFocus && !this.draftDue && now - this.draftWroteAt >= DRAFT_BEAT_MS) this.draftDue = DRAFT_NOW; // keeps "focus" fresh in the file
+    if (!this.draftDue || now < this.draftDue || this.draftBusy) return;
+    this.saveDraft(now);
+  }
+  saveDraft(now = Date.now()) {
+    this.draftDue = 0;
+    this.draftSince = 0;
+    if (!this.draftReady || this.draftRoom == null) return;
+    let text = "", range = null;
+    try { text = this.chat.value(); } catch {}
+    try { range = this.chat.selected_range(); } catch {}
+    const rooms = {};
+    for (const [room, d] of [[this.draftRoom, { text, range }], ...[...this.roomDrafts].reverse()]) { // the room shown first, then the newest others
+      if (typeof d?.text === "string" && d.text !== "" && !(room in rooms)) rooms[room] = { text: d.text, range: d.range ?? null };
+    }
+    const snap = { rooms, focus: this.chatFocus };
+    const empty = !snap.focus && !Object.keys(rooms).length;
+    if (empty && !this.draftOwn) return; // nothing of ours to remove
+    const sig = JSON.stringify(snap);
+    if (sig === this.draftSig && !(snap.focus && now - this.draftWroteAt >= DRAFT_BEAT_MS)) return;
+    this.draftSig = sig;
+    this.draftWroteAt = now;
+    this.draftOwn = !empty;
+    this.draftBusy = true;
+    try {
+      Promise.resolve(exec("node", [HELPER(), "draft-write", sig], { timeout: 5000 })).catch(() => {}).then(() => { this.draftBusy = false; });
+    } catch { this.draftBusy = false; }
+  }
+  loadDraft() {
+    const done = (j) => { this.draftSaved = j; this.draftLoaded = true; this.applyDraft(); };
+    try {
+      Promise.resolve(exec("node", [HELPER(), "draft-read"], { timeout: 4000 })).then((r) => {
+        let j = null;
+        try { if (r.code === 0) j = JSON.parse(r.stdout); } catch {}
+        done(j);
+      }, () => done(null));
+    } catch { done(null); }
+  }
+  // Runs (from draftTick) once the file is read and the room is known. A box the person has already typed in keeps its text.
+  applyDraft() {
+    if (!this.draftLoaded || this.draftReady || this.draftRoom == null) return;
+    this.draftReady = true;
+    const s = this.draftSaved;
+    this.draftSaved = null;
+    const rooms = s && typeof s.rooms === "object" && s.rooms ? s.rooms : {};
+    for (const [room, d] of Object.entries(rooms)) { // the other rooms' drafts go where syncRoom looks for them
+      if (room === this.draftRoom || this.roomDrafts.has(room) || typeof d?.text !== "string" || d.text === "") continue;
+      this.roomDrafts.set(room, { text: d.text, content: null, range: d.range ?? null, pics: [] });
+    }
+    const d = rooms[this.draftRoom];
+    let cur = "";
+    try { cur = this.chat.value(); } catch {}
+    if (d && typeof d.text === "string" && d.text !== "" && cur === "") {
+      this.mirror.delete("chat"); // the restore is the mod's own write, not a loss
+      try {
+        this.chat.set_value(d.text);
+        const n = [...d.text].length;
+        if (d.range && d.range.start <= d.text.length && d.range.end <= d.text.length) this.chat.set_selected_range(d.range);
+        else if (n) this.chat.set_selected_range({ start: d.text.length, end: d.text.length });
+      } catch {}
+      try { this.lastValue = this.chat.value(); this.core = editCore(this.lastValue); } catch {}
+      this.keep("chat", this.chat);
+      this.diag(`draft: restored ${d.text.length} chars after a restart`);
+    }
+    this.draftOwn = Object.keys(rooms).length > 0 || Boolean(s?.focus);
+    if (s?.focus) this.focusWant = Date.now() + DRAFT_FOCUS_WAIT_MS;
+    this.draftDirty();
   }
   // Every box is looked at once per draw and once per poll tick, so a loss that raised no change event is mended within a tick.
   guardAll() {
