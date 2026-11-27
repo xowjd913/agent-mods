@@ -1,5 +1,6 @@
 // herdr/tools/inbox-write.cjs 단위 테스트: node --test herdr/test/inbox-write.test.cjs
 // 쓰기 도구가 만든 줄을 inbox 리더(inbox.cjs)가 그대로 받아들이는지 확인한다.
+require("./helpers/po-home.cjs"); // a PO machine: a profile without `preset` is "po" (see the helper)
 const test = require("node:test");
 const POSIX = process.platform !== "win32"; // Windows has no POSIX file modes: only the mode asserts are skipped there
 const assert = require("node:assert/strict");

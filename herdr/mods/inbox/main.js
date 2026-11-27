@@ -22,6 +22,7 @@ import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, S
 import { theme, exec, appHome, checking, window, run, hc, terminals, panes, focused, setBadge, shared, layouts, setShared, props, openOverlay, closeOverlay, watchFolder, pickFiles, home, readTextFile } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
+const ACCT = () => `${appHome()}/mods/inbox/claude-account.cjs`; // which Claude account a session runs on (#121); bundled by the installer
 const ICON = (name) => `mods/workspace-chrome/${name}.svg`;
 const LOAD_TIMEOUT = 20000, LOAD_STALL_MS = 30000, WINDOW_REFRESH_MS = 5000, PANE_REFRESH_MS = 30000, STATUS_POLL_MS = 1500, WATCH_DEBOUNCE_MS = 250;
 const KIND = { done: ["완료", "working"], decision: ["결정", "blocked"], verify: ["확인", "blocked"], stop: ["중단", "idle"], resume: ["재개", "dim"], other: ["알림", "dim"], start: ["시작", "dim"] };
@@ -36,7 +37,8 @@ const WIDE_MIN = 520; // two columns (rooms | room) from this width; narrower: t
 const ROOM_W = 168, SLIM_W = 58; // the window's room list / the dock's slim room column (initial circle + badges, the project as the tooltip)
 const PASTE_SETTLE_MS = 350; // the PO terminal takes the paste before Enter is pressed
 const PANE_POLL_MS = 300, PANE_WAIT_MS = 6000; // a send to a PO with no pane: how often / how long to wait for the pane the send opened
-const PROMPT_TIMEOUT_MS = 5000; // a screen read that has not answered by then is given up (the next one may start)
+const PROMPT_TIMEOUT_MS = 5000, PROMPT_RETRY_MS = 2000; // a screen read that has not answered by then ends as "could not read" and is tried again after PROMPT_RETRY_MS
+const BANG_READ_MS = 6000; // a '!' command's screen read must answer within this, else it is refused and the busy flag is released
 const PROMPT_REFRESH_MS = 3000, PROMPT_LINES = 40; // a blocked PO's screen is re-read this often while shown (the last PROMPT_LINES lines are read)
 const BADGE_KEY = "inbox.badge"; // {id, ts}: the copy (dock / pane) that writes the app icon badge
 const OPEN_KEY = "inbox.expanded"; // cards the person opened ("자세히"), shared so they stay open across re-renders and window reopens
@@ -58,6 +60,7 @@ const DEFAULT_NAMES = Object.freeze({
   hubRole: "po", hubIdLabel: "po", hubId: "^[a-z0-9-]{1,40}$", hubDir: "po", // the hub (PO): its `role` value, id label, id pattern, folder
   labelRole: "role", labelWait: "wait", labelWaitLink: "wait-link", labelSession: "session",
   answerLine: 'Panel answer ({kind}) for {agent}: "{text}".{ Target: {link}}',
+  preset: "po", arrangeScript: "~/.claude/skills/leader/herdr-team.sh", // the profile's preset ("none" = no agent / hub naming rules at all, #124) and the PO arrange script ("" = not there: the features that need it hide)
 });
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // a hub id becomes a file name whatever its pattern says
 function compileNames(n) {
@@ -140,6 +143,20 @@ function findPo(terms, leaderName, address) {
 
 
 // chat:begin
+// Cutting and passing on text (#113): JS strings are UTF-16, so a plain slice(0, n) can split an emoji (a surrogate pair) and leave a lone
+// half, which is not valid UTF-8: a TextView / element id that carries one makes the whole view fail ("invalid utf-8 sequence").
+// cutPoint(s, n) is n, or n - 1 when n falls between the two halves of a pair; cutHead/cutTail never leave half a pair; wellFormed turns
+// any lone half into U+FFFD (the engine's toWellFormed when it has one). Every cut of a person's / a PO's text goes through these.
+function cutPoint(s, n) {
+  const a = s.charCodeAt(n - 1), b = s.charCodeAt(n);
+  return n > 0 && n < s.length && a >= 0xd800 && a <= 0xdbff && b >= 0xdc00 && b <= 0xdfff ? n - 1 : n;
+}
+const cutHead = (v, n) => { const s = String(v ?? ""); return s.slice(0, cutPoint(s, Math.max(0, n))); };
+const cutTail = (v, n) => { const s = String(v ?? ""); const at = s.length - Math.max(0, n); return at <= 0 ? s : s.slice(at === cutPoint(s, at) ? at : at + 1); };
+const HALF_SURROGATE = /[\ud800-\udfff]/, SURROGATES = /([\ud800-\udbff][\udc00-\udfff])|[\ud800-\udfff]/g;
+const wellFormed = (v) => { const s = String(v ?? ""); return HALF_SURROGATE.test(s) ? s.replace(SURROGATES, (m, pair) => (pair ? m : "\ufffd")) : s; };
+// The first character as a capital (an avatar letter), a whole emoji when it starts with one, never half of it.
+const initial = (v) => (Array.from(String(v ?? ""))[0] ?? "").toUpperCase();
 // The chat box of the window: "@" mentions, the menu of live leaders and which PO a line goes to. Pure. The mods cannot require a
 // .cjs file, so this block is copied verbatim between the markers into inbox/main.js (a test keeps them identical).
 const MENTION_END = "(?=$|[\\s.,!?:;)])";
@@ -165,7 +182,7 @@ function parseMention(raw, known = []) {
     else if (known.includes(name)) { if (!to.includes(name)) to.push(name); } else return m;
     return pre;
   }).trim() === "";
-  const text = flat.replace(/(^|\n)@here[.,!?:;)]+ ?/g, "$1").replace(HERE_PUNCT, "").replace(HERE, "$1").replace(/[ \t]+/g, " ").replace(/ ?\n ?/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/^[\s,.:;!?)]+/, "").trim();
+  const text = flat.replace(/(^|\n)@here[.,!?:;)]+ ?/g, "$1").replace(HERE_PUNCT, "").replace(HERE, "$1").replace(/[ \t]+/g, " ").replace(/ ?\n ?/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/^[\s,.:;!?)]+/, (m) => (flat.startsWith("!") ? m : "")).trim(); // a "!" the person started with is theirs (a "!cmd" line, #93); only punctuation left by a removed mention goes
   return { text, to, here, empty };
 }
 // What an Enter does in the box: Shift+Enter is a line break, a plain Enter (or Cmd/Ctrl+Enter) sends, any other key nothing.
@@ -179,10 +196,10 @@ const strayBreak = (value, sentAt, now) => String(value ?? "").length > 0 && Str
 // commit's own 100 ms edit) sends. `heldAt`: when an Enter was last held (0 = never); `changedAt`, `now`: ms.
 const IME_MS = 500;
 const IME_TAIL = /[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\u3040-\u30FF\u3400-\u9FFF]$/;
-const imeHold = (value, changedAt, heldAt, now) => {
+const imeHold = (value, changedAt, heldAt, now, atEnd = true) => {
   if (Number(heldAt) > 0 && Number(changedAt) <= Number(heldAt) + 100) return false;
   if (Number(now) - Number(changedAt) < IME_MS) return true;
-  return IME_TAIL.test(String(value ?? "").trimEnd());
+  return atEnd !== false && IME_TAIL.test(String(value ?? "").trimEnd()); // a syllable still being composed sits at the cursor: with the cursor inside the text the tail is settled
 };
 // The line break the widget itself puts in the box for a held Enter (it may add it before or after the key handler runs): the held Enter
 // must not leave it there, or the person sees a blank line appear before the second Enter. `heldAt`, `now`: ms; HELD_BREAK_MS covers both orders.
@@ -190,6 +207,30 @@ const HELD_BREAK_MS = 150;
 const strayHeld = (value, heldAt, now) => Number(heldAt) > 0 && Number(now) - Number(heldAt) < HELD_BREAK_MS && /\n$/.test(String(value ?? ""));
 // The text with its trailing line breaks cut: what "an edit" is measured on (the widget's own line break for an Enter is not an edit).
 const editCore = (value) => String(value ?? "").replace(/\n+$/, "");
+// #83: Enter sends from any cursor position. The widget may also put its own line break at the cursor (anywhere in the text, not only at the end):
+// `strayAt(prev, value)` is where exactly one "\n" was inserted into `prev` (-1 if the change is anything else), `withoutAt` takes it out again,
+// `enterPending(enterAt, now)` says an Enter was pressed just before (or up to 25 ms after) `now`, and `atTextEnd(value, cursor)` is whether the
+// cursor is at the end of the text (an unknown cursor counts as the end, the careful side for the IME hold).
+const strayAt = (prev, value) => {
+  const a = String(prev ?? ""), b = String(value ?? "");
+  if (b.length !== a.length + 1) return -1;
+  let i = 0;
+  while (i < a.length && a[i] === b[i]) i++;
+  return b[i] === "\n" && b.slice(0, i) + b.slice(i + 1) === a ? i : -1;
+};
+const withoutAt = (value, i) => String(value ?? "").slice(0, i) + String(value ?? "").slice(i + 1);
+// An Enter pressed with text selected makes the widget REPLACE the selection by "\n" (not insert one): `replacedAt(prev, value)` is {idx, end} when
+// `value` is `prev` with the span [idx, end) (at least one character) swapped for one "\n", else null. The span is the selected text to put back.
+const replacedAt = (prev, value) => {
+  const a = String(prev ?? ""), b = String(value ?? "");
+  for (let i = b.indexOf("\n"); i >= 0; i = b.indexOf("\n", i + 1)) {
+    const end = a.length - (b.length - i - 1);
+    if (end > i && b.slice(0, i) === a.slice(0, i) && b.slice(i + 1) === a.slice(end)) return { idx: i, end };
+  }
+  return null;
+};
+const enterPending = (enterAt, now) => Number(enterAt) > 0 && Number(now) - Number(enterAt) >= -25 && Number(now) - Number(enterAt) < HELD_BREAK_MS;
+const atTextEnd = (value, cursor) => cursor == null || !Number.isFinite(Number(cursor)) || Number(cursor) >= editCore(value).length;
 const holdShown = (changedAt, heldAt) => Number(heldAt) > 0 && Number(changedAt) <= Number(heldAt) + 100; // a held Enter is still waiting for its second one
 // The "@query" being typed right before `cursor` (offsets into the box text), or null. Not inside a chip, not in the middle of a word.
 function mentionQuery(text, cursor, tokens = []) {
@@ -257,6 +298,28 @@ const DRAFT_GRACE_MS = 60000;
 function staleDrafts(keys, live, seen, now) {
   return [...keys].filter((k) => !live.has(k) && !(now - (seen.get(k) ?? 0) < DRAFT_GRACE_MS));
 }
+// #74: a draft mirror. Every change of a text box is copied (`mirror`: {text, content, range}); when the box comes back empty without the
+// person's own key press (`keyAt`, within DRAFT_KEY_MS) and without a clear of ours (which empties the mirror first), the text is put back.
+const DRAFT_KEY_MS = 1000;
+// #112: a mirror of ONE character is never taken for a wipe. A Korean/Japanese/Chinese IME that is composing takes the Backspace itself (the key press
+// never reaches `keyAt`), so deleting the first, still-composed character empties the box with no key just before it: that is the person's edit, and
+// putting the character back made it impossible to delete. (Losing a one-character draft to a rebuild is cheap.)
+const draftWiped = (mirror, value, keyAt, now) => Boolean(mirror) && [...String(mirror.text ?? "")].length > 1 && String(value ?? "") === "" && !(Number(now) - Number(keyAt) < DRAFT_KEY_MS);
+// #66 (draft per room): the unsent chat text each room holds while another room is shown. `cur` = what the box holds now {text, content, range, pics};
+// leaving `from` stores it there (nothing to keep = the room's entry goes), arriving at `to` takes that room's entry out (it is the box again) and
+// returns it as `load` (null = an empty box). A room that was left empty keeps no entry; the map is capped (oldest dropped). Pure (no mutation of `map`).
+const ROOM_DRAFTS_MAX = 24;
+function swapDraft(map, from, to, cur) {
+  const out = new Map(map);
+  if (from != null) {
+    out.delete(from);
+    if (cur && (String(cur.text ?? "") !== "" || (cur.pics ?? []).length > 0)) out.set(from, cur);
+  }
+  const load = to != null && to !== from ? out.get(to) ?? null : null;
+  if (to != null && to !== from) out.delete(to);
+  while (out.size > ROOM_DRAFTS_MAX) out.delete(out.keys().next().value);
+  return { map: out, load };
+}
 // The "@" menu: "@here" first, then the live leaders of the picked PO (`pick`, a PO id; none for PO_OTHER), by shown name. `query`
 // filters by hc name or shown name.
 function leaderMenu(terms, memo, query = "", limit = 8, pick = "") {
@@ -306,6 +369,23 @@ function tlMemoGet(kind, v, make) {
   return r;
 }
 const TL_CUT_MIN = 500;
+// The PO hook's copy of a submitted line (kind "me") against a desk record: compared without wrapper tags, whitespace squeezed, and (second chance) by words +
+// pictures; a hook line ending in "…" (the hook keeps 2000 characters, #49) matches a record that starts with what is left. The hook line is the proof that a
+// line really reached the PO's model, whatever the desk's own status says.
+const tlNorm = (v) => cutHead(String(v ?? "").replace(/\s+/g, " ").trim(), 2000);
+const tlFull = (v) => tlMemoGet("f", v, (s) => tlNorm(unwrapTags(s)));
+const tlCore = (v) => tlMemoGet("c", v, (s) => { const sp = splitImgs(s); return `${tlNorm(sp.text)}|${sp.imgs.join(",")}`; });
+// "" when the line is not such a cut (a short line that merely ends in "…" must not hide a longer send).
+const tlCut = (v) => { const s = String(v ?? ""); if (!s.endsWith("…")) return ""; const p = tlFull(s.slice(0, -1)); return p.length >= TL_CUT_MIN ? p : ""; };
+const hookKey = (v) => ({ t: tlFull(v), c: tlCore(v), p: tlCut(v) });
+const tlMatches = (k, m) => tlFull(m.line) === k.t || tlFull(m.text) === k.t || (k.c.length > 1 && (tlCore(m.line) === k.c || tlCore(m.text) === k.c)) || (k.p && (tlFull(m.line).startsWith(k.p) || tlFull(m.text).startsWith(k.p)));
+// A hook line belongs to a desk record when it came from up to 11 minutes (the Enter button's life) after the record's time to 1 minute before it.
+const tlWindow = (xms, mms, back = 60000) => (xms - mms) >= -back && (xms - mms) <= 11 * 60000;
+// recs = [{ms, text}] (the PO's "me" lines); m = the desk record ({line, text, ms}); since = where its window starts (default: the record's own time).
+// True when the PO's hook saw that record's text submitted (#111: a send that looked failed but reached the PO is proven by this). `back` = how far before `since` a line still counts (the send path passes a few seconds: an identical line from before this send, e.g. a repeated "네", proves nothing).
+function hookProved(recs, m, since = Number(m?.ms ?? m?.at) || 0, back = 60000) {
+  return (recs ?? []).some((x) => x && typeof x.text === "string" && tlWindow(Number(x.ms) || 0, since, back) && tlMatches(hookKey(x.text), m ?? {}));
+}
 function timeline(room, leaders, says, mine, waits = [], now = 0) {
   const out = [];
   const seen = new Set();
@@ -328,30 +408,29 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
   // own sends are pasted into that terminal too, so the hook sees them as well: such a line is dropped when a desk record that reached the PO
   // (not failed / nopane / gone) has the same text (its `line` or its `text`, whitespace ignored) and came from up to 11 minutes (the Enter
   // button's life) before to 1 minute after it. One desk record covers one typed line.
-  const sentBy = (mine ?? []).filter((m) => m.po === room && !["failed", "nopane", "gone"].includes(m.status));
+  // A record the desk marked failed / nopane / gone did not reach the PO as far as the desk knew, so it is matched only after every other record (a hand
+  // retyped copy must not turn a failed bubble "sent" while a good record has the same text). When the hook did see its text (#111: the desk's check of
+  // the PO's screen can miss a line the PO queued while it was busy), the record IS delivered: it is covered like any other and shown "sent".
+  const DESK_BAD = ["failed", "nopane", "gone"];
+  const own = (mine ?? []).filter((m) => m.po === room);
+  const sentBy = own.filter((m) => !DESK_BAD.includes(m.status)).concat(own.filter((m) => DESK_BAD.includes(m.status)));
+  const proven = new Set();
   const taken = new Set();
-  const tnorm = (v) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 2000);
-  // Compared without wrapper tags (the terminal's paste wrapper must not make a copy look different) and, as a second chance, by words + pictures.
-  const full = (v) => tlMemoGet("f", v, (s) => tnorm(unwrapTags(s)));
-  const core = (v) => tlMemoGet("c", v, (s) => { const sp = splitImgs(s); return `${tnorm(sp.text)}|${sp.imgs.join(",")}`; });
-  // The PO hook keeps at most 2000 characters of a typed line and ends a longer one in "…" (#49), so its copy of a long desk send is only the
-  // start of that send: a line ending in "…" also matches a record whose text starts with what is left (at least TL_CUT_MIN characters after
-  // whitespace is squeezed, so a short line that merely ends in "…" does not hide a longer send). "" when the line is not such a cut.
-  const cut = (v) => { const s = String(v ?? ""); if (!s.endsWith("…")) return ""; const p = full(s.slice(0, -1)); return p.length >= TL_CUT_MIN ? p : ""; };
+  const full = tlFull, core = tlCore, cut = tlCut;
   // The PO's reply to a line the desk sent to a leader (#58): the hook gives a prompt and its reply the same pid, and the prompt matched a desk
   // record that has a `to`. Only the 1:1 view reads it (`about`); the bubble does not say "→ leader", since the reply is to the person.
   const about = new Map();
   if (room && room !== PO_OTHER) for (const x of says ?? []) {
     if (x.me) {
-      const t = full(x.text), c = core(x.text), p = cut(x.text);
-      const i = sentBy.findIndex((m, j) => !taken.has(j) && (x.ms - (Number(m.ms) || 0)) >= -60000 && (x.ms - (Number(m.ms) || 0)) <= 11 * 60000 && (full(m.line) === t || full(m.text) === t || (c.length > 1 && (core(m.line) === c || core(m.text) === c)) || (p && (full(m.line).startsWith(p) || full(m.text).startsWith(p)))));
-      if (i >= 0) { taken.add(i); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); continue; }
+      const k = hookKey(x.text);
+      const i = sentBy.findIndex((m, j) => !taken.has(j) && tlWindow(x.ms, Number(m.ms) || 0) && tlMatches(k, m));
+      if (i >= 0) { taken.add(i); proven.add(sentBy[i]); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); continue; }
       out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
       continue;
     }
     out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: x.to || "", ...(!x.to && x.pid && about.get(x.pid) ? { about: about.get(x.pid) } : {}) });
   }
-  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", ...(x.tos?.length ? { tos: x.tos } : {}), kind: x.kind || "chat", status: liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
+  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", ...(x.tos?.length ? { tos: x.tos } : {}), kind: x.kind || "chat", status: proven.has(x) ? "sent" : liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
   // Two entries with the same key (the same text at the same ms) would share one element id: the later ones get a #n suffix.
   const used = new Map();
   for (const e of out) {
@@ -380,7 +459,7 @@ function chatRecord(rec, status, now = 0, seq = "") {
   if ((!text && !imgs.length) || !rec?.po) return null;
   const ms = Number(now) || 0;
   const tos = [...new Set((Array.isArray(rec?.tos) ? rec.tos : []).map((x) => String(x ?? "")).filter(Boolean))].slice(0, 8); // every leader the line names (#58); `to` stays the first
-  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, ...(imgs.length ? { imgs } : {}), line: cleanText(rec.line ?? text).slice(0, 4000), to: String(rec.to ?? ""), ...(tos.length > 1 ? { tos } : {}), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", ak: String(rec.ak ?? ""), status: CHAT_STATUS.includes(status) ? status : "failed" };
+  return { id: `${ms}-${String(seq ?? "")}`, at: ms, ts: new Date(ms).toISOString(), ms, text, ...(imgs.length ? { imgs } : {}), line: cutHead(cleanText(rec.line ?? text), 4000), to: String(rec.to ?? ""), ...(tos.length > 1 ? { tos } : {}), po: String(rec.po), kind: CHAT_KINDS.includes(rec.kind) ? rec.kind : "chat", ak: String(rec.ak ?? ""), status: CHAT_STATUS.includes(status) ? status : "failed" };
 }
 // The list with record `id` set to `status` at `now` (null when there is no such record or it already has it).
 function setChatStatus(list, id, status, now = 0) {
@@ -388,6 +467,11 @@ function setChatStatus(list, id, status, now = 0) {
   const i = list.findIndex((x) => x && x.id === id);
   if (i < 0 || list[i].status === status) return null;
   return list.map((x, j) => (j === i ? { ...x, status, at: Number(now) || 0 } : x));
+}
+// The list without record `id` (null when there is no such record). Only a bubble that failed to send may go (see mineActs' "delete").
+function dropChat(list, id) {
+  if (!Array.isArray(list) || !list.some((x) => x && x.id === id)) return null;
+  return list.filter((x) => !(x && x.id === id));
 }
 // The small dim note under a bubble that is not (fully) sent: "" when it was sent. `blocked`: the PO still waits on a prompt; `age`: ms since
 // the status last changed (an Enter button older than ENTER_TTL_MS is gone: the pasted line may not be in the input any more).
@@ -399,12 +483,12 @@ function mineNote(status, blocked = true, age = 0) {
   if (status === "noenter" && old) return "오래되어 입력창에 없을 수 있습니다 — 다시 보내세요";
   return MINE_NOTE[status] ?? "";
 }
-// The buttons a bubble offers, in order: "resend" (nothing reached the PO, or its pasted line is gone: send it again) and "enter" (it is pasted
+// The buttons a bubble offers, in order: "resend" (nothing reached the PO, or its pasted line is gone: send it again; a bubble that failed also offers "delete": drop it for good) and "enter" (it is pasted
 // into a normal prompt: only Enter is missing). A held one offers none while the PO still waits on its question (Enter there would answer the
 // question; that is only offered next to the question itself), and Enter and resend after it was answered. An Enter older than ENTER_TTL_MS
 // becomes a resend.
 function mineActs(status, blocked = false, age = 0) {
-  if (status === "nopane" || status === "failed" || status === "gone") return ["resend"];
+  if (status === "nopane" || status === "failed" || status === "gone") return ["resend", "delete"];
   const fresh = !(Number(age) > ENTER_TTL_MS);
   if (status === "noenter") return fresh ? ["enter"] : ["resend"];
   if (status === "held" && !blocked) return fresh ? ["enter", "resend"] : ["resend"];
@@ -423,21 +507,47 @@ const badgeTurn = (lease, id, now, ttl = 65000) => (!lease || lease.id === id ||
 // A spinner / timer row of the PO ("✻ Waiting (12s)", "✻ Thinking… (3s · esc to interrupt)"): it changes every second without the question
 // changing, so it is neither shown nor part of the signature.
 const PROMPT_TIMER = /^[\s│┃|]*[^\p{L}\p{N}\s]?\s*\p{L}[\p{L}\s'-]{0,30}[….]*\s*\((?:\d+\s*[hms]\s*)+[^)]*\)[\s│┃|]*$/u;
-const promptTail = (text, n = 10) => cleanText(text).split("\n").map((l) => l.trimEnd()).filter((l) => l.trim() && !PROMPT_TIMER.test(l)).slice(-n).map((l) => (l.length > 140 ? `${l.slice(0, 139)}…` : l));
+const promptTail = (text, n = 10) => cleanText(text).split("\n").map((l) => l.trimEnd()).filter((l) => l.trim() && !PROMPT_TIMER.test(l)).slice(-n).map((l) => (l.length > 140 ? `${cutHead(l, 139)}…` : l));
 const PROMPT_NUM = /^[\s│┃|]*([❯>›])?\s*(\d{1,2})[.)]\s+(\S.*?)[\s│┃|]*$/;
 const promptFooter = (l) => /^[^\p{L}\p{N}]*$/u.test(l) || (l.length <= 140 && /\b(esc|enter|tab|ctrl|shift|alt)\b|^\s*[↑↓←→]|\? for shortcuts/i.test(l));
-// {options: [{key, label, on}], head: the up to 2 lines right above the choices}. Options only when they are 1..N (2 or more).
+// {options: [{key, label, on}], head: the up to 2 lines right above the choices, tabs: the tab bar line of a multi-question prompt or ""}.
+// Options only when they are 1..N (2 or more). A choice may carry description lines under it (AskUserQuestion: the row is indented deeper than the
+// number): those belong to the choice above and do not break the run. The tab bar ("← ☐ Scope  ☐ Priority  ✔ Submit →") is the line with arrows and
+// checkbox marks somewhere above the choices; it is kept so the desk can offer the tab keys.
+const promptCol = (l) => l.length - l.replace(/^[\s│┃|]*/, "").length;
+const PROMPT_TABS = /←.*→|→.*←/; // the bar has both arrows (and a checkbox mark, below)
+const PROMPT_MARK = /[☐☒☑✔✓□■]/;
 function promptParse(text) {
   const lines = promptTail(text, 24);
   const num = lines.map((l) => PROMPT_NUM.exec(l));
+  const none = { options: [], head: [], tabs: "" };
+  // the numbered row that owns line i: itself, or the one up to 4 lines above it when every line between is a description (indented deeper than its number)
+  const owner = (i) => {
+    for (let j = i; j >= 0 && i - j <= 4; j--) {
+      if (!num[j]) continue;
+      const col = lines[j].search(/\d/);
+      for (let k = j + 1; k <= i; k++) if (promptCol(lines[k]) <= col && !/^[^\p{L}\p{N}]*$/u.test(lines[k])) return -1; // a rule line (no letters or digits) between choices is skipped
+      return j;
+    }
+    return -1;
+  };
   let end = lines.length - 1;
   for (let skip = 0; end >= 0 && !num[end] && skip < 6 && promptFooter(lines[end]); skip++) end--;
-  if (end < 0 || !num[end]) return { options: [], head: [] };
-  let start = end;
-  while (start > 0 && num[start - 1]) start--;
-  const options = num.slice(start, end + 1).map((m) => ({ key: m[2], label: m[3].trim().slice(0, 80), on: m[1] === "❯" || m[1] === "›" }));
-  if (options.length < 2 || !options.every((o, i) => Number(o.key) === i + 1)) return { options: [], head: [] };
-  return { options: options.slice(0, 6), head: lines.slice(Math.max(0, start - 2), start) };
+  if (end < 0) return none;
+  end = owner(end);
+  if (end < 0) return none;
+  const rows = [end];
+  while (Number(num[rows[rows.length - 1]][2]) > 1) {
+    const prev = owner(rows[rows.length - 1] - 1);
+    if (prev < 0) break;
+    rows.push(prev);
+  }
+  rows.reverse();
+  const options = rows.map((j) => { const m = num[j]; return { key: m[2], label: cutHead(m[3].trim(), 80), on: m[1] === "❯" || m[1] === "›" }; });
+  if (options.length < 2 || !options.every((o, i) => Number(o.key) === i + 1)) return none;
+  const start = rows[0];
+  const tabs = lines.slice(Math.max(0, start - 5), start).reverse().find((l) => PROMPT_TABS.test(l) && PROMPT_MARK.test(l)) ?? ""; // only near the question: an arrow line far up is output
+  return { options: options.slice(0, 8), head: lines.slice(Math.max(0, start - 2), start), tabs: tabs.replace(/[│┃|]/g, " ").replace(/\s+/g, " ").trim() };
 }
 const promptOptions = (text) => promptParse(text).options;
 // What identifies the question on screen: the choices (without which one is highlighted) and the lines above them, whitespace squeezed; when
@@ -453,11 +563,24 @@ const promptSame = (a, b) => promptTail(a, 40).map((l) => l.replace(/\s+/g, " ")
 // whitespace ignored), or, for a long / multi-line paste the PO folds into "[Pasted text …]", that marker is.
 function inputHas(screen, line) {
   const squeeze = (s) => s.replace(/[│┃|]/g, " ").replace(/\s+/g, " ").trim();
-  const want = squeeze(cleanText(line));
+  const want = squeeze(cleanText(line)).replace(/^!\s*/, ""); // bash mode draws the "!" apart from the command
   if (!want) return false;
   const hay = squeeze(cleanText(screen).split("\n").filter((l) => l.trim()).slice(-14).join("\n"));
-  if (/\n/.test(cleanText(line).trim()) || want.length > 200) return /\[Pasted text/i.test(hay) || hay.includes(want.slice(0, 24)) || hay.includes(want.slice(-24));
-  return hay.includes(want.slice(0, 24)) || hay.includes(want.slice(-24));
+  if (/\n/.test(cleanText(line).trim()) || want.length > 200) return /\[Pasted text/i.test(hay) || hay.includes(cutHead(want, 24)) || hay.includes(cutTail(want, 24));
+  return hay.includes(cutHead(want, 24)) || hay.includes(cutTail(want, 24));
+}
+// A desk line that is a shell command for the PO's own prompt ("!ls": Claude Code's bash mode starts with "!"). null for any other text,
+// "" for a bare "!"; "!!" is not one. The command is the rest of the line, trimmed.
+const bangCommand = (text) => { const m = /^\s*!(?!!)([\s\S]*)$/.exec(String(text ?? "")); return m ? m[1].trim() : null; };
+// What stands in the PO's input box on its screen: the text after the last prompt mark (❯ > ›) among the last 14 lines (box borders ignored), "" for an empty
+// box, null when no prompt line is there. A dim placeholder hint reads as text (colors are not on the screen), so the desk then refuses: it never types over text.
+function promptInput(screen) {
+  const lines = cleanText(screen).split("\n").filter((l) => l.trim()).slice(-14);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = /^[\s│┃|]*([❯>›])(?:\s+(.*?))?[\s│┃|]*$/.exec(lines[i]);
+    if (m) return (m[2] ?? "").trim();
+  }
+  return null;
 }
 // Slack-style headers: `head` is true for the first entry and whenever the sender changes or the gap to the entry before is over `gap`.
 const groupTimeline = (entries, gap = TL_GAP_MS) => (entries ?? []).map((e, i, a) => ({ ...e, head: i === 0 || a[i - 1].who !== e.who || e.ms - a[i - 1].ms > gap }));
@@ -504,7 +627,7 @@ function roomLeaders(entries, label = (id) => id) {
   return out.sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
 }
 // The leader to filter by: `leader` while the room still has it, else "" (= everyone; a leader that left the room goes back to 전체).
-const settleLeader = (choices, leader) => (leader && (choices ?? []).length >= 2 && (choices ?? []).some((x) => x.id === leader) ? String(leader) : "");
+const settleLeader = (choices, leader) => (leader && (choices ?? []).length >= 1 && (choices ?? []).some((x) => x.id === leader) ? String(leader) : "");
 // Only the leaders whose terminal is open now stay as choices (a closed leader's session is gone: its history stays under "전체"). A leader is live when a
 // terminal carries its hc name, or sits at the address its summary recorded. `sums` = [{leader, terminal}].
 const aliveLeaders = (choices, terms, sums) => (choices ?? []).filter((c) => (terms ?? []).some((t) => t.name === c.id || (t.address && (sums ?? []).some((s) => s.leader === c.id && s.terminal === t.address))));
@@ -533,10 +656,10 @@ function snapStep(snaps, room, seen, now, ttl = SNAP_TTL_MS) {
 // The element id of a timeline row: the entry key, which ends in the "#n" of a duplicate; a long key keeps its start and gets a hash of the whole.
 function tlId(key) {
   const k = String(key ?? "");
-  if (k.length <= 80) return `tl-${k}`;
+  if (k.length <= 80) return `tl-${wellFormed(k)}`;
   let h = 5381;
   for (const ch of k) h = (Math.imul(h, 33) ^ ch.codePointAt(0)) >>> 0;
-  return `tl-${k.slice(0, 64)}~${h.toString(16).padStart(8, "0")}`;
+  return `tl-${wellFormed(cutHead(k, 64))}~${h.toString(16).padStart(8, "0")}`;
 }
 // {all, unread, decision, verify, done, stop}: how many entries each chip shows.
 const filterCounts = (entries, seen) => Object.fromEntries(CHAT_FILTERS.map(([k]) => [k, filterEntries(entries, k, seen).length]));
@@ -579,18 +702,57 @@ function dockTarget(here, f, terms) {
 // The options of a decision report, read strictly from its body (the leader report rule: one "N안: ..." line per option, N = 1..3, and
 // optionally a "추천: N안" line). At least two distinct numbers, otherwise none (nothing is guessed: "A:", "1)", "①", "1. step" are not options).
 // -> { options: [1, 2], recommended: 2 | 0 }
+// "추천"/"권장"/"recommend" mark a recommended option, but not when negated: "비추천", "비권장", "추천하지 않", "권장하지 않", "not recommended",
+// "don't recommend" (a negated option is one the report says NOT to pick, so it never gets the "(추천)" mark).
+const REC_MARK = /추천|권장|recommend/i;
+const REC_NEG = /비\s*추천|비\s*권장|(?:추천|권장)\s*(?:하지\s*(?:않|말)|안\s*함|드리지\s*않|할\s*수\s*없)|(?:not|n['’]t|never)\s+(?:be\s+)?recommend|un-?recommend/i;
+const recMarked = (txt) => REC_MARK.test(String(txt ?? "")) && !REC_NEG.test(String(txt ?? ""));
 function decisionOptions(body) {
   const nums = new Set();
   let rec = 0;
   for (const line of String(body ?? "").split(/\r?\n/)) {
-    let m = line.match(/^\s*(?:[-*]\s*)?([1-3])안\s*[:：)]\s*\S/);
-    if (m) { nums.add(Number(m[1])); continue; }
+    // "1안: …", "1안) …", and with a marker between the number and the colon: "1안(추천): …", "1안 (추천): …", "**1안** [권장]: …"
+    let m = line.match(/^\s*(?:[-*]\s*)?(?:\*\*)?([1-3])안(?:\*\*)?\s*(?:[(（\[［]([^)）\]］\n]{0,24})[)）\]］])?\s*(?:\*\*)?\s*[:：)]\s*\S/);
+    if (m) {
+      const n = Number(m[1]);
+      nums.add(n);
+      // the recommendation marked on the option itself: "1안(추천):" or "… (추천)" / "★" at the end of its line
+      if (!rec && (recMarked(m[2]) || recMarked(line.match(/[(（\[［]([^)）\]］\n]{0,24})[)）\]］]\s*$/)?.[1]) || /[★⭐]\s*$/.test(line))) rec = n;
+      continue;
+    }
     m = line.match(/^\s*(?:[-*]\s*)?추천\s*[:：]\s*([1-3])안/);
     if (m && !rec) rec = Number(m[1]);
   }
   const options = [...nums].sort((x, y) => x - y);
   if (options.length < 2) return { options: [], recommended: 0 };
   return { options, recommended: options.includes(rec) ? rec : 0 };
+}
+// A decision report that asks several questions (#76): a header line starting with a circled digit ("① 병합 시점", "**② 순서**", "- ③ …") opens a
+// question, and the "N안:" lines below it (until the next header) are that question's options. Only when at least two questions each have
+// at least two options; otherwise [] and the card reads the whole body as one question (decisionOptions). Options above the first header
+// belong to no question and make the body ambiguous, so they also give [].
+// -> [{ label: "①", options: [1, 2], recommended: 2 | 0 }, ...]
+const GROUP_HEAD = /^\s*(?:[-*#>]+\s*)?(?:\*\*)?([①②③④⑤⑥⑦⑧⑨⑩])/;
+function decisionGroups(body) {
+  const segs = [{ label: "", lines: [] }];
+  for (const line of String(body ?? "").split(/\r?\n/)) {
+    const m = line.match(GROUP_HEAD);
+    if (m) segs.push({ label: m[1], lines: [] });
+    else segs[segs.length - 1].lines.push(line);
+  }
+  if (segs.length < 3 || decisionOptions(segs[0].lines.join("\n")).options.length) return [];
+  const groups = segs.slice(1).map((s) => ({ label: s.label, ...decisionOptions(s.lines.join("\n")) }));
+  return groups.every((g) => g.options.length >= 2) && new Set(groups.map((g) => g.label)).size === groups.length ? groups : [];
+}
+// The answer for picks {label: N}: "①1안, ②2안" in the questions' order; "" until every question has a pick that is one of its options.
+function groupAnswer(groups, picks) {
+  const parts = [];
+  for (const g of groups ?? []) {
+    const n = picks?.[g.label];
+    if (!g.options.includes(n)) return "";
+    parts.push(`${g.label}${n}안`);
+  }
+  return parts.join(", ");
 }
 // What a decision report offers when it has no "N안:" lines (#62): its "추천: ..." and "답: ..." lines, shown on the card without opening it,
 // and the quoted answers after "답:" ("둘 다 진행" / "#59만" / "보류", also “…” and 「…」) as answer buttons when there are at least two.
@@ -600,7 +762,7 @@ function decisionHints(body) {
   const lines = [];
   let answers = [];
   let rec = "";
-  const cut = (s) => (s.length > 160 ? `${s.slice(0, 159)}…` : s);
+  const cut = (s) => (s.length > 160 ? `${cutHead(s, 159)}…` : s);
   for (const raw of String(body ?? "").split(/\r?\n/)) {
     const line = raw.replace(/^\s*(?:[-*]\s*)?/, "").trim();
     const r = line.match(/^추천\s*[:：]\s*(.*?)(?:\s*[.。]?\s+답\s*[:：].*)?$/);
@@ -743,10 +905,31 @@ function typingNow(terms, room, memo, track = null, now = 0) {
   leaders.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return [...out, ...leaders];
 }
+// #69: the rooms with work going on, as a Set of room ids (a PO's id, or PO_OTHER): a room is working when its PO, a leader of it, or a team
+// member below them is "working" right now. Status only (the terminals the poll already reads), no grace: it goes out as soon as all stop.
+// Waiting for an approval ("blocked") is not working: the room's red count / "질문" chip says that.
+function roomWorking(terms) {
+  const list = terms ?? [];
+  const out = new Set();
+  const states = workStates(list);
+  for (const p of poList(list)) if (states.get(p.address)?.work) out.add(p.id);
+  for (const t of list) {
+    if (!isAgentName(t?.name) || !states.get(t.address)?.work) continue;
+    if (leaderOwner(list, t.name, t.address) === PO_OTHER) { out.add(PO_OTHER); break; }
+  }
+  return out;
+}
+// #119: the rooms whose PO has remote on, as a Set of room ids, from the desk's remote states (room -> {phase}). Only "on" / "already" count: sending, failed and
+// unknown (and a room with no state yet) are off, so the mark never claims more than the last screen check or restore saw.
+function remoteRooms(rc) {
+  const out = new Set();
+  for (const [room, r] of rc ?? []) if (r && (r.phase === "on" || r.phase === "already")) out.add(room);
+  return out;
+}
 // A short text that changes exactly when something the desk shows from the terminals changes: the status, the wait label and the shown
 // name of every PO and leader, and whether a leader has work below it (a team member working). The 1.5 s poll redraws a copy only when this
 // differs from the last one (no redraw on a quiet second).
-function statusSig(terms) {
+function statusSig(terms, remote) {
   const rows = [];
   const hot = busyAddrs(terms), states = workStates(terms);
   for (const t of terms ?? []) {
@@ -754,7 +937,9 @@ function statusSig(terms) {
     if (!lead && !poId(t)) continue;
     rows.push(`${t.address}|${String(t.status ?? "")}|${lead ? waitingKind(t) : ""}|${lead ? liveName(t) : ""}|${lead && hot.has(t.address) ? 1 : 0}|${lead && hot.has(t.address) ? typingLabel(states, t.address) : ""}`);
   }
-  return rows.sort().join("\n");
+  const w = [...roomWorking(terms)].sort().join(",");
+  const r = [...(remote ?? [])].sort().join(","); // #119: a room's remote mark comes and goes with the desk's own state, not with a terminal
+  return rows.sort().join("\n") + (w ? `\n#w:${w}` : "") + (r ? `\n#r:${r}` : ""); // #69: a working terminal that is no PO/leader (a member right under a PO) still moves a room dot
 }
 // ---- images (pasted, picked or dropped in the box; or pasted in the PO terminal and read back by the hook)
 // A picture lives in <app root>/data/inbox/img/ (0600, written by this helper); a line of the desk's message names it as "[image: <path> — ...]"
@@ -795,66 +980,80 @@ function clipLong(text) {
   const s = String(text ?? "");
   let end = Math.min(s.length, LONG_CHARS), n = 0, i = -1;
   while ((i = s.indexOf("\n", i + 1)) !== -1 && i < end) if (++n >= LONG_LINES) { end = i; break; }
+  end = cutPoint(s, end);
   if (end >= s.length) return { text: s, cut: false, more: 0 };
   return { text: s.slice(0, end).trimEnd(), cut: true, more: s.length - end };
 }
 const moreLabel = (more) => `더 보기 · ${String(Math.max(0, Number(more) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}자 더`;
-// Where the **bold** runs of a Markdown text (the string given to TextView.markdown) sit, as [{start,end}] UTF-16 offsets into that same string,
-// markers included. The TextView draws no heavier weight for them (it ignores bold), so main.js paints a tint behind these ranges instead.
-// Fenced blocks and `code spans` are skipped, a \\* is not a marker, an opening ** must be followed and a closing ** preceded by a non-blank.
-// Bounded: a line over 2000 chars, work past 20000 chars or more than 100 ranges is left plain. Pure.
-function boldRanges(md) {
-  const out = [];
-  let fence = false, pos = 0, work = 0;
-  for (const ln of String(md ?? "").split("\n")) {
-    const at = pos;
-    pos += ln.length + 1;
-    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; continue; }
-    if (fence || ln.length > 2000 || !ln.includes("**")) continue;
-    work += ln.length;
-    if (work > 20000 || out.length >= 100) break;
-    let m = ln, i = 0;
-    while (i < m.length) { // blank out the code spans (same length, so the offsets stay)
-      if (m[i] === "\\") { i += 2; continue; }
-      if (m[i] !== "`") { i++; continue; }
-      let n = 1;
-      while (m[i + n] === "`") n++;
-      const run = "`".repeat(n);
-      let j = m.indexOf(run, i + n);
-      while (j !== -1 && m[j + n] === "`") j = m.indexOf(run, j + n + 1);
-      if (j === -1) { i += n; continue; }
-      m = m.slice(0, i) + " ".repeat(j + n - i) + m.slice(j + n);
-      i = j + n;
-    }
-    i = 0;
-    while (i < m.length - 1 && out.length < 100) {
-      if (m[i] === "\\") { i += 2; continue; }
-      if (m[i] === "*" && m[i + 1] === "*" && i + 2 < m.length && !/[\s*]/.test(m[i + 2])) {
-        let j = m.indexOf("**", i + 2);
-        while (j !== -1 && (/\s/.test(m[j - 1]) || m[j - 1] === "\\" || m[j + 2] === "*")) j = m.indexOf("**", j + 1);
-        if (j !== -1) { out.push({ start: at + i, end: at + j + 2 }); i = j + 2; continue; }
-        i += 2; continue;
-      }
-      i++;
-    }
-  }
-  return out;
-}
+// A list item line of a Markdown source: "-", "*" or "+", or "1." / "1)", then a blank and some text.
+const MD_ITEM = /^\s*(?:[-*+]|(\d{1,9})[.)])\s+\S/;
+// A first line like "[lead-po-inbox] 최종 확인 요청": a [tag], a blank, a short title.
+const MD_HEAD = /^\s*\[(?![ xX✓✔]?\])[^\]\n]{1,60}\][ \t]+\S[^\n]{0,60}$/; // not a checkbox line: "[ ] 할 일", "[x] 끝"
 // A message text as Markdown for a TextView.markdown(...).raw_html(false): wrapper tags removed first (they would print literally), a line that
-// is only 【...】 made bold, images switched off (![x](y) -> a plain link), and single line breaks kept as line breaks (Markdown would join them).
-// Code fences are left as written. Never produces HTML: the view shows tags as text. Pure.
+// is only 【...】 made bold, images switched off (![x](y) -> a plain link), single line breaks kept as line breaks (Markdown would join them), and
+// the list marks people type ("•", "1)") written as real Markdown items with a blank line before the list and after it (#66), so the view draws
+// them as a list whose wrapped lines sit under the item text. The words themselves are never changed. Code fences are left as written.
+// Never produces HTML: the view shows tags as text. Pure.
+// A single "~" is written "\~" so the view does not strike text through between two of them ("3~4.5일 ... 1.5~2일" is a range, not a
+// strikethrough); "~~text~~" stays a strikethrough. `code` spans and links/URLs are left as they are (an escape would show inside them). Pure.
+const TILDE_KEEP = /(`+[^`\n]*`+|\]\([^)\n]*\)|<?(?:https?:\/\/|www\.)[^\s<>)]*>?)/;
+function escTilde(ln) {
+  if (!ln.includes("~")) return ln;
+  return ln.split(TILDE_KEEP).map((seg, i) => (i % 2 ? seg : seg.replace(/(?<![~\\])~(?!~)/g, "\\~"))).join("");
+}
 function mdText(text) { return tlMemoGet("m", text, mdTextRaw); }
 function mdTextRaw(text) {
+  const norm = (ln) => ln.replace(/!\[/g, "!\\[").replace(/^(\s*)[•‣▪◦●・]\s+/, "$1- ").replace(/^(\s*)(\d{1,3})[)）]\s+/, "$1$2. ");
   const src = unwrapTags(text).replace(/\r\n?/g, "\n").split("\n");
-  let fence = false;
-  const rows = src.map((ln) => {
-    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; return { s: ln, flow: false }; }
-    if (fence) return { s: ln, flow: false };
-    let s = ln.replace(/!\[/g, "!\\[");
-    if (/^\s*【[^】\n]*】[:：]?\s*$/.test(s)) s = `**${s.trim()}**`;
-    return { s, flow: true };
-  });
-  return rows.map((r, i) => (r.flow && r.s.trim() && rows[i + 1]?.flow && rows[i + 1].s.trim() && !/ {2}$/.test(r.s) ? r.s + "  " : r.s)).join("\n");
+  // a first line like "[이름] 종류" over more text is the header of the message: shown bold, as a line of its own
+  const first = src.findIndex((l) => l.trim());
+  const head = first >= 0 && src.length > first + 1 && src.slice(first + 1).some((l) => l.trim()) && MD_HEAD.test(src[first]) && !src[first].includes("**") && !MD_ITEM.test(norm(src[first]));
+  let fence = false, inList = false;
+  const rows = [];
+  for (let i = 0; i < src.length; i++) {
+    const ln = src[i];
+    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; inList = false; rows.push({ s: ln, flow: false }); continue; }
+    if (fence) { rows.push({ s: ln, flow: false }); continue; }
+    let s = escTilde(norm(ln));
+    if (head && i === first) s = `**${s.trim()}**`;
+    else if (/^\s*【[^】\n]*】[:：]?\s*$/.test(s)) s = `**${s.trim()}**`;
+    const m = MD_ITEM.exec(s);
+    const item = Boolean(m) && (inList || m[1] === undefined || m[1] === "1"); // a "2025. 11" line is text, not a list that starts at 2025
+    const prev = rows[rows.length - 1];
+    const blank = !s.trim();
+    // blank lines between two items of one list are dropped: a list with a gap between its items is drawn as paragraphs, and a numbered
+    // list people write as "1. a", blank, "2. b" must look like the "-" list (compact); a gap only separates real paragraphs
+    if (blank && inList) {
+      let j = i + 1;
+      while (j < src.length && !src[j].trim()) j++;
+      if (j < src.length && !/^\s*(?:```|~~~)/.test(src[j]) && MD_ITEM.test(norm(src[j]))) continue;
+    }
+    // a list needs a blank line before it to be one, and the line after it a blank line to be out of it again
+    if (prev?.flow && prev.s.trim() && ((item && !inList) || (!item && !blank && inList && !/^\s/.test(s)))) rows.push({ s: "", flow: true });
+    if (blank) inList = false;
+    else if (item) inList = true;
+    else if (!/^\s{2,}/.test(s)) inList = false;
+    rows.push({ s, flow: true, item });
+  }
+  return rows.map((r, i) => (r.flow && r.s.trim() && rows[i + 1]?.flow && rows[i + 1].s.trim() && !rows[i + 1].item && !/ {2}$/.test(r.s) ? r.s + "  " : r.s)).join("\n");
+}
+// A whole line that is only **bold** text.
+const BOLD_LINE = /^\*\*(\S(?:(?:(?!\*\*).)*?\S)?)\*\*[ \t]*$/;
+// The mdText source cut into what is drawn as its own TextView: [{s, bold}]. A line that is only **bold** text is its own block (bold: true, the
+// ** removed), because the TextView draws no heavier weight inside a text but the whole view can be given one. Everything between stays
+// Markdown as one block. A **bold** run inside a sentence is shown at the normal weight, without markers. Fences are skipped. Pure.
+function mdBlocks(md) {
+  const out = [];
+  let cur = [], fence = false;
+  const flush = () => { const s = cur.join("\n").replace(/^\n+|\n+$/g, ""); if (s.trim()) out.push({ s, bold: false }); cur = []; };
+  for (const ln of String(md ?? "").split("\n")) {
+    if (/^\s*(?:```|~~~)/.test(ln)) { fence = !fence; cur.push(ln); continue; }
+    const m = fence ? null : BOLD_LINE.exec(ln);
+    if (m) { flush(); out.push({ s: m[1], bold: true }); continue; }
+    cur.push(ln);
+  }
+  flush();
+  return out;
 }
 // A message text -> {text without its "[image: ...]" lines, imgs: the paths those lines named}.
 function splitImgs(text) { return tlMemoGet("s", unwrapTags(text), splitImgsRaw); }
@@ -913,10 +1112,21 @@ function pinStep(st, o) {
   // The growth only counts for a view that was at the END OF WHAT IT SHOWED before it (the handle's y is still the old layout's): a person
   // reading higher up (an expanded long bubble) is not dragged down by a new row, however often the content grows (#54).
   const nearPrev = prev > 0 ? y + vh >= prev - PIN_SLACK : true;
-  if (near) return { pinned: true, ct: ch, go: was && grew && y + vh < ch - 1 };
-  if (was && grew && nearPrev) return { pinned: true, ct: ch, go: true };
-  return { pinned: false, ct: ch, go: false };
+  // #67: the viewport got shorter (the input box grew under the list) while the view sat at the end of its old size: the end must stay on screen,
+  // so it goes to the end again. A view reading higher up (not pinned, or not near the old end) keeps its place.
+  const pvh = Number(st?.vh) || 0;
+  const shrunk = pvh > 0 && vh < pvh - 1 && y + pvh >= (prev > 0 ? prev : ch) - PIN_SLACK;
+  if (near) return { pinned: true, ct: ch, vh, go: was && (grew || shrunk) && y + vh < ch - 1 };
+  if (was && grew && nearPrev) return { pinned: true, ct: ch, vh, go: true };
+  if (was && shrunk) return { pinned: true, ct: ch, vh, go: true };
+  return { pinned: false, ct: ch, vh, go: false };
 }
+// #72: the "jump to the newest" button shows while the view is scrolled up by more than JUMP_MIN px from the end (more than PIN_SLACK, so it is never
+// there while the view follows), and a list that fits its viewport never shows it.
+const JUMP_MIN = 80;
+const jumpShown = (y, vh, ch) => (Number(ch) || 0) > (Number(vh) || 0) + 1 && (Number(y) || 0) + (Number(vh) || 0) < (Number(ch) || 0) - JUMP_MIN;
+// #67: the box grows to this many rows, then scrolls inside itself (the list above keeps the rest of the height).
+const INPUT_MAX_LINES = 4;
 // A message the person just sent follows to the newest even from higher up: the first draw that shows a new last entry within SEND_FOLLOW_MS of the
 // send (`at` = when it was sent, 0 = none) goes to the end once.
 const SEND_FOLLOW_MS = 5000;
@@ -931,43 +1141,6 @@ const SEL_HOLD_MS = 120000, PRESS_HOLD_MS = 8000;
 // st = {sel: a selection is settled, selAt, press: the pointer is down in the list, pressAt}. While true, background redraws wait.
 const quietNow = (st, now) => Boolean((st?.sel && now - (st.selAt || 0) < SEL_HOLD_MS) || (st?.press && now - (st.pressAt || 0) < PRESS_HOLD_MS));
 
-// ---- highlight colours: the band behind **bold** runs, from the theme's own tokens.
-// A colour is "#rrggbb" + an alpha byte. The alpha starts strong (so the area is clearly visible) and steps down only while the text colour
-// would stop being readable on the blended result (contrast < HL_MIN_CONTRAST), so it holds on a light and a dark theme alike.
-const HL_MIN_CONTRAST = 3.5;
-const HL_KINDS = {
-  bold: { alpha: 0x73, floor: 0x40, tokens: ["accent", "ansi4", "foreground"] }, // about 45%
-};
-const HEX6 = /^#[0-9a-f]{6}$/i;
-// A theme colour as "#rrggbb": "#rgb" is expanded and "#rrggbbaa" loses its alpha (the tint sets its own); anything else -> null.
-const hex6 = (c) => {
-  if (typeof c !== "string") return null;
-  if (HEX6.test(c)) return c.toLowerCase();
-  if (/^#[0-9a-f]{3}$/i.test(c)) return "#" + [...c.slice(1)].map((x) => x + x).join("").toLowerCase();
-  if (/^#[0-9a-f]{8}$/i.test(c)) return c.slice(0, 7).toLowerCase();
-  return null;
-};
-const rgbOf = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
-const lumOf = (h) => {
-  const [r, g, b] = rgbOf(h).map((v) => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-};
-const contrastOf = (a, b) => { const x = lumOf(a), y = lumOf(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
-const blendHex = (top, under, a) => { const u = rgbOf(under); return "#" + rgbOf(top).map((v, i) => Math.round(v * a + u[i] * (1 - a)).toString(16).padStart(2, "0")).join(""); };
-// kind -> "#rrggbbaa", or null when the theme has no usable token (the caller then paints nothing and logs it once, see tintMiss).
-function tintHex(t, kind) {
-  const k = HL_KINDS[kind];
-  const base = k && k.tokens.map((n) => hex6(t?.[n])).find(Boolean);
-  if (!base) return null;
-  let a = k.alpha;
-  const bg = hex6(t.background), fg = hex6(t.foreground);
-  if (bg && fg) {
-    while (a > k.floor && contrastOf(fg, blendHex(base, bg, a / 255)) < HL_MIN_CONTRAST) a = Math.max(k.floor, a - 8);
-  }
-  return base + a.toString(16).padStart(2, "0");
-}
-// Why tintHex gave nothing: the tokens it looked at and what they held (colours only), for one diag line.
-const tintMiss = (t, kind) => `highlight ${kind}: no usable theme token (${(HL_KINDS[kind]?.tokens ?? []).map((n) => `${n}=${JSON.stringify(t?.[n] ?? null)}`).join(" ")}); nothing painted`;
 // A TextView selection event -> {start, end} (UTF-16 offsets into the Markdown source), or null when it carries no usable range.
 // `len` is the length of the string the view was given: a range past it belongs to an older text and is dropped.
 function selRangeOf(sel, len) {
@@ -1011,6 +1184,40 @@ function restartBlock({ po = "", status = "", running = false } = {}) {
   if (s === "working") return "PO가 작업 중입니다 — 끝난 뒤에 누르세요";
   return "";
 }
+// ---- "원격 연결 켜기" (#79): one click sends `/remote-control` to the room's terminal through the same `hc send` path as 새로 시작 (sendLine). The desk cannot
+// press it for the person any other way (a skill cannot run the command). Pure part: why it cannot be pressed now ("" when it can).
+const REMOTE_CMD = "/remote-control";
+function remoteBlock({ po = "", status = "", running = false, sending = false } = {}) {
+  if (sending) return "원격 연결 명령을 보내는 중입니다";
+  return restartBlock({ po, status, running });
+}
+const REMOTE_POLLS = 5, REMOTE_POLL_MS = 1000; // after the send: this many screen reads, this far apart (~5 s)
+const REMOTE_URL = /https:\/\/claude\.ai\/code\/[^\s)\]>"'`]+/g;
+// What the PO's screen says about Remote Control. `menu` = Claude Code's "already connected" menu (Disconnect this session / Show QR code / Continue), `active` = the
+// footer says it is on, `url` = the last session link on screen, `off` = a disconnect line is on screen after the last on line (#109: that clears the saved on-record). Text copied from Claude Code's UI and NOT verified against a real terminal (UNVERIFIED).
+function remoteScreen(text) {
+  const clean = cleanText(text);
+  const lines = clean.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim());
+  const tail = lines.slice(-14).join("\n");
+  // Only the three numbered option lines together count (prose that merely mentions these words is not the menu).
+  const opt = (n, re) => new RegExp(`^\\s*(?:[❯>›▶]\\s*)?${n}[.)]\\s*${re}\\s*$`, "im").test(tail);
+  const menu = opt(1, "Disconnect this session") && opt(2, "Show QR code") && opt(3, "Continue");
+  const active = menu || /Remote Control (is )?(active|connected)/i.test(lines.slice(-8).join("\n"));
+  // `seen` = the transcript line Claude Code prints when it turned on ("/remote-control is active · Continue here, on your phone, or at <url>", copied from a real
+  // screen) is on screen and no later line says it was turned off. Weaker than `active`: that line scrolls away, and a disconnect line's wording is UNVERIFIED.
+  let on = -1, off = -1;
+  lines.forEach((l, i) => { if (/\/?remote[- ]control (is )?(active|connected)/i.test(l)) on = i; if (/remote[- ]control (is )?(disconnected|off|stopped|inactive)|disconnected (this )?session/i.test(l)) off = i; });
+  const urls = clean.match(REMOTE_URL) ?? [];
+  return { menu, active, seen: active || (on >= 0 && on > off), off: !active && off >= 0 && off > on, url: urls.length ? urls[urls.length - 1].replace(/[.,;:]+$/, "") : "" };
+}
+// The one-line system note for the room's chat. kind: on | already | fail | unknown.
+function remoteNote(kind, { url = "", why = "" } = {}) {
+  const u = url ? ` — ${url}` : "";
+  if (kind === "on") return `원격 연결 켜짐${u}`;
+  if (kind === "already") return `이미 켜져 있음${u}`;
+  if (kind === "unknown") return "원격 연결 명령을 보냈지만 5초 안에 화면에서 결과를 확인하지 못했습니다. 터미널에서 확인하세요";
+  return `켜지 못함: ${why || "알 수 없는 이유"}`;
+}
 // The line pasted into the PO (English: it is read by an agent). `file` is where the note goes (shown with ~).
 function handoffAsk(file) {
   return `${RESTART_MARK} The user will restart you with /clear. Before that, write a handoff note to ${file} (overwrite it; create the folder if needed) so that the next session can continue seamlessly: (1) decisions and final checks the user still has to answer, (2) each running leader with its task, issue/PR and state, (3) what you were doing and the next steps, (4) anything that is only in this conversation. Keep it short and in the user's language. Do nothing else; reply "handoff written" when the file is saved.`;
@@ -1047,15 +1254,17 @@ function restartSendResult(r) {
   const out = String(r?.stdout ?? "").trim(), err = String(r?.stderr ?? "").trim();
   let j = null;
   try { j = JSON.parse(out); } catch {}
-  const detail = `code ${code}; stdout ${out.slice(0, 160)}; stderr ${err.slice(0, 160)}`.replace(/\s+/g, " ");
+  const detail = `code ${code}; stdout ${cutHead(out, 160)}; stderr ${cutHead(err, 160)}`.replace(/\s+/g, " ");
   if (code === 0 && j && j.started === true) {
     const turn = Number(j.turn);
     return { ok: true, turn: Number.isFinite(turn) ? turn : null, status: String(j.status ?? ""), why: "", detail };
   }
   const kind = String(j?.error?.kind ?? "");
+  // exit 0 and started:false with no error: `hc send` waited and gave up (a person's unfinished draft in the PO's input) — the text may or may not be in the box
+  if (code === 0 && j && j.started === false && !j.error) return { ok: false, notStarted: true, turn: null, status: "", why: "PO가 받아 시작하지 않았습니다(입력창에 쓰던 글이 있는지 확인하세요)", detail };
   const why = kind === "blocked" ? "PO가 질문 중이라 받지 않았습니다"
     : kind === "status_mismatch" ? "PO가 일하는 중이라 받지 않았습니다"
-    : j?.error?.message ? `PO가 받지 않았습니다(${String(j.error.message).slice(0, 80)})`
+    : j?.error?.message ? `PO가 받지 않았습니다(${cutHead(String(j.error.message), 80)})`
     : `hc send가 실패했습니다(종료 코드 ${code})`;
   return { ok: false, turn: null, status: "", why, detail };
 }
@@ -1067,6 +1276,15 @@ function restartTerm(r) {
   if (!j || typeof j !== "object") return null;
   const turn = Number(j.turn);
   return { live: String(j.state ?? "") === "live" && (j.exit_code === null || j.exit_code === undefined), status: String(j?.status?.state ?? "").trim().toLowerCase(), turn: Number.isFinite(turn) ? turn : null };
+}
+// The claude process of a terminal from `hc get <t> --json` ({code, stdout}): its foreground process when that is claude, else null (a shell prompt, a child in front).
+function termPid(r) {
+  if (!r || Number(r.code) !== 0) return null;
+  let j = null;
+  try { j = JSON.parse(String(r.stdout ?? "")); } catch { return null; }
+  const f = j?.foreground, pid = Number(f?.pid);
+  const name = String(f?.name ?? (Array.isArray(f?.argv) ? f.argv[0] : "") ?? "");
+  return Number.isInteger(pid) && pid > 1 && /(^|[\\/])claude(\.exe)?$/i.test(name) ? pid : null;
 }
 // Why nothing is sent now ("" when it can be): the terminal must be known and running, not on a prompt, not working (idle or done are both fine).
 function restartSendBlock(term) {
@@ -1094,6 +1312,7 @@ function restartDraft(mine, room, now) {
 // What the PO's hook recorded as submitted (UserPromptSubmit -> kind "me" lines of po/<id>.jsonl) is the proof of what `hc send` really sent.
 // The step-1 request must come back as exactly itself: a draft left in the input box is sent in front of it ("<draft><request>"), and the run stops.
 // recs = [{ms, text}] ("me" lines); since = ms just before the send. "wait" = no record yet, "ok", "mismatch" (something else was submitted).
+const SEND_PROOF_BACK_MS = 2000; // a hook line counts as proof of THIS send only from this long before the send started (clock slack); an older identical line is another send
 const RESTART_REC_MS = 12 * 1000; // how long the desk waits for the record of a send (the hook writes it when the prompt is submitted)
 const restartNorm = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 function restartSubmitCheck(recs, since, expected) {
@@ -1109,10 +1328,31 @@ function restartClearCheck(recs, since) {
   return (recs ?? []).some((x) => x && Number(x.ms) >= Number(since)) ? "text" : "clean";
 }
 // chat:end
+// What claude-account.cjs needs of a terminal (`hc get <t> --json`): the single CLAUDE_CONFIG_DIR= token of its argv env part (nothing else of
+// the argv) and the pid of its claude. null when unreadable.
+function acctInfo(r) {
+  if (!r || Number(r.code) !== 0) return null;
+  let j = null;
+  try { j = JSON.parse(String(r.stdout ?? "")); } catch { return null; }
+  if (!j || typeof j !== "object" || j.state !== "live") return null;
+  const argv = [];
+  for (const t of Array.isArray(j.argv) ? j.argv : []) {
+    if (typeof t !== "string") continue;
+    if (t === "claude" || t.startsWith("-")) break; // the env part ends at the program
+    if (t.startsWith("CLAUDE_CONFIG_DIR=")) { argv.push(t.slice(0, 600)); break; }
+  }
+  const f = j.foreground, pid = Number(f?.pid);
+  return { argv, pid: Number.isInteger(pid) && pid > 1 ? pid : null };
+}
+const ACCT_TTL_MS = 5 * 60 * 1000, ACCT_RETRY_MS = 60 * 1000;
 
 // The pending-question card: the screen lines scroll inside it (all options stay reachable), the buttons stay under them.
 const PROMPT_LINES_H = 240, PROMPT_MAX_H = 340;
 const DIAG_FLUSH_MS = 2000; // the diag queue is written out this often (one timer started in init)
+const NOTICE_TOP = 44; // just under the 38px header
+const NOTICE_MAX_W = 560;
+const MSG_MS = 5000; // how long a floating notice stays before it hides itself (a click hides it sooner)
+const MSG_TICK_MS = 500; // how often the notice is checked for expiry
 const PIN_TICK_MS = 250; // how often the timeline checks that it still sits at the newest
 const LOAD_REDRAW_MS = 25000; // an unchanged load still redraws this often (the "5분 전" clocks)
 
@@ -1268,19 +1508,25 @@ export default class Inbox extends View {
     this.compact = false;
     this.narrow = !this.windowed; // narrower than WIDE_MIN (until the first size report: the dock and a pane start narrow, the window wide)
     this.writing = null; // leader whose answer box is open
-    this.inputs = new Map(); // leader -> InputState
+    this.inputs = new Map(); // leader -> TextareaState (the answer box of a card)
+    this.cardK = new Map(); // leader -> the Enter bookkeeping of that answer box (see cardState)
     this.inputSeen = new Map(); // leader -> last ms its answer box was wanted (a draft is cleared only after DRAFT_GRACE_MS without it)
     this.pickLive = { id: "", at: 0, label: "" }; // the picked room, the last time it was live (a PO missing from one poll keeps its room: #57)
     this.msg = null; // {text, bad}
     this.copied = null; // key of the command whose 복사 button just ran
     this.more = new Set(); // bubble ids the person opened with "더 보기" (#47: long messages start folded)
     this.chat = TextareaState.new({ value: "", rows: 1, placeholder: "PO에게 말하기 — Enter로 보내기, Shift+Enter로 줄바꿈, @로 리더 부르기, 그림은 붙여넣기" });
-    try { this.chat.set_auto_grow(1, 6); } catch {}
+    try { this.chat.set_auto_grow(1, INPUT_MAX_LINES); } catch {}
     this.menu = null; // the open "@" menu: {start, end, query, items, sel}
     this.changedAt = 0; // the last edit of the box (ms)
+    this.roomDrafts = new Map(); // #66: room id -> the unsent chat draft {text, content, range, pics} of a room that is not shown now (see swapDraft)
+    this.draftRoom = null; // the room the chat box belongs to now
+    this.mirror = new Map(); // #74: box key ("chat" or a leader) -> {text, content, range}: the last text each box held (see keep / guard)
+    this.keyAt = 0; // the last key press in a box (ms): an emptied box with no key press just before it was wiped, not edited
     this.sentAt = 0; // the last send (ms)
     this.uid = Math.random().toString(36).slice(2, 8); // this copy of the desk (the badge lease, record ids)
     this.seq = 0;
+    this.bangBusy = false; // a '!' command is being checked (screen read) before it is pasted
     this.opening = new Set(); // PO terminals a send is waiting on (their pane is opening): one send per PO at a time
     this.backs = new Map(); // record id -> the pane that had the keyboard before the send (given back after Enter)
     this.prompt = null; // {po, at, text}: the screen tail of the picked room's PO while it waits on a prompt
@@ -1290,20 +1536,27 @@ export default class Inbox extends View {
     this.promptChain = 0; // the newest scheduled re-read of the screen; an older one does nothing
     this.who = new Map(); // room -> the leader the room is narrowed to (#58, "특정 리더만"); like `filt`, not saved
     this.rs = new Map(); // room -> the state of its "PO 새로 시작" (see restartOpen)
+    this.rcChecked = new Set(); // PO terminal addresses whose screen was read for the on-state (see remoteRestore)
+    this.rc = new Map(); // room -> the state of its "원격 연결 켜기" {phase: send | on | already | unknown | fail, at, url, why, note {text, ms, bad}} (see remoteOn)
     this.rgen = 0; // numbers a restart run: a timer of an older run does nothing
     this.filt = new Map(); // room -> the chat filter chip picked there (전체 when missing); not saved: a restart shows every message again
     this.heldAt = 0; // the last Enter held back as a possible IME confirm (ms)
     this.nlAt = 0; // the last Shift+Enter handled (ms)
     this.core = ""; // the box text without trailing line breaks, as of the last change
+    this.lastValue = ""; // #83: the box text as of the last change (a line break the widget put at the cursor is found against it)
+    this.enterAt = 0; // #83: the last plain Enter (key or submit event) in the chat box (ms)
+    this.brk = null; // #83: {idx, at, core, editAt}: the line break the widget last put in the text, and the edit state before it
     this.editAt = 0; // the last time that text changed (ms); the IME hold reads this, not changedAt
     this.pics = []; // pictures waiting in the box: [{path, w, h}] (saved under the inbox's po/img by the helper)
-    this.picBusy = 0; // pictures being read from the clipboard / a file right now
+    this.picBusy = 0; // pictures being read from the clipboard / a file right now FOR THE ROOM SHOWN (picBusyBy: per room)
+    this.picBusyBy = new Map();
     this.replyPics = new Map(); // leader -> pictures waiting in that leader's answer box (same shape as this.pics)
     this.replyBusy = new Map(); // leader -> pictures being read for that answer box
     this.imgd = new Map(); // path -> [w, h] of pictures added here (the helper's list covers the others)
     this.ui = { sels: new Map(), sel: false, selAt: 0, press: false, pressAt: 0 }; // a drag-select in the list: redraws wait while it is held
     this.dirty = false; // a redraw was held back
     this.pin = { pinned: true, ct: 0 }; // the timeline's pin to the newest (see pinStep)
+    this.jump = false; // #72: the jump-to-newest button is shown (set by pinTick from the scroll position)
     this.pinCh = 0; // the content height at the last re-pin look/call (see pinCall)
     this.reading = null; // {ch, at}: a 더 보기 / 접기 click is waiting for its new layout to land: the 250ms poll must not restore the pin from the old one
     this.sentAt2 = 0; // when the person last sent a chat (the first draw with a new last entry after it goes to the end once, see sendFollow)
@@ -1315,10 +1568,19 @@ export default class Inbox extends View {
       this.changedAt = Date.now();
       let value = "";
       try { value = this.chat.value(); } catch {}
+      if (this.guard("chat", this.chat, value)) return; // the box was emptied behind the person's back: the text is back, nothing else to do
+      this.keep("chat", this.chat, value);
+      const prev = this.lastValue;
+      const brk = strayAt(prev, value); // #83: the widget put a line break at the cursor
+      const rep = brk < 0 ? replacedAt(prev, value) : null; // ... or an Enter over a selection swapped the selected text for one
+      this.lastValue = value;
+      if (brk >= 0 && enterPending(this.enterAt, this.changedAt)) { this.dropAt(value, brk, this.editAt); return; } // the Enter (sent or held) left it: take it out, wherever it is
+      if (rep && enterPending(this.enterAt, this.changedAt)) { this.putBack(prev, rep, this.editAt); return; } // the selected text comes back
+      this.brk = brk >= 0 ? { idx: brk, at: this.changedAt, core: this.core, editAt: this.editAt } : rep ? { idx: rep.idx, at: this.changedAt, core: this.core, editAt: this.editAt, rep, prev } : null; // (the key may come after this change: see enterBox)
       const core = editCore(value); // an edit is a change of the text itself: the widget's own line break for an Enter is not one
       if (core !== this.core) { this.core = core; this.editAt = this.changedAt; }
       this.heldTick(c);
-      if (strayBreak(value, this.sentAt, this.changedAt)) { try { this.chat.set_value(""); } catch {} return; } // the Enter that sent left a line break
+      if (strayBreak(value, this.sentAt, this.changedAt)) { this.wipe("chat", this.chat); return; } // the Enter that sent left a line break
       if (strayHeld(value, this.heldAt, this.changedAt)) { this.dropBreak(value); return; } // the held Enter left a line break
       this.syncMenu(c);
     });
@@ -1351,12 +1613,42 @@ export default class Inbox extends View {
     // row, the dots, a picture that finished loading) is seen here and the view goes back to the bottom. A held-back redraw is let go
     // once the selection / press is over.
     cx.timer.every(PIN_TICK_MS, (cx) => this.pinTick(cx));
+    cx.timer.every(MSG_TICK_MS, (cx) => { if (this.msg && Date.now() - this.msg.at >= MSG_MS) { this.msg = null; this.softNotify(cx); } });
     cx.timer.every(DIAG_FLUSH_MS, () => this.flushDiag());
     this.usage = undefined; // the rows of the usage line: undefined before the first read, null = Unknown, else [{label, percent, resetsAt}]
     this.usageSig = "";
     this.loadUsage(cx);
     cx.timer.every(USAGE_REFRESH_MS, (cx) => this.loadUsage(cx));
     this.diag(`init: ${this.windowed ? "window" : this.mained ? "main" : this.paned ? "pane" : "dock"}`);
+  }
+
+  // "이 세션 계정" (#121): which Claude account each live leader runs on, read from its terminal (`hc get`: the env part of argv, else the process env) and
+  // resolved by claude-account.cjs. Cached by terminal; an unknown answer is asked again sooner. Nothing secret is read: only the one variable.
+  loadAccounts(cx) {
+    let list = [];
+    try { list = terminals() ?? []; } catch {}
+    this.accts ??= new Map();
+    const now = Date.now();
+    for (const t of list) {
+      if (!isAgentName(t?.name) || !t.address) continue;
+      const e = this.accts.get(t.name);
+      if (e && e.busy && now - e.at < 30000) continue;
+      if (e && e.addr === t.address && !e.busy && now - e.at < (e.label === null ? ACCT_RETRY_MS : ACCT_TTL_MS)) continue;
+      this.accts.set(t.name, { addr: t.address, label: e?.addr === t.address ? e.label : null, at: now, busy: true });
+      cx.spawn(async (cx) => {
+        let label = null;
+        try {
+          const info = acctInfo(await hc(["get", t.address, "--json"]));
+          if (info) {
+            const r = await exec("node", [ACCT(), "label", "--info", JSON.stringify(info)], { timeout: 8000 });
+            if (r.code === 0) { const l = JSON.parse(r.stdout).label; label = typeof l === "string" && l ? l : null; }
+          }
+        } catch {}
+        const prev = this.accts.get(t.name);
+        this.accts.set(t.name, { addr: t.address, label, at: Date.now(), busy: false });
+        if (label !== (prev?.label ?? null)) this.softNotify(cx);
+      });
+    }
   }
 
   // Reads the usage file (a file read only) and redraws only when what the line shows (the rows or the tooltip text) changed: a redraw drops a drag-select.
@@ -1399,6 +1691,7 @@ export default class Inbox extends View {
 
   // ---- redraw gating (a drag-select must not be rebuilt under the pointer) and the pin to the newest
   pinTick(cx) {
+    this.guardAll();
     if (this.dirty && !quietNow(this.ui, Date.now())) { this.dirty = false; try { cx.notify(); } catch {} }
     if (!this.scroll || !this.drawnAt) return;
     try {
@@ -1409,16 +1702,39 @@ export default class Inbox extends View {
       if (this.reading) {
         if (Math.abs(ct.height - this.reading.ch) <= 1 && Date.now() - this.reading.at < 1500) return;
         this.reading = null;
-        this.pin = { pinned: o.y + vp.height >= ct.height - PIN_SLACK, ct: ct.height };
+        this.pin = { pinned: o.y + vp.height >= ct.height - PIN_SLACK, ct: ct.height, vh: vp.height };
         return;
       }
       const r = pinStep(this.pin, { y: o.y, vh: vp.height, ch: ct.height });
       // A scroll that is held back (drag / selection) leaves the pin as it was: pinned and the old content height stay, so the next tick after the
       // release still sees the growth and goes to the bottom (storing r.ct now would turn it into "pinned: false").
       if (r.go && quietNow(this.ui, Date.now())) return;
-      this.pin = { pinned: r.pinned, ct: r.ct };
+      this.pin = { pinned: r.pinned, ct: r.ct, vh: r.vh };
+      // A tick that goes to the bottom is mid-move: o.y is the old offset against the new height, so the button is judged on the next tick (no flash).
+      if (!r.go) this.syncJump(cx, jumpShown(o.y, vp.height, ct.height));
       if (r.go) { this.pinCh = ct.height; this.diag(`pin: tick go y=${Math.round(o.y)} vh=${Math.round(vp.height)} ch=${Math.round(ct.height)}`); this.scroll.scroll_to_item(this.lastIdx); }
     } catch {}
+  }
+
+  // #72: the jump button follows the scroll position: a redraw only when it has to appear or go away.
+  syncJump(cx, on) {
+    if (on === Boolean(this.jump)) return;
+    this.jump = on;
+    this.softNotify(cx);
+  }
+  // The button: back to the newest bubble, and the view follows again from there (pinned) like at the bottom.
+  jumpToEnd(c) {
+    try {
+      const o = this.scroll.offset(), vp = this.scroll.viewport_size(), ct = this.scroll.content_size();
+      this.reading = null;
+      this.pinCh = 0;
+      this.pin = { pinned: true, ct: ct.height, vh: vp.height };
+      this.jump = false;
+      this.diag(`pin: jump y=${Math.round(o.y)} vh=${Math.round(vp.height)} ch=${Math.round(ct.height)}`);
+      this.scroll.scroll_to_item(this.lastIdx);
+    } catch {}
+    try { c.timer.after(80, () => { if (!quietNow(this.ui, Date.now())) this.pinGo(this.lastIdx, "jump"); }); } catch {}
+    c.notify();
   }
 
   // One catch-up call after a draw: scroll to the row `last` only while the content grew since the last call and the view is not at its end (see
@@ -1474,6 +1790,69 @@ export default class Inbox extends View {
     if (this.selMark) this.selMark.downs++;
     this.diag(`press (list mouse down), click ${e?.click_count ?? "?"}${this.ui.selAt && this.selMark ? `, ${Date.now() - this.ui.selAt}ms after the last settle` : ""}`);
   }
+  // #74: the draft mirror. keep(): copy what a box holds (text, tokens, cursor) after each change. wipe(): the mod's own clear (send, a stale
+  // draft): the mirror is emptied first so the clear is not taken for a loss. guard(): a box that is empty while the mirror holds text and no
+  // key of the person's came just before was emptied by something else (a rebuild of the view): the text and the cursor are put back.
+  keep(key, st, value) {
+    try {
+      const text = value ?? st.value();
+      if (text === "") { this.mirror.delete(key); return; }
+      let content = null, range = null;
+      try { content = st.content(); } catch {}
+      try { range = st.selected_range(); } catch {}
+      this.mirror.set(key, { text, content, range });
+    } catch {}
+  }
+  // #66: the chat box holds the draft of the room shown. When the room changes (a click on a room, or the shown room moving by itself) the box's
+  // text, mention chips, cursor and pictures go to that room's slot and the new room's slot comes back (or an empty box). Sending clears only the
+  // box of the room shown, so another room's draft is untouched. Idempotent: called with the room already shown it does nothing.
+  syncRoom(pick) {
+    if (pick == null || pick === this.draftRoom) return;
+    const from = this.draftRoom;
+    this.draftRoom = pick;
+    if (from == null) return; // first look: the box was never anyone else's
+    let cur = null;
+    try { cur = { text: this.chat.value(), content: this.chat.content(), range: this.chat.selected_range(), pics: this.pics.slice() }; } catch {}
+    const r = swapDraft(this.roomDrafts, from, pick, cur);
+    this.roomDrafts = r.map;
+    this.menu = null;
+    this.heldAt = 0;
+    this.mirror.delete("chat"); // the swap below is the mod's own write, not a loss
+    try {
+      if (r.load) {
+        try { this.chat.set_value(r.load.content ?? r.load.text); } catch { this.chat.set_value(r.load.text); }
+        if (r.load.range) this.chat.set_selected_range(r.load.range);
+      } else this.chat.set_value("");
+    } catch {}
+    this.pics = r.load?.pics ?? [];
+    this.picBusy = this.picBusyBy.get(pick) ?? 0;
+    try { this.lastValue = this.chat.value(); this.core = editCore(this.lastValue); } catch {}
+    this.brk = null;
+    this.keep("chat", this.chat);
+    this.diag(`draft: room switched, ${r.load ? `restored ${String(r.load.text).length} chars` : "empty box"}`);
+  }
+  wipe(key, st) {
+    this.mirror.delete(key);
+    try { st.set_value(""); } catch {}
+  }
+  guard(key, st, value) {
+    const m = this.mirror.get(key);
+    let v = value;
+    if (v === undefined) { try { v = st.value(); } catch { return false; } }
+    if (!draftWiped(m, v, this.keyAt, Date.now())) return false;
+    try {
+      st.set_value(m.content ?? m.text);
+      if (m.range) st.set_selected_range(m.range);
+    } catch { try { st.set_value(m.text); } catch {} }
+    this.diag(`draft restored in ${key === "chat" ? "chat" : "answer box"} (${m.text.length} chars)`);
+    return true;
+  }
+  // Every box is looked at once per draw and once per poll tick, so a loss that raised no change event is mended within a tick.
+  guardAll() {
+    this.guard("chat", this.chat);
+    for (const [k, st] of this.inputs) this.guard(k, st);
+  }
+
   // A held Enter whose second Enter never came (the person kept typing): the "한 번 더 Enter" hint goes away. The redraw respects the selection hold.
   heldTick(c) {
     if (this.heldAt && !holdShown(this.editAt, this.heldAt)) { this.heldAt = 0; this.softNotify(c); }
@@ -1510,14 +1889,6 @@ export default class Inbox extends View {
     try { cx.notify(); } catch {}
   }
 
-  // One diag line per kind when the theme gave nothing to paint with (the next redraws stay quiet).
-  tintWarn(t, kind) {
-    const w = (this.tintWarned ??= new Set());
-    if (w.has(kind)) return;
-    w.add(kind);
-    this.diag(tintMiss(t, kind));
-  }
-
   // A TextView's selection settled (sel) or cleared (null): only the hold on background redraws (ui.sel / selAt) and the diag.log lines, which
   // show whether a drag-copy sees the selection come and go (the range is logged when the app sends one). Nothing is painted for a selection.
   onSel(id, sel, cx) {
@@ -1545,13 +1916,21 @@ export default class Inbox extends View {
     else if (list.length) this.replyPics.set(key, list);
     else this.replyPics.delete(key);
   }
-  bumpBusy(key, n) {
-    if (key == null) { this.picBusy = Math.max(0, this.picBusy + n); return; }
+  // The PO box's reads are counted per room (`room` = the room the read started in), and only the room shown sees its own count: a read that
+  // started in another room never blocks sending or shows "reading…" here.
+  bumpBusy(key, n, room = this.draftRoom) {
+    if (key == null) {
+      const v = Math.max(0, (this.picBusyBy.get(room) ?? 0) + n);
+      if (v) this.picBusyBy.set(room, v); else this.picBusyBy.delete(room);
+      this.picBusy = this.picBusyBy.get(this.draftRoom) ?? 0;
+      return;
+    }
     const v = Math.max(0, (this.replyBusy.get(key) ?? 0) + n);
     if (v) this.replyBusy.set(key, v); else this.replyBusy.delete(key);
   }
-  async addPic(args, c, key = null) {
-    this.bumpBusy(key, 1);
+  // A picture for the PO box goes to the room the read STARTED in: when that room is not shown any more it joins that room's saved draft.
+  async addPic(args, c, key = null, room = this.draftRoom) {
+    this.bumpBusy(key, 1, room);
     try { c.notify(); } catch {}
     try {
       const r = await exec("node", [HELPER(), ...args], { timeout: 20000 });
@@ -1559,18 +1938,25 @@ export default class Inbox extends View {
       const o = JSON.parse(r.stdout);
       if (!o?.path) throw new Error("그림이 없습니다");
       if (o.w > 0 && o.h > 0) this.imgd.set(o.path, [o.w, o.h]);
-      const cur = this.picsOf(key);
+      const away = key == null && room !== this.draftRoom;
+      const slot = away ? this.roomDrafts.get(room) : null;
+      const cur = away ? (slot?.pics ?? []) : this.picsOf(key);
+      const pic = { path: o.path, w: o.w ?? 0, h: o.h ?? 0 };
       if (cur.length >= MAX_IMGS) this.say(`그림은 한 번에 ${MAX_IMGS}장까지 붙일 수 있습니다.`, true);
-      else if (!cur.some((x) => x.path === o.path)) this.setPics(key, [...cur, { path: o.path, w: o.w ?? 0, h: o.h ?? 0 }]);
+      else if (!cur.some((x) => x.path === o.path)) {
+        if (away) this.roomDrafts.set(room, { text: "", ...(slot ?? {}), pics: [...cur, pic] });
+        else this.setPics(key, [...cur, pic]);
+      }
       this.msg = null;
-    } catch (e) { this.say(`그림을 붙이지 못했습니다: ${String(e?.message ?? e).slice(0, 140)}`, true); }
-    finally { this.bumpBusy(key, -1); try { c.notify(); } catch {} }
+    } catch (e) { this.say(`그림을 붙이지 못했습니다: ${cutHead(String(e?.message ?? e), 140)}`, true); }
+    finally { this.bumpBusy(key, -1, room); try { c.notify(); } catch {} }
   }
   pastePic(c, key = null) { return this.addPic(["clipimg"], c, key); }
   async pickPics(c, key = null) {
+    const room = this.draftRoom; // the room the file button was pressed in
     let files = null;
-    try { files = await pickFiles({ prompt: "그림 붙이기", multiple: true }); } catch (e) { this.say(`파일을 고르지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); try { c.notify(); } catch {} return; }
-    for (const f of (files ?? []).slice(0, MAX_IMGS)) await this.addPic(["addimg", f], c, key);
+    try { files = await pickFiles({ prompt: "그림 붙이기", multiple: true }); } catch (e) { this.say(`파일을 고르지 못했습니다: ${cutHead(String(e?.message ?? e), 120)}`, true); try { c.notify(); } catch {} return; }
+    for (const f of (files ?? []).slice(0, MAX_IMGS)) await this.addPic(["addimg", f], c, key, room);
   }
   dropPics(paths, c, key = null) { for (const f of (paths ?? []).slice(0, MAX_IMGS)) this.addPic(["addimg", f], c, key); }
   removePic(i, c, key = null) { this.setPics(key, this.picsOf(key).filter((_x, k) => k !== i)); try { c.notify(); } catch {} }
@@ -1631,7 +2017,7 @@ export default class Inbox extends View {
     try {
       const terms = this.liveTerms(), now = Date.now();
       this.syncTyping(terms, now);
-      sig = `${statusSig(terms)}\n~${graceKey(this.typingAt, now)}`; // the grace running out changes this, so the dots are redrawn away
+      sig = `${statusSig(terms, remoteRooms(this.rc))}\n~${graceKey(this.typingAt, now)}`; // the grace running out changes this, so the dots are redrawn away
     } catch { return; }
     if (sig === this.sig) return;
     const first = this.sig === null;
@@ -1684,7 +2070,7 @@ export default class Inbox extends View {
     const now = Date.now();
     for (const k of live) this.inputSeen.set(k, now);
     for (const k of staleDrafts(this.inputs.keys(), live, this.inputSeen, now)) { // an old draft must not reappear on the leader's next card (but one missing poll must not wipe it: #57)
-      try { const st = this.inputs.get(k); if (String(st.value() ?? "") !== "") st.set_value(""); } catch {}
+      try { const st = this.inputs.get(k); if (String(st.value() ?? "") !== "" || this.mirror.has(k)) this.wipe(k, st); } catch {}
       this.inputSeen.delete(k);
     }
   }
@@ -1720,7 +2106,7 @@ export default class Inbox extends View {
 
   // A command's copy button: exactly that text goes on the clipboard (no paste, no send); the button says "복사됨" for a moment.
   copy(key, text, cx) {
-    try { cx.write_to_clipboard(String(text)); } catch (e) { this.say(`복사하지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); this.softNotify(cx); return; }
+    try { cx.write_to_clipboard(String(text)); } catch (e) { this.say(`복사하지 못했습니다: ${cutHead(String(e?.message ?? e), 120)}`, true); this.softNotify(cx); return; }
     this.copied = key;
     this.softNotify(cx); // a selection held in another bubble is not rebuilt by this
     try { cx.timer.after(1800, (c) => { if (this.copied === key) { this.copied = null; this.softNotify(c); } }); } catch {}
@@ -1737,7 +2123,7 @@ export default class Inbox extends View {
       if (d.action === "focus") run("pane.focus", { pane: d.pane });
       else run("pane.split", { direction: "right", mod: "inbox", props: { mode: "pane" }, ...(d.pane ? { pane: d.pane } : {}) });
       if (this.windowed) { try { closeOverlay(safeProps().overlay); } catch {} }
-    } catch (e) { this.say(`옆에 열지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); }
+    } catch (e) { this.say(`옆에 열지 못했습니다: ${cutHead(String(e?.message ?? e), 120)}`, true); }
   }
 
   // UI mode -> terminal mode: the layout this `<name>-ui` was made from (the terminals stay alive in the core; only the main area changes).
@@ -1748,12 +2134,12 @@ export default class Inbox extends View {
       const base = cur.endsWith("-ui") ? cur.slice(0, -3) : "";
       if (!base || !(layouts() ?? []).includes(base)) { this.say("돌아갈 터미널 모드 레이아웃을 찾지 못했습니다.", true); return; }
       run("layout.switch", { name: base });
-    } catch (e) { this.say(`터미널 모드로 바꾸지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); }
+    } catch (e) { this.say(`터미널 모드로 바꾸지 못했습니다: ${cutHead(String(e?.message ?? e), 120)}`, true); }
   }
 
   openWindow() {
     this.msg = null;
-    try { openOverlay(WINDOW); } catch (e) { this.say(`창을 열지 못했습니다: ${String(e?.message ?? e).slice(0, 120)}`, true); }
+    try { openOverlay(WINDOW); } catch (e) { this.say(`창을 열지 못했습니다: ${cutHead(String(e?.message ?? e), 120)}`, true); }
   }
 
   load(cx) {
@@ -1773,15 +2159,17 @@ export default class Inbox extends View {
         const shown = {};
         for (const [po, c] of Object.entries(d?.cost ?? {})) shown[po] = [costLabel(c), costTip(c)];
         const sig = JSON.stringify({ ...d, cost: shown, at: 0 });
-        const err = d?.profileError ? `프로필을 읽지 못해 기본 이름으로 보여 줍니다: ${String(d.profileError).slice(0, 160)}` : null; // kept shown, but only a change of it redraws
+        const err = d?.profileError ? `프로필을 읽지 못해 기본 이름으로 보여 줍니다: ${cutHead(String(d.profileError), 160)}` : null; // kept shown, but only a change of it redraws
         this.changed = sig !== this.sigData || err !== this.error || !this.data || Date.now() - this.drawnAt > LOAD_REDRAW_MS;
         this.sigData = sig;
         this.data = d;
         this.error = err;
         rememberLeaders();
+        this.loadAccounts(cx);
         this.markSeen();
+        this.remoteRestore(cx);
         if (this.drawing()) this.startWatch(cx);
-      } catch (e) { if (gen === this.gen) { this.error = `불러오기 실패: ${String(e?.message ?? e).slice(0, 180)}`; this.changed = true; } }
+      } catch (e) { if (gen === this.gen) { this.error = `불러오기 실패: ${cutHead(String(e?.message ?? e), 180)}`; this.changed = true; } }
       finally {
         if (gen === this.gen) {
           this.busy = false;
@@ -1858,8 +2246,10 @@ export default class Inbox extends View {
     const leaders = (this.data?.leaders ?? []).map((s) => ({ s, owner: leaderOwner(terms, s.leader, s.terminal, s.po) }));
     const waits = (id) => all.filter((a) => a.owner === id).map((a) => ({ leader: a.s.leader, ts: a.item?.ts ?? "", kind: a.kind }));
     const room = (id) => timeline(id, leaders, id === PO_OTHER ? [] : this.data?.po?.[id] ?? [], mine, waits(id), now);
-    const rooms = pos.map((p) => ({ id: p.id, label: p.label, title: p.title, blocked: this.isBlocked(p.address) }));
-    if (hasOther) rooms.push({ id: PO_OTHER, label: OTHER_LABEL, title: "", blocked: false });
+    const busy = roomWorking(terms); // #69: the rooms with work going on (a dot beside the name)
+    const remote = remoteRooms(this.rc); // #119: the rooms whose PO has remote on (the subtitle under the name)
+    const rooms = pos.map((p) => ({ id: p.id, label: p.label, title: p.title, blocked: this.isBlocked(p.address), working: busy.has(p.id), remote: remote.has(p.id) }));
+    if (hasOther) rooms.push({ id: PO_OTHER, label: OTHER_LABEL, title: "", blocked: false, working: busy.has(PO_OTHER) });
     if (settled.ghost && !rooms.some((r) => r.id === pick)) rooms.push({ id: pick, label: this.pickLive.label, title: "", blocked: false, ghost: true }); // held for a moment: the room list does not lose it
     let raw = [];
     const tabs = rooms.map((r) => {
@@ -1913,6 +2303,7 @@ export default class Inbox extends View {
 
   pickPo(id, c) {
     this.heldAt = 0;
+    this.syncRoom(id);
     try { setShared(PICK_KEY, id); } catch {}
     this.menu = null;
     this.markSeen();
@@ -1926,9 +2317,10 @@ export default class Inbox extends View {
   }
 
   // #58: the leader row under the chips — 전체 | one chip per leader of the room. It works together with the chips (the chip filters that leader's
-  // entries). Shown when the room has two or more leaders (with one there is nothing to choose); a leader that waits on the person is marked.
+  // entries). Shown while the room has one or more live leaders (#70: with one it still says who is there; none open = no row); a leader that
+  // waits on the person is marked.
   leaderBar(t, v) {
-    if (!v.pick || (v.choices?.length ?? 0) < 2) return null;
+    if (!v.pick || (v.choices?.length ?? 0) < 1) return null;
     const chip = (id, label, on, mark, tip) => div().id(`who-${id || "all"}`).flex_none().h(22).px(8).rounded(11).flex().items_center().cursor_pointer().text_size(11).on_mouse_down("left", stop)
       .bg(on ? t.selected : t.raised).border(1).border_color(on ? t.foreground + "40" : t.border).text_color(on ? t.foreground : t.muted)
       .hover((x) => x.bg(t.hover).text_color(t.foreground)).on_click((_e, c) => this.setWho(v.pick, id, c)).tooltip(tip).child(mark ? `${label} ●` : label);
@@ -1944,7 +2336,7 @@ export default class Inbox extends View {
     else this.say("그 리더 터미널이 지금 없습니다.", true);
   }
 
-  say(text, bad = false) { this.msg = { text, bad }; }
+  say(text, bad = false) { this.msg = { text, bad, at: Date.now() }; } // drawn as a floating notice over the top of the room (see render), gone after MSG_MS
 
   // The ONE way the panel puts text into a PO terminal (answer buttons, the answer box, option chips and the chat box):
   // clipboard -> focus the PO pane -> terminal.paste -> Enter after PASTE_SETTLE_MS (submitPo) -> the keyboard goes back to where it was.
@@ -2004,7 +2396,7 @@ export default class Inbox extends View {
       }
       const go = (c2) => { // `opening` stays set until the delivery is done: a second send in the settle gap is "busy", not a race
         try { const r = this.deliver(po, text, c2, rec, ok, id, true); if (r === "sent" || r === "held") { try { ok?.(r); } catch {} } }
-        catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
+        catch (e) { this.say(`붙여 넣지 못했습니다: ${cutHead(String(e?.message ?? e), 160)}`, true); }
         this.opening.delete(po);
         try { c2.notify(); } catch {}
       };
@@ -2036,16 +2428,42 @@ export default class Inbox extends View {
     try {
       c.spawn(async (cx) => {
         let r = null;
+        const t0 = Date.now();
         try { r = await hc(["send", "--json", "--", po, text]); } catch (e) { r = { code: -1, stdout: "", stderr: String(e?.message ?? e) }; }
         const res = restartSendResult(r);
-        if (!res.ok) { this.diag(`desk send failed: ${res.detail} (po ${po})`); fail(res.why, cx); return; }
+        if (!res.ok) {
+          this.diag(`desk send failed: ${res.detail} (po ${po})`);
+          if (res.notStarted) { // no turn started: read the PO's screen — the text in its input only needs Enter (no second paste), else it did not arrive
+            let rd = null;
+            try { rd = await hc(["read", po, "--lines", String(PROMPT_LINES)]); } catch {}
+            if (rd && rd.code === 0 && inputHas(String(rd.stdout ?? ""), text) && !this.isBlocked(po)) {
+              this.opening.delete(po); this.mark(id, "noenter");
+              this.say(`PO(${po})의 입력창에 글은 들어갔지만 시작되지 않았습니다. 말풍선의 'Enter 누르기'를 누르세요.`, true);
+              try { cx.notify(); } catch {}
+              return;
+            }
+          }
+          // `hc send` gave up without seeing a turn start, but the text may still have reached the PO (#111: a PO that was busy queues a pasted line and
+          // submits it when its turn ends, so it is neither in the input box nor started yet). The PO's hook writes a "me" line when a prompt is
+          // submitted: wait a little for it before calling the send failed. A line that arrives later still turns the bubble "sent" in the timeline.
+          if (res.notStarted && rec?.po && await this.poSeen(cx, rec.po, { line: text, text: rec.text ?? text }, t0)) {
+            this.diag(`desk send: hc reported no turn, the PO's hook saw the line (po ${po})`);
+            this.opening.delete(po); this.mark(id, "sent");
+            try { ok?.("sent"); } catch {}
+            this.say(`PO(${po})에 보냈습니다.`);
+            try { cx.notify(); } catch {}
+            return;
+          }
+          fail(res.why, cx);
+          return;
+        }
         this.opening.delete(po);
         this.mark(id, "sent");
         try { ok?.("sent"); } catch {}
         this.say(`PO(${po})에 보냈습니다.`);
         try { cx.notify(); } catch {}
       });
-    } catch (e) { fail(String(e?.message ?? e).slice(0, 80), c); return "failed"; }
+    } catch (e) { fail(cutHead(String(e?.message ?? e), 80), c); return "failed"; }
     return "opening";
   }
 
@@ -2061,6 +2479,15 @@ export default class Inbox extends View {
     go(c);
   }
 
+  // Waits (bounded by RESTART_REC_MS) for the PO's hook to record `m` ({line, text}) as submitted after `since`; true when it did.
+  async poSeen(cx, room, m, since) {
+    const t0 = Date.now();
+    for (;;) {
+      try { if (hookProved(await this.poMe(room), m, since, SEND_PROOF_BACK_MS)) return true; } catch {}
+      if (Date.now() - t0 >= RESTART_REC_MS) return false;
+      try { await this.sleepOn(cx, 1000); } catch { return false; }
+    }
+  }
   // One line of the person's own history per desk send (the timeline draws it as the right-hand bubble). Returns its id ("" when nothing was recorded).
   record(rec, status) {
     try {
@@ -2074,6 +2501,14 @@ export default class Inbox extends View {
   mark(id, status) {
     if (!id) return;
     try { const next = setChatStatus(shared(CHAT_KEY) ?? [], id, status, Date.now()); if (next) setShared(CHAT_KEY, next); } catch {}
+  }
+  // The bubble's "삭제": a bubble that failed to send is removed from the chat for good (it does not come back when the chat is opened again).
+  discard(id, c) {
+    const r = this.recordOf(id);
+    if (!r || !this.recordActs(r, this.recordPo(r)).includes("delete")) return;
+    try { const next = dropChat(shared(CHAT_KEY) ?? [], id); if (next) setShared(CHAT_KEY, next); } catch {}
+    this.backs.delete(id);
+    c.notify();
   }
   recordOf(id) { try { return (shared(CHAT_KEY) ?? []).find((x) => x?.id === id) ?? null; } catch { return null; } }
 
@@ -2099,13 +2534,36 @@ export default class Inbox extends View {
     if (!this.recordActs(r, po).includes("resend")) return;
     if (!po) { this.say(NO_PO(), true); c.notify(); return; }
     const before = r.status;
+    if (bangCommand(r.line || r.text) !== null) { this.resendBang(id, c, po, r, before); return; }
     this.mark(id, "sending");
     try {
       const out = this.deliver(po, r.line || r.text, c, r, (r2) => this.markAsk(r, r2), id);
       if (out === "busy") this.mark(id, before);
       else if (out === "sent" || out === "held") this.markAsk(r, out);
-    } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
+    } catch (e) { this.say(`붙여 넣지 못했습니다: ${cutHead(String(e?.message ?? e), 160)}`, true); }
     c.notify();
+  }
+
+  // A '!' bubble's resend goes through the same guard as the first send (PO idle, pane open, input box empty), so a resend never types into a PO that
+  // has since started working or has text in its box. A refusal puts the record back as it was and says why.
+  resendBang(id, c, po, r, before) {
+    const stop = (why, cx = c) => { this.bangBusy = false; this.mark(id, before); this.say(`${why} '!' 명령은 보내지 않았습니다. 상태를 확인한 뒤 '다시 보내기'를 누르세요.`, true); try { cx.notify(); } catch {} };
+    if (this.bangBusy) { this.say("앞의 '!' 명령을 확인하는 중입니다. 잠시 뒤에 다시 보내세요.", true); try { c.notify(); } catch {} return; }
+    if (this.mained) { this.say("UI 모드에서는 PO 터미널에 글을 그대로 붙여 넣을 수 없어 '!' 명령을 보내지 않았습니다.", true); try { c.notify(); } catch {} return; }
+    const gate = this.bangGate(po);
+    if (gate) { this.say(`${gate} '!' 명령은 보내지 않았습니다.`, true); try { c.notify(); } catch {} return; }
+    this.mark(id, "sending");
+    this.bangBusy = true;
+    this.bangCheck(c, po, stop, (cx, clip) => {
+      this.bangBusy = false;
+      try {
+        const out = this.deliver(po, r.line || r.text, cx, r, (r2) => this.markAsk(r, r2), id);
+        this.bangClipBack(cx, clip, out);
+        if (out === "busy") this.mark(id, before);
+        else if (out === "sent" || out === "held") this.markAsk(r, out);
+      } catch (e) { this.say(`붙여 넣지 못했습니다: ${cutHead(String(e?.message ?? e), 160)}`, true); }
+      try { cx.notify(); } catch {}
+    });
   }
 
   // The bubble's "Enter 누르기": the text is in the PO's normal prompt and only Enter is missing. Before the key goes, the PO's screen is read and the
@@ -2140,29 +2598,27 @@ export default class Inbox extends View {
   // the desk itself, and refused unless the PO is still blocked (a stale panel must not answer a different prompt).
   readPrompt(po, cx) {
     const now = Date.now();
-    if ((this.promptBusy && now - this.promptBusyAt < PROMPT_TIMEOUT_MS) || (this.prompt?.po === po && now - this.prompt.at < PROMPT_REFRESH_MS)) return;
-    const gen = ++this.promptGen; // a read that comes back after it was given up (or replaced) is ignored
-    this.promptBusy = true;
-    this.promptBusyAt = now;
+    const cur = this.prompt?.po === po ? this.prompt : null;
+    if ((this.promptBusy && now - this.promptBusyAt < PROMPT_TIMEOUT_MS) || (cur && now - cur.at < (cur.failed ? PROMPT_RETRY_MS : PROMPT_REFRESH_MS))) return;
+    const gen = ++this.promptGen;
+    this.promptBusy = true; this.promptBusyAt = now;
     let done = false;
-    const fin = (text) => {
+    // Every ending fills this.prompt (the screen, or {failed: true}), so the panel never stays on "reading": a read that fails, comes back empty or
+    // takes too long is shown as "could not read" and tried again. After an await only the spawn's / timer's own cx is used (a render's cx is not
+    // good any more by then, #92).
+    const fin = (text, c2) => {
       if (done || gen !== this.promptGen) return;
-      done = true;
-      this.promptBusy = false;
-      // The same screen again (only a timer row moved): no new state and no redraw, so a drag-select in the panel is not cut. Either way the next read is
-      // scheduled here (one chain: a newer read replaces the older chain), and only while the PO still waits.
-      const same = this.prompt?.po === po && promptSame(this.prompt.text, text);
-      this.prompt = same ? { ...this.prompt, at: Date.now() } : { po, at: Date.now(), text };
+      done = true; this.promptBusy = false;
+      const failed = !String(text ?? "").trim();
+      const same = !failed && cur && !cur.failed && promptSame(cur.text, text);
+      this.prompt = same ? { ...cur, at: Date.now() } : { po, at: Date.now(), text: failed ? "" : text, failed };
       const chain = ++this.promptChain;
-      try {
-        if (!same) this.softNotify(cx);
-        cx.timer.after(PROMPT_REFRESH_MS + 100, (c2) => { if (chain === this.promptChain && this.isBlocked(po)) this.readPrompt(po, c2); });
-      } catch {}
+      if (!same) this.softNotify(c2);
+      try { c2.timer.after((failed ? PROMPT_RETRY_MS : PROMPT_REFRESH_MS) + 100, (c3) => { if (chain === this.promptChain && this.isBlocked(po)) this.readPrompt(po, c3); }); } catch {}
     };
-    try { cx.timer.after(PROMPT_TIMEOUT_MS, (c2) => { if (!done && gen === this.promptGen) { this.promptBusy = false; try { c2.notify(); } catch {} } }); } catch {}
-    let r;
-    try { r = hc(["read", po, "--lines", String(PROMPT_LINES)]); } catch { fin(""); return; }
-    Promise.resolve(r).then((o) => fin(o && o.code === 0 ? String(o.stdout ?? "") : "")).catch(() => fin(""));
+    try { cx.timer.after(PROMPT_TIMEOUT_MS, (c2) => fin("", c2)); } catch {}
+    const read = async () => { try { const o = await hc(["read", po, "--lines", String(PROMPT_LINES)]); return o && o.code === 0 ? String(o.stdout ?? "") : ""; } catch { return ""; } };
+    try { cx.spawn(async (c2) => { fin(await read(), c2); }); } catch { read().then((text) => fin(text, cx)); }
   }
   // A key press from the question panel. Never on a stale panel: the PO must still be blocked, and its screen is read again right before the key
   // and must show the same question the buttons were built from (else the panel is refreshed and no key goes).
@@ -2172,6 +2628,7 @@ export default class Inbox extends View {
     const shown = this.prompt?.po === po ? this.prompt : null;
     if (!shown) { say(`PO(${po})의 화면을 아직 읽지 못해 ${key}를 누르지 않았습니다. 잠시 뒤 다시 누르세요.`); return; }
     const want = promptSig(shown.text);
+    if (shown.failed || !want) { say(`PO(${po})의 화면을 읽지 못해 처음 본 질문이 없어 ${key}를 누르지 않았습니다. 다시 읽기를 누르세요.`); return; } // never a key for a screen the person has not seen
     const fail = () => say(`PO(${po})의 화면을 다시 읽지 못해 ${key}를 누르지 않았습니다.`);
     let rd;
     try { rd = hc(["read", po, "--lines", String(PROMPT_LINES)]); } catch { fail(); return; }
@@ -2191,19 +2648,28 @@ export default class Inbox extends View {
   promptPanel(t, v, cx) {
     const po = v.pick && v.pick !== PO_OTHER ? chatTarget(v.terms, [], v.pick).po : "";
     if (!po || !this.isBlocked(po)) { this.prompt = null; return null; }
-    this.readPrompt(po, cx);
+    try { this.readPrompt(po, cx); } catch { this.promptBusy = false; this.prompt = { po, at: Date.now(), text: "", failed: true }; }
     const shown = this.prompt?.po === po ? this.prompt : null;
     const lines = shown ? promptTail(shown.text, 40) : [];
-    const opts = shown ? promptOptions(shown.text) : [];
-    const key = (k, label, tip, primary) => this.button(t, `pp-${k}`, label, (c) => this.pressPrompt(po, k === "esc" ? "esc" : k === "enter" ? "enter" : k, c), { primary, tip });
+    const parsed = shown ? promptParse(shown.text) : { options: [], head: [], tabs: "" };
+    const opts = parsed.options;
+    const key = (k, label, tip, primary) => this.button(t, `pp-${k}`, label, (c) => this.pressPrompt(po, k, c), { primary, tip });
+    // Never a dead end: whatever the read or the parse gave, the person can open that terminal and answer there (and read the screen as it is).
+    const note = !shown ? "화면을 읽는 중…"
+      : !lines.length ? "화면을 읽지 못했습니다. '다시 읽기'를 누르거나 '터미널 열기'로 직접 답하세요."
+      : !opts.length ? "선택지를 찾지 못했습니다. 아래 화면 그대로를 보고 '터미널 열기'로 직접 답하세요." : "";
     return v_flex().id("po-prompt").flex_none().min_w(0).max_h(PROMPT_MAX_H).mx(10).mb(6).p(10).gap(8).rounded(8).bg(t.blocked + "14").border(1).border_color(t.blocked + "55").on_mouse_down("left", stop)
       .child(div().min_w(0).truncate().text_size(11).font_semibold().text_color(t.blocked).child("PO가 질문 중입니다 — 화면 끝"))
+      .when(Boolean(note), (el) => el.child(div().min_w(0).text_size(11).text_color(t.dim).child(note)))
       .child(v_flex().id("po-prompt-lines").min_w(0).min_h(0).max_h(PROMPT_LINES_H).overflow_y_scrollbar().gap(2)
-        .children(lines.length ? lines.map((l, i) => div().min_w(0).text_size(11).text_color(t.muted).child(this.text(`pp-l${i}`, chatHtml(l)))) : [div().text_size(11).text_color(t.dim).child(shown ? "화면을 읽지 못했습니다. 아래 버튼은 PO가 질문 중일 때만 눌립니다." : "화면을 읽는 중…")]))
+        .children(lines.map((l, i) => div().min_w(0).text_size(11).text_color(t.muted).child(this.text(`pp-l${i}`, chatHtml(l))))))
       .child(h_flex().min_w(0).gap(6).items_center().flex_wrap()
-        .children(opts.map((o) => this.button(t, `pp-${o.key}`, `${o.key}. ${o.label.length > 32 ? `${o.label.slice(0, 31)}…` : o.label}`, (c) => this.pressPrompt(po, o.key, c), { primary: o.on, tip: o.label })))
+        .children(opts.map((o) => this.button(t, `pp-${o.key}`, `${o.key}. ${o.label.length > 32 ? `${cutHead(o.label, 31)}…` : o.label}`, (c) => this.pressPrompt(po, o.key, c), { primary: o.on, tip: o.label })))
+        .when(Boolean(parsed.tabs), (el) => el.child(key("left", "← 이전 질문", `질문 탭을 앞으로(${parsed.tabs})`)).child(key("right", "다음 질문 →", `질문 탭을 뒤로(${parsed.tabs})`)))
         .child(key("enter", "Enter", "화면에서 강조된 선택지를 확정합니다(PO가 질문 중일 때만)"))
-        .child(key("esc", "Esc", "질문을 취소합니다(PO가 질문 중일 때만)")));
+        .child(key("esc", "Esc", "질문을 취소합니다(PO가 질문 중일 때만)"))
+        .child(this.button(t, "pp-term", "터미널 열기", (c) => { try { run("terminal.peek", { terminal: po }); } catch (e) { this.say(`터미널을 열지 못했습니다: ${cutHead(String(e?.message ?? e), 120)}`, true); } c.notify(); }, { tip: "이 PO의 터미널 화면을 엽니다(키는 누르지 않습니다)" }))
+        .child(this.button(t, "pp-reread", "다시 읽기", (c) => { this.prompt = null; this.promptBusy = false; c.notify(); }, { tip: "PO 화면을 다시 읽습니다" })));
   }
 
   // ---- "PO 새로 시작" (per room): ask the PO for a handoff note, wait for it, /clear, /PO. State per room in this.rs[room] =
@@ -2278,13 +2744,13 @@ export default class Inbox extends View {
   restartRun(room, po, id, c) {
     const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "");
     const why = restartBlock({ po, status: st });
-    if (why) { this.say(why, true); try { c.notify(); } catch {} return; }
+    if (why) { this.remoteSet(room, { phase: "fail", kind: "fail", why }, c); return; }
     const g = ++this.rgen;
     this.rs.set(room, { phase: "run", n: 0, gen: g, po, id, since: 0, path: "", note: null, quiet: 0, why: "" });
     try { c.notify(); } catch {}
     c.spawn(async (cx) => {
       try { await this.restartFlow(room, g, po, id, cx); }
-      catch (e) { this.restartFail(room, g, String(e?.message ?? e).slice(0, 100), cx); }
+      catch (e) { this.restartFail(room, g, cutHead(String(e?.message ?? e), 100), cx); }
     });
   }
   // Steps 1-4. Every step checks the run is still the same (gen).
@@ -2391,6 +2857,142 @@ export default class Inbox extends View {
         .child(this.button(t, "rs-close", r.phase === "run" || r.phase === "clear" || r.phase === "timeout" ? "취소" : "닫기", (c) => this.restartClose(room, c), { tip: r.phase === "run" || r.phase === "clear" ? "기다리기를 멈춥니다(이미 보낸 요청은 그대로입니다)" : "" })));
   }
 
+  // ---- "원격 연결 켜기" (#79), per terminal: `room` = the key of the state, `po` = the terminal address, `status` = its hc status. A room of any kind can use it (PO room
+  // now, a solo room later): it needs only the terminal's address. The flow: read the screen (already on? the "already connected" menu open? then no send), send the one line
+  // /remote-control, read the screen again a few times (~5 s) to see what it did, and close the "already connected" menu with Esc only (never Disconnect, never Enter) after
+  // checking it is still on screen. The result is a system note in the room's chat (rc.note) and a small mark by the button. What the screen looks like is UNVERIFIED.
+  async remoteRead(po) {
+    try {
+      const o = await hc(["read", po, "--lines", String(PROMPT_LINES)]);
+      return o && o.code === 0 ? String(o.stdout ?? "") : null;
+    } catch { return null; }
+  }
+  // Esc closes the menu, pressed ONCE (a second Esc in a row can rewind the PO's conversation). Right before it the screen must still show the whole menu and the
+  // terminal's status is read again (poTerm): not running or working = no press (Esc would stop its turn). After it the screen is read again; true = the menu is gone,
+  // false = it is still there (or anything could not be checked) and nothing more is pressed.
+  async remoteClose(po, cx) {
+    const t = await this.remoteRead(po);
+    if (t === null) return false;
+    if (!remoteScreen(t).menu) return true;
+    const term = await this.poTerm(po);
+    if (!term || !term.live || term.status === "working") return false;
+    let k = null; try { k = await hc(["keys", po, "esc"]); } catch {}
+    if (!(k && k.code === 0)) return false;
+    await this.sleepOn(cx, 600);
+    const after = await this.remoteRead(po);
+    return after !== null && !remoteScreen(after).menu;
+  }
+  remoteSet(room, patch, c) {
+    const r = { ...(this.rc.get(room) ?? {}), at: Date.now(), ...patch };
+    if (patch.kind) { const ms = Date.now(); r.note = { text: remoteNote(patch.kind, r), ms, bad: patch.kind === "fail" || patch.kind === "unknown" }; delete r.kind; }
+    this.rc.set(room, r);
+    if (patch.kind && r.note) this.say(`원격 연결 · ${r.note.text}`, r.note.bad); // the same result also floats over the top of the room for a few seconds (no layout space)
+    try { c.notify(); } catch {}
+  }
+  remoteOn(room, po, c) {
+    const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "");
+    const r0 = this.rc.get(room);
+    const rs = this.rs.get(room);
+    const why = remoteBlock({ po, status: st, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")), sending: r0?.phase === "send" });
+    if (why) { this.remoteSet(room, { phase: "fail", kind: "fail", why }, c); return; }
+    this.remoteSet(room, { phase: "send", why: "" }, c);
+    c.spawn(async (cx) => {
+      const done = (phase, kind, extra = {}) => { this.remoteSet(room, { phase, kind, why: "", url: "", ...extra }, cx); if (phase === "on" || phase === "already") this.remoteMark(room, po, extra.url ?? ""); };
+      try {
+        const pre0 = await this.remoteRead(po);
+        const pre = pre0 === null ? null : remoteScreen(pre0);
+        if (pre && pre.off) await this.remoteHelper("remote-clear", room); // the screen says it was turned off: the saved on-record is stale
+        if (pre && pre.active) { // already on (or its menu is open and the person is stuck in it): no send
+          if (pre.menu && !(await this.remoteClose(po, cx))) { done("fail", "fail", { why: "이미 켜져 있고 터미널에 연결 메뉴가 열려 있습니다. 닫지 못했습니다 — 터미널에서 Continue를 고르세요(Disconnect는 고르지 마세요)" }); return; }
+          done("already", "already", { url: pre.url });
+          return;
+        }
+        const res = await this.sendLine(po, REMOTE_CMD, () => true, room);
+        if (!res.ok) { done("fail", "fail", { why: res.why }); return; }
+        if (pre === null) { done("unknown", "unknown"); return; }
+        for (let i = 0; i < REMOTE_POLLS; i++) {
+          await this.sleepOn(cx, REMOTE_POLL_MS);
+          const txt = await this.remoteRead(po);
+          if (txt === null) continue;
+          const now = remoteScreen(txt);
+          if (now.menu) { // it was already connected: the command opened Claude Code's menu
+            if (await this.remoteClose(po, cx)) done("already", "already", { url: now.url });
+            else done("fail", "fail", { why: "이미 켜져 있어 연결 메뉴가 열렸고 닫지 못했습니다 — 터미널에서 Continue를 고르세요(Disconnect는 고르지 마세요)" });
+            return;
+          }
+          if (now.active || (now.url && now.url !== pre.url)) { done("on", "on", { url: now.url }); return; }
+        }
+        done("unknown", "unknown");
+      } catch (e) { done("fail", "fail", { why: cutHead(String(e?.message ?? e), 100) }); }
+    });
+  }
+  // The button and, beside it, the last known state: once the last screen check saw it on, the button itself reads "● 원격 연결 켜짐" (a click re-checks the screen and only sends if it no longer shows on). Not watched, so a disconnect made in the terminal shows only after the next check.
+  remoteButton(t, room, po, status) {
+    const r = this.rc.get(room);
+    const rs = this.rs.get(room);
+    const why = remoteBlock({ po, status, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")), sending: r?.phase === "send" });
+    const on = r && (r.phase === "on" || r.phase === "already");
+    const at = on ? new Date(r.at).toTimeString().slice(0, 5) : "";
+    return h_flex().id(`rc-${room}`).flex_none().min_w(0).gap(6).items_center()
+      .when(r?.phase === "send", (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child("확인 중…")))
+      .child(this.button(t, on ? "rc-on-done" : "rc-on", on ? h_flex().items_center().gap(6).child(div().flex_none().w(8).h(8).rounded(4).bg(t.working)).child("원격 연결 켜짐") : "원격 연결 켜기", (c) => this.remoteOn(room, po, c), { disabled: why, tip: why || (on ? `${at}에 화면으로 확인한 상태입니다. 그 뒤 터미널에서 끊었는지는 보지 않습니다. 누르면 화면을 다시 확인하고, 꺼져 있을 때만 /remote-control을 보냅니다` : "이 PO 터미널에 /remote-control을 보내 원격 연결(Remote Control)을 켭니다. Herdr를 다시 켜도 이 데스크가 켜짐을 본 적이 있으면 켜짐으로 이어서 보여 줍니다. 본 적이 없거나 확인할 수 없는 경우(예: Windows)에는 이미 켜져 있어도 이 글자로 보일 수 있습니다. 눌러도 안전합니다: 화면을 먼저 확인하고, 이미 켜져 있으면 연결 메뉴를 Esc로 닫기만 합니다") }));
+  }
+  // The system note of the last 원격 연결 try, as a quiet line at the end of the room's chat.
+  remoteNoteRow(t, room) {
+    const n = this.rc.get(room)?.note;
+    if (!n) return null;
+    return h_flex().id(`rc-note-${room}`).flex_none().min_w(0).px(14).py(4).gap(6).justify_center().items_center()
+      .child(div().min_w(0).text_size(11).text_color(n.bad ? t.blocked : t.dim).child(this.text(`rc-note-t-${room}`, chatHtml(`원격 연결 · ${new Date(n.ms).toTimeString().slice(0, 5)} · ${n.text}`))));
+  }
+
+  // After a start or a reload of the desk the in-memory state is gone, so every PO terminal is checked ONCE (read only, nothing is sent or pressed). Two sources, the screen first:
+  // (1) the screen still shows Claude Code's "/remote-control is active" line: on (and that is saved, see remoteMark); a disconnect line after it: off (the saved record is deleted).
+  // (2) the line has scrolled away (the usual case after the Herdr app restarts: the PO's claude process keeps running there, so remote really is still on): the saved record
+  // of when the desk last saw it on counts only while that same process (pid + start time from `hc get` and ps) still runs, in the same session, and the transcript's newest
+  // transcript record is not the empty one a disconnect leaves (#109; inbox.cjs checkRemote). Without a record, a pid or a start time (Windows) it stays "켜기" (a click re-checks).
+  // A state is only ever set here, never cleared. `force` (the refresh button) checks again.
+  remoteRestore(cx, force = false) {
+    if (force) this.rcChecked.clear();
+    const pos = poList(this.liveTerms()).filter((p) => !this.rcChecked.has(p.address));
+    for (const p of pos) {
+      this.rcChecked.add(p.address);
+      cx.spawn(async (c) => {
+        const txt = await this.remoteRead(p.address);
+        if (txt === null) { this.rcChecked.delete(p.address); return; } // could not read: try again at the next load
+        const sc = remoteScreen(txt);
+        let url = sc.url;
+        if (sc.off) { await this.remoteHelper("remote-clear", p.id); return; }
+        if (sc.seen) this.remoteMark(p.id, p.address, sc.url);
+        else {
+          const pid = await this.remotePid(p.address);
+          const j = pid ? await this.remoteHelper("remote-check", p.id, String(pid)) : null;
+          if (!j || j.on !== true) return;
+          url = String(j.url ?? "");
+        }
+        const r = this.rc.get(p.id);
+        if (r && r.phase !== "on" && r.phase !== "already") return; // a try of this session (sending, failed, unknown) is newer than the screen
+        this.rc.set(p.id, { ...(r ?? {}), phase: "on", at: Date.now(), url: url || r?.url || "", why: "" });
+        try { c.notify(); } catch {}
+      });
+    }
+  }
+  // The claude process of a PO terminal (`hc get`), null when it is not the foreground process or could not be read.
+  async remotePid(po) {
+    try { return termPid(await hc(["get", po, "--json"])); } catch { return null; }
+  }
+  // The helper's remote-check / remote-mark / remote-clear (it reads and writes the record file and runs ps; the desk cannot). null when it did not answer.
+  async remoteHelper(cmd, ...args) {
+    try {
+      const r = await exec("node", [HELPER(), cmd, ...args], { timeout: 8000 });
+      if (r.code === 0) return JSON.parse(r.stdout);
+    } catch {}
+    return null;
+  }
+  // The desk saw remote on in terminal `po` (room = the PO id): save the process behind it for the next restore. Quiet and best effort: a failure only means no restore.
+  async remoteMark(room, po, url = "") {
+    const pid = await this.remotePid(po);
+    if (pid) await this.remoteHelper("remote-mark", room, String(pid), String(url ?? ""));
+  }
   // A panel answer: the answer line goes through deliver(). The box is cleared and the ask marked once it reached the PO (or, when the PO had
   // no pane, once the pane opened and it was delivered).
   send(a, text, cx, kind = "answer") {
@@ -2408,7 +3010,7 @@ export default class Inbox extends View {
       const sent = { text: body, imgs: pics.map((x) => x.path) };
       const r = this.deliver(po, line, cx, { text: body, imgs: pics.map((x) => x.path), to: a.s.leader, po: a.owner, kind, ak: this.askKey(a) }, (r2) => { this.clearBox(a, r2, sent); });
       if (r === "sent" || r === "held") this.clearBox(a, r, sent);
-    } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
+    } catch (e) { this.say(`붙여 넣지 못했습니다: ${cutHead(String(e?.message ?? e), 160)}`, true); }
     cx.notify();
   }
 
@@ -2418,7 +3020,7 @@ export default class Inbox extends View {
     const leader = a.s.leader;
     try { setShared(SENT_KEY, { ...(shared(SENT_KEY) ?? {}), [leader]: this.askKey(a) + (how === "held" ? "|held" : "") }); } catch {}
     const st = this.inputs.get(leader);
-    if (st && (!sent || String(st.value() ?? "").trim() === sent.text)) st.set_value("");
+    if (st && (!sent || String(st.value() ?? "").trim() === sent.text)) this.wipe(leader, st);
     this.setPics(leader, sent ? this.picsOf(leader).filter((x) => !sent.imgs.includes(x.path)) : []);
     if (this.writing === a.s.leader) this.writing = null;
   }
@@ -2426,12 +3028,93 @@ export default class Inbox extends View {
   box(leader, cx) {
     let s = this.inputs.get(leader);
     if (!s) {
-      s = InputState.new({ value: "", placeholder: "답을 적고 Enter" });
-      s.on("submit", (_e, c) => { const a = this.asks().find((x) => x.s.leader === leader); if (a) this.send(a, s.value(), c); });
+      s = TextareaState.new({ value: "", rows: 1, placeholder: "답을 적고 Enter — Shift+Enter로 줄바꿈" }); // #110: the same multi-line box as the PO chat (the single-line Input took neither a second line nor Cmd+A)
+      try { s.set_auto_grow(1, INPUT_MAX_LINES); } catch {}
+      s.on("submit", (e, c) => this.cardEnter(leader, e?.shift ? "newline" : "send", c)); // the widget's own submit event: with Shift a line break, else Enter (the key press below says the same; each handler dedupes)
       s.on("paste_other", (_e, c) => this.pastePic(c, leader)); // Cmd+V found no text: take a picture from the clipboard, as the PO box does
+      s.on("change", () => this.cardChange(leader, s)); // #74: the draft mirror, #83: the Enter bookkeeping
       this.inputs.set(leader, s);
     }
     return s;
+  }
+
+  // #110: the answer box of a decision card takes Enter the way the PO chat box does (#83): Enter sends from any cursor position without leaving the
+  // widget's own line break in the text, the first Enter after a Korean/Japanese/Chinese IME edit is held once, Shift+Enter is a line break. The chat box
+  // keeps its own copy of this (it also has the "@" menu and chips); both use the same pure rules (strayAt, imeHold, ...).
+  cardState(leader) {
+    let k = this.cardK.get(leader);
+    if (!k) { k = { lastValue: "", core: "", changedAt: 0, editAt: 0, enterAt: 0, heldAt: 0, nlAt: 0, sentAt: 0, brk: null }; this.cardK.set(leader, k); }
+    return k;
+  }
+
+  cardChange(leader, st) {
+    const k = this.cardState(leader);
+    k.changedAt = Date.now();
+    let value = "";
+    try { value = st.value(); } catch { return; }
+    if (this.guard(leader, st, value)) return; // the box was emptied behind the person's back: the text is back
+    this.keep(leader, st, value);
+    const prev = k.lastValue;
+    const brk = strayAt(prev, value);
+    const rep = brk < 0 ? replacedAt(prev, value) : null;
+    k.lastValue = value;
+    if (brk >= 0 && enterPending(k.enterAt, k.changedAt)) { this.cardEdit(st, k, withoutAt(value, brk), { start: brk, end: brk + 1 }, "", { start: brk, end: brk }, k.editAt); return; }
+    if (rep && enterPending(k.enterAt, k.changedAt)) { this.cardEdit(st, k, prev, { start: rep.idx, end: rep.idx + 1 }, prev.slice(rep.idx, rep.end), { start: rep.idx, end: rep.end }, k.editAt); return; }
+    k.brk = brk >= 0 ? { idx: brk, at: k.changedAt, core: k.core, editAt: k.editAt } : rep ? { idx: rep.idx, at: k.changedAt, core: k.core, editAt: k.editAt, rep, prev } : null;
+    const core = editCore(value);
+    if (core !== k.core) { k.core = core; k.editAt = k.changedAt; }
+    if (strayBreak(value, k.sentAt, k.changedAt)) { this.wipe(leader, st); return; } // the Enter that sent left a line break
+    if (strayHeld(value, k.heldAt, k.changedAt)) this.cardEdit(st, k, editCore(value), null, null, { start: editCore(value).length, end: editCore(value).length }, k.editAt); // the held Enter left a line break
+  }
+
+  // Puts the box back to `next` (the text the person meant): replaces `span` with `text` through the widget (so it stays an edit), plain set_value when
+  // the widget does not give `next`, then the cursor/selection to `range`. `span` null: set_value only.
+  cardEdit(st, k, next, span, text, range, editAt) {
+    k.lastValue = next; k.core = editCore(next); k.editAt = editAt; k.brk = null;
+    try {
+      if (span) { st.set_selected_range(span); st.replace(text); }
+      if (st.value() !== next) st.set_value(next);
+      st.set_selected_range(range);
+    } catch {}
+  }
+
+  cardEnter(leader, intent, c) {
+    const k = this.cardState(leader), st = this.inputs.get(leader), now = Date.now();
+    if (!st) return;
+    if (intent === "send") {
+      k.enterAt = now;
+      if (now - k.sentAt <= 250 || now - k.heldAt < 150) return; // (the key and the submit event of one press are one Enter)
+      let value = "", cur = null;
+      try { value = st.value(); } catch {}
+      try { cur = st.selected_range().end; } catch {}
+      const b = k.brk;
+      if (b && now - b.at <= 25 && value[b.idx] === "\n") { // the widget's line break came before this key: it is not the person's text
+        if (b.rep) { value = b.prev; cur = b.rep.end; this.cardEdit(st, k, b.prev, { start: b.rep.idx, end: b.rep.idx + 1 }, b.prev.slice(b.rep.idx, b.rep.end), { start: b.rep.idx, end: b.rep.end }, b.editAt); }
+        else { value = withoutAt(value, b.idx); cur = b.idx; this.cardEdit(st, k, value, { start: b.idx, end: b.idx + 1 }, "", { start: b.idx, end: b.idx }, b.editAt); }
+        k.core = b.core;
+      }
+      if (value.trim() && imeHold(value, k.editAt, k.heldAt, now, atTextEnd(value, cur))) { // maybe the IME's confirming Enter: only this once
+        k.heldAt = now;
+        if (strayHeld(value, now, now) && now - k.changedAt <= 25) { const n = editCore(value); this.cardEdit(st, k, n, null, null, { start: n.length, end: n.length }, k.editAt); }
+        c.notify();
+        return;
+      }
+      const a = this.asks().find((x) => x.s.leader === leader);
+      if (!a) return;
+      k.sentAt = now;
+      this.send(a, value, c);
+    } else if (intent === "newline" && now - k.nlAt > 80) {
+      k.nlAt = now;
+      try { c.timer.after(40, () => { if (needsNewline(k.changedAt, now)) { try { st.replace("\n"); } catch {} } }); } catch {}
+    }
+  }
+
+  answerKey(leader, e, c) {
+    this.keyAt = Date.now();
+    const intent = enterIntent(e?.key, Boolean(e?.modifiers?.shift));
+    if (!intent) return;
+    if (intent === "send") { try { c.stop_propagation(); } catch {} }
+    this.cardEnter(leader, intent, c);
   }
 
   // ---- PO chat: the text goes to the PO's prompt through deliver(), the same path as a panel answer.
@@ -2474,10 +3157,26 @@ export default class Inbox extends View {
   enterBox(intent, c) {
     const now = Date.now();
     if (intent === "send") {
+      this.enterAt = now;
       if (now - this.pickedAt <= 250 || now - this.sentAt <= 250 || now - this.heldAt < 150) return; // (the key and the submit event of one press are one Enter)
       let value = "";
       try { value = this.chat.value(); } catch {}
-      if (value.trim() && imeHold(value, this.editAt, this.heldAt, now)) { // maybe the IME's confirming Enter: only this once
+      let cur = null; // #83: where the cursor was when Enter was pressed (Enter sends from any position; the IME tail rule is for the end)
+      try { cur = this.chat.selected_range().end; } catch {}
+      const b = this.brk;
+      if (b && now - b.at <= 25 && value[b.idx] === "\n") { // the widget's line break at the cursor came before this key: it is not the person's text
+        if (b.rep) { // it replaced a selection: the selected text is the person's text and comes back
+          value = b.prev;
+          cur = b.rep.end;
+          this.putBack(b.prev, b.rep, b.editAt);
+        } else {
+          value = withoutAt(value, b.idx);
+          cur = b.idx;
+          this.dropAt(this.chat.value(), b.idx, b.editAt);
+        }
+        this.core = b.core;
+      }
+      if (value.trim() && imeHold(value, this.editAt, this.heldAt, now, atTextEnd(value, cur))) { // maybe the IME's confirming Enter: only this once
         this.heldAt = now;
         if (strayHeld(value, now, now) && now - this.changedAt <= 25) this.dropBreak(value); // the widget already added its line break
         c.notify();
@@ -2488,6 +3187,36 @@ export default class Inbox extends View {
       this.nlAt = now;
       try { c.timer.after(40, () => { if (needsNewline(this.changedAt, now)) { try { this.chat.replace("\n"); } catch {} } }); } catch {}
     }
+  }
+
+  // #83: takes the one line break at `idx` out (the text and the chips around it stay, the cursor goes where the break was); `editAt` is the edit time to keep.
+  dropAt(value, idx, editAt) {
+    const next = withoutAt(value, idx);
+    this.lastValue = next;
+    this.core = editCore(next);
+    this.editAt = editAt;
+    this.brk = null;
+    try {
+      this.chat.set_selected_range({ start: idx, end: idx + 1 });
+      this.chat.replace("");
+      if (this.chat.value() !== next) this.chat.set_value(next); // the widget would not replace with nothing: plain text instead
+      this.chat.set_selected_range({ start: idx, end: idx });
+    } catch {}
+  }
+
+  // #83: an Enter over a selection made the widget swap the selected text for a line break: the text of `prev` comes back (chips of the selected span
+  // become plain text) with its selection, and the Enter then sends it whole.
+  putBack(prev, rep, editAt) {
+    this.lastValue = prev;
+    this.core = editCore(prev);
+    this.editAt = editAt;
+    this.brk = null;
+    try {
+      this.chat.set_selected_range({ start: rep.idx, end: rep.idx + 1 });
+      this.chat.replace(prev.slice(rep.idx, rep.end));
+      if (this.chat.value() !== prev) this.chat.set_value(prev);
+      this.chat.set_selected_range({ start: rep.idx, end: rep.end });
+    } catch {}
   }
 
   // Takes the one trailing line break the widget added out of the box (the cursor goes to the end, where it was).
@@ -2501,6 +3230,7 @@ export default class Inbox extends View {
 
   // Keys of the box: the open menu's keys first, then Enter / Shift+Enter.
   inputKey(e, c) {
+    this.keyAt = Date.now();
     if (this.menu) { this.menuKey(e, c); return; }
     const intent = enterIntent(e?.key, Boolean(e?.modifiers?.shift));
     if (!intent) return;
@@ -2537,9 +3267,92 @@ export default class Inbox extends View {
       }
       let r;
       try { r = hc(["keys", po, "enter"]); } catch { fail(cx, ""); this.restore(back, cx, id); return; }
-      Promise.resolve(r).then((o) => { if (o && o.code !== 0) fail(cx, String(o.stderr ?? "").trim().slice(0, 80)); else this.mark(id, "sent"); }).catch(() => fail(cx, "")).then(() => this.restore(back, cx, id));
+      Promise.resolve(r).then((o) => { if (o && o.code !== 0) fail(cx, cutHead(String(o.stderr ?? "").trim(), 80)); else this.mark(id, "sent"); }).catch(() => fail(cx, "")).then(() => this.restore(back, cx, id));
     };
     try { c.timer.after(settle, press); } catch { press(c); }
+  }
+
+  // A desk line that starts with "!" goes into the PO's own prompt as the person's raw input (Claude Code's bash mode). `hc send` wraps text in <hc …> and
+  // `hc keys` has no "!", so this is the unwrapped paste path (clipboard + terminal.paste + Enter, keyboard given back). Only when nothing else is in play:
+  // not UI mode (no pane), no @mention or picture, one line, the PO's pane open, the PO idle (not working, not on a question) and its input box empty.
+  // Otherwise nothing is sent, the text stays in the box and the reason is shown. Whether a pasted leading "!" enters bash mode is unverified in the real app.
+  sendBang(c, po, p, pics) {
+    const cmd = bangCommand(p.text);
+    const refuse = (why, cx = c) => { this.bangBusy = false; this.say(`${why} '!' 명령은 보내지 않았고 글은 입력칸에 그대로 있습니다.`, true); try { cx.notify(); } catch {} };
+    if (this.bangBusy) { this.say("앞의 '!' 명령을 확인하는 중입니다. 잠시 뒤에 다시 보내세요.", true); try { c.notify(); } catch {} return; }
+    if (this.mained) { refuse("UI 모드에서는 PO 터미널에 글을 그대로 붙여 넣을 수 없어(보내기는 글을 <hc …>로 감쌉니다)"); return; }
+    if (p.to.length) { refuse("'!' 명령은 PO에게만 보낼 수 있어(@멘션을 빼 주세요)"); return; }
+    if (pics.length) { refuse("'!' 명령은 그림과 함께 보낼 수 없어"); return; }
+    if (!cmd) { refuse("'!' 뒤에 실행할 명령이 없어"); return; }
+    if (/\n/.test(cmd)) { refuse("'!' 명령은 한 줄만 보낼 수 있어"); return; }
+    const gate = this.bangGate(po);
+    if (gate) { refuse(gate); return; }
+    const text = composeChat(this.chat.content());
+    const room = this.view().pick; // the room it is sent from: the screen read below can end after another room was picked
+    this.bangBusy = true;
+    this.bangCheck(c, po, refuse, (cx, clip) => {
+      this.bangBusy = false;
+      try {
+        const res = this.deliver(po, `!${cmd}`, cx, { text: `!${cmd}`, imgs: [], to: "", tos: [], po: room, kind: "chat" });
+        this.bangClipBack(cx, clip, res);
+        if (res === "sent") {
+          this.sentAt2 = Date.now();
+          if (composeChat(this.chat.content()) === text) { this.wipe("chat", this.chat); this.menu = null; }
+        }
+      } catch (e) { this.say(`붙여 넣지 못했습니다: ${cutHead(String(e?.message ?? e), 160)}`, true); }
+      try { cx.notify(); } catch {}
+    });
+  }
+
+  // The checks that need no screen read: the PO's pane is open and the PO is neither working nor on a question. "" when it may go on, else the reason.
+  bangGate(po) {
+    let hasPane = false;
+    try { hasPane = (panes() ?? []).some((x) => x.terminal === po); } catch {}
+    if (!hasPane) return `PO(${po})의 터미널 칸이 화면에 열려 있지 않아`;
+    const term = this.liveTerms().find((x) => x.address === po);
+    if (!term || isBusy(term)) return `PO(${po})가 일하는 중이거나 질문 중이라`;
+    return "";
+  }
+
+  // Reads the PO's screen (and the clipboard text, to give it back after the paste) and calls `go(cx, clip)` only when the PO is idle at an EMPTY input
+  // box; every other outcome calls `fail(why, cx)`. The read is capped at BANG_READ_MS: a stalled `hc read` fails instead of holding the busy flag forever.
+  // Used by the first send and by a bubble's resend, so both go through the same guard.
+  bangCheck(c, po, fail, go) {
+    const spawn = (cx) => (async () => {
+      const work = Promise.all([
+        Promise.resolve().then(() => hc(["read", po, "--lines", String(PROMPT_LINES)])).catch(() => null),
+        this.clipText(),
+      ]);
+      const limit = new Promise((res) => { try { cx.timer.after(BANG_READ_MS, () => res(null)); } catch {} });
+      const got = await Promise.race([work, limit]);
+      if (!got) { fail(`PO(${po})의 화면 읽기가 ${Math.round(BANG_READ_MS / 1000)}초 안에 끝나지 않아`, cx); return; }
+      const [r, clip] = got;
+      if (!(r && r.code === 0)) { fail(`PO(${po})의 화면을 읽지 못해`, cx); return; }
+      const inp = promptInput(String(r.stdout ?? ""));
+      if (inp === null) { fail(`PO(${po})의 입력창을 화면에서 찾지 못해`, cx); return; }
+      if (inp !== "") { fail(`PO(${po})의 입력창이 비어 있지 않아`, cx); return; }
+      const t2 = this.liveTerms().find((x) => x.address === po);
+      if (!t2 || isBusy(t2)) { fail(`PO(${po})가 그 사이 일하거나 질문 중이 되어`, cx); return; }
+      go(cx, clip);
+    })().catch((e) => { try { fail(cutHead(String(e?.message ?? e), 80), cx); } catch {} });
+    try { c.spawn(spawn); } catch (e) { fail(cutHead(String(e?.message ?? e), 80), c); }
+  }
+
+  // The clipboard's TEXT (null when it holds none or cannot be read: a picture is not restored). Never throws.
+  async clipText() {
+    try {
+      const r = await exec("node", [HELPER(), "cliptext"], { timeout: 4000 });
+      if (r.code !== 0) return null;
+      const o = JSON.parse(r.stdout);
+      return typeof o?.text === "string" && o.text !== "" ? o.text : null;
+    } catch { return null; }
+  }
+
+  // After the '!' line was pasted (the paste itself runs inside deliver), the clipboard gets back what it held before. Not when the delivery is still
+  // waiting for a pane ("opening": that paste needs the clipboard later) or failed.
+  bangClipBack(cx, clip, res) {
+    if (typeof clip !== "string" || clip === "" || (res !== "sent" && res !== "held")) return;
+    try { cx.write_to_clipboard(clip); } catch {}
   }
 
   sendChat(c) {
@@ -2563,26 +3376,26 @@ export default class Inbox extends View {
       return;
     }
     const po = tgt.po;
+    if (bangCommand(p.text) !== null) { this.sendBang(c, po, p, pics); return; }
     try {
       // The PO reads a picture from its file: each path goes in the message as a line it can open with the Read tool.
       const line = [p.text, ...pics.map((x) => imgLine(x.path))].filter(Boolean).join("\n");
       const r = this.deliver(po, line, c, { text: p.text, imgs: pics.map((x) => x.path), to: p.to[0] ?? "", tos: p.to, po: v.pick, kind: "chat" });
       if (r === "sent" || r === "held" || r === "opening") { // opening: the bubble holds the text and sends it by itself once the pane opens
         this.sentAt2 = Date.now(); // the draw that shows the new bubble goes to the end once (sendFollow)
-        this.chat.set_value("");
+        this.wipe("chat", this.chat);
         this.pics = [];
         this.menu = null;
       }
-    } catch (e) { this.say(`붙여 넣지 못했습니다: ${String(e?.message ?? e).slice(0, 160)}`, true); }
+    } catch (e) { this.say(`붙여 넣지 못했습니다: ${cutHead(String(e?.message ?? e), 160)}`, true); }
     c.notify();
   }
 
   // The chat footer: the "@" menu, the input with mention chips, the send button. The room has no box while it is "PO 모름" (no PO to send to).
   chatBox(t, v) {
-    if (v.pick === PO_OTHER) {
-      return div().id("chat-none").flex_none().px(12).py(8).border_t(1).border_color(t.border).text_size(11.5).text_color(t.dim)
-        .child("PO를 알 수 없는 방이라 여기서는 보낼 곳이 없습니다. 왼쪽에서 PO 방을 고르세요.");
-    }
+    // #74: the box is drawn in every room (the "PO 모름" room too, with a note instead of a target), at the same place in the tree with ids on
+    // its parts, so a room switch, a refresh or a hint line coming and going never rebuilds the input the person is typing in.
+    const none = v.pick === PO_OTHER;
     const menu = this.menu && v_flex().id("chat-menu").flex_none().p(4).gap(2).rounded(8).bg(t.raised).border(1).border_color(t.border)
       .children(this.menu.items.map((it, i) => h_flex().id(`mn-${it.id}`).h(26).px(8).gap(8).items_center().rounded(6).cursor_pointer()
         .bg(i === this.menu.sel ? t.selected : t.raised).hover((x) => x.bg(t.hover))
@@ -2593,16 +3406,16 @@ export default class Inbox extends View {
     const target = v.tabs.find((x) => x.id === v.pick && x.id !== PO_OTHER && !x.ghost);
     const chip = (ctx) => div().h(ctx.line_height).px(5).rounded(5).flex().items_center().bg(t.working + "26").text_color(t.working).text_size(12.5).font_semibold()
       .child(ctx.token.label ?? ctx.token.text.trim());
-    return v_flex().flex_none().px(10).pb(10).pt(6).gap(6).border_t(1).border_color(t.border)
+    return v_flex().id("chat-box").flex_none().px(10).pb(10).pt(6).gap(6).border_t(1).border_color(t.border)
       .on_key_down((e, c) => this.inputKey(e, c))
       .when(Boolean(menu), (el) => el.child(menu))
       .when(holdShown(this.changedAt, this.heldAt), (el) => el.child(div().text_size(11).text_color(t.working).child("한 번 더 Enter로 보냅니다")))
-      .child(div().truncate().text_size(10.5).text_color(t.dim).child(target ? `받는 PO: ${target.label}` : ghost ? "PO 터미널을 다시 찾는 중입니다 — 쓰던 글은 그대로 있습니다" : "받는 PO가 없습니다 — PO를 고르세요"))
+      .child(div().id("chat-target").truncate().text_size(10.5).text_color(t.dim).child(none ? "PO를 알 수 없는 방이라 여기서는 보낼 곳이 없습니다 — 왼쪽에서 PO 방을 고르세요(쓰던 글은 그대로 있습니다)" : target ? `받는 PO: ${target.label}` : ghost ? "PO 터미널을 다시 찾는 중입니다 — 쓰던 글은 그대로 있습니다" : "받는 PO가 없습니다 — PO를 고르세요"))
       .when(this.pics.length > 0 || this.picBusy > 0, (el) => el.child(this.picRow(t, null)))
-      .child(h_flex().gap(6).items_center()
+      .child(h_flex().id("chat-row").gap(6).items_center()
         .on_drop((ev, c) => this.dropPics(ev?.paths, c))
         .child(this.button(t, "chat-attach", "그림", (c) => { this.pickPics(c); }, { tip: "그림 파일을 골라 붙입니다(Cmd+V로 붙여넣거나 파일을 끌어다 놓아도 됩니다). 보내면 PO가 파일을 열어 봅니다" }))
-        .child(div().flex_1().min_w(0).on_mouse_down("left", stop)
+        .child(div().id("chat-input").flex_1().min_w(0).on_mouse_down("left", stop)
           .child(Textarea.new(this.chat).token((ctx) => chip(ctx)).min_h(30).px(10).py(5).rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
         .child(this.button(t, "chat-send", "PO에 보내기", (c) => this.sendChat(c), { primary: true, tip: "고른 PO 터미널에 글을 붙여 넣고 Enter까지 눌러 보냅니다(글은 클립보드를 거칩니다). Shift+Enter는 줄바꿈" })));
   }
@@ -2610,6 +3423,24 @@ export default class Inbox extends View {
   poHint(t) {
     return div().id("po-hint").flex_none().px(this.compact ? 10 : 14).pb(6).text_size(11).text_color(t.muted)
       .child(`PO 터미널에 ${hubTag()}, ${NAMES.hubIdLabel}=<id> 라벨을 달면 PO별로 나뉩니다. 지금은 PO가 없어 채팅을 보낼 수 없습니다.`);
+  }
+
+  // #69: the "working" dot of a room: a small accent dot, always in the layout (clear when idle) so the name does not move when it comes and goes.
+  roomDot(t, x) {
+    const d = div().flex_none().size(6).rounded(3);
+    return x.working ? d.bg(t.working).tooltip("작업 중") : d;
+  }
+
+  // #119: the remote mark of a room, in the accent colour with the "원격 연결 켜짐" tip: null unless the room's PO has remote on (an unknown or never-checked state is off).
+  // Text, not a dot, so it is not mistaken for #69's "working" dot. Every room view takes it from here (the wide list shows it as "PO · 원격", the narrow ones as "원격").
+  roomRemote(t, x, text) {
+    return x.remote ? div().flex_none().text_size(10).text_color(t.working).tooltip("원격 연결 켜짐").child(text) : null;
+  }
+
+  // The small line under a room's name in the wide room list: "PO", and "PO · 원격" while its PO has remote on.
+  roomSub(t, x) {
+    if (x.id === PO_OTHER) return div().min_w(0).truncate().text_size(10).text_color(t.dim).child("채팅 없음");
+    return this.roomRemote(t, x, "PO · 원격") ?? div().min_w(0).truncate().text_size(10).text_color(t.dim).child("PO");
   }
 
   // The count badges of a room: unread (green) and waiting leaders (red).
@@ -2633,7 +3464,8 @@ export default class Inbox extends View {
           .hover((s) => s.bg(on ? t.selected : t.hover)).on_click((_e, c) => this.pickPo(x.id, c))
           .tooltip(x.id === PO_OTHER ? OTHER_TIP : `po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
           .child(div().max_w(150).truncate().text_size(11.5).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
-          .children(this.roomBadges(t, x));
+          .child(this.roomDot(t, x))
+          .children([this.roomRemote(t, x, "원격"), ...this.roomBadges(t, x)].filter(Boolean));
       }));
   }
 
@@ -2643,12 +3475,14 @@ export default class Inbox extends View {
       .children(v.tabs.map((x) => {
         const on = x.id === v.pick;
         const color = x.id === PO_OTHER ? t.dim : tint(t, x.id);
-        const badges = this.roomBadges(t, x);
+        const badges = [this.roomRemote(t, x, "원격"), ...this.roomBadges(t, x)].filter(Boolean);
         return v_flex().id(`po-${x.id}`).flex_none().items_center().py(5).gap(3).rounded(8).cursor_pointer().on_mouse_down("left", stop)
           .bg(on ? t.selected : t.chrome).hover((s) => s.bg(on ? t.selected : t.hover)).on_click((_e, c) => this.pickPo(x.id, c))
           .tooltip(x.id === PO_OTHER ? OTHER_TIP : `${x.label} · po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
-          .child(this.circle(t, color, x.id === PO_OTHER ? "?" : String(x.label).slice(0, 1).toUpperCase()))
-          .child(div().w(SLIM_W - 10).truncate().text_center().text_size(9.5).text_color(on ? t.foreground : t.dim).child(x.label))
+          .child(this.circle(t, color, x.id === PO_OTHER ? "?" : initial(x.label)))
+          .child(h_flex().w(SLIM_W - 10).gap(3).items_center().justify_center()
+            .child(div().min_w(0).truncate().text_center().text_size(9.5).text_color(on ? t.foreground : t.dim).child(x.label))
+            .child(this.roomDot(t, x)))
           .when(badges.length > 0, (el) => el.child(h_flex().gap(3).items_center().children(badges)));
       }));
   }
@@ -2662,10 +3496,11 @@ export default class Inbox extends View {
         return h_flex().id(`po-${x.id}`).flex_none().h(44).px(8).gap(8).items_center().rounded(8).cursor_pointer().on_mouse_down("left", stop)
           .bg(on ? t.selected : t.chrome).hover((s) => s.bg(on ? t.selected : t.hover)).on_click((_e, c) => this.pickPo(x.id, c))
           .tooltip(x.id === PO_OTHER ? OTHER_TIP : `po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
-          .child(this.circle(t, color, x.id === PO_OTHER ? "?" : String(x.label).slice(0, 1).toUpperCase()))
+          .child(this.circle(t, color, x.id === PO_OTHER ? "?" : initial(x.label)))
           .child(v_flex().flex_1().min_w(0)
             .child(div().min_w(0).truncate().text_size(12.5).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
-            .child(div().min_w(0).truncate().text_size(10).text_color(t.dim).child(x.id === PO_OTHER ? "채팅 없음" : "PO")))
+            .child(this.roomSub(t, x)))
+          .child(this.roomDot(t, x))
           .children(this.roomBadges(t, x));
       }));
   }
@@ -2700,7 +3535,7 @@ export default class Inbox extends View {
     return div().flex_none().size(28).rounded(14).bg(color + "33").flex().items_center().justify_center().text_size(12).font_semibold().text_color(color).child(letter);
   }
 
-  avatar(t, leader) { return this.circle(t, tint(t, leader), shortName(leader).slice(0, 1).toUpperCase()); }
+  avatar(t, leader) { return this.circle(t, tint(t, leader), initial(shortName(leader))); }
 
   // ---- report text. Collapsed (default): the headline, the first meaningful line and the short link. Open: the structured body
   // (blocks come parsed from inbox.cjs): headings, indented list rows, command blocks with a copy button, short link labels.
@@ -2717,29 +3552,36 @@ export default class Inbox extends View {
       : div().flex_none().w(f.w).h(f.h).rounded(4).bg(t.hover);
   }
 
-  // A message as Markdown (bold, headings, lists, `code`, links; no raw HTML: tags show as text). The wrapper tags are removed first (mdText).
+  // A message as Markdown (headings, lists, `code`, links; no raw HTML: tags show as text). The wrapper tags are removed first (mdText).
   // Selectable like text(); a link opens only when it is http(s) (openUrl ignores everything else).
-  // The TextView draws **bold** at the normal weight (it ignores bold and the weight around it), so each bold run also gets a tint behind it
-  // (highlight_range, offsets into the very string given to markdown): bold stays visible without a weight.
-  md(id, src, t) {
-    this.tvN = (this.tvN ?? 0) + 1;
-    const m = mdText(src);
-    let tv = TextView.markdown(id, m).raw_html(false).selectable(true).on_link_click((url, c) => openUrl(url, c)).on_selection_change((sel, c) => this.onSel(id, sel, c));
-    if (t) {
+  // The person's own bubble and the PO's bubbles both draw through here, so a list, `code` and a bold header read the same in both (#66).
+  // The TextView draws **bold** at the normal weight (it ignores bold and the weight around it), so a line that is only **bold** text is its own
+  // TextView with font_weight(700) (mdBlocks, #66); a bold run inside a sentence stays at the normal weight. Nothing is painted behind bold.
+  md(id, src) {
+    const view = (vid0, s0, bold) => {
+      this.tvN = (this.tvN ?? 0) + 1;
+      const vid = wellFormed(vid0), s = wellFormed(s0); // a lone half of an emoji makes TextView.markdown throw and the whole view with it (#113)
       try {
-        const bc = tintHex(t, "bold"); // theme accent at ~45% (less when the text would stop being readable), see HL_KINDS
-        if (bc) for (const r of boldRanges(m)) tv = tv.highlight_range(r.start, r.end, bc);
-        else this.tintWarn(t, "bold");
-      } catch {}
-    }
-    return tv;
+        const tv = TextView.markdown(vid, s).raw_html(false).selectable(true).on_link_click((url, c) => openUrl(url, c)).on_selection_change((sel, c) => this.onSel(vid, sel, c));
+        return bold ? tv.font_weight(700) : tv;
+      } catch (e) {
+        // One entry the Markdown view refuses is drawn as plain text; the rest of the list stays.
+        this.diag(`markdown view failed for ${cutHead(vid, 60)}: ${cutHead(String(e?.message ?? e), 160)}`);
+        const tv = this.text(vid, `<p>${escHtml(s).replace(/\n/g, "<br>")}</p>`);
+        return bold ? tv.font_weight(700) : tv;
+      }
+    };
+    const blocks = mdBlocks(mdText(src));
+    if (!blocks.length) return view(id, "", false);
+    if (blocks.length === 1 && !blocks[0].bold) return view(id, blocks[0].s, false);
+    return v_flex().min_w(0).gap(3).children(blocks.map((b, i) => (b.bold ? div().min_w(0).pt(i ? 3 : 0).child(view(`${id}-${i}`, b.s, true)) : view(`${id}-${i}`, b.s, false))));
   }
 
   // A PO message folded like the person's own (#47): a long one shows its first lines and a "더 보기" under them.
   mdFolded(id, src, t) {
     const lc = clipLong(unwrapTags(src)), open = lc.cut && this.more.has(id);
-    if (!lc.cut) return this.md(id, src, t);
-    return v_flex().min_w(0).gap(6).child(this.md(id, open ? src : lc.text, t)).child(this.moreToggle(t, id, lc, open));
+    if (!lc.cut) return this.md(id, src);
+    return v_flex().min_w(0).gap(6).child(this.md(id, open ? src : lc.text)).child(this.moreToggle(t, id, lc, open));
   }
 
   // "더 보기 · N자 더" / "접기" under a folded bubble. Only this bubble opens; the 복사 chip copies the whole text either way.
@@ -2758,6 +3600,7 @@ export default class Inbox extends View {
 
   text(id, html) {
     this.tvN = (this.tvN ?? 0) + 1;
+    id = wellFormed(id); html = wellFormed(html); // see md(): a lone half of an emoji must not reach the TextView (#113)
     return TextView.html(id, html).selectable(true).on_link_click((url, c) => openUrl(url, c)).on_selection_change((sel, c) => this.onSel(id, sel, c));
   }
 
@@ -2794,7 +3637,7 @@ export default class Inbox extends View {
       const key = `${id}-${i}`;
       if (p.t === "code") return div().min_w(0).pl(p.depth ? p.depth * 14 + 18 : 0).child(this.codeBlock(t, p.text, p.html, `copy-${key}`));
       if (p.t === "h") return div().min_w(0).pt(4).child(this.heading_text(t, key, p.html, 14.5));
-      return div().min_w(0).text_size(12.5).text_color(t.foreground).child(typeof p.md === "string" && p.md ? this.md(key, p.md, t) : this.text(key, p.html));
+      return div().min_w(0).text_size(12.5).text_color(t.foreground).child(typeof p.md === "string" && p.md ? this.md(key, p.md) : this.text(key, p.html));
     }));
   }
 
@@ -2826,10 +3669,23 @@ export default class Inbox extends View {
     return h_flex().gap(6).items_center().min_w(0)
       .when(!bare, (el) => el.child(div().id(`peek-${s.leader}-${it?.ts ?? ""}`).min_w(0).truncate().text_size(12).font_semibold().text_color(tint(t, s.leader)).cursor_pointer()
         .hover((x) => x.text_color(t.foreground)).on_mouse_down("left", stop).on_click(() => this.peek(s)).tooltip("그 리더 터미널 들여다보기").child(shortName(s.leader))))
+      .when(!bare && Boolean(this.accts?.get(s.leader)?.label), (el) => el.child(div().flex_none().max_w(150).truncate().text_size(10.5).text_color(t.dim).tooltip("이 리더 세션이 쓰는 Claude 계정").child(`이 세션 계정: ${this.accts.get(s.leader).label}`)))
       .when(!bare && Boolean(it?.linkRef), (el) => el.child(div().min_w(0).max_w(150).truncate().text_size(10.5).text_color(t.dim).child(it.linkRef)))
       .when(Boolean(it), (el) => el.child(this.kindTag(t, it, it.kind, waiting)))
       .when(!bare, (el) => el.child(div().flex_1()))
       .when(Boolean(extra), (el) => el.child(extra));
+  }
+
+  // One button of a multi-question decision card (#76): remember the pick; with every question picked, send "①1안, ②2안" at once and forget them.
+  pickGroup(a, groups, label, n, cx) {
+    const key = this.askKey(a);
+    this.gpick ??= new Map();
+    const cur = this.gpick.get(a.s.leader);
+    const picks = cur?.key === key ? { ...cur.picks, [label]: n } : { [label]: n };
+    const text = groupAnswer(groups, picks);
+    if (!text) { this.gpick.set(a.s.leader, { key, picks }); cx.notify(); return; }
+    this.gpick.delete(a.s.leader);
+    this.send(a, text, cx, "choice");
   }
 
   // What a waiting leader's message offers: 링크 열기, 확인 완료 (verify), 답 쓰기 with its answer box, and what an answer does.
@@ -2837,14 +3693,22 @@ export default class Inbox extends View {
     const { s, kind, item, link } = a;
     const writing = this.writing === s.leader;
     const done = this.sentOf(a);
-    const opts = kind === "decision" ? decisionOptions(item?.body) : { options: [], recommended: 0 }; // once: the chips and the recommended one read the same list
+    const groups = kind === "decision" ? decisionGroups(item?.body) : []; // several questions (#76): one button row per question
+    const opts = kind === "decision" && !groups.length ? decisionOptions(item?.body) : { options: [], recommended: 0 }; // once: the chips and the recommended one read the same list
+    const key = this.askKey(a);
+    const picks = this.gpick?.get(s.leader)?.key === key ? this.gpick.get(s.leader).picks : {};
     // Without "N안:" lines the card still shows what the report offers (#62): its 추천 / 답 lines and the quoted answers as buttons.
-    const hint = kind === "decision" && opts.options.length < 2 ? decisionHints(item?.body) : { lines: [], answers: [], recommended: "" };
+    const hint = kind === "decision" && !groups.length && opts.options.length < 2 ? decisionHints(item?.body) : { lines: [], answers: [], recommended: "" };
     const box = v_flex().min_w(0).gap(6)
+      .children(groups.map((g, gi) => h_flex().id(`grp-${s.leader}-${gi}`).gap(6).items_center().flex_wrap()
+        .child(div().flex_none().text_size(12).font_semibold().text_color(t.foreground).child(g.label))
+        .children(g.options.map((n) => this.button(t, `opt-${s.leader}-${gi}-${n}`, `${n}안${n === g.recommended ? " (추천)" : ""}`, (c) => this.pickGroup(a, groups, g.label, n, c),
+          { primary: picks[g.label] === n, disabled: a.po ? "" : NO_PO(), tip: `${g.label}번 질문에 ${n}안을 고릅니다. 모든 질문을 고르면 한 번에 보냅니다` })))))
+      .when(groups.length > 0 && done === "", (el) => el.child(div().text_size(11).text_color(t.dim).child(`질문마다 하나씩 고르면 한 번에 보냅니다(${groups.filter((g) => !picks[g.label]).map((g) => g.label).join("·")} 남음)`)))
       .children(hint.lines.map((x, i) => div().id(`hint-${s.leader}-${i}`).min_w(0).text_size(12).text_color(t.foreground).child(x)))
       .child(h_flex().gap(6).items_center().flex_wrap()
         .when(Boolean(link) && link !== item?.link, (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", (c) => openUrl(link, c))))
-        .children(kind === "decision" ? opts.options.map((n) => this.button(t, `opt-${s.leader}-${n}`, `${n}안 선택`, (c) => this.send(a, `${n}안 선택`, c, "choice"), { primary: n === opts.recommended, disabled: a.po ? "" : NO_PO(), tip: CLIP })) : [])
+        .children(kind === "decision" ? opts.options.map((n) => this.button(t, `opt-${s.leader}-${n}`, `${n}안 선택${n === opts.recommended ? " (추천)" : ""}`, (c) => this.send(a, `${n}안 선택`, c, "choice"), { primary: n === opts.recommended, disabled: a.po ? "" : NO_PO(), tip: CLIP })) : [])
         .children(hint.answers.map((w, i) => this.button(t, `ans-${s.leader}-${i}`, w, (c) => this.send(a, w, c, "choice"), { primary: w === hint.recommended, disabled: a.po ? "" : NO_PO(), tip: CLIP })))
         .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c, "verify"), { primary: true, disabled: a.po ? "" : NO_PO(), tip: CLIP })))
         .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); this.reveal(this.spot(s, item)); c.notify(); }, { disabled: a.po ? "" : NO_PO() }))
@@ -2854,10 +3718,11 @@ export default class Inbox extends View {
       const input = this.box(s.leader, cx);
       const row = this.picRow(t, s.leader);
       if (row) box.child(row);
-      box.child(h_flex().gap(6).items_center()
+      box.child(h_flex().id(`reply-${s.leader}`).gap(6).items_center()
+        .on_key_down((e, c) => this.answerKey(s.leader, e, c))
         .on_drop((ev, c) => this.dropPics(ev?.paths, c, s.leader))
         .child(this.button(t, `attach-${s.leader}`, "그림", (c) => { this.pickPics(c, s.leader); }, { tip: "그림 파일을 골라 붙입니다(Cmd+V로 붙여넣거나 파일을 끌어다 놓아도 됩니다). 보내면 PO가 파일을 열어 봅니다" }))
-        .child(div().flex_1().min_w(0).on_mouse_down("left", stop).child(Input.new(input).h(30).px(10).items_center().rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
+        .child(div().flex_1().min_w(0).on_mouse_down("left", stop).child(Textarea.new(input).min_h(30).px(10).py(5).rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
         .child(this.button(t, `send-${s.leader}`, "보내기", (c) => this.send(a, input.value(), c), { primary: true, disabled: a.po ? "" : NO_PO(), tip: CLIP })));
     }
     return box;
@@ -2892,7 +3757,7 @@ export default class Inbox extends View {
       const note = mineNote(e.status, blockedNow, age);
       const bad = e.status === "nopane" || e.status === "failed" || e.status === "noenter" || e.status === "gone" || (e.status === "held" && !blockedNow);
       const acts = mineActs(e.status, blockedNow, age);
-      const ACT = { resend: ["다시 보내기", "같은 글을 같은 PO에게 다시 보냅니다(말풍선은 늘지 않습니다)", (c) => this.resend(e.id, c)], enter: ["Enter 누르기", "PO의 입력창에 보낸 글이 아직 있는지 확인한 뒤 Enter만 누릅니다(PO가 질문 중이면 누르지 않습니다)", (c) => this.enterNow(e.id, c)] };
+      const ACT = { resend: ["다시 보내기", "같은 글을 같은 PO에게 다시 보냅니다(말풍선은 늘지 않습니다)", (c) => this.resend(e.id, c)], delete: ["삭제", "보내지 못한 이 말풍선을 채팅에서 지웁니다(되돌릴 수 없습니다)", (c) => this.discard(e.id, c)], enter: ["Enter 누르기", "PO의 입력창에 보낸 글이 아직 있는지 확인한 뒤 Enter만 누릅니다(PO가 질문 중이면 누르지 않습니다)", (c) => this.enterNow(e.id, c)] };
       const root = this.data?.root ?? "";
       const bp = bubbleParts(e.text, e.imgs, root);
       const dims = bp.imgs.map((p) => this.data?.imgd?.[p] ?? this.imgd.get(p));
@@ -2916,7 +3781,7 @@ export default class Inbox extends View {
               .on_click(() => openFile(p)).tooltip("눌러서 그림 열기")
               .child(image(imgRel(root, p)).w(sizes[i].w).h(sizes[i].h)))) // image() loads only paths under the app folder: data/inbox/img/<file>
             .when(bp.chips.length > 0, (el) => el.child(h_flex().gap(4).flex_wrap().children(bp.chips.map((n) => div().flex_none().px(6).h(17).rounded(5).flex().items_center().bg(t.raised).text_size(10.5).text_color(t.muted).child(`사진 #${n}`)))))
-            .when(Boolean(bp.text), (el) => el.child(this.text(`${id}-t`, chatHtml(words))))
+            .when(Boolean(bp.text), (el) => el.child(this.md(`${id}-t`, words)))
             .when(lc.cut, (el) => el.child(this.moreToggle(t, id, lc, open)))))
         .when(Boolean(note), (el) => el.child(h_flex().max_w("100%").min_w(0).gap(6).items_center().flex_wrap().justify_end()
           .child(div().min_w(0).text_size(10.5).text_color(bad ? t.blocked : t.dim).child(note))
@@ -2969,12 +3834,14 @@ export default class Inbox extends View {
   full(cx) {
     this.tvN = 0;
     this.noteRedraw(cx);
+    this.guardAll();
     Promise.resolve().then(() => { // once per draw (only when the count changed or 10s passed, so a busy desk does not flood the file)
       const now = Date.now();
       if (this.tvLast !== this.tvN || now - (this.tvLogAt ?? 0) > 10000) { this.tvLast = this.tvN; this.tvLogAt = now; this.diag(`draw: ${this.tvN} selectable TextView(s)`, cx); }
     });
     const t = theme();
     const v = this.view();
+    this.syncRoom(v.pick); // the room can move by itself (a closed PO, the first pick): the box follows it
     this.drawnAt = Date.now();
     const strip = this.windowed && this.narrow; // a narrow window: the rooms are a strip on top; the dock and a pane use the slim column when narrow
     const blocks = [];
@@ -3001,6 +3868,8 @@ export default class Inbox extends View {
     // follow key, not the spot map).
     const hn = v.pick ? this.rs.get(v.pick)?.note : null; // the handoff note of a restart, as the PO's own bubble
     if (hn?.text) blocks.push(this.entryRow(t, { key: `rs-note-${hn.ms}`, who: "po", head: true, ms: hn.ms, ts: "", text: `**인수인계 노트**\n\n${hn.text}`, to: "" }, v, cx));
+    const rn = v.pick ? this.remoteNoteRow(t, v.pick) : null; // the last "원격 연결 켜기" result, a system note
+    if (rn) blocks.push(rn);
     for (const x of this.typing(v)) blocks.push(this.typingRow(t, x));
     // The END SENTINEL: an 8px row (the list's bottom padding) as the LAST direct child. Every "go to the newest" is scroll_to_item(this sentinel):
     // the smallest scroll that reveals a thin row at the very end is the exact bottom, whatever the height of the last bubble. scroll_to_item on
@@ -3018,7 +3887,7 @@ export default class Inbox extends View {
       } catch {}
       // A message the person just sent follows too (once), from wherever they were reading; a new bubble of someone else does not (only at the end).
       const mine = sendFollow(this.sentAt2, Date.now(), key, this.tlSeen);
-      if (mine) { this.sentAt2 = 0; this.reading = null; this.pin = { pinned: true, ct: Number(this.pin?.ct) || 0 }; }
+      if (mine) { this.sentAt2 = 0; this.reading = null; this.pin = { pinned: true, ct: Number(this.pin?.ct) || 0, vh: Number(this.pin?.vh) || 0 }; }
       if (mine || tlFollow(this.tlSeen, key, atEnd)) {
         const last = blocks.length - 1; // the end sentinel
         this.pinCh = 0; // a new room: the retry below is a fresh catch-up
@@ -3041,23 +3910,36 @@ export default class Inbox extends View {
       .on_mouse_up("left", () => { this.ui.press = false; })
       .on_mouse_down_out((_e, c) => { this.ui.press = false; if (this.ui.sel) this.dropSel(); if (this.dirty) this.softNotify(c); })
       .when(Boolean(this.scroll), (el) => el.track_scroll(this.scroll)).children(blocks);
+    // #72: the round jump-to-newest button in the list's bottom-right corner (inside the list's own box: it never reaches the input below), shown only
+    // while the view is scrolled up from the end. The list itself is unchanged inside this box.
+    const jump = this.jump && blocks.length > 1
+      ? h_flex().id("inbox-jump").absolute().bottom(12).right(18).w(32).h(32).rounded(16).items_center().justify_center().cursor_pointer()
+        .bg(t.raised).border(1).border_color(t.border).text_color(t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground))
+        .on_mouse_down("left", stop).on_click((_e, c) => this.jumpToEnd(c)).tooltip("가장 아래(최신)로")
+        .child(div().text_size(15).child("↓"))
+      : null;
+    const listBox = v_flex().id("inbox-listbox").relative().flex_1().min_h(0).child(lines).when(Boolean(jump), (el) => el.child(jump));
     const bar = this.filterBar(t, v);
     const lbar = this.leaderBar(t, v);
     const rrow = this.restartRow(t, v, cx); // "PO 새로 시작": the button, its confirm line or its steps (null in the other-PO room)
+    const rpo = v.pick && v.pick !== PO_OTHER ? chatTarget(v.terms, [], v.pick).po ?? "" : "";
+    const rcb = rpo ? this.remoteButton(t, v.pick, rpo, String(v.terms.find((x) => x.address === rpo)?.status ?? "")) : null; // "원격 연결 켜기" (#79): in the room header
     const usage = this.usageLine(t, v.pick); // null before the first read (and when there is no cost to show either)
     const panel = this.promptPanel(t, v, cx); // a blocked PO's screen + its keys (null while the room's PO is not waiting on a prompt)
     const room = v_flex().flex_1().min_w(0).min_h(0).when(!strip, (el) => el.h_full()) // beside the rooms the column must fill the row (h_flex centers children)
       .when(!strip && Boolean(head), (el) => el.child(h_flex().flex_none().h(30).px(14).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(head))
-        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : `리더 ${new Set(v.raw.filter((e) => e.leader).map((e) => e.leader)).size}명`))))
+        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : `리더 ${v.choices?.length ?? 0}명`))
+        .when(Boolean(rcb), (el) => el.child(rcb))))
+      .when(strip && Boolean(rcb), (el) => el.child(h_flex().flex_none().min_w(0).px(14).pb(4).justify_end().child(rcb))) // the picker layout has no room header
       .when(Boolean(usage), (el) => el.child(usage))
       .when(Boolean(bar), (el) => el.child(bar))
       .when(Boolean(lbar), (el) => el.child(lbar))
-      .child(lines)
+      .child(listBox)
       .when(Boolean(panel), (el) => el.child(panel))
       .when(Boolean(rrow), (el) => el.child(rrow))
       .child(this.chatBox(t, v));
-    return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
+    return v_flex().size_full().min_h(0).relative().bg(t.chrome).text_size(13)
       .on_window_mouse_move((e, c) => this.pointer(e, c))
       .on_window_mouse_up("left", (e, c) => this.pointerUp(c, e))
       .on_size_change((size, c) => this.onSize(size.width, c))
@@ -3066,7 +3948,7 @@ export default class Inbox extends View {
           .when(!this.paned || this.mained, (el) => el.child(div().text_size(15).font_semibold().text_color(t.foreground).child("UI 모드"))) // a pane's own header already says it
           .when(!this.windowed && waiting > 0, (el) => el.child(this.tag(t, `대기 ${waiting}`, "blocked")))
           .child(div().id("inbox-refresh").p(3).rounded(5).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
-            .on_mouse_down("left", stop).on_click((_e, c) => { this.gen++; this.busy = false; this.load(c); }).tooltip("새로고침")
+            .on_mouse_down("left", stop).on_click((_e, c) => { this.gen++; this.busy = false; this.remoteRestore(c, true); this.load(c); }).tooltip("새로고침")
             .child(this.busy ? svg(ICON("spinner")).size(13).spin(900) : div().text_size(14).child("↻"))))
         .child(h_flex().gap(8).items_center()
           .child(div().text_size(11).text_color(t.dim).child(this.data ? ago(this.data.at) : ""))
@@ -3079,8 +3961,10 @@ export default class Inbox extends View {
       .when(strip, (el) => el.child(this.picker(t, v)))
       .when(!strip && !v.tabs.some((x) => x.id !== PO_OTHER), (el) => el.child(this.poHint(t)))
       .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
-      .when(Boolean(this.msg), (el) => el.child(div().id("inbox-msg").px(14).pb(6).text_size(11.5).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
-        .on_mouse_down("left", stop).on_click((_e, c) => { this.msg = null; c.notify(); }).child(this.msg.text)))
-      .child(strip ? room : h_flex().flex_1().min_h(0).items_stretch().child(this.narrow ? this.slimRooms(t, v) : this.roomList(t, v)).child(room));
+      .child(strip ? room : h_flex().flex_1().min_h(0).items_stretch().child(this.narrow ? this.slimRooms(t, v) : this.roomList(t, v)).child(room))
+      // The notice floats over the top of the room: absolute, so it takes no layout space and the chat never moves when it comes or goes.
+      .when(Boolean(this.msg), (el) => el.child(h_flex().id("inbox-msg-layer").absolute().top(NOTICE_TOP).left(0).right(0).px(14).justify_center()
+        .child(div().id("inbox-msg").max_w(NOTICE_MAX_W).px(12).py(5).rounded(6).bg(t.chrome).shadow_md().text_size(11.5).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
+          .on_mouse_down("left", stop).on_click((_e, c) => { this.msg = null; c.notify(); }).tooltip("눌러서 닫기").child(this.msg.text))));
   }
 }

@@ -1,6 +1,7 @@
 // Tests of the picture, bubble-size, scroll-pin and selection rules (PO desk, #36/#37). The visual results (how wide a bubble really draws,
 // whether a drag-select survives in the real app, whether image() takes an absolute path) cannot be tested here; these cover the rules
 // behind them and the shape of the code that uses them.
+require("./helpers/po-home.cjs"); // a PO machine: a profile without `preset` is "po" (see the helper)
 const test = require("node:test");
 const POSIX = process.platform !== "win32"; // Windows has no POSIX file modes: only the mode asserts are skipped there
 const assert = require("node:assert/strict");
@@ -185,7 +186,7 @@ test("pinStep: re-pin when pinned and content grew; keep the place when the user
   assert.equal(r.pinned, true);
   // the user scrolled up (content unchanged, far from the bottom) -> unpinned, no jump
   r = I.pinStep({ pinned: true, ct: 1000 }, { y: 100, vh: 400, ch: 1000 });
-  assert.deepEqual(r, { pinned: false, ct: 1000, go: false });
+  assert.deepEqual(r, { pinned: false, ct: 1000, vh: 400, go: false });
   // unpinned and content grew (a late image) -> still keeps the place
   r = I.pinStep({ pinned: false, ct: 1000 }, { y: 100, vh: 400, ch: 1200 });
   assert.equal(r.go, false);
@@ -502,7 +503,7 @@ test("#54 re-fix: a view reading higher up is never dragged by growth; the end s
   for (const ch of [17508, 17567, 17700, 18000]) { const r = I.pinStep(st, { y: 11411, vh: 2127, ch }); assert.equal(r.go, false); assert.equal(r.pinned, false); st = { pinned: r.pinned, ct: r.ct }; }
   // even a pin that is still "engaged" (a stale true) does not go when the view was far from the end of what it showed
   const stale = I.pinStep({ pinned: true, ct: 17130 }, { y: 11157, vh: 2003, ch: 17508 }); // 3970px above the old end
-  assert.deepEqual(stale, { pinned: false, ct: 17508, go: false });
+  assert.deepEqual(stale, { pinned: false, ct: 17508, vh: 2003, go: false });
   // (c) at the true bottom + growth: go (and keep following a stream of growth while each go lands)
   let at = I.pinStep({ pinned: true, ct: 17130 }, { y: 17130 - 2127, vh: 2127, ch: 17508 });
   assert.equal(at.go, true);
@@ -524,7 +525,76 @@ test("#54 re-fix: a view reading higher up is never dragged by growth; the end s
   assert.equal(/\.pb\(8\)\.overflow_y_scrollbar\(\)/.test(MAIN), false); // the 8px moved into the sentinel
   assert.match(MAIN, /const last = blocks\.length - 1; \/\/ the end sentinel/);
   assert.match(MAIN, /scroll_to_item\(this\.lastIdx\)/);
-  assert.equal((MAIN.match(/scroll_to_item\(/g) ?? []).length, 6); // 2 doc comments, pinTick, pinGo, follow, reveal(): none aimed at a bubble
+  assert.equal((MAIN.match(/scroll_to_item\(/g) ?? []).length, 7); // 2 doc comments, pinTick, pinGo, follow, reveal(), jumpToEnd(): none aimed at a bubble
   assert.match(MAIN, /this\.sentAt2 = Date\.now\(\);/);
   assert.match(MAIN, /if \(mine\) \{ this\.sentAt2 = 0;/); // once
+});
+
+// ---- #67: the input box grows -> the list viewport shrinks; #72: jump-to-newest button
+test("#67 pinStep: a viewport shrink while pinned at the bottom goes to the end; reading above or unpinned does not", () => {
+  // pinned at the bottom (y 600 + vh 400 = ch 1000); the input box grew, the viewport is now 300 tall: the end is cut off -> go
+  let r = I.pinStep({ pinned: true, ct: 1000, vh: 400 }, { y: 600, vh: 300, ch: 1000 });
+  assert.equal(r.pinned, true);
+  assert.equal(r.go, true);
+  assert.equal(r.vh, 300);
+  // same size: no go, and the viewport is remembered for the next look
+  r = I.pinStep({ pinned: true, ct: 1000, vh: 400 }, { y: 600, vh: 400, ch: 1000 });
+  assert.equal(r.go, false);
+  assert.equal(r.vh, 400);
+  // the viewport grew back (box emptied after a send): sitting at the bottom needs no go
+  r = I.pinStep({ pinned: true, ct: 1000, vh: 300 }, { y: 700, vh: 400, ch: 1000 });
+  assert.equal(r.go, false);
+  assert.equal(r.pinned, true);
+  // reading higher up (far from the bottom): a shrink never drags the view
+  r = I.pinStep({ pinned: true, ct: 1000, vh: 400 }, { y: 100, vh: 300, ch: 1000 });
+  assert.equal(r.go, false);
+  assert.equal(r.pinned, false);
+  // already unpinned: a shrink does nothing
+  r = I.pinStep({ pinned: false, ct: 1000, vh: 400 }, { y: 100, vh: 300, ch: 1000 });
+  assert.equal(r.go, false);
+  assert.equal(r.pinned, false);
+  // the old state without vh (first look) behaves as before
+  r = I.pinStep({ pinned: true, ct: 1000 }, { y: 600, vh: 400, ch: 1000 });
+  assert.equal(r.go, false);
+});
+
+test("#72 jumpShown: only when scrolled away from the bottom (beyond JUMP_MIN), never when the content fits", () => {
+  assert.equal(I.JUMP_MIN, 80);
+  assert.equal(I.jumpShown(600, 400, 1000), false); // at the bottom
+  assert.equal(I.jumpShown(540, 400, 1000), false); // 60px above: still counts as the bottom (< JUMP_MIN)
+  assert.equal(I.jumpShown(500, 400, 1000), true); // 100px above
+  assert.equal(I.jumpShown(0, 400, 5000), true); // at the top of a long list
+  assert.equal(I.jumpShown(0, 400, 300), false); // the content fits: nothing to jump to
+  assert.equal(I.jumpShown(0, 400, 400), false);
+  assert.equal(I.jumpShown(undefined, undefined, undefined), false);
+  assert.equal(I.jumpShown(NaN, 400, 1000), true); // an unreadable offset reads as the top
+});
+
+test("#67/#72 wiring: the box has a max height (scrolls inside), the list sits in a relative box with the corner button, the jump re-enables follow", () => {
+  assert.ok(I.INPUT_MAX_LINES >= 2 && I.INPUT_MAX_LINES <= 5);
+  assert.match(MAIN, /this\.chat\.set_auto_grow\(1, INPUT_MAX_LINES\)/);
+  // the button is an overlay in the list's own corner (inside the list box, not the chat box), so it cannot cover the input
+  assert.match(MAIN, /const listBox = v_flex\(\)\.id\("inbox-listbox"\)\.relative\(\)\.flex_1\(\)\.min_h\(0\)\.child\(lines\)\.when\(Boolean\(jump\), \(el\) => el\.child\(jump\)\)/);
+  assert.match(MAIN, /h_flex\(\)\.id\("inbox-jump"\)\.absolute\(\)\.bottom\(12\)\.right\(18\)/);
+  assert.match(MAIN, /\.on_click\(\(_e, c\) => this\.jumpToEnd\(c\)\)/);
+  // shown only from the pinTick reading of the scroll position, and redrawn only on a change
+  assert.match(MAIN, /this\.syncJump\(cx, jumpShown\(o\.y, vp\.height, ct\.height\)\)/);
+  const sync = MAIN.slice(MAIN.indexOf("  syncJump("), MAIN.indexOf("  jumpToEnd("));
+  assert.match(sync, /if \(on === Boolean\(this\.jump\)\) return;/);
+  // the jump drops the 더 보기 hold, re-pins, and goes to the end sentinel (lastIdx)
+  const jump = MAIN.slice(MAIN.indexOf("  jumpToEnd("), MAIN.indexOf("  jumpToEnd(") + 900);
+  assert.match(jump, /this\.reading = null;/);
+  assert.match(jump, /this\.pin = \{ pinned: true,/);
+  assert.match(jump, /this\.jump = false;/);
+  assert.match(jump, /scroll_to_item\(this\.lastIdx\)/);
+});
+
+test("#66/#67/#72 shared pure helpers are identical in main.js and inbox.cjs", () => {
+  const CJS = fs.readFileSync(path.join(__dirname, "../mods/inbox/inbox.cjs"), "utf8").replace(/\r\n/g, "\n");
+  const line = (src, re) => (src.match(re) ?? [])[0];
+  for (const re of [/^const JUMP_MIN = .*$/m, /^const jumpShown = .*$/m, /^const INPUT_MAX_LINES = .*$/m]) {
+    const a = line(MAIN, re), b = line(CJS, re);
+    assert.ok(a, `main.js has ${re}`);
+    assert.equal(a, b);
+  }
 });

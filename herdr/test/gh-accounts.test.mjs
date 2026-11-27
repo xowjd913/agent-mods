@@ -21,11 +21,11 @@ const stub = "const h = () => globalThis.__herdr;" +
   "export const checking = () => false;" +
   "export const spaces = () => h().spaces;" +
   "export const panes = () => h().panes;" +
-  "export const window = () => ({ platform: 'macos' });" +
+  "export const window = () => ({ platform: h().platform || 'macos' });" +
   // gh-account 호출이면 cli 경로 뒤의 인자만 reply 에 넘긴다(PATH= 인자가 끼어도 같다). 다른 명령(open, sh)은 기록만 한다.
   "export const exec = (cmd, args) => { const x = h(); x.calls.push([cmd, ...args]);" +
   "  const i = args.indexOf('node'); if (cmd !== 'env' || i < 0) return Promise.resolve({ code: 0, stdout: '', stderr: '' });" +
-  "  return Promise.resolve(x.reply(args.slice(i + 2))); };";
+  "  return Promise.resolve(String(args[i + 1]).endsWith('claude-account.cjs') ? x.claude(args.slice(i + 2)) : x.reply(args.slice(i + 2))); };";
 const hooks = `data:text/javascript,${encodeURIComponent(`
 export async function resolve(s, c, n) { return ["gpui-kit","gpui-base","herdr"].includes(s) ? { url: "stub:" + s, shortCircuit: true } : n(s, c); }
 export async function load(u, c, n) { return u.startsWith("stub:") ? { format: "module", source: ${JSON.stringify(stub)}, shortCircuit: true } : n(u, c); }
@@ -54,12 +54,25 @@ function base(a) {
   return undefined;
 }
 
+// claude-account CLI 의 기본 답: 기본 계정과 로그인된 계정 하나, 로그인 안 된 계정 하나.
+const CLIST = { selected: null, accounts: [
+  { id: null, label: "기본 계정", folder: null, status: { loggedIn: true, authMethod: "claude.ai", at: 1, fresh: true }, usage: [{ label: "5h", percent: 12 }], selected: true },
+  { id: "work", label: "회사", folder: "work", status: { loggedIn: true, authMethod: "claude.ai", at: 1, fresh: true }, usage: null, selected: false },
+  { id: "spare", label: "예비", folder: "spare", status: { loggedIn: false, authMethod: null, at: 1, fresh: true }, usage: null, selected: false },
+] };
+function claudeBase(a) {
+  if (a[0] === "list") return ok(CLIST);
+  if (a[0] === "login" && a[1] === "status") return ok({ state: "none" });
+  return ok({ ok: true });
+}
+
 function fake(over = {}) {
   globalThis.__herdr = {
     calls: [], clicks: {}, texts: [],
     spaces: [{ id: 1, folder: "/w/app", tabs: [{ id: 10 }] }, { id: 2, folder: "/m", machine: true, tabs: [] }],
     panes: [{ tab: 10, cwd: "/w/app" }, { tab: 10, cwd: "/w/notes" }, { tab: 99, cwd: "/elsewhere" }],
     reply: (a) => base(a) ?? { code: 0, stdout: "바꿨습니다", stderr: "" },
+    claude: (a) => claudeBase(a),
     ...over,
   };
   return globalThis.__herdr;
@@ -75,7 +88,9 @@ function cxFake() {
 }
 // gh-account 호출의 인자만 뽑는다. 첫 호출(shell-path) 뒤로는 로그인 셸 PATH 를 함께 넘겨야 한다.
 const CLI = "/app/mods/gh-accounts/gh-account.cjs";
-const cliArgs = (h) => h.calls.filter((c) => c[0] === "env").map((c) => {
+const CCLI = "/app/mods/gh-accounts/claude-account.cjs";
+const claudeArgs = (h) => h.calls.filter((c) => c[0] === "env" && c.includes(CCLI)).map((c) => c.slice(c.indexOf("node") + 2));
+const cliArgs = (h) => h.calls.filter((c) => c[0] === "env" && !c.includes(CCLI)).map((c) => {
   assert.equal(c[1], "HERDR_APP_HOME=/app");
   const i = c.indexOf("node");
   assert.equal(c[i + 1], CLI);
@@ -233,7 +248,7 @@ test("주의 줄이나 실패는 눈에 띄게, 도구가 없으면 설치 안�
   w.init({}, cx);
   await cx.settle();
   assert.equal(w.missing, true);
-  assert.equal(h.calls.length, 1);
+  assert.equal(cliArgs(h).length, 1); // gh-account 는 shell-path 한 번만
   w.render(cx);
   assert.ok(h.texts.some((s) => s.includes("--add gh-accounts")));
 });
@@ -397,4 +412,153 @@ test("계정 추가: 되돌리기 실패·로그인 실패는 붉게 알리고, 
   cx.tick(2000);
   await cx.settle();
   assert.deepEqual(v.note, { text: "gh auth login 이 실패했습니다: denied", bad: true });
+});
+
+// ---- Claude 계정 ----
+const claudeChanges = (h) => claudeArgs(h).filter((a) => !["list", "status"].includes(a[0]) && !(a[0] === "login" && a[1] === "status"));
+
+test("Claude 계정: 목록·로그인 여부·사용량을 보여 주고, 지금 세션은 그대로라는 안내를 적는다", async () => {
+  const { h, cx, v } = await open();
+  assert.deepEqual(claudeArgs(h).slice(0, 2), [["list"], ["login", "status"]]);
+  v.render(cx);
+  for (const s of ["Claude 계정", "기본 계정", "회사", "예비", "새 세션에 사용", "로그인 안 됨", "사용량 5h 12%", "폴더 work"]) assert.ok(h.texts.includes(s), s);
+  assert.ok(h.texts.some((s) => s.includes("지금 돌고 있는 세션은 그대로")));
+  assert.ok(h.texts.some((s) => s.includes("한도가 차도 저절로 바꾸지 않습니다")));
+});
+
+test("Claude 계정: 로그인 여부를 모르는 계정만 status 로 확인한 뒤 다시 읽는다", async () => {
+  let n = 0;
+  const { h } = await open({ claude: (a) => {
+    if (a[0] === "list") { n += 1; const l = JSON.parse(JSON.stringify(CLIST)); if (n === 1) l.accounts[1].status = null; return ok(l); }
+    return claudeBase(a);
+  } });
+  assert.deepEqual(claudeArgs(h).filter((a) => a[0] === "status"), [["status", "--id", "work"]]);
+  assert.equal(claudeArgs(h).filter((a) => a[0] === "list").length, 2);
+});
+
+test("Claude 계정: 새 세션에 쓸 계정을 고르면 select 로 가고, 이미 고른 계정은 부르지 않는다", async () => {
+  const { h, cx, v } = await open();
+  v.render(cx);
+  h.clicks["cl-pick-default"]({}, cx);
+  await cx.settle();
+  assert.deepEqual(claudeChanges(h), []);
+  h.clicks["cl-pick-work"]({}, cx);
+  await cx.settle();
+  assert.deepEqual(claudeChanges(h), [["select", "--id", "work"]]);
+  assert.match(v.note.text, /새로 여는 세션부터/);
+  v.cl.accounts[0].selected = false;
+  v.render(cx);
+  h.clicks["cl-pick-default"]({}, cx);
+  await cx.settle();
+  assert.deepEqual(claudeChanges(h).at(-1), ["select"]);
+});
+
+test("Claude 계정: 계정 추가는 이름을 받아 add 한 뒤 바로 로그인을 시작하고, 이름이 비면 부르지 않는다", async () => {
+  let started = false;
+  const { h, cx, v } = await open({ claude: (a) => {
+    if (a[0] === "add") return ok({ ok: true, id: "new", label: "새계정" });
+    if (a[0] === "login" && a[1] === "start") { started = true; return ok({ ok: true, login: { id: "new", label: "새계정", state: "starting", url: null } }); }
+    if (a[0] === "login" && a[1] === "status") return ok(started ? { state: "starting", id: "new", label: "새계정", url: null } : { state: "none" });
+    return claudeBase(a);
+  } });
+  v.render(cx);
+  h.clicks["cl-add"]({}, cx);
+  assert.equal(v.clAsk, true);
+  v.addClaude(cx);
+  assert.deepEqual(claudeChanges(h), []);
+  v.clInput.set_value("  새계정  ");
+  v.addClaude(cx);
+  await cx.settle();
+  assert.deepEqual(claudeChanges(h), [["add", "--label", "새계정"], ["login", "start", "--id", "new"]]);
+  assert.equal(v.clAsk, false);
+  assert.equal(v.clLogin.state, "starting");
+});
+
+test("Claude 로그인: 주소가 오면 복사 단추와 시크릿 창 안내를 보이고, 끝나면 성공·같은 계정 경고·실패를 알린다", async () => {
+  let st = { state: "waiting", id: "work", label: "회사", url: "https://claude.ai/oauth/authorize?code=true&x=1" };
+  const { h, cx, v } = await open({ claude: (a) => (a[0] === "login" && a[1] === "status" ? ok(st) : claudeBase(a)) });
+  assert.equal(v.clLogin.url, st.url);
+  v.render(cx);
+  for (const s of ["회사 계정 로그인 중", "주소 복사", "그만두기", st.url]) assert.ok(h.texts.includes(s), s);
+  assert.ok(h.texts.some((s) => s.includes("시크릿 창(Cmd+Shift+N)에서 열기")));
+  h.clicks["cl-login-copy"]({}, cx);
+  assert.ok(h.calls.some((c) => c[0] === "sh" && c[c.length - 1] === st.url));
+  const finish = async (x) => { st = x; cx.tick(2000); await cx.settle(); };
+  await finish({ state: "done", id: "work", label: "회사", duplicate: true, message: "이미 등록된 계정과 같음: 같은 Claude 계정을 또 로그인했습니다." });
+  assert.equal(v.clLogin, null);
+  assert.equal(v.note.bad, true);
+  assert.match(v.note.text, /성공했습니다.*이미 등록된 계정과 같음/);
+  st = { state: "waiting", id: "work", label: "회사", url: "https://x/y" }; v.clLogin = st;
+  await finish({ state: "done", id: "work", label: "회사", duplicate: false, message: null });
+  assert.deepEqual([v.note.bad, v.note.text], [false, "회사 로그인에 성공했습니다."]);
+  v.clLogin = { state: "waiting", id: "work", label: "회사", url: "https://x/y" };
+  await finish({ state: "failed", id: "work", label: "회사", message: "로그인에 실패했습니다." });
+  assert.equal(v.note.bad, true);
+  assert.match(v.note.text, /실패/);
+});
+
+test("Claude 계정: 로그아웃·목록에서 빼기는 확인 카드를 거치고, 폴더를 지운다는 말은 하지 않는다", async () => {
+  const { h, cx, v } = await open();
+  v.render(cx);
+  h.clicks["cl-logout-work"]({}, cx);
+  h.texts.length = 0;
+  v.render(cx);
+  assert.ok(h.texts.includes("회사 계정을 로그아웃할까요?"));
+  assert.deepEqual(claudeChanges(h), []);
+  h.clicks["cl-confirm-go"]({}, cx);
+  await cx.settle();
+  assert.deepEqual(claudeChanges(h), [["logout", "--id", "work"]]);
+  h.clicks["cl-remove-spare"]({}, cx);
+  h.texts.length = 0;
+  v.render(cx);
+  assert.ok(h.texts.some((s) => s.includes("계정 폴더는 디스크에 그대로 둡니다")));
+  h.clicks["cl-confirm-go"]({}, cx);
+  await cx.settle();
+  assert.deepEqual(claudeChanges(h).at(-1), ["remove", "--id", "spare"]);
+  // 기본 계정에는 로그아웃·빼기 단추가 없다.
+  assert.ok(!("cl-logout-default" in h.clicks) && !("cl-remove-default" in h.clicks));
+});
+
+test("Claude 계정: 도구 파일이 없으면 설치 안내, 로그인 안 된 계정에는 로그인 단추", async () => {
+  const { h, cx, v } = await open({ claude: () => ({ code: 1, stdout: "", stderr: "Error: Cannot find module '/app/claude-account.cjs'" }) });
+  assert.equal(v.clMissing, true);
+  v.render(cx);
+  assert.ok(h.texts.some((s) => s.includes("claude-account.cjs") && s.includes("--add gh-accounts")));
+  const o = await open();
+  o.v.render(o.cx);
+  o.h.clicks["cl-login-spare"]({}, o.cx);
+  await o.cx.settle();
+  assert.deepEqual(claudeChanges(o.h), [["login", "start", "--id", "spare"]]);
+});
+
+test("Claude 계정: 고른 계정이 아직 로그인되지 않았다면 select 뒤에 경고를 함께 보여 준다", async () => {
+  const warn = "아직 로그인되지 않은 계정입니다. 새 세션이 로그인 화면에서 멈출 수 있습니다.";
+  const { h, cx, v } = await open({ claude: (a) => (a[0] === "select" ? ok({ ok: true, selected: "spare", warning: warn }) : claudeBase(a)) });
+  v.render(cx);
+  h.clicks["cl-pick-spare"]({}, cx);
+  await cx.settle();
+  assert.deepEqual(claudeChanges(h), [["select", "--id", "spare"]]);
+  assert.ok(v.note.text.includes(warn));
+  assert.equal(v.note.bad, true);
+});
+
+test("Claude 계정: Windows 에서는 새 세션 선택·계정 추가·로그인을 막고 안내 문구를 보인다(기본 계정으로 되돌리기만 된다)", async () => {
+  const note = "Windows에서는 아직 지원하지 않습니다(이슈 #121 후속)";
+  const { h, cx, v } = await open({ platform: "windows" });
+  v.render(cx);
+  assert.ok(h.texts.some((s) => s.includes(note)));
+  h.clicks["cl-pick-work"]({}, cx);
+  h.clicks["cl-add"]?.({}, cx);
+  h.clicks["cl-login-spare"]?.({}, cx);
+  await cx.settle();
+  assert.deepEqual(claudeChanges(h), []);
+  v.addClaude(cx);
+  await cx.settle();
+  assert.deepEqual(claudeChanges(h), []);
+  assert.equal(v.note.text, note);
+  v.cl.accounts[0].selected = false;
+  v.render(cx);
+  h.clicks["cl-pick-default"]({}, cx);
+  await cx.settle();
+  assert.deepEqual(claudeChanges(h).at(-1), ["select"]);
 });

@@ -457,6 +457,7 @@ function defaultDeps() {
     pidAlive: (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; } },
     osNotify: (title, body) => osNotify(title, body),
     ghAccount: () => loadGhAccount(),
+    claudeAccount: () => claudeAccountDir(),
   };
 }
 
@@ -776,10 +777,29 @@ function makeWorktree(deps, a, now) {
   throw new Error("워크트리 이름을 정하지 못했습니다.");
 }
 
-function launchArgs(a, name, cwd, extraEnv = {}) {
+const CLAUDE_ACCOUNT_WARN = "계정 선택을 읽지 못해 기본 계정으로 시작합니다";
+const CLAUDE_ACCOUNT_WIN = "Windows에서는 아직 지원하지 않습니다(이슈 #121 후속)";
+// 책상(계정 패널)에서 "새 세션에 사용"으로 고른 Claude 계정 폴더. { dir, warning }: 기본 계정이면 dir=null(= CLAUDE_CONFIG_DIR 를 넣지 않는다).
+// 선택을 읽다 실패하면 조용히 기본 계정으로 가지 않고 warning 을 돌려준다. 도구가 설치돼 있지 않으면 계정 기능을 쓰지 않는 것이므로 경고 없이 null.
+function claudeAccountDir(win = WIN) {
+  for (const f of ["./claude-account.cjs", "../../claude-account/claude-account.cjs"]) {
+    let m;
+    try { m = require(f); } catch { continue; }
+    try {
+      const dir = m.selectedDir(m.makeCtx());
+      if (dir && win) return { dir: null, warning: CLAUDE_ACCOUNT_WIN }; // Windows 는 계정을 적용하지 못한다
+      return { dir: dir || null, warning: null };
+    } catch { return { dir: null, warning: CLAUDE_ACCOUNT_WARN }; }
+  }
+  return { dir: null, warning: null };
+}
+
+// claudeDir 는 macOS·Linux 에서만 적용한다(env 로 넘긴다). Windows 에서는 적용하지 못하므로 절대 넣지 않는다.
+function launchArgs(a, name, cwd, extraEnv = {}, claudeDir = null, win = WIN) {
   const argv = [];
-  if (!WIN) {
+  if (!win) {
     argv.push("env", `PATH=${extraEnv.PATH ?? process.env.PATH ?? ""}`);
+    if (a.program === "claude" && claudeDir) argv.push(`CLAUDE_CONFIG_DIR=${claudeDir}`);
     // 계정 이름·신원 파일 경로만 넘긴다. 토큰은 넘기지 않는다(세션 안의 gh·git 이 그때그때 받는다).
     for (const [k, v] of Object.entries(extraEnv)) if (k !== "PATH" && /^[A-Z_][A-Z0-9_]*$/.test(k)) argv.push(`${k}=${v}`);
   }
@@ -872,7 +892,9 @@ function execute(runId, deps = defaultDeps()) {
       }
     }
     const name = `sched-${a.id.slice(0, 6)}-${stamp(now).replace("-", "")}${run.id.slice(0, 2)}`.slice(0, 32);
-    const launched = deps.hc(launchArgs(a, name, cwd, acct.env));
+    const ca = a.program === "claude" && deps.claudeAccount ? deps.claudeAccount() : { dir: null, warning: null };
+    if (ca.warning) patchRun(runId, { note: [patch.note, ca.warning].filter(Boolean).join(" ") });
+    const launched = deps.hc(launchArgs(a, name, cwd, acct.env, ca.dir));
     if (launched.code !== 0) return finish({ status: "실패", error: oneLine(launched.stderr || launched.stdout, 200) || "hc run 실패" });
     let info = null;
     try { info = JSON.parse(launched.stdout); } catch {}
@@ -1297,7 +1319,7 @@ function main(argv) {
 module.exports = {
   ScheduleError, compile, nextAfter, nextTimes, latestIn, describe, validateAutomation, zonedToUtc, partsOf, localZone,
   tick, collectNotices, osNotifyCommand, execute, runNow, refreshRun, launchArgs, slugOf, stamp, claimRun, list, validate, save, remove, toggle, nextCmd, options, codexModels, branchOptions,
-  defaultDeps, loadGhAccount, accountEnv, syncStatus, setSyncRepo, record, importFromRepo, normRemote,
+  defaultDeps, claudeAccountDir, loadGhAccount, accountEnv, syncStatus, setSyncRepo, record, importFromRepo, normRemote,
   paths: { STORE_DIR, AUTOS_FILE, RUNS_FILE, SETTINGS_FILE },
 };
 if (require.main === module) main(process.argv.slice(2));
