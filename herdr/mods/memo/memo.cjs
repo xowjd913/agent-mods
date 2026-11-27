@@ -10,11 +10,17 @@
 //   name <b64 text>   -> {file, path}: (text = the start of the memo, its title is taken) a safe file name nobody uses yet in the folder (the folder is created if missing)
 //   delete <file> [path] -> deletes one memo file of the folder
 //   po <file> [path]  -> the line to paste into the PO terminal: "메모 요청: <title> ..." + body + file path
+//   gh-config                         -> {repo, branch, folder, defaultFolder}: the GitHub upload setting
+//   gh-set <b64 json {repo, branch, folder}> -> saves it (empty repo clears it)
+//   gh-prepare <file> <path>          -> {ready, isPublic, repo, branch, remote} or {ready: false, message}: gh login and public/private check, writes nothing
+//   gh-upload <file> <path> <0|1>     -> uploads the memo through `gh api` (1 = the person confirmed a public repository) -> {repo, remote, url, created, unchanged}
+//   (the login is the person's own `gh auth login`; no token is ever read, stored or passed here)
 // Reading and writing a memo's text is done by the mod itself (readTextFile / writeTextFile: they refuse to overwrite a file that changed meanwhile).
 "use strict";
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const github = require("./github.cjs");
 
 const MAX_ITEMS = 500; // files listed (newest first); more are counted as truncated
 const HEAD_BYTES = 8192; // read of each file for its title and preview
@@ -62,11 +68,64 @@ function setDir(home, raw) {
     if (!st) fs.mkdirSync(dir, { recursive: true });
     cfg.dir = dir;
   }
+  writeConfig(home, cfg);
+  return configInfo(home);
+}
+// Atomic write (tmp + rename) of the whole config; the caller passes the object it read so keys of other settings stay.
+function writeConfig(home, cfg) {
   fs.mkdirSync(path.dirname(configFile(home)), { recursive: true });
   const tmp = `${configFile(home)}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + "\n");
   fs.renameSync(tmp, configFile(home));
-  return configInfo(home);
+}
+
+// ---- the GitHub setting (#144): config.json "github": {repo: "owner/name", branch, folder}. The upload itself is github.cjs.
+function ghConfig(home) {
+  const g = readConfig(home).github;
+  const o = g && typeof g === "object" && !Array.isArray(g) ? g : {};
+  const str = (v) => (typeof v === "string" ? v : "");
+  return { repo: str(o.repo), branch: str(o.branch), folder: str(o.folder), defaultFolder: github.DEFAULT_FOLDER };
+}
+// Saves the three fields after checking them. An empty repo clears the whole setting (the upload button then asks for one).
+function setGhConfig(home, raw) {
+  const cfg = readConfig(home);
+  if (!String(raw?.repo ?? "").trim()) delete cfg.github;
+  else {
+    const n = github.normalizeSettings(raw);
+    cfg.github = { repo: n.repoText, branch: n.branch, folder: String(raw.folder ?? "").trim() ? n.folder : "" };
+  }
+  writeConfig(home, cfg);
+  return ghConfig(home);
+}
+// Everything the upload needs, validated: settings, the memo's real path, and the path it will have in the repository.
+function ghTarget(home, dir, file, given) {
+  const s = github.normalizeSettings(ghConfig(home));
+  const p = pathChecked(dir, file, given);
+  const st = fs.statSync(p);
+  if (!st.isFile()) throw new Error("파일이 아닙니다");
+  if (st.size > github.MAX_UPLOAD_BYTES) throw new Error("1 MiB보다 큰 메모는 올리지 않습니다");
+  return { settings: s, path: p, remote: github.remotePath(s.folder, file) };
+}
+// Step 1 of "GitHub에 올리기": gh ready? repository public? Nothing is written anywhere.
+function ghPrepare(home, dir, file, given, run) {
+  if (!String(ghConfig(home).repo).trim()) throw new Error("먼저 설정에서 올릴 저장소(owner/이름)를 정하세요");
+  const t = ghTarget(home, dir, file, given);
+  const g = github.checkGh(run);
+  if (!g.ready) return { ok: true, ready: false, reason: g.reason, message: g.message };
+  const info = github.repoInfo(t.settings.owner, t.settings.repo, run);
+  return { ok: true, ready: true, isPublic: info.isPublic, repo: t.settings.repoText, branch: t.settings.branch, remote: t.remote };
+}
+// Step 2: checks everything again (the screen may be minutes old), refuses a public repository that was not confirmed, then uploads.
+function ghUpload(home, dir, file, given, confirmedPublic, run) {
+  if (!String(ghConfig(home).repo).trim()) throw new Error("먼저 설정에서 올릴 저장소(owner/이름)를 정하세요");
+  const t = ghTarget(home, dir, file, given);
+  const g = github.checkGh(run);
+  if (!g.ready) throw new Error(g.message);
+  const info = github.repoInfo(t.settings.owner, t.settings.repo, run);
+  if (info.isPublic && !confirmedPublic) throw new Error("공개 저장소입니다. 확인 없이는 올리지 않습니다");
+  const bytes = fs.readFileSync(t.path);
+  const r = github.upload(t.settings, { file, title: titleOf(bytes.toString("utf8")), content: bytes }, run);
+  return { ok: true, repo: t.settings.repoText, remote: t.remote, isPublic: info.isPublic, ...r };
 }
 
 // ---- titles and file names
@@ -184,8 +243,15 @@ const unb64 = (s) => Buffer.from(String(s ?? ""), "base64").toString("utf8");
 function main(argv) {
   const [home, cmd, ...a] = argv;
   try {
-    if (!home || !cmd) throw new Error("usage: memo.cjs <app home> <config|setdir|list|name|delete|po> ...");
+    if (!home || !cmd) throw new Error("usage: memo.cjs <app home> <config|setdir|list|name|delete|po|gh-config|gh-set|gh-prepare|gh-upload> ...");
     if (cmd === "config") return out({ ok: true, ...configInfo(home) });
+    if (cmd === "gh-config") return out({ ok: true, ...ghConfig(home) });
+    if (cmd === "gh-set") {
+      let raw = null;
+      try { raw = JSON.parse(unb64(a[0])); } catch {}
+      if (!raw || typeof raw !== "object") throw new Error("설정 값이 올바르지 않습니다");
+      return out({ ok: true, ...setGhConfig(home, raw) });
+    }
     if (cmd === "setdir") return out({ ok: true, ...setDir(home, unb64(a[0])) });
     const dir = memoDir(home);
     if (cmd === "list") return out({ ok: true, dir, ...listMemos(dir) });
@@ -205,6 +271,8 @@ function main(argv) {
       const text = fs.readFileSync(p, "utf8");
       return out({ ok: true, title: titleOf(text), path: p, text: poMessage(titleOf(text), text, p) });
     }
+    if (cmd === "gh-prepare") return out(ghPrepare(home, dir, a[0], a[1]));
+    if (cmd === "gh-upload") return out(ghUpload(home, dir, a[0], a[1], a[2] === "1"));
     throw new Error(`unknown command: ${cmd}`);
   } catch (e) {
     out({ ok: false, error: e && e.code === "ENOENT" ? "파일이나 폴더를 찾지 못했습니다" : String((e && e.message) || e).slice(0, 200) });
@@ -212,4 +280,4 @@ function main(argv) {
 }
 
 if (require.main === module) main(process.argv.slice(2));
-module.exports = { defaultDir, memoDir, configInfo, setDir, titleOf, previewOf, safeName, fileNameFor, uniqueName, isMemoFile, pathOf, pathChecked, listMemos, poMessage, UNTITLED, MAX_BODY_IN_PO };
+module.exports = { defaultDir, memoDir, configInfo, setDir, ghConfig, setGhConfig, ghPrepare, ghUpload, titleOf, previewOf, safeName, fileNameFor, uniqueName, isMemoFile, pathOf, pathChecked, listMemos, poMessage, UNTITLED, MAX_BODY_IN_PO };
