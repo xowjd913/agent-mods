@@ -107,7 +107,8 @@ function run(env = process.env, payload = readPayload(), I = require("./inbox.cj
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   appendLine(file, JSON.stringify(line) + "\n");
   // Which transcript this PO's session writes, so the desk can sum its cost (after a /clear the next prompt records the new session).
-  if (po) { try { I.writePoSession(I.inboxDir(), po, payload, now); } catch {} }
+  // #90: a solo room records it too, under its terminal id (the usage line of the room reads it back).
+  if (po || solo) { try { I.writePoSession(I.inboxDir(), po || id, payload, now); } catch {} }
   // A prompt with a picture placeholder gets its pictures from the transcript (a worker, since the transcript may not hold it yet);
   // Stop tries once more for any prompt still without (the hook of this very event has nothing to wait for).
   const tp = typeof payload?.transcript_path === "string" ? payload.transcript_path : "";
