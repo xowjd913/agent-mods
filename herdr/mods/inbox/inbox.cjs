@@ -299,8 +299,17 @@ const MAX_PO_TEXT = 2000;
 // The PO's lines: {ts, kind:"say", text, to?} per line, oldest first. Lenient like parseLines: broken or unknown lines are skipped,
 // unknown fields are ignored. `to` is who the line answers (an hc name or "here"), "" when absent. A {kind:"me"} line is what the person
 // typed into the PO terminal itself (written by the PO hook): it comes back with `me: true` and is shown as the person's own bubble.
+// A {ts, kind:"fwd", to, pid, h?} line (#82, written by the PO's send helper) says the person's prompt `pid` was forwarded to the agent `to`:
+// the matching `me` line comes back with `fwd: [{to, exact}]` (`exact` = what was sent has the same words as the prompt; `h` = fwdHash of the sent
+// text). The hash is plain: UTF-8 bytes of the text with each run of ASCII whitespace (space, tab, CR, LF) made one space and the ends cut of those
+// (NBSP, U+3000 and other Unicode spaces stay as they are), sha256, first 16 hex chars lowercase, so a shell helper can match it byte for byte.
+// The helper hashes the text it sent as it is; the desk hashes the `me` line after unwrapTags (the hook's <hc>/<pasted_content> wrapper is not part of
+// what the person said). Linked by the prompt id only, never by guessing from the text; a `fwd` with no `pid`, a `to` that is not an agent name, or no `me` line
+// with that `pid` is dropped, and the same pid + agent counts once (a resend).
+const fwdHash = (text) => require("crypto").createHash("sha256").update(String(text ?? "").replace(/[ \t\r\n]+/g, " ").replace(/^ | $/g, ""), "utf8").digest("hex").slice(0, 16);
 function parsePoLines(text) {
   const out = [];
+  const fwds = []; // {kind:"fwd"} lines, joined to their `me` line below
   const pics = []; // {kind:"img"} lines: the images of a prompt, written by the hook after it read them from the transcript
   for (const raw of String(text ?? "").split("\n")) {
     let o;
@@ -311,12 +320,25 @@ function parsePoLines(text) {
       if (ms > 0 && imgs.length) pics.push({ ms, pid: typeof o.pid === "string" ? o.pid : "", imgs });
       continue;
     }
+    if (o && o.kind === "fwd") {
+      const to = typeof o.to === "string" ? o.to.trim() : "";
+      if (typeof o.pid === "string" && o.pid && isAgentName(to)) fwds.push({ pid: o.pid, to, h: typeof o.h === "string" ? o.h : "" });
+      continue;
+    }
     if (!o || (o.kind !== "say" && o.kind !== "me") || typeof o.text !== "string") continue;
     const body = unwrapTags(o.text); // no <hc ...> / <pasted_content ...> wrapper tags in what the desk draws or compares
     if (!body.trim()) continue;
     const ms = Date.parse(o.ts);
     if (!(ms > 0)) continue;
-    out.push({ ts: new Date(ms).toISOString(), ms, text: cutHead(body.trim(), MAX_PO_TEXT), to: typeof o.to === "string" ? o.to.trim() : "", ...(o.kind === "me" ? { me: true } : {}), pid: typeof o.pid === "string" ? o.pid : "" });
+    out.push({ ts: new Date(ms).toISOString(), ms, text: cutHead(body.trim(), MAX_PO_TEXT), to: typeof o.to === "string" ? o.to.trim() : "", ...(o.kind === "me" ? { me: true, raw: o.text } : {}), pid: typeof o.pid === "string" ? o.pid : "" });
+  }
+  const byPid = new Map(); // the prompt id -> its (latest) `me` line
+  for (const x of out) if (x.me && x.pid) byPid.set(x.pid, x);
+  for (const f of fwds) {
+    const m = byPid.get(f.pid);
+    if (!m || (m.fwd ?? []).some((y) => y.to === f.to)) continue;
+    m.whole ??= fwdHash(unwrapTags(m.raw)); // hashed only for a prompt that was forwarded
+    (m.fwd ??= []).push({ to: f.to, exact: Boolean(f.h) && f.h === m.whole });
   }
   // An image line belongs to the prompt with its prompt id, else to the latest prompt within 2 minutes before it.
   for (const g of pics) {
@@ -325,7 +347,7 @@ function parsePoLines(text) {
     if (hit) hit.imgs = g.imgs;
   }
   out.sort((a, b) => a.ms - b.ms);
-  return out.slice(-MAX_PO).map(({ pid, ...x }) => (pid ? { ...x, pid } : x)); // the prompt id stays, when there is one: the 1:1 view pairs a reply with its prompt (#58)
+  return out.slice(-MAX_PO).map(({ pid, whole, raw, ...x }) => (pid ? { ...x, pid } : x)); // the prompt id stays, when there is one: the 1:1 view pairs a reply with its prompt (#58)
 }
 
 // ---- picture files (Node side; the pure rules - which path may be drawn - are imgOk/splitImgs in the chat block)
@@ -1343,7 +1365,10 @@ const tlNorm = (v) => cutHead(String(v ?? "").replace(/\s+/g, " ").trim(), 2000)
 const tlFull = (v) => tlMemoGet("f", v, (s) => tlNorm(unwrapTags(s)));
 const tlCore = (v) => tlMemoGet("c", v, (s) => { const sp = splitImgs(s); return `${tlNorm(sp.text)}|${sp.imgs.join(",")}`; });
 // "" when the line is not such a cut (a short line that merely ends in "…" must not hide a longer send).
-const tlCut = (v) => { const s = String(v ?? ""); if (!s.endsWith("…")) return ""; const p = tlFull(s.slice(0, -1)); return p.length >= TL_CUT_MIN ? p : ""; };
+// The hook cuts the wrapped paste at 2000 characters, so the cut often lands inside the closing tag ("…\n</pasted_…"): a half tag at the end is not text the desk
+// record has, so it is dropped before the prefix is compared (unwrapTags only strips whole tags).
+const TL_HALF_TAG = /[ \t\n]*<\\?\/?[A-Za-z_]{0,14}$/;
+const tlCut = (v) => { const s = String(v ?? ""); if (!s.endsWith("…")) return ""; const p = tlFull(s.slice(0, -1).replace(TL_HALF_TAG, "")); return p.length >= TL_CUT_MIN ? p : ""; };
 const hookKey = (v) => ({ t: tlFull(v), c: tlCore(v), p: tlCut(v) });
 const tlMatches = (k, m) => tlFull(m.line) === k.t || tlFull(m.text) === k.t || (k.c.length > 1 && (tlCore(m.line) === k.c || tlCore(m.text) === k.c)) || (k.p && (tlFull(m.line).startsWith(k.p) || tlFull(m.text).startsWith(k.p)));
 // A hook line belongs to a desk record when it came from up to 11 minutes (the Enter button's life) after the record's time to 1 minute before it.
@@ -1388,6 +1413,7 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
   // record that has a `to`. Only the 1:1 view reads it (`about`); the bubble does not say "→ leader", since the reply is to the person.
   const about = new Map();
   const coveredReports = new Set(); // indexes into `out` of the reports an hc copy was matched to
+  const fwdOf = new Map(); // desk record -> the forwards of the hook line it matched (the hook line is not drawn then, so the mark moves onto the desk bubble)
   if (room && room !== PO_OTHER) for (const x of says ?? []) {
     if (x.me) {
       // #87: the PO hook also records a leader's report that arrived as `<hc from=...>`; the report is already on the desk (card or notice), so that copy is not a bubble of the person. One report covers one such line.
@@ -1398,13 +1424,13 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
       }
       const k = hookKey(x.text);
       const i = sentBy.findIndex((m, j) => !taken.has(j) && tlWindow(x.ms, Number(m.ms) || 0) && tlMatches(k, m));
-      if (i >= 0) { taken.add(i); proven.add(sentBy[i]); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); continue; }
-      out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
+      if (i >= 0) { taken.add(i); proven.add(sentBy[i]); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); if (x.fwd?.length) fwdOf.set(sentBy[i], x.fwd); continue; }
+      out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}), ...(x.fwd?.length ? { fwd: x.fwd } : {}) });
       continue;
     }
     out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: x.to || "", ...(!x.to && x.pid && about.get(x.pid) ? { about: about.get(x.pid) } : {}) });
   }
-  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", ...(x.tos?.length ? { tos: x.tos } : {}), kind: x.kind || "chat", status: proven.has(x) ? "sent" : liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
+  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", ...(x.tos?.length ? { tos: x.tos } : {}), kind: x.kind || "chat", status: proven.has(x) ? "sent" : liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}), ...(fwdOf.get(x)?.length ? { fwd: fwdOf.get(x) } : {}) });
   // Two entries with the same key (the same text at the same ms) would share one element id: the later ones get a #n suffix.
   const used = new Map();
   for (const e of out) {
@@ -1573,10 +1599,24 @@ function seenNext(seenMap, room, entries) {
 // 전체. The person's own lines are only under 전체; the made-up "waiting" entry (no report) counts by the kind the leader waits on.
 const CHAT_FILTERS = [["all", "전체"], ["unread", "안 읽은 것"], ["decision", "결정 필요"], ["verify", "최종 확인 요청"], ["done", "결과"], ["stop", "멈춤"]];
 const entryKind = (e) => (e?.who === "po" || e?.who === "me" ? "" : e?.waiting || e?.it?.kind || "");
+// #140: a decision report is closed (so it leaves the 결정 필요 chip and its count; it stays under 전체) when (1) its own `it.answered` is set (a later
+// "answered" line of that leader, markAnswered), or (2) a LATER line of the person is addressed to that leader: a chat line (`to` / `tos`) or one the PO
+// forwarded (`fwd`, #82), judged from `entries` (the same set the chips are made from). A later report (done/resume/stop) or a PO line without `fwd`
+// does not close it, and neither does a line to another leader. The made-up "waiting" entry is never closed. Any later line to that leader closes it,
+// even one that is not an answer: a stale count is better than a hidden question only when it is rare, so this stays this narrow.
+function decisionClosed(e, entries) {
+  if (e?.waiting || e?.wait || entryKind(e) !== "decision") return false;
+  if (e.it?.answered) return true;
+  const leader = entryLeader(e);
+  const ms = Number(e.ms) || 0;
+  return Boolean(leader) && (entries ?? []).some((x) => x?.who === "me" && (Number(x.ms) || 0) > ms
+    && (x.to === leader || (x.tos ?? []).includes(leader) || (x.fwd ?? []).some((f) => f.to === leader)));
+}
 function filterEntries(entries, filter, seen) {
   const list = entries ?? [];
   if (!filter || filter === "all" || !CHAT_FILTERS.some((f) => f[0] === filter)) return list;
   if (filter === "unread") return list.filter((e) => e.who !== "me" && !e.wait && e.ms > (Number(seen) || 0));
+  if (filter === "decision") return list.filter((e) => entryKind(e) === "decision" && !decisionClosed(e, list));
   return list.filter((e) => entryKind(e) === filter);
 }
 // What the timeline draws under a filter: the filtered entries, and always the pending "waiting" ones (a leader still waiting on the person must not
@@ -1606,9 +1646,12 @@ const settleLeader = (choices, leader) => (leader && (choices ?? []).length >= 1
 // terminal carries its hc name, or sits at the address its summary recorded. `sums` = [{leader, terminal}].
 const aliveLeaders = (choices, terms, sums) => (choices ?? []).filter((c) => (terms ?? []).some((t) => t.name === c.id || (t.address && (sums ?? []).some((s) => s.leader === c.id && s.terminal === t.address))));
 // Attributed by a field only, never by guessing from the text: the person's line whose `to` / `tos` names the leader (a chat with @lead-x, an
-// answer button of its card), and the PO's line whose `to` names it or whose `about` does (its reply to a prompt the desk sent to that leader).
+// answer button of its card, or a line the PO forwarded to it: `fwd`, #82), and the PO's line whose `to` names it or whose `about` does (its reply to a prompt the desk sent to that leader).
 const leaderEntries = (entries, leader) => (leader ? (entries ?? []).filter((e) => entryLeader(e) === leader
-  || (e?.who === "me" && (e.to === leader || (e.tos ?? []).includes(leader))) || (e?.who === "po" && (e.to === leader || e.about === leader))) : entries ?? []);
+  || (e?.who === "me" && (e.to === leader || (e.tos ?? []).includes(leader) || (e.fwd ?? []).some((x) => x.to === leader))) || (e?.who === "po" && (e.to === leader || e.about === leader))) : entries ?? []);
+// The small line over a bubble of the person's words that the PO passed on (#82): "→ x 그대로 전달" (the same words) or "→ x 다듬어 전달" (reworded). In
+// one leader's 1:1 view (`leader`) only that leader's mark shows; in 전체 every leader it went to. `label` = the shown name of a leader. [] when none.
+const fwdMarks = (e, leader = "", label = (n) => n) => (e?.who === "me" ? (e.fwd ?? []) : []).filter((x) => !leader || x.to === leader).map((x) => `→ ${label(x.to)} ${x.exact ? "그대로" : "다듬어"} 전달`);
 // The "안 읽은 것" base, shared by every copy of the mod (Dock, window, pane): {<room>: {seen, ts}}. The first copy to draw a room takes the room's
 // last-opened marker before it moves, and the others use that same value for SNAP_TTL_MS after it was last drawn (each draw renews it).
 const SNAP_TTL_MS = 30000;
@@ -2415,7 +2458,7 @@ function chatDraftRead(root = appRoot(), now = Date.now()) {
   return { rooms, focus: j.focus === true && now - j.at < DRAFT_FOCUS_MS };
 }
 
-module.exports = { ROOM_W_MIN, ROOM_W_MAX, ROOM_W_KEY, roomWidth, soloMode, soloTerm, soloRooms, STOP_LOCK_MS, stopBlock, stopLocked, stopKey, stopWorking, hookProved, initial, cutPoint, cutHead, cutTail, wellFormed, CLIP_TEXT_MAX, clipText, bangCommand, promptInput, promptParse, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, SEND_PROOF_BACK_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, roomWorking, REMOTE_CMD, REMOTE_POLLS, REMOTE_POLL_MS, remoteBlock, remoteScreen, remoteNote, SOLO_DIR, soloEnabled, readSolo, setSolo, SOLO_FLAG, soloFile, decisionGroups, groupAnswer, dropChat, REMOTE_DIR, remoteRecFile, termPid, procStart, bridgeState, readRemoteRec, clearRemote, markRemote, checkRemote, remoteRooms, FONT_BASE, FONT_KEY, FONT_MIN, FONT_MAX, fontOverride, fontScale, NOTICE_KINDS, isNotice, noticeText, hcSender, HC_REPORT_MS, hcSame, CHAT_DRAFT_FILE, DRAFT_FOCUS_MS, DRAFT_KEEP_MS, chatDraftPath, chatDraftSnap, chatDraftWrite, chatDraftRead };
+module.exports = { fwdHash, fwdMarks, ROOM_W_MIN, ROOM_W_MAX, ROOM_W_KEY, roomWidth, soloMode, soloTerm, soloRooms, STOP_LOCK_MS, stopBlock, stopLocked, stopKey, stopWorking, hookProved, initial, cutPoint, cutHead, cutTail, wellFormed, CLIP_TEXT_MAX, clipText, bangCommand, promptInput, promptParse, DEFAULT_NAMES, setNames, plainNames, loadNames, isAgentName, isHubTerm, isAgentTerm, labelOf, mentionRe, COST_PRICES, COST_BIG_PROMPT, COST_READ_MAX, COST_IDS, COST_CACHE, PO_SESSION_DIR, modelKey, costTokens, costUsd, costFold, costFresh, costRead, subagentFiles, poSessionFile, sessionRecord, writePoSession, readPoSession, poCosts, costLabel, costTip, handoffFile, readHandoff, HANDOFF_MAX, RESTART_STEPS, RESTART_WAIT_MS, RESTART_POLL_MS, RESTART_CLEAR_MS, RESTART_MARK, restartBlock, handoffAsk, restartConfirm, restartSteps, restartNoteFresh, restartPoll, restartSendResult, restartTerm, restartSendBlock, restartClearState, restartDraft, RESTART_DRAFT_MS, restartSubmitCheck, restartClearCheck, RESTART_REC_MS, SEND_PROOF_BACK_MS, USAGE_FILE, USAGE_REFRESH_MS, USAGE_STALE_MS, USAGE_WARN, USAGE_TRACK_W, USAGE_TRACK_H, usageFill, usageLeft, parseUsage, usageTip, unwrapTags, clipLong, moreLabel, LONG_LINES, LONG_CHARS, mdText, mdBlocks, MD_ITEM, IMG_TOTAL_MAX, pruneImages, diagAppend, DIAG_MAX, appRoot, imgRel, fitImg, bubbleWidth, imgSize, imageDims, imgDir, sniffExt, saveImage, importImage, clipImage, transcriptImages, pendingImagePids, MAX_IMG_BYTES, imgOk, imgLine, splitImgs, bubbleParts, MAX_IMGS, pinStep, PIN_SLACK, JUMP_MIN, jumpShown, INPUT_MAX_LINES, quietNow, PO_OTHER, cleanPoId, poId, poProject, poList, poFile, leaderOwner, choosePick, composeChat, parseMention, enterIntent, needsNewline, strayBreak, imeHold, holdShown, strayHeld, editCore, strayAt, withoutAt, replacedAt, enterPending, atTextEnd, HELD_BREAK_MS, TL_GAP_MS, timeline, groupTimeline, unreadCount, seenNext, CHAT_FILTERS, filterEntries, filterCounts, decisionClosed, tlKey, tlFollow, atBottom, chatHtml, chatRecord, setChatStatus, mineNote, mineActs, ENTER_TTL_MS, liveStatus, badgeTurn, cleanText, promptTail, promptSame, PROMPT_TIMER, typingNow, workStates, typingLabel, LABEL_BLOCKED, LABEL_WORKING, LABEL_TEAM, LABEL_GRACE, selRangeOf, bubbleCap, chatColW, BUBBLE_SHARE, BUBBLE_SIDE, typingSync, leaderSaid, graceKey, busyAddrs, TYPING_GRACE_MS, statusSig, promptOptions, promptSig, inputHas, keepWaiting, snapBase, snapStep, SNAP_TTL_MS, tlId, CHAT_KINDS, CHAT_STATUS, dockTarget, decisionOptions, decisionHints, mentionQuery, leaderMenu, chatTarget, parsePoLines, hookLine, readPo, markAnswered, waitingKind, leaderName, rememberNames, liveName, parseBody, toParts, escapeHtml, inlineSegs, linkLabel, linkRef, enrich, parseLines, openAsk, summarize, collect, findPo, answerLine, inboxDir, KINDS, pinCall, COST_KRW_RATE, COST_KRW_NOTE, sendFollow, SEND_FOLLOW_MS, settlePick, staleDrafts, PICK_GRACE_MS, DRAFT_GRACE_MS, DRAFT_KEY_MS, draftWiped, swapDraft, ROOM_DRAFTS_MAX, entryLeader, roomLeaders, settleLeader, aliveLeaders, leaderEntries, roomWorking, REMOTE_CMD, REMOTE_POLLS, REMOTE_POLL_MS, remoteBlock, remoteScreen, remoteNote, SOLO_DIR, soloEnabled, readSolo, setSolo, SOLO_FLAG, soloFile, decisionGroups, groupAnswer, dropChat, REMOTE_DIR, remoteRecFile, termPid, procStart, bridgeState, readRemoteRec, clearRemote, markRemote, checkRemote, remoteRooms, FONT_BASE, FONT_KEY, FONT_MIN, FONT_MAX, fontOverride, fontScale, NOTICE_KINDS, isNotice, noticeText, hcSender, HC_REPORT_MS, hcSame, CHAT_DRAFT_FILE, DRAFT_FOCUS_MS, DRAFT_KEEP_MS, chatDraftPath, chatDraftSnap, chatDraftWrite, chatDraftRead };
 
 if (require.main === module) {
   // `node inbox.cjs`            -> the panel's data (JSON)

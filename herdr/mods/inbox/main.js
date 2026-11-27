@@ -434,7 +434,10 @@ const tlNorm = (v) => cutHead(String(v ?? "").replace(/\s+/g, " ").trim(), 2000)
 const tlFull = (v) => tlMemoGet("f", v, (s) => tlNorm(unwrapTags(s)));
 const tlCore = (v) => tlMemoGet("c", v, (s) => { const sp = splitImgs(s); return `${tlNorm(sp.text)}|${sp.imgs.join(",")}`; });
 // "" when the line is not such a cut (a short line that merely ends in "…" must not hide a longer send).
-const tlCut = (v) => { const s = String(v ?? ""); if (!s.endsWith("…")) return ""; const p = tlFull(s.slice(0, -1)); return p.length >= TL_CUT_MIN ? p : ""; };
+// The hook cuts the wrapped paste at 2000 characters, so the cut often lands inside the closing tag ("…\n</pasted_…"): a half tag at the end is not text the desk
+// record has, so it is dropped before the prefix is compared (unwrapTags only strips whole tags).
+const TL_HALF_TAG = /[ \t\n]*<\\?\/?[A-Za-z_]{0,14}$/;
+const tlCut = (v) => { const s = String(v ?? ""); if (!s.endsWith("…")) return ""; const p = tlFull(s.slice(0, -1).replace(TL_HALF_TAG, "")); return p.length >= TL_CUT_MIN ? p : ""; };
 const hookKey = (v) => ({ t: tlFull(v), c: tlCore(v), p: tlCut(v) });
 const tlMatches = (k, m) => tlFull(m.line) === k.t || tlFull(m.text) === k.t || (k.c.length > 1 && (tlCore(m.line) === k.c || tlCore(m.text) === k.c)) || (k.p && (tlFull(m.line).startsWith(k.p) || tlFull(m.text).startsWith(k.p)));
 // A hook line belongs to a desk record when it came from up to 11 minutes (the Enter button's life) after the record's time to 1 minute before it.
@@ -479,6 +482,7 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
   // record that has a `to`. Only the 1:1 view reads it (`about`); the bubble does not say "→ leader", since the reply is to the person.
   const about = new Map();
   const coveredReports = new Set(); // indexes into `out` of the reports an hc copy was matched to
+  const fwdOf = new Map(); // desk record -> the forwards of the hook line it matched (the hook line is not drawn then, so the mark moves onto the desk bubble)
   if (room && room !== PO_OTHER) for (const x of says ?? []) {
     if (x.me) {
       // #87: the PO hook also records a leader's report that arrived as `<hc from=...>`; the report is already on the desk (card or notice), so that copy is not a bubble of the person. One report covers one such line.
@@ -489,13 +493,13 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
       }
       const k = hookKey(x.text);
       const i = sentBy.findIndex((m, j) => !taken.has(j) && tlWindow(x.ms, Number(m.ms) || 0) && tlMatches(k, m));
-      if (i >= 0) { taken.add(i); proven.add(sentBy[i]); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); continue; }
-      out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
+      if (i >= 0) { taken.add(i); proven.add(sentBy[i]); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); if (x.fwd?.length) fwdOf.set(sentBy[i], x.fwd); continue; }
+      out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}), ...(x.fwd?.length ? { fwd: x.fwd } : {}) });
       continue;
     }
     out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: x.to || "", ...(!x.to && x.pid && about.get(x.pid) ? { about: about.get(x.pid) } : {}) });
   }
-  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", ...(x.tos?.length ? { tos: x.tos } : {}), kind: x.kind || "chat", status: proven.has(x) ? "sent" : liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
+  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", ...(x.tos?.length ? { tos: x.tos } : {}), kind: x.kind || "chat", status: proven.has(x) ? "sent" : liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}), ...(fwdOf.get(x)?.length ? { fwd: fwdOf.get(x) } : {}) });
   // Two entries with the same key (the same text at the same ms) would share one element id: the later ones get a #n suffix.
   const used = new Map();
   for (const e of out) {
@@ -664,10 +668,24 @@ function seenNext(seenMap, room, entries) {
 // 전체. The person's own lines are only under 전체; the made-up "waiting" entry (no report) counts by the kind the leader waits on.
 const CHAT_FILTERS = [["all", "전체"], ["unread", "안 읽은 것"], ["decision", "결정 필요"], ["verify", "최종 확인 요청"], ["done", "결과"], ["stop", "멈춤"]];
 const entryKind = (e) => (e?.who === "po" || e?.who === "me" ? "" : e?.waiting || e?.it?.kind || "");
+// #140: a decision report is closed (so it leaves the 결정 필요 chip and its count; it stays under 전체) when (1) its own `it.answered` is set (a later
+// "answered" line of that leader, markAnswered), or (2) a LATER line of the person is addressed to that leader: a chat line (`to` / `tos`) or one the PO
+// forwarded (`fwd`, #82), judged from `entries` (the same set the chips are made from). A later report (done/resume/stop) or a PO line without `fwd`
+// does not close it, and neither does a line to another leader. The made-up "waiting" entry is never closed. Any later line to that leader closes it,
+// even one that is not an answer: a stale count is better than a hidden question only when it is rare, so this stays this narrow.
+function decisionClosed(e, entries) {
+  if (e?.waiting || e?.wait || entryKind(e) !== "decision") return false;
+  if (e.it?.answered) return true;
+  const leader = entryLeader(e);
+  const ms = Number(e.ms) || 0;
+  return Boolean(leader) && (entries ?? []).some((x) => x?.who === "me" && (Number(x.ms) || 0) > ms
+    && (x.to === leader || (x.tos ?? []).includes(leader) || (x.fwd ?? []).some((f) => f.to === leader)));
+}
 function filterEntries(entries, filter, seen) {
   const list = entries ?? [];
   if (!filter || filter === "all" || !CHAT_FILTERS.some((f) => f[0] === filter)) return list;
   if (filter === "unread") return list.filter((e) => e.who !== "me" && !e.wait && e.ms > (Number(seen) || 0));
+  if (filter === "decision") return list.filter((e) => entryKind(e) === "decision" && !decisionClosed(e, list));
   return list.filter((e) => entryKind(e) === filter);
 }
 // What the timeline draws under a filter: the filtered entries, and always the pending "waiting" ones (a leader still waiting on the person must not
@@ -697,9 +715,12 @@ const settleLeader = (choices, leader) => (leader && (choices ?? []).length >= 1
 // terminal carries its hc name, or sits at the address its summary recorded. `sums` = [{leader, terminal}].
 const aliveLeaders = (choices, terms, sums) => (choices ?? []).filter((c) => (terms ?? []).some((t) => t.name === c.id || (t.address && (sums ?? []).some((s) => s.leader === c.id && s.terminal === t.address))));
 // Attributed by a field only, never by guessing from the text: the person's line whose `to` / `tos` names the leader (a chat with @lead-x, an
-// answer button of its card), and the PO's line whose `to` names it or whose `about` does (its reply to a prompt the desk sent to that leader).
+// answer button of its card, or a line the PO forwarded to it: `fwd`, #82), and the PO's line whose `to` names it or whose `about` does (its reply to a prompt the desk sent to that leader).
 const leaderEntries = (entries, leader) => (leader ? (entries ?? []).filter((e) => entryLeader(e) === leader
-  || (e?.who === "me" && (e.to === leader || (e.tos ?? []).includes(leader))) || (e?.who === "po" && (e.to === leader || e.about === leader))) : entries ?? []);
+  || (e?.who === "me" && (e.to === leader || (e.tos ?? []).includes(leader) || (e.fwd ?? []).some((x) => x.to === leader))) || (e?.who === "po" && (e.to === leader || e.about === leader))) : entries ?? []);
+// The small line over a bubble of the person's words that the PO passed on (#82): "→ x 그대로 전달" (the same words) or "→ x 다듬어 전달" (reworded). In
+// one leader's 1:1 view (`leader`) only that leader's mark shows; in 전체 every leader it went to. `label` = the shown name of a leader. [] when none.
+const fwdMarks = (e, leader = "", label = (n) => n) => (e?.who === "me" ? (e.fwd ?? []) : []).filter((x) => !leader || x.to === leader).map((x) => `→ ${label(x.to)} ${x.exact ? "그대로" : "다듬어"} 전달`);
 // The "안 읽은 것" base, shared by every copy of the mod (Dock, window, pane): {<room>: {seen, ts}}. The first copy to draw a room takes the room's
 // last-opened marker before it moves, and the others use that same value for SNAP_TTL_MS after it was last drawn (each draw renews it).
 const SNAP_TTL_MS = 30000;
@@ -4175,6 +4196,7 @@ export default class Inbox extends View {
       const width = Math.min(Math.max(bubbleWidth(words), pics, 64), cap ?? Infinity);
       return v_flex().id(id).flex_none().px(10).pt(top).gap(2).items_end()
         .when(Boolean(e.to), (el) => el.child(div().max_w("85%").min_w(0).truncate().text_size(fz(10)).text_color(t.dim).child(`→ ${shortName(e.to)}`)))
+        .children(fwdMarks(e, v.who, (n) => shortName(n)).map((x, i) => div().id(`${id}-fwd${i}`).max_w("85%").min_w(0).truncate().text_size(fz(10)).text_color(t.dim).child(x))) // #82: the PO passed these words on (only the picked leader's mark in its 1:1 view)
         .child(h_flex().w_full().min_w(0).gap(6).items_end().justify_end() // always the right edge: the chip and the time are left of the bubble
           .child(this.sideTools(t, id, e.text, e.ms))
           .child(v_flex().flex_none().w(width).max_w(cap ?? "75%").min_w(0).px(12).py(9).gap(6).rounded(12).bg(t.working + "33").border(1).border_color((bad ? t.blocked : t.working) + "66").text_size(fz(12.5)).text_color(t.foreground)
