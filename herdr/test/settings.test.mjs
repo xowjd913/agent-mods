@@ -5,15 +5,21 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createRequire } from "node:module";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
 
 const stub = "const h = () => globalThis.__herdr;" +
   "const el = () => { let id = null; const p = new Proxy({}, { get: (_t, k) => (...a) => {" +
   "  if (k === 'when') { if (a[0]) a[1](p); return p; }" +
   "  if (k === 'id') id = a[0];" +
   "  if (k === 'on_click' && id) h().clicks[id] = a[0];" +
+  "  if ((k === 'pr' || k === 'mr') && id) h().pr[id] = a[0];" +
   "  if (k === 'child' || k === 'children') h().texts.push(...[].concat(a[0]).filter((x) => typeof x === 'string'));" +
   "  return p; } }); return p; };" +
   "export const View = class {}; export const div = el; export const svg = el; export const v_flex = el; export const h_flex = el;" +
+  "export const InputState = { new: (o) => ({ v: String(o?.value ?? ''), placeholder: o?.placeholder, value() { return this.v; }, set_value(x) { this.v = String(x); }, on() {} }) };" +
+  "export const Input = { new: () => el() };" +
   "export const theme = () => ({});" +
   "export const props = () => h().props;" +
   "export const appHome = () => '/app';" +
@@ -23,6 +29,7 @@ const stub = "const h = () => globalThis.__herdr;" +
   "export const closeOverlay = (id) => { h().closed.push(id); };" +
   "export const readTextFile = async (p) => (h().files[p] ?? null);" +
   "export const exec = async (c, a, o) => { h().execs.push({ c, a, o }); const r = h().execResult; return typeof r === 'function' ? r(c, a) : (r ?? { code: 0, stdout: '', stderr: '' }); };" +
+  "export const settings = () => { const s = h().settings; if (s === 'boom') throw new Error('x'); return s ?? {}; };" +
   "export const window = () => ({ platform: h().platform ?? 'macos' });";
 const hooks = `data:text/javascript,${encodeURIComponent(`
 export async function resolve(s, c, n) { return ["gpui-kit","gpui-base","herdr"].includes(s) ? { url: "stub:" + s, shortCircuit: true } : n(s, c); }
@@ -36,10 +43,10 @@ const SRC = { settings: fs.readFileSync(new URL("../mods/settings/main.js", impo
 const block = (s) => s.match(/\/\/ settings-window:begin\n[\s\S]*?\/\/ settings-window:end/)?.[0];
 
 function fake(over = {}) {
-  globalThis.__herdr = { props: {}, shared: {}, opened: [], closed: [], clicks: {}, texts: [], files: {}, execs: [], ...over };
+  globalThis.__herdr = { props: {}, shared: {}, opened: [], closed: [], clicks: {}, texts: [], pr: {}, files: {}, execs: [], ...over };
   return globalThis.__herdr;
 }
-const cx = () => ({ notified: 0, clip: [], notify() { this.notified++; }, write_to_clipboard(t) { this.clip.push(t); }, stop_propagation() {} });
+const cx = () => { const c = { notified: 0, clip: [], timers: [], notify() { this.notified++; }, write_to_clipboard(t) { this.clip.push(t); }, stop_propagation() {} }; c.timer = { every: (ms, fn) => c.timers.push({ ms, fn }) }; return c; };
 const make = (part, extra = {}, over = {}) => {
   const h = fake({ props: { part, ...extra }, ...over });
   const v = new Settings();
@@ -58,7 +65,7 @@ test("설정 창은 키 하나, 제목 줄·칸 목록·내용 블록으로 이�
   // 블록 안의 settingsWindow를 꺼내 쓴다.
   const code = block(SRC.settings).replace(/^\/\/.*$/gm, "");
   const settingsWindow = new Function(`${code}\nreturn settingsWindow;`)();
-  for (const [section, body] of [["accounts", { mod: "gh-accounts" }], ["github", { mod: "gh-accounts" }], ["mods", { mod: "settings", props: { part: "mods" } }], ["nope", { mod: "gh-accounts" }], [undefined, { mod: "gh-accounts" }]]) {
+  for (const [section, body] of [["accounts", { mod: "gh-accounts" }], ["github", { mod: "gh-accounts" }], ["mods", { mod: "settings", props: { part: "mods" } }], ["rules", { mod: "settings", props: { part: "rules" } }], ["fontsize", { mod: "settings", props: { part: "fontsize" } }], ["nope", { mod: "gh-accounts" }], [undefined, { mod: "gh-accounts" }]]) {
     const w = settingsWindow(section);
     assert.equal(w.kind, "window");
     assert.equal(w.key, "settings");
@@ -82,11 +89,17 @@ test("제목 줄의 닫기는 이 창의 overlay로 closeOverlay를 부른다", 
   assert.deepEqual(h.closed, ["ov-1"]);
 });
 
-test("칸 목록: 계정·모드는 눌러지고, 규칙·Claude 계정·UI 모드 글자 크기는 준비 중이라 눌러지지 않는다", () => {
+test("칸 목록: 계정·모드·규칙·UI 모드 글자 크기가 모두 눌러지고 준비 중인 칸은 없다. Claude 계정 줄은 없다(계정 칸에 들어 있다)", () => {
   const { h } = make("nav", { section: "accounts" });
-  assert.deepEqual(Object.keys(h.clicks).sort(), ["settings-nav-accounts", "settings-nav-mods"]);
-  for (const s of ["규칙", "Claude 계정", "UI 모드 글자 크기", "계정", "모드"]) assert.ok(h.texts.includes(s), s);
-  assert.equal(h.texts.filter((x) => x === "준비 중").length, 3);
+  assert.deepEqual(Object.keys(h.clicks).sort(), ["settings-nav-accounts", "settings-nav-fontsize", "settings-nav-mods", "settings-nav-rules"]);
+  for (const s of ["규칙", "UI 모드 글자 크기", "계정", "모드"]) assert.ok(h.texts.includes(s), s);
+  assert.ok(!h.texts.includes("Claude 계정"));
+  assert.equal(h.texts.filter((x) => x === "준비 중").length, 0);
+  const sections = new Function(`${SRC.settings.match(/const SECTIONS = \[[\s\S]*?\n\];/)[0]}\nreturn SECTIONS;`)();
+  assert.ok(!sections.some((x) => x.soon), "준비 중 칸이 남아 있지 않다");
+  const acc = sections.find((x) => x.id === "accounts");
+  assert.ok(/GitHub/.test(acc.hint) && /Claude/.test(acc.hint), "계정 칸 설명이 GitHub와 Claude를 말한다");
+  assert.ok(!sections.some((x) => x.id === "claude"));
 });
 
 test("칸을 누르면 마지막 칸을 기억하고 같은 키의 창을 그 칸으로 다시 연다", () => {
@@ -98,11 +111,14 @@ test("칸을 누르면 마지막 칸을 기억하고 같은 키의 창을 그 �
   assert.deepEqual(h.opened[0].layout.children[1].children[1].children[0].content, { mod: "settings", props: { part: "mods" } });
 });
 
-test("준비 중인 칸은 직접 불러도 창을 열지 않는다", () => {
+test("없는 칸은 직접 불러도 창을 열지 않고, 글자 크기 칸은 그 내용으로 연다", () => {
   const { h, v } = make("nav", { section: "accounts" });
-  for (const id of ["rules", "claude", "fontsize", "없는칸"]) v.open(id);
+  for (const id of ["claude", "없는칸"]) v.open(id);
   assert.deepEqual(h.opened, []);
   assert.deepEqual(h.shared, {});
+  v.open("fontsize");
+  assert.equal(h.shared["settings.section"], "fontsize");
+  assert.deepEqual(h.opened[0].layout.children[1].children[1].children[0].content, { mod: "settings", props: { part: "fontsize" } });
 });
 
 test("MODS 목록은 install.cjs의 모드·설명·기본 여부와 같다", () => {
@@ -404,4 +420,254 @@ test("tabs-mine의 설정 버튼은 settings 창을 열고 계정 패널 버튼�
   assert.match(SRC.tabs, /h_flex\(\)\.id\("settings-open"\)/);
   assert.match(SRC.tabs, /openOverlay\(settingsWindow\(shared\(SETTINGS_SHARED\)\)\)/);
   assert.ok(!/accounts-board/.test(SRC.tabs));
+});
+
+// ---- 규칙 칸(#126) ----
+// exec를 진짜 도우미(rules.cjs)로 이어 임시 HOME·받은편지함 폴더에서 돌린다. 진짜 ~/.claude 나 진짜 프로필은 건드리지 않는다.
+const RULES_CJS = new URL("../mods/settings/rules.cjs", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+function rulesEnv(profile = null) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rules-ui-"));
+  const inbox = path.join(home, "inbox");
+  fs.mkdirSync(inbox);
+  const file = path.join(inbox, "profile.json");
+  if (profile !== null) fs.writeFileSync(file, typeof profile === "string" ? profile : JSON.stringify(profile));
+  const env = { PATH: process.env.PATH, HOME: home, USERPROFILE: home, HERDR_INBOX_DIR: inbox };
+  const calls = [];
+  const execResult = (c, a) => {
+    calls.push(a.slice(1));
+    assert.equal(c, "node");
+    assert.equal(a[0], "/app/mods/settings/rules.cjs");
+    const r = spawnSync(process.execPath, [RULES_CJS, ...a.slice(1)], { env, encoding: "utf8" });
+    return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+  };
+  return { file, calls, execResult };
+}
+async function rulesView(profile, over = {}) {
+  const e = rulesEnv(profile);
+  const h = fake({ props: { part: "rules" }, execResult: e.execResult, ...over });
+  const v = new Settings();
+  const c = cx();
+  v.init(h.props, c);
+  await tick();
+  h.texts.length = 0;
+  v.render(c);
+  return { h, v, c, ...e };
+}
+const redraw = (h, v, c) => { h.texts.length = 0; v.render(c); };
+const typed = (v, id, text) => v.ruleInputs[id].set_value(text);
+
+test("규칙 칸: 열면 프로필을 읽어 지금 쓰는 규칙·이유·파일을 보여 주고 이름 규칙을 공유값에 올린다", async () => {
+  const { h, calls, file } = await rulesView(null);
+  assert.deepEqual(calls, [["show"]]);
+  assert.ok(h.texts.includes("지금 쓰는 규칙: 규칙 없음"), h.texts.join("|"));
+  assert.ok(h.texts.some((x) => x.startsWith("이유: 프로필 파일이 없고")));
+  assert.ok(h.texts.some((x) => x.includes(file) && x.includes("없음")));
+  assert.equal(h.shared["inbox.names"].preset, "none");
+  assert.ok(["rules-save", "rules-preset-po", "rules-preset-none"].every((id) => h.clicks[id]), "저장과 규칙 고르기 버튼");
+  assert.equal(h.clicks["rules-reset"], undefined, "파일이 없으면 되돌릴 것이 없다");
+});
+
+test("규칙 칸: PO 규칙을 골라 저장하면 도우미로 쓰고, 결과·재시작 안내를 보이고, 공유 이름 규칙과 바쁨 표시를 정리한다", async () => {
+  const { h, v, c, file, calls } = await rulesView(null);
+  h.clicks["rules-preset-po"]({}, c);
+  assert.equal(v.ruleInputs["agent.name"].value(), "^lead-[a-z0-9_-]+$", "고른 규칙의 기본값으로 칸이 채워진다");
+  typed(v, "agent.strip", "^boss-");
+  h.clicks["rules-save"]({}, c);
+  assert.equal(h.shared["settings.busy"].action, "save", "저장하는 동안 설치와 같은 잠금을 잡는다");
+  await tick();
+  assert.equal(h.shared["settings.busy"], null);
+  const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(saved.preset, "po");
+  assert.equal(saved.agent.strip, "^boss-");
+  assert.equal(saved.agent.name, undefined, "기본값과 같은 칸은 적지 않는다");
+  assert.equal(calls[1][0], "set");
+  assert.equal(h.shared["inbox.names"].preset, "po");
+  assert.equal(h.shared["inbox.names"].strip, "^boss-");
+  redraw(h, v, c);
+  assert.ok(h.texts.some((x) => x.startsWith("저장했습니다") && x.includes("다시 시작")), h.texts.join("|"));
+  assert.ok(h.texts.includes("지금 쓰는 규칙: PO 규칙"));
+  assert.ok(h.clicks["rules-reset"], "파일이 생겼으니 되돌리기가 보인다");
+});
+
+test("규칙 칸: 다른 설치·제거가 도는 중이면 저장도 되돌리기도 하지 않고 기다린다고 말한다", async () => {
+  const { h, v, c, calls, file } = await rulesView(null);
+  h.shared["settings.busy"] = { name: "work", action: "add", at: Date.now() };
+  redraw(h, v, c);
+  assert.ok(h.texts.some((x) => x === "work 설치 중이라 기다립니다"), h.texts.join("|"));
+  assert.equal(h.clicks["rules-save"] && typeof h.clicks["rules-save"], "function", "이전 그리기의 핸들러가 남아 있어도");
+  h.clicks["rules-save"]({}, c);
+  v.resetRules(c);
+  await tick();
+  assert.deepEqual(calls, [["show"]], "쓰기 명령은 가지 않았다");
+  assert.equal(fs.existsSync(file), false);
+});
+
+test("규칙 칸: 파일이 깨졌으면 오류와 되돌리기만 보이고, 되돌리기는 확인 뒤 .bak으로 옮긴다", async () => {
+  const { h, v, c, file } = await rulesView("{ not json");
+  assert.ok(h.texts.includes("프로필 파일을 읽을 수 없습니다"));
+  assert.equal(h.clicks["rules-save"], undefined, "깨진 파일 위에는 저장하지 않는다");
+  assert.ok(h.texts.some((x) => x.startsWith("profile")) || h.texts.some((x) => /JSON|json/.test(x)), h.texts.join("|"));
+  h.clicks["rules-reset"]({}, c);
+  redraw(h, v, c);
+  assert.equal(fs.existsSync(file), true, "확인 전에는 그대로");
+  h.clicks["rules-reset-yes"]({}, c);
+  await tick();
+  assert.equal(fs.existsSync(file), false);
+  assert.equal(fs.readFileSync(`${file}.bak`, "utf8"), "{ not json");
+  redraw(h, v, c);
+  assert.ok(h.texts.some((x) => x.startsWith("기본값으로 되돌렸습니다")));
+  assert.ok(h.clicks["rules-save"], "되돌린 뒤에는 다시 저장할 수 있다");
+});
+
+test("규칙 칸: 로더가 거절하는 값은 저장하지 못했다고 알리고 파일은 그대로다", async () => {
+  const { h, v, c, file } = await rulesView({ v: 1, preset: "po" });
+  const before = fs.readFileSync(file, "utf8");
+  typed(v, "agent.name", "(");
+  h.clicks["rules-save"]({}, c);
+  await tick();
+  redraw(h, v, c);
+  assert.ok(h.texts.some((x) => x.startsWith("저장하지 못했습니다(파일은 그대로입니다)")), h.texts.join("|"));
+  assert.equal(fs.readFileSync(file, "utf8"), before);
+  assert.equal(h.shared["settings.busy"], null);
+});
+
+test("규칙 칸: node나 도우미를 못 돌리면 오류를 보이고 깨지지 않는다", async () => {
+  const h = fake({ props: { part: "rules" }, execResult: () => { throw new Error("spawn node ENOENT"); } });
+  const v = new Settings();
+  const c = cx();
+  v.init(h.props, c);
+  await tick();
+  redraw(h, v, c);
+  assert.ok(h.texts.some((x) => x.includes("rules.cjs") && x.includes("node")), h.texts.join("|"));
+});
+
+test("규칙 칸 도우미: 이 칸이 보내는 id는 모두 도우미가 알고, busyText는 저장·되돌리기를 말한다", () => {
+  assert.match(SRC.settings, /const BUSY_VERB = \{ remove: "제거", save: "저장", reset: "되돌리기" \}/);
+  assert.match(SRC.settings, /name: "규칙", action: "save"/);
+  assert.match(SRC.settings, /name: "규칙", action: "reset"/);
+});
+
+test("tabs-mine은 아직 아무도 이름 규칙을 올리지 않았을 때만 도우미로 읽어 올린다(바탕: 프로필이 아니라 pickPreset)", async () => {
+  const src = SRC.tabs;
+  assert.match(src, /publishNames\(cx\)/);
+  assert.match(src, /mods\/settings\/rules\.cjs/);
+  assert.match(src, /if \(cur && Object\.keys\(cur\)\.length\) return;/);
+  assert.match(src, /import \{[^}]*\bsetShared\b[^}]*\} from "herdr"/);
+});
+
+// ---- UI 모드 글자 크기 칸(#126) ----
+const KEY = "settings.uiFontSize";
+const has = (h, re) => h.texts.some((x) => re.test(x));
+
+test("글자 크기 칸: 기본은 Herdr 글자 크기를 따르고, 지금 Herdr 크기와 UI 모드 크기를 보여 준다(직접 정하는 줄은 없다)", () => {
+  const { h } = make("fontsize", {}, { settings: { font_size: 16 } });
+  assert.ok(h.texts.includes("UI 모드 글자 크기"));
+  assert.ok(h.texts.includes("Herdr 글자 크기 따르기") && h.texts.includes("UI 모드만 따로 정하기"));
+  assert.ok(has(h, /^UI 모드 글자 크기: 16px \(Herdr 글자 크기를 따르는 중\)$/), h.texts.join(" | "));
+  assert.ok(h.texts.includes("지금 Herdr 글자 크기: 16px"));
+  assert.ok(h.texts.includes("미리보기 (16px)"));
+  assert.ok(has(h, /미리보기|리더 보고/));
+  assert.equal(h.clicks["font-plus"], undefined);
+  assert.equal(h.clicks["font-minus"], undefined);
+  assert.ok(!has(h, /준비 중/));
+});
+
+test("글자 크기 칸: 직접 정한 크기는 Herdr 값을 이기고, 거기서 -/+로 10~24px 안에서만 움직인다", () => {
+  const { h, v, c } = make("fontsize", {}, { settings: { font_size: 16 }, shared: { [KEY]: 18 } });
+  assert.ok(has(h, /^UI 모드 글자 크기: 18px \(직접 정한 크기\)$/), h.texts.join(" | "));
+  assert.ok(h.texts.includes("지금 Herdr 글자 크기: 16px"));
+  assert.ok(h.texts.includes("18px") && h.texts.includes("미리보기 (18px)"));
+  h.clicks["font-plus"]({}, c);
+  assert.equal(h.shared[KEY], 19);
+  h.clicks["font-minus"]({}, c);
+  h.clicks["font-minus"]({}, c);
+  assert.equal(h.shared[KEY], 17);
+  assert.ok(c.notified >= 3);
+  h.shared[KEY] = 24;
+  h.clicks = {};
+  v.render(c);
+  assert.equal(h.clicks["font-plus"], undefined, "24px에서는 더 키우지 못한다");
+  assert.equal(typeof h.clicks["font-minus"], "function");
+  h.shared[KEY] = 10;
+  h.clicks = {};
+  v.render(c);
+  assert.equal(h.clicks["font-minus"], undefined, "10px에서는 더 줄이지 못한다");
+  assert.equal(typeof h.clicks["font-plus"], "function");
+});
+
+test("글자 크기 칸: 정하기는 지금 크기로 시작하고(10~24로 맞춤), 따르기는 값을 지운다", () => {
+  const { h, c } = make("fontsize", {}, { settings: { font_size: 16 } });
+  h.clicks["font-fixed"]({}, c);
+  assert.equal(h.shared[KEY], 16);
+  h.clicks["font-follow"]({}, c);
+  assert.equal(h.shared[KEY], null);
+  const big = make("fontsize", {}, { settings: { font_size: 40 } });
+  big.h.clicks["font-fixed"]({}, big.c);
+  assert.equal(big.h.shared[KEY], 24);
+  const small = make("fontsize", {}, { settings: { font_size: 6 } });
+  small.h.clicks["font-fixed"]({}, small.c);
+  assert.equal(small.h.shared[KEY], 10);
+  const none = make("fontsize", {}, { settings: "boom" });
+  none.h.clicks["font-fixed"]({}, none.c);
+  assert.equal(none.h.shared[KEY], 13, "Herdr 값을 못 읽으면 13px에서 시작한다");
+});
+
+test("글자 크기 칸: 잘못된 값은 무시한다(저장된 값이 깨졌으면 따르기로 본다, 입력은 받지 않는다)", () => {
+  for (const bad of ["18", "x", 99, 9, 0, -3, NaN, {}, true]) {
+    const { h } = make("fontsize", {}, { settings: { font_size: 20 }, shared: { [KEY]: bad } });
+    assert.ok(has(h, /^UI 모드 글자 크기: 20px \(Herdr 글자 크기를 따르는 중\)$/), `bad: ${JSON.stringify(bad)}`);
+    assert.equal(h.clicks["font-plus"], undefined);
+  }
+  const { h, v, c } = make("fontsize", {}, { shared: { [KEY]: 15 } });
+  for (const bad of [99, 9, NaN, "20", {}, undefined, Infinity]) v.setFont(bad, c);
+  assert.equal(h.shared[KEY], 15);
+  v.setFont(30.4, c);
+  assert.equal(h.shared[KEY], 15);
+  v.setFont(12.4, c);
+  assert.equal(h.shared[KEY], 12);
+});
+
+test("글자 크기 칸: Herdr 글자 크기를 못 읽어도 그린다(알 수 없음, 13px 기준)", () => {
+  const { h } = make("fontsize", {}, { settings: "boom" });
+  assert.ok(h.texts.includes("지금 Herdr 글자 크기: 알 수 없음"));
+  assert.ok(has(h, /^UI 모드 글자 크기: 13px/));
+});
+
+test("글자 크기 칸: Herdr 글자 크기는 몇 초마다 다시 읽고 달라졌을 때만 다시 그린다", () => {
+  const { h, c } = make("fontsize", {}, { settings: { font_size: 13 } });
+  assert.equal(c.timers.length, 1);
+  assert.equal(c.timers[0].ms, 2000);
+  const before = c.notified;
+  c.timers[0].fn(c);
+  assert.equal(c.notified, before, "그대로면 다시 그리지 않는다");
+  h.settings = { font_size: 18 };
+  c.timers[0].fn(c);
+  assert.equal(c.notified, before + 1);
+  const rules = make("rules");
+  assert.equal(rules.c.timers.length, 0, "다른 칸은 타이머를 쓰지 않는다");
+});
+
+test("글자 크기 규칙은 inbox와 같다(FONT_BASE·키·범위·fontOverride·fontScale이 한 글자도 다르지 않다)", () => {
+  const cut = (t) => t.slice(t.indexOf("const FONT_BASE"), t.indexOf("\n};\n", t.indexOf("const fontScale")) + 4).replace(/\r\n/g, "\n");
+  const inbox = fs.readFileSync(new URL("../mods/inbox/inbox.cjs", import.meta.url), "utf8");
+  const a = cut(SRC.settings).split("\n").filter((l) => !l.startsWith("//")).join("\n");
+  const b = cut(inbox).split("\n").filter((l) => !l.startsWith("//")).join("\n");
+  assert.ok(a.includes("fontOverride") && a.includes("FONT_KEY"));
+  assert.equal(a, b);
+});
+
+test("오른쪽 여백: 모드·규칙·글자 크기 칸의 목록·폼·줄이 같은 오른쪽 여백(INSET_R)을 쓰고, 계정 칸(gh-accounts)도 컨트롤이 같은 거리에 놓인다(#126)", async () => {
+  const inset = Number(SRC.settings.match(/^const INSET_R = (\d+);/m)?.[1]);
+  assert.ok(inset >= 20, "스크롤바에 붙지 않을 만큼의 여백");
+  const ghSrc = fs.readFileSync(new URL("../mods/gh-accounts/main.js", import.meta.url), "utf8");
+  assert.equal(Number(ghSrc.match(/^const INSET_R = (\d+);/m)?.[1]), inset, "gh-accounts 의 값이 같다");
+  assert.match(ghSrc, /id\("acct-list"\)[^\n]*\.pr\(INSET_R - 8\)/, "계정 목록: 줄 안쪽 8 + 목록 오른쪽 = INSET_R");
+  const seen = (part, ids) => { const { h } = make(part, {}, { settings: {} }); for (const id of ids) assert.equal(h.pr[id], inset, `${part}/${id}`); };
+  seen("mods", ["mods-list", "mods-source"]);
+  const rv = await rulesView(null);
+  for (const id of ["rules-status", "rules-presets", "rules-form"]) assert.equal(rv.h.pr[id], inset, `rules/${id}`);
+  seen("fontsize", ["font-status", "font-modes", "font-sample"]);
+  // 본문 칸(스크롤 목록 밖 한 줄짜리)에 14 로 굳은 좌우 여백이 남아 있지 않다.
+  const body = SRC.settings.slice(SRC.settings.indexOf("modsBody(t) {"), SRC.settings.indexOf("  render(cx) {"));
+  assert.equal([...body.matchAll(/\.px\(14\)/g)].length, [...body.matchAll(/h\(38\)\.px\(14\)/g)].length, "제목 줄(h(38)) 말고는 px(14)를 쓰지 않는다");
 });
