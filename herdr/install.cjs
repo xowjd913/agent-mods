@@ -28,11 +28,11 @@ const ALL = [...CORE, ...EXTRAS];
 // 모드 설명과 꼭 함께 있어야 하는 모드. deps는 코드에서 확인한 것만 적는다.
 //   work·prs: wt-menu 팝업을 연다(work/main.js, prs/main.js의 openOverlay). 패널 버튼은 tabs-mine에만 있다.
 //   prs: 데이터를 mods/work/collect.cjs로 읽는다. schedules: 30초 tick을 tabs-mine이 부른다.
-//   tabs-mine: 설정 버튼이 settings 창을 연다(tabs-mine/main.js의 openOverlay). settings: GitHub 칸이 gh-accounts 블록을 그대로 쓴다.
+//   tabs-mine: 설정 버튼이 settings 창을 연다(tabs-mine/main.js의 openOverlay). settings: 계정 칸이 gh-accounts 블록을 그대로 쓴다.
 //   gh-accounts: 오른쪽 패널의 계정 버튼은 없어지고 입구는 설정 창뿐이다. gh-account 도구(--gh-account)는 모드가 아니라 따로 설치한다.
 const MODS = {
   "tabs-mine": { desc: "탭 줄. 오른쪽 패널 버튼과 설정 버튼을 더하고 예약 실행을 맡는다", deps: ["settings"] },
-  settings: { desc: "설정 창: GitHub 계정과 설치된 모드", deps: ["gh-accounts"] },
+  settings: { desc: "설정 창: 계정과 설치된 모드", deps: ["gh-accounts"] },
   work: { desc: "Work 패널: 누가 무엇을 하고 있나", deps: ["tabs-mine", "wt-menu"] },
   prs: { desc: "PRs 패널: 무엇을 손봐야 하나", deps: ["work", "tabs-mine", "wt-menu"] },
   "wt-menu": { desc: "워크트리 메뉴: Work·PRs에서 워크트리 줄을 누르면 뜨는 팝업", deps: [] },
@@ -41,7 +41,7 @@ const MODS = {
   "agent-groups": { desc: "왼쪽 사이드바 에이전트 목록을 작업별로 묶는다", deps: [] },
   "leader-tabs": { desc: "칸 머리줄에 리더 탭을 보여 준다", deps: [] },
   "path-menu": { desc: "터미널 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄운다", deps: [] },
-  "gh-accounts": { desc: "계정 패널: 스페이스·저장소마다 쓸 GitHub 계정 고르기 (설정 창 GitHub 칸)", deps: [] },
+  "gh-accounts": { desc: "계정 패널: 스페이스·저장소마다 쓸 GitHub 계정 고르기 (설정 창 계정 칸)", deps: [] },
   inbox: { desc: "UI 모드 패널: 리더 결과 보고를 채팅처럼 보고, 결정을 PO에게 답한다", deps: ["tabs-mine"] },
 };
 const MARK = ".installed-by-herdr-installer";

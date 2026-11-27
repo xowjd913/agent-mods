@@ -1,24 +1,28 @@
 // 설정 창: 탭 줄의 `설정` 버튼이 연다. 창은 하나(key "settings")이고 다시 누르면 그 창으로 간다.
 // 창은 블록 셋으로 이뤄진다(제목 줄 · 왼쪽 칸 목록 · 오른쪽 내용). 이 모드가 제목 줄·칸 목록·`모드` 칸을 그리고,
-// `GitHub` 칸은 계정 패널(gh-accounts)을 고치지 않고 그대로 블록으로 넣는다. 그래서 계정 패널의 기능은 그대로다.
+// `계정` 칸은 계정 패널(gh-accounts)을 고치지 않고 그대로 블록으로 넣는다. 그래서 계정 패널의 기능은 그대로다.
 // `규칙`(#124)·`Claude 계정`(#123)·`UI 모드 글자 크기`(#103)는 그 일이 합쳐진 뒤 칸을 더한다. 지금은 꺼진 채 "준비 중"으로만 보인다.
-// 모드 켜기·끄기는 하지 않는다: 설치기(install.cjs)는 모드와 함께 깔리지 않으므로 창에서 돌릴 수 없다. 설치 여부와 설치 명령만 보여 준다.
+// `모드` 칸은 README의 설치 한 줄(curl | sh, Windows는 PowerShell)을 herdr `exec`로 돌려 설치·제거한다(기본 모드는 제거하지 않는다).
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { theme, props, openOverlay, closeOverlay, setShared, appHome, readTextFile } from "herdr";
+import { theme, props, openOverlay, closeOverlay, setShared, appHome, readTextFile, exec, window } from "herdr";
 
 // settings-window:begin
 // 설정 창의 모양. tabs-mine/main.js와 settings/main.js에 이 블록을 그대로 복사해 둔다(모드끼리 파일을 불러올 수 없다. 테스트가 둘이 같은지 본다).
 // 칸을 바꾸면 SETTINGS_BODY와 settings/main.js의 SECTIONS를 함께 고친다.
 const SETTINGS_SHARED = "settings.section"; // 마지막으로 본 칸. 버튼으로 다시 열면 그 칸으로 연다
-const SETTINGS_BODY = { github: { mod: "gh-accounts" }, mods: { mod: "settings", props: { part: "mods" } } };
+const SETTINGS_BODY = { accounts: { mod: "gh-accounts" }, mods: { mod: "settings", props: { part: "mods" } } };
 const settingsWindow = (section) => {
-  const id = SETTINGS_BODY[section] ? section : "github";
-  return { kind: "window", key: "settings", width: 900, height: 640, layout: { id: "settings", type: "column", children: [
+  const id = SETTINGS_BODY[section] ? section : "accounts"; // 옛 이름(github)이 기억돼 있어도 계정 칸으로 간다
+  return { kind: "window", key: "settings", width: 900, height: 720, layout: { id: "settings", type: "column", children: [
     { id: "settings-bar", type: "block", content: { mod: "settings", props: { part: "bar" } }, size: { px: 40 }, window_drag: true },
     { id: "settings-main", type: "row", children: [
       { id: "settings-nav", type: "block", content: { mod: "settings", props: { part: "nav", section: id } }, size: { px: 200 } },
-      { id: "settings-body", type: "block", content: SETTINGS_BODY[id], size: { weight: 1 } },
+      // 내용 아래에 여백 칸을 둬서 마지막 줄이 창 아래에 붙지 않게 한다(내용 모드는 고치지 않는다).
+      { id: "settings-body", type: "column", size: { weight: 1 }, children: [
+        { id: "settings-content", type: "block", content: SETTINGS_BODY[id], size: { weight: 1 } },
+        { id: "settings-pad", type: "block", content: { mod: "settings", props: { part: "pad" } }, size: { px: 24 } },
+      ] },
     ] },
   ] } };
 };
@@ -26,8 +30,8 @@ const settingsWindow = (section) => {
 
 // 칸 목록. soon은 아직 없는 칸(켜지 않는다), issue는 그 칸이 기다리는 이슈다.
 const SECTIONS = [
-  { id: "github", label: "GitHub", hint: "저장소별 GitHub 계정" },
-  { id: "mods", label: "모드", hint: "설치된 모드와 설치 명령" },
+  { id: "accounts", label: "계정", hint: "저장소별 GitHub 계정" },
+  { id: "mods", label: "모드", hint: "설치된 모드를 설치·제거" },
   { id: "rules", label: "규칙", soon: true, issue: 124 },
   { id: "claude", label: "Claude 계정", soon: true, issue: 123 },
   { id: "fontsize", label: "UI 모드 글자 크기", soon: true, issue: 103 },
@@ -36,8 +40,8 @@ const SECTIONS = [
 // install.cjs의 MODS와 같은 이름·설명·기본 여부(테스트가 install.cjs와 같은지 본다). 모드 폴더에서는 install.cjs를 읽을 수 없어 적어 둔다.
 const MODS = [
   { name: "tabs-mine", desc: "탭 줄. 오른쪽 패널 버튼과 설정 버튼을 더하고 예약 실행을 맡는다", core: true },
-  { name: "settings", desc: "설정 창: GitHub 계정과 설치된 모드", core: true },
-  { name: "gh-accounts", desc: "계정 패널: 스페이스·저장소마다 쓸 GitHub 계정 고르기 (설정 창 GitHub 칸)", core: true },
+  { name: "settings", desc: "설정 창: 계정과 설치된 모드", core: true },
+  { name: "gh-accounts", desc: "계정 패널: 스페이스·저장소마다 쓸 GitHub 계정 고르기 (설정 창 계정 칸)", core: true },
   { name: "work", desc: "Work 패널: 누가 무엇을 하고 있나", core: true },
   { name: "prs", desc: "PRs 패널: 무엇을 손봐야 하나", core: true },
   { name: "wt-menu", desc: "워크트리 메뉴: Work·PRs에서 워크트리 줄을 누르면 뜨는 팝업", core: true },
@@ -56,6 +60,17 @@ const cmdAdd = (mod) => cmdSh("--add", mod);
 const cmdAddWin = (mod) => cmdPs("-Add", mod);
 const cmdRemove = (mod) => cmdSh("--remove", mod);
 const cmdRemoveWin = (mod) => cmdPs("-Remove", mod);
+const isWin = () => { try { return window()?.platform === "windows"; } catch { return false; } };
+// 설치기를 이 컴퓨터에서 돌린다. HERDR_APP_HOME을 이 Herdr 설정 폴더로 맞춰 터미널에서 돌린 것과 같은 곳을 고친다.
+const runInstaller = (action, mod, home) => {
+  const flag = action === "remove" ? "Remove" : "Add";
+  if (isWin()) {
+    const q = (x) => String(x).replace(/'/g, "''");
+    return exec("powershell.exe", ["-NoProfile", "-Command", `$env:HERDR_APP_HOME='${q(home)}'; ${cmdPs("-" + flag, mod)}`], { timeout: 600000 });
+  }
+  return exec("env", [`HERDR_APP_HOME=${home}`, "sh", "-c", cmdSh("--" + action, mod)], { timeout: 600000 });
+};
+const lastLine = (r) => [...String(r.stderr || "").split("\n"), ...String(r.stdout || "").split("\n")].map((l) => l.trim()).filter(Boolean).pop() ?? "";
 
 const safeProps = () => { try { return props() ?? {}; } catch { return {}; } };
 // 창을 끌 때 쓰는 눌림은 모드가 처리하는 컨트롤에서 멈춘다.
@@ -64,7 +79,10 @@ const stop = (_e, cx) => cx.stop_propagation();
 export default class Settings extends View {
   init(p, cx) {
     this.part = (p ?? safeProps()).part ?? "mods";
-    this.section = (p ?? safeProps()).section ?? "github";
+    this.section = (p ?? safeProps()).section ?? "accounts";
+    this.busy = null; // { name, action } 설치기가 도는 중
+    this.confirm = null; // 제거 확인을 기다리는 모드 이름
+    this.result = {}; // 모드별 마지막 결과 { ok, text }
     this.installed = null; // { 모드: true|false }, 읽기 전
     this.note = null;
     if (this.part === "mods") this.load(cx);
@@ -116,13 +134,46 @@ export default class Settings extends View {
       }));
   }
 
-  // 이 컴퓨터에서 터미널에 붙여 넣을 명령. 설치기는 저장소를 받은 폴더에서 돌리거나, 받지 않고 curl로 돌린다.
+  // 설치기를 돌린다. 끝나면 설치 여부를 다시 읽고, 모드를 바꿨으니 Herdr를 다시 시작하라고 알린다.
+  run(cx, action, name) {
+    if (this.busy) return;
+    this.busy = { name, action };
+    this.confirm = null;
+    delete this.result[name];
+    cx.notify();
+    const home = String(appHome() ?? "");
+    runInstaller(action, name, home).then((r) => {
+      const ok = r.code === 0;
+      const out = lastLine(r);
+      this.result[name] = ok
+        ? { ok, text: `${action === "remove" ? "제거했습니다" : "설치했습니다"}. 적용하려면 Herdr를 다시 시작하세요.${out ? ` (${out.slice(0, 90)})` : ""}` }
+        : { ok, text: `실패했습니다(${r.code}): ${out.slice(0, 140) || "출력 없음"}` };
+    }, (e) => {
+      this.result[name] = { ok: false, text: `설치기를 시작하지 못했습니다: ${String(e?.message ?? e).slice(0, 140)}` };
+    }).finally(() => { this.busy = null; this.load(cx); cx.notify(); });
+  }
+
   modRow(t, m) {
     const on = this.installed ? this.installed[m.name] : null;
-    const cmd = on ? cmdRemove(m.name) : cmdAdd(m.name);
-    const copy = (id, label, text) => div().id(`${id}-${m.name}`).flex_none().h(22).px(8).rounded(5).flex().items_center().cursor_pointer().text_size(11)
-      .bg(t.raised).text_color(t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
-      .on_click((_e, cx) => this.copy(cx, text)).tooltip(text).child(label);
+    const busyHere = this.busy?.name === m.name;
+    const locked = Boolean(this.busy) || on == null;
+    const res = this.result[m.name];
+    const btn = (id, label, fn, tone) => {
+      const el = div().id(`${id}-${m.name}`).flex_none().h(22).px(8).rounded(5).flex().items_center().text_size(11)
+        .bg(tone === "danger" ? t.blocked : t.raised).text_color(tone === "danger" ? t.foreground : t.muted).on_mouse_down("left", stop);
+      if (locked) return el.opacity(0.5).child(label);
+      return el.cursor_pointer().hover((x) => x.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => fn(cx)).child(label);
+    };
+    const actions = h_flex().gap(6).items_center().flex_wrap();
+    if (busyHere) actions.child(div().text_size(11).text_color(t.muted).child(this.busy.action === "remove" ? "제거하는 중…" : "설치하는 중…"));
+    else if (on === false) actions.child(btn("mod-add", "설치", (cx) => this.run(cx, "add", m.name)));
+    else if (on && m.core) actions.child(div().text_size(11).text_color(t.dim).child("기본 모드라 제거하지 않습니다"));
+    else if (on && this.confirm === m.name) {
+      actions.child(div().text_size(11).text_color(t.muted).child(`${m.name}을(를) 제거할까요?`))
+        .child(btn("mod-remove-yes", "제거", (cx) => this.run(cx, "remove", m.name), "danger"))
+        .child(btn("mod-remove-no", "취소", (cx) => { this.confirm = null; cx.notify(); }));
+    } else if (on) actions.child(btn("mod-remove", "제거", (cx) => { this.confirm = m.name; cx.notify(); }));
+    if (res && !res.ok) actions.child(btn("mod-copy", "명령 복사", (cx) => this.copy(cx, isWin() ? (on ? cmdRemoveWin(m.name) : cmdAddWin(m.name)) : on ? cmdRemove(m.name) : cmdAdd(m.name))));
     return v_flex().id(`mod-${m.name}`).px(10).py(7).gap(4).rounded(6).bg(t.chrome).border_1().border_color(t.border)
       .child(h_flex().gap(8).items_center()
         .child(div().flex_none().size(8).rounded(4).bg(on == null ? t.dim : on ? t.working : t.border))
@@ -130,9 +181,8 @@ export default class Settings extends View {
         .child(div().text_size(11).text_color(t.dim).child(on == null ? "확인 중" : on ? "설치됨" : "설치 안 됨"))
         .child(div().text_size(11).text_color(t.dim).child(m.core ? "기본" : "추가")))
       .child(div().text_size(12).text_color(t.muted).child(m.desc))
-      .child(h_flex().gap(6).items_center().flex_wrap()
-        .child(copy("mod-copy", on ? "제거 명령 복사" : "설치 명령 복사", cmd))
-        .child(copy("mod-copy-win", "Windows 명령 복사", on ? cmdRemoveWin(m.name) : cmdAddWin(m.name))));
+      .child(actions)
+      .when(Boolean(res), (el) => el.child(div().text_size(11).text_color(res.ok ? t.working : t.blocked).child(res.text)));
   }
 
   modsBody(t) {
@@ -142,7 +192,7 @@ export default class Settings extends View {
         .child(div().id("mods-refresh").p(3).rounded(5).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
           .on_click((_e, cx) => { this.installed = null; this.load(cx); cx.notify(); }).tooltip("새로고침").child(div().text_size(14).child("↻"))))
       .child(div().px(14).pb(8).text_size(12).text_color(t.dim)
-        .child("모드는 설치기로 켜고 끕니다. 설치기는 모드와 함께 깔리지 않아 이 창에서 돌리지 않고, 터미널에 붙여 넣을 명령을 복사해 줍니다. 모드를 바꾼 뒤에는 Herdr를 다시 시작하세요."))
+        .child("모드를 여기서 바로 설치·제거합니다(README의 설치 한 줄과 같은 설치기를 돌립니다). 바꾼 뒤에는 Herdr를 다시 시작하세요."))
       .when(Boolean(this.note), (el) => el.child(div().px(14).pb(6).text_size(11).text_color(t.muted).max_h(40).overflow_hidden().child(this.note)))
       .child(v_flex().id("mods-list").flex_1().min_h(0).px(10).pb(10).gap(6).overflow_y_scrollbar().mode("always").children(MODS.map((m) => this.modRow(t, m))));
   }
@@ -151,6 +201,7 @@ export default class Settings extends View {
     const t = theme();
     if (this.part === "bar") return this.bar(t);
     if (this.part === "nav") return this.nav(t);
+    if (this.part === "pad") return div().size_full().bg(t.chrome);
     return this.modsBody(t);
   }
 }

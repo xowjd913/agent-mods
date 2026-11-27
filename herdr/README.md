@@ -37,7 +37,7 @@
 | 작업별 묶음 (`agent-groups`) | 사이드바에서 터미널을 리더별로 묶고 리더 아래에 팀원을 둡니다 | 추가 | [agent-groups](../docs/mods/agent-groups.md) |
 | 리더 탭 (`leader-tabs`) | 리더 세션이 둘 이상이면 칸 머리줄에 리더 탭을 띄웁니다 | 추가 | [leader-tabs](../docs/mods/leader-tabs.md) |
 | 경로 메뉴 (`path-menu`) | 터미널의 파일 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄웁니다 | 추가 | [path-menu](../docs/mods/path-menu.md) |
-| 계정 (`gh-accounts`) | 스페이스·저장소마다 쓸 GitHub 계정을 보고 고릅니다([gh-account](../docs/gh-account.md) 도구 필요). 설정 창의 GitHub 칸으로 열립니다 | 기본 | [gh-accounts](../docs/mods/gh-accounts.md) |
+| 계정 (`gh-accounts`) | 스페이스·저장소마다 쓸 GitHub 계정을 보고 고릅니다([gh-account](../docs/gh-account.md) 도구 필요). 설정 창의 계정 칸으로 열립니다 | 기본 | [gh-accounts](../docs/mods/gh-accounts.md) |
 | UI 모드 (`inbox`) | 리더 결과 보고를 채팅처럼 보여 주고, 결정이 필요한 보고에 답하거나 채팅칸에서 `@리더`로 말하면 PO 터미널에 입력으로 전해 줍니다 | 추가 | [inbox](../docs/mods/inbox.md), [인박스 계약](../docs/inbox-contract.md) |
 
 <!-- 새 모드: docs/mods/<모드>.md를 같은 틀(제목, 한 줄 소개, 스크린샷, 사용법, 필요한 것, 설치, 돌아가기 링크)로 만들고 위 표와 ../README.md 모드 표에 한 줄씩 더합니다. -->
@@ -183,7 +183,7 @@ sh herdr/install.sh --gh-account-uninstall  # 제거
 - gh 활성 계정은 바꾸지 않고(패널의 계정 추가만 로그인 직후 원래대로 되돌림), 토큰은 저장하지 않습니다.
 - 매핑이 없거나 깨졌으면 `gh`와 `git`은 원래대로 동작합니다.
 - macOS·Linux만 지원하고, HTTPS 원격만 인증합니다.
-- 보고 고르려면 탭 줄의 `설정` 버튼을 눌러 `GitHub` 칸을 엽니다([settings](../docs/mods/settings.md), [gh-accounts](../docs/mods/gh-accounts.md)). 기본 모드에 들어 있습니다. 도구 설치·되돌리기와 계정 추가도 그 칸에서 할 수 있습니다.
+- 보고 고르려면 탭 줄의 `설정` 버튼을 눌러 `계정` 칸을 엽니다([settings](../docs/mods/settings.md), [gh-accounts](../docs/mods/gh-accounts.md)). 기본 모드에 들어 있습니다. 도구 설치·되돌리기와 계정 추가도 그 칸에서 할 수 있습니다.
 - 자세한 사용법과 한계: [gh-account](../docs/gh-account.md)
 
 ---
