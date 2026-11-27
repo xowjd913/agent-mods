@@ -19,7 +19,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, ScrollHandle } from "gpui-base";
-import { theme, exec, appHome, checking, window, run, hc, terminals, panes, focused, setBadge, shared, layouts, setShared, props, openOverlay, closeOverlay, watchFolder, pickFiles, home, readTextFile } from "herdr";
+import { settings, theme, exec, appHome, checking, window, run, hc, terminals, panes, focused, setBadge, shared, layouts, setShared, props, openOverlay, closeOverlay, watchFolder, pickFiles, home, readTextFile } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
 const ACCT = () => `${appHome()}/mods/inbox/claude-account.cjs`; // which Claude account a session runs on (#121); bundled by the installer
@@ -369,6 +369,10 @@ function tlMemoGet(kind, v, make) {
   return r;
 }
 const TL_CUT_MIN = 500;
+// #80: the UI mode's text follows Herdr's text size. Every size written in the code is for FONT_BASE (13, Herdr's setting when #80 was made) and is
+// multiplied by settings().font_size / FONT_BASE, so 13 looks as before. A missing or odd value is 13; the factor is held within 0.6..2.5.
+const FONT_BASE = 13;
+const fontScale = (st) => { const n = Number(st?.font_size); return Number.isFinite(n) && n > 0 ? Math.min(2.5, Math.max(0.6, n / FONT_BASE)) : 1; };
 // The PO hook's copy of a submitted line (kind "me") against a desk record: compared without wrapper tags, whitespace squeezed, and (second chance) by words +
 // pictures; a hook line ending in "…" (the hook keeps 2000 characters, #49) matches a record that starts with what is left. The hook line is the proof that a
 // line really reached the PO's model, whatever the desk's own status says.
@@ -1346,6 +1350,20 @@ function acctInfo(r) {
 }
 const ACCT_TTL_MS = 5 * 60 * 1000, ACCT_RETRY_MS = 60 * 1000;
 
+// #80: the text-size factor (see fontScale). `fz(n)` is a size written for 13 px made right for the setting now. The setting has no change event,
+// so it is read again at each draw (at most once a second) and by a 2-second timer that redraws only when the factor moved.
+const FONT_POLL_MS = 2000;
+let FS = 1, fsAt = 0;
+const fz = (n) => Math.round(n * FS * 10) / 10;
+const syncFont = (force = false) => {
+  const now = Date.now();
+  if (!force && now - fsAt < 1000) return false;
+  fsAt = now;
+  const before = FS;
+  try { FS = fontScale(settings()); } catch { FS = 1; }
+  return FS !== before;
+};
+
 // The pending-question card: the screen lines scroll inside it (all options stay reachable), the buttons stay under them.
 const PROMPT_LINES_H = 240, PROMPT_MAX_H = 340;
 const DIAG_FLUSH_MS = 2000; // the diag queue is written out this often (one timer started in init)
@@ -1609,6 +1627,9 @@ export default class Inbox extends View {
     // The folder watch makes a new report or PO line appear at once; the timer above stays as the fallback (a watch that cannot start or
     // dies). The status poll makes the "···" bubbles, the blocked dots and the names follow the terminals within seconds.
     cx.timer.every(STATUS_POLL_MS, (cx) => this.pollStatus(cx));
+    // #80: Herdr has no event for a changed text size, so the setting is read here and the view is redrawn only when the factor moved.
+    syncFont(true);
+    cx.timer.every(FONT_POLL_MS, (cx) => { if (syncFont(true)) this.softNotify(cx); });
     // The timeline keeps its place at the newest: the handle's numbers are those of the last layout, so content that grew after a draw (a
     // row, the dots, a picture that finished loading) is seen here and the view goes back to the bottom. A held-back redraw is let go
     // once the selection / press is over.
@@ -1673,9 +1694,9 @@ export default class Inbox extends View {
     const c = pick && pick !== PO_OTHER ? this.data?.cost?.[pick] : null;
     const cost = costLabel(c);
     const withCost = (el) => (cost ? el.child(div().flex_none().child("·")).child(div().id("inbox-cost").flex_none().tooltip(costTip(c)).child(`이 세션 ${cost}`)) : el);
-    if (rows === undefined) return cost ? withCost(h_flex().id("inbox-usage").flex_none().h(22).px(this.compact ? 10 : 14).gap(6).items_center().overflow_hidden().text_size(11).text_color(t.dim)) : null;
+    if (rows === undefined) return cost ? withCost(h_flex().id("inbox-usage").flex_none().h(fz(22)).px(this.compact ? 10 : 14).gap(6).items_center().overflow_hidden().text_size(fz(11)).text_color(t.dim)) : null;
     const track = this.narrow ? 28 : USAGE_TRACK_W;
-    const line = h_flex().id("inbox-usage").flex_none().h(22).px(this.compact ? 10 : 14).gap(6).items_center().overflow_hidden().text_size(11).text_color(t.dim)
+    const line = h_flex().id("inbox-usage").flex_none().h(fz(22)).px(this.compact ? 10 : 14).gap(6).items_center().overflow_hidden().text_size(fz(11)).text_color(t.dim)
       .tooltip(usageTip(rows, Date.now())).child(div().flex_none().child("Claude"));
     if (!rows) return withCost(line.child(div().flex_none().text_color(t.muted).child("Unknown")));
     return withCost(rows.reduce((el, u, i) => {
@@ -1968,12 +1989,12 @@ export default class Inbox extends View {
     if (!pics.length && !busy) return null;
     const pre = key == null ? "pic" : `rpic-${key}`;
     return h_flex().gap(6).items_center().flex_wrap()
-      .children(pics.map((x, i) => h_flex().id(`${pre}-${i}`).flex_none().h(44).pl(4).pr(6).gap(6).items_center().rounded(8).bg(t.raised).border(1).border_color(t.border)
+      .children(pics.map((x, i) => h_flex().id(`${pre}-${i}`).flex_none().h(fz(44)).pl(4).pr(6).gap(6).items_center().rounded(8).bg(t.raised).border(1).border_color(t.border)
         .child(this.thumb(t, x))
-        .child(div().max_w(110).truncate().text_size(10.5).text_color(t.muted).child(String(x.path).split(/[\\/]/).pop()))
-        .child(div().id(`${pre}-x-${i}`).px(4).rounded(5).text_size(12).text_color(t.dim).cursor_pointer().on_mouse_down("left", stop)
+        .child(div().max_w(110).truncate().text_size(fz(10.5)).text_color(t.muted).child(String(x.path).split(/[\\/]/).pop()))
+        .child(div().id(`${pre}-x-${i}`).px(4).rounded(5).text_size(fz(12)).text_color(t.dim).cursor_pointer().on_mouse_down("left", stop)
           .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, c) => this.removePic(i, c, key)).tooltip("이 그림 빼기").child("✕"))))
-      .when(busy > 0, (x) => x.child(div().text_size(10.5).text_color(t.dim).child("그림을 읽는 중…")));
+      .when(busy > 0, (x) => x.child(div().text_size(fz(10.5)).text_color(t.dim).child("그림을 읽는 중…")));
   }
 
   // The watch runs only while this copy is drawn; a copy nobody looks at releases it (a closed copy is released by the runtime).
@@ -2294,7 +2315,7 @@ export default class Inbox extends View {
     return h_flex().flex_none().min_w(0).px(10).py(5).gap(5).items_center().flex_wrap().border_b(1).border_color(t.border)
       .children(CHAT_FILTERS.map(([k, label]) => {
         const on = v.filter === k, n = v.counts?.[k] ?? 0;
-        return div().id(`flt-${k}`).flex_none().h(22).px(8).rounded(11).flex().items_center().cursor_pointer().text_size(11).on_mouse_down("left", stop)
+        return div().id(`flt-${k}`).flex_none().h(fz(22)).px(8).rounded(11).flex().items_center().cursor_pointer().text_size(fz(11)).on_mouse_down("left", stop)
           .bg(on ? t.selected : t.raised).border(1).border_color(on ? t.foreground + "40" : t.border).text_color(on ? t.foreground : n ? t.muted : t.dim)
           .when(!on && !n, (el) => el.opacity(0.6)).hover((x) => x.bg(t.hover).text_color(t.foreground))
           .on_click((_e, c) => this.setFilter(v.pick, k, c)).tooltip(k === "unread" ? "이 방을 열 때 아직 읽지 않았던 글만" : k === "all" ? "모든 글" : `${label}만 보기`).child(`${label} ${n}`);
@@ -2321,11 +2342,11 @@ export default class Inbox extends View {
   // waits on the person is marked.
   leaderBar(t, v) {
     if (!v.pick || (v.choices?.length ?? 0) < 1) return null;
-    const chip = (id, label, on, mark, tip) => div().id(`who-${id || "all"}`).flex_none().h(22).px(8).rounded(11).flex().items_center().cursor_pointer().text_size(11).on_mouse_down("left", stop)
+    const chip = (id, label, on, mark, tip) => div().id(`who-${id || "all"}`).flex_none().h(fz(22)).px(8).rounded(11).flex().items_center().cursor_pointer().text_size(fz(11)).on_mouse_down("left", stop)
       .bg(on ? t.selected : t.raised).border(1).border_color(on ? t.foreground + "40" : t.border).text_color(on ? t.foreground : t.muted)
       .hover((x) => x.bg(t.hover).text_color(t.foreground)).on_click((_e, c) => this.setWho(v.pick, id, c)).tooltip(tip).child(mark ? `${label} ●` : label);
     return h_flex().flex_none().min_w(0).px(10).py(5).gap(5).items_center().flex_wrap().border_b(1).border_color(t.border)
-      .child(div().flex_none().text_size(10.5).text_color(t.dim).child("리더"))
+      .child(div().flex_none().text_size(fz(10.5)).text_color(t.dim).child("리더"))
       .child(chip("", "전체", !v.who, false, "이 방의 모든 리더"))
       .children(v.choices.map((x) => chip(x.id, x.label, v.who === x.id, x.waiting, `${x.label}와 주고받은 글만(● = 나의 답을 기다림)`)));
   }
@@ -2659,10 +2680,10 @@ export default class Inbox extends View {
       : !lines.length ? "화면을 읽지 못했습니다. '다시 읽기'를 누르거나 '터미널 열기'로 직접 답하세요."
       : !opts.length ? "선택지를 찾지 못했습니다. 아래 화면 그대로를 보고 '터미널 열기'로 직접 답하세요." : "";
     return v_flex().id("po-prompt").flex_none().min_w(0).max_h(PROMPT_MAX_H).mx(10).mb(6).p(10).gap(8).rounded(8).bg(t.blocked + "14").border(1).border_color(t.blocked + "55").on_mouse_down("left", stop)
-      .child(div().min_w(0).truncate().text_size(11).font_semibold().text_color(t.blocked).child("PO가 질문 중입니다 — 화면 끝"))
-      .when(Boolean(note), (el) => el.child(div().min_w(0).text_size(11).text_color(t.dim).child(note)))
+      .child(div().min_w(0).truncate().text_size(fz(11)).font_semibold().text_color(t.blocked).child("PO가 질문 중입니다 — 화면 끝"))
+      .when(Boolean(note), (el) => el.child(div().min_w(0).text_size(fz(11)).text_color(t.dim).child(note)))
       .child(v_flex().id("po-prompt-lines").min_w(0).min_h(0).max_h(PROMPT_LINES_H).overflow_y_scrollbar().gap(2)
-        .children(lines.map((l, i) => div().min_w(0).text_size(11).text_color(t.muted).child(this.text(`pp-l${i}`, chatHtml(l))))))
+        .children(lines.map((l, i) => div().min_w(0).text_size(fz(11)).text_color(t.muted).child(this.text(`pp-l${i}`, chatHtml(l))))))
       .child(h_flex().min_w(0).gap(6).items_center().flex_wrap()
         .children(opts.map((o) => this.button(t, `pp-${o.key}`, `${o.key}. ${o.label.length > 32 ? `${cutHead(o.label, 31)}…` : o.label}`, (c) => this.pressPrompt(po, o.key, c), { primary: o.on, tip: o.label })))
         .when(Boolean(parsed.tabs), (el) => el.child(key("left", "← 이전 질문", `질문 탭을 앞으로(${parsed.tabs})`)).child(key("right", "다음 질문 →", `질문 탭을 뒤로(${parsed.tabs})`)))
@@ -2831,27 +2852,27 @@ export default class Inbox extends View {
     const box = () => v_flex().id("po-restart").flex_none().min_w(0).mx(10).mb(6).px(10).py(8).gap(6).rounded(8).bg(t.raised).border(1).border_color(t.border).on_mouse_down("left", stop);
     if (!r) {
       return h_flex().id("po-restart").flex_none().min_w(0).mx(10).mb(4).gap(8).items_center().justify_end()
-        .when(Boolean(why), (el) => el.child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(why)))
+        .when(Boolean(why), (el) => el.child(div().min_w(0).truncate().text_size(fz(10.5)).text_color(t.dim).child(why)))
         .child(this.button(t, "rs-open", "PO 새로 시작", (c) => this.restartOpen(room, c), { disabled: why, tip: "PO에게 인수인계 노트를 쓰게 한 뒤 /clear 하고 /PO로 다시 시작합니다" }));
     }
     if (r.phase === "confirm") {
       return box()
-        .child(div().min_w(0).text_size(11.5).text_color(t.foreground).child(restartConfirm(waiting("decision"), waiting("verify"))))
+        .child(div().min_w(0).text_size(fz(11.5)).text_color(t.foreground).child(restartConfirm(waiting("decision"), waiting("verify"))))
         .child(h_flex().min_w(0).gap(6).items_center().flex_wrap()
           .child(this.button(t, "rs-go", "새로 시작", (c) => this.restartRun(room, po, room, c), { primary: true, disabled: why, tip: "노트를 요청하고, 노트가 생기면 /clear 와 /PO 를 차례로 보냅니다" }))
           .child(this.button(t, "rs-cancel", "취소", (c) => this.restartClose(room, c)))
-          .when(Boolean(why), (el) => el.child(div().min_w(0).text_size(10.5).text_color(t.blocked).child(why))));
+          .when(Boolean(why), (el) => el.child(div().min_w(0).text_size(fz(10.5)).text_color(t.blocked).child(why))));
     }
     const failed = r.phase === "timeout" || r.phase === "fail";
     const color = (s) => (s === "done" ? t.working : s === "fail" ? t.blocked : s === "active" ? t.foreground : t.dim);
     const mark = (s) => (s === "done" ? "✓" : s === "fail" ? "✕" : s === "active" ? "…" : "·");
     return box()
       .child(h_flex().min_w(0).gap(10).items_center().flex_wrap()
-        .children(restartSteps(r.n, failed).map((s, i) => div().id(`rs-step-${i}`).flex_none().text_size(11).text_color(color(s.state)).child(`${mark(s.state)} ${s.label}`))))
-      .when(r.phase === "timeout", (el) => el.child(div().min_w(0).text_size(11).text_color(t.blocked).child("노트가 제때 만들어지지 않았습니다. 아무것도 비우지 않았습니다.")))
-      .when(r.phase === "fail", (el) => el.child(div().min_w(0).text_size(11).text_color(t.blocked).child(r.why)))
-      .when(r.phase === "done", (el) => el.child(div().min_w(0).text_size(11).text_color(t.working).child("PO를 새로 시작했습니다. 노트는 위에 남겨 두었습니다.")))
-      .when(r.phase === "run" || r.phase === "clear", (el) => el.child(div().min_w(0).text_size(10.5).text_color(t.dim).child(r.n < 2 ? "노트가 생길 때까지 기다리는 중입니다(최대 5분)…" : "PO가 끝나기를 기다린 뒤 대화를 비웁니다…")))
+        .children(restartSteps(r.n, failed).map((s, i) => div().id(`rs-step-${i}`).flex_none().text_size(fz(11)).text_color(color(s.state)).child(`${mark(s.state)} ${s.label}`))))
+      .when(r.phase === "timeout", (el) => el.child(div().min_w(0).text_size(fz(11)).text_color(t.blocked).child("노트가 제때 만들어지지 않았습니다. 아무것도 비우지 않았습니다.")))
+      .when(r.phase === "fail", (el) => el.child(div().min_w(0).text_size(fz(11)).text_color(t.blocked).child(r.why)))
+      .when(r.phase === "done", (el) => el.child(div().min_w(0).text_size(fz(11)).text_color(t.working).child("PO를 새로 시작했습니다. 노트는 위에 남겨 두었습니다.")))
+      .when(r.phase === "run" || r.phase === "clear", (el) => el.child(div().min_w(0).text_size(fz(10.5)).text_color(t.dim).child(r.n < 2 ? "노트가 생길 때까지 기다리는 중입니다(최대 5분)…" : "PO가 끝나기를 기다린 뒤 대화를 비웁니다…")))
       .child(h_flex().min_w(0).gap(6).items_center().flex_wrap()
         .when(r.phase === "timeout", (el) => el.child(this.button(t, "rs-retry", "다시", (c) => this.restartRun(room, po, room, c), { primary: true, disabled: why && !running ? why : "", tip: "노트를 다시 요청합니다" })))
         .child(this.button(t, "rs-close", r.phase === "run" || r.phase === "clear" || r.phase === "timeout" ? "취소" : "닫기", (c) => this.restartClose(room, c), { tip: r.phase === "run" || r.phase === "clear" ? "기다리기를 멈춥니다(이미 보낸 요청은 그대로입니다)" : "" })));
@@ -2934,7 +2955,7 @@ export default class Inbox extends View {
     const on = r && (r.phase === "on" || r.phase === "already");
     const at = on ? new Date(r.at).toTimeString().slice(0, 5) : "";
     return h_flex().id(`rc-${room}`).flex_none().min_w(0).gap(6).items_center()
-      .when(r?.phase === "send", (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child("확인 중…")))
+      .when(r?.phase === "send", (el) => el.child(div().flex_none().text_size(fz(10.5)).text_color(t.dim).child("확인 중…")))
       .child(this.button(t, on ? "rc-on-done" : "rc-on", on ? h_flex().items_center().gap(6).child(div().flex_none().w(8).h(8).rounded(4).bg(t.working)).child("원격 연결 켜짐") : "원격 연결 켜기", (c) => this.remoteOn(room, po, c), { disabled: why, tip: why || (on ? `${at}에 화면으로 확인한 상태입니다. 그 뒤 터미널에서 끊었는지는 보지 않습니다. 누르면 화면을 다시 확인하고, 꺼져 있을 때만 /remote-control을 보냅니다` : "이 PO 터미널에 /remote-control을 보내 원격 연결(Remote Control)을 켭니다. Herdr를 다시 켜도 이 데스크가 켜짐을 본 적이 있으면 켜짐으로 이어서 보여 줍니다. 본 적이 없거나 확인할 수 없는 경우(예: Windows)에는 이미 켜져 있어도 이 글자로 보일 수 있습니다. 눌러도 안전합니다: 화면을 먼저 확인하고, 이미 켜져 있으면 연결 메뉴를 Esc로 닫기만 합니다") }));
   }
   // The system note of the last 원격 연결 try, as a quiet line at the end of the room's chat.
@@ -2942,7 +2963,7 @@ export default class Inbox extends View {
     const n = this.rc.get(room)?.note;
     if (!n) return null;
     return h_flex().id(`rc-note-${room}`).flex_none().min_w(0).px(14).py(4).gap(6).justify_center().items_center()
-      .child(div().min_w(0).text_size(11).text_color(n.bad ? t.blocked : t.dim).child(this.text(`rc-note-t-${room}`, chatHtml(`원격 연결 · ${new Date(n.ms).toTimeString().slice(0, 5)} · ${n.text}`))));
+      .child(div().min_w(0).text_size(fz(11)).text_color(n.bad ? t.blocked : t.dim).child(this.text(`rc-note-t-${room}`, chatHtml(`원격 연결 · ${new Date(n.ms).toTimeString().slice(0, 5)} · ${n.text}`))));
   }
 
   // After a start or a reload of the desk the in-memory state is gone, so every PO terminal is checked ONCE (read only, nothing is sent or pressed). Two sources, the screen first:
@@ -3397,31 +3418,31 @@ export default class Inbox extends View {
     // its parts, so a room switch, a refresh or a hint line coming and going never rebuilds the input the person is typing in.
     const none = v.pick === PO_OTHER;
     const menu = this.menu && v_flex().id("chat-menu").flex_none().p(4).gap(2).rounded(8).bg(t.raised).border(1).border_color(t.border)
-      .children(this.menu.items.map((it, i) => h_flex().id(`mn-${it.id}`).h(26).px(8).gap(8).items_center().rounded(6).cursor_pointer()
+      .children(this.menu.items.map((it, i) => h_flex().id(`mn-${it.id}`).h(fz(26)).px(8).gap(8).items_center().rounded(6).cursor_pointer()
         .bg(i === this.menu.sel ? t.selected : t.raised).hover((x) => x.bg(t.hover))
         .on_mouse_down("left", stop).on_click((_e, c) => this.pickMenu(i, c))
-        .child(div().text_size(12.5).font_semibold().text_color(it.id === "here" ? t.muted : tint(t, it.id)).child(`@${it.label}`))
-        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(it.id === "here" ? "PO에게 그냥 보내기" : it.sub))));
+        .child(div().text_size(fz(12.5)).font_semibold().text_color(it.id === "here" ? t.muted : tint(t, it.id)).child(`@${it.label}`))
+        .child(div().flex_1().min_w(0).truncate().text_size(fz(11)).text_color(t.dim).child(it.id === "here" ? "PO에게 그냥 보내기" : it.sub))));
     const ghost = v.tabs.some((x) => x.id === v.pick && x.ghost);
     const target = v.tabs.find((x) => x.id === v.pick && x.id !== PO_OTHER && !x.ghost);
-    const chip = (ctx) => div().h(ctx.line_height).px(5).rounded(5).flex().items_center().bg(t.working + "26").text_color(t.working).text_size(12.5).font_semibold()
+    const chip = (ctx) => div().h(ctx.line_height).px(5).rounded(5).flex().items_center().bg(t.working + "26").text_color(t.working).text_size(fz(12.5)).font_semibold()
       .child(ctx.token.label ?? ctx.token.text.trim());
     return v_flex().id("chat-box").flex_none().px(10).pb(10).pt(6).gap(6).border_t(1).border_color(t.border)
       .on_key_down((e, c) => this.inputKey(e, c))
       .when(Boolean(menu), (el) => el.child(menu))
-      .when(holdShown(this.changedAt, this.heldAt), (el) => el.child(div().text_size(11).text_color(t.working).child("한 번 더 Enter로 보냅니다")))
-      .child(div().id("chat-target").truncate().text_size(10.5).text_color(t.dim).child(none ? "PO를 알 수 없는 방이라 여기서는 보낼 곳이 없습니다 — 왼쪽에서 PO 방을 고르세요(쓰던 글은 그대로 있습니다)" : target ? `받는 PO: ${target.label}` : ghost ? "PO 터미널을 다시 찾는 중입니다 — 쓰던 글은 그대로 있습니다" : "받는 PO가 없습니다 — PO를 고르세요"))
+      .when(holdShown(this.changedAt, this.heldAt), (el) => el.child(div().text_size(fz(11)).text_color(t.working).child("한 번 더 Enter로 보냅니다")))
+      .child(div().id("chat-target").truncate().text_size(fz(10.5)).text_color(t.dim).child(none ? "PO를 알 수 없는 방이라 여기서는 보낼 곳이 없습니다 — 왼쪽에서 PO 방을 고르세요(쓰던 글은 그대로 있습니다)" : target ? `받는 PO: ${target.label}` : ghost ? "PO 터미널을 다시 찾는 중입니다 — 쓰던 글은 그대로 있습니다" : "받는 PO가 없습니다 — PO를 고르세요"))
       .when(this.pics.length > 0 || this.picBusy > 0, (el) => el.child(this.picRow(t, null)))
       .child(h_flex().id("chat-row").gap(6).items_center()
         .on_drop((ev, c) => this.dropPics(ev?.paths, c))
         .child(this.button(t, "chat-attach", "그림", (c) => { this.pickPics(c); }, { tip: "그림 파일을 골라 붙입니다(Cmd+V로 붙여넣거나 파일을 끌어다 놓아도 됩니다). 보내면 PO가 파일을 열어 봅니다" }))
         .child(div().id("chat-input").flex_1().min_w(0).on_mouse_down("left", stop)
-          .child(Textarea.new(this.chat).token((ctx) => chip(ctx)).min_h(30).px(10).py(5).rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
+          .child(Textarea.new(this.chat).token((ctx) => chip(ctx)).min_h(fz(30)).px(10).py(5).rounded(8).border(1).border_color(t.input).bg(t.background).text_size(fz(12.5)).text_color(t.foreground)))
         .child(this.button(t, "chat-send", "PO에 보내기", (c) => this.sendChat(c), { primary: true, tip: "고른 PO 터미널에 글을 붙여 넣고 Enter까지 눌러 보냅니다(글은 클립보드를 거칩니다). Shift+Enter는 줄바꿈" })));
   }
 
   poHint(t) {
-    return div().id("po-hint").flex_none().px(this.compact ? 10 : 14).pb(6).text_size(11).text_color(t.muted)
+    return div().id("po-hint").flex_none().px(this.compact ? 10 : 14).pb(6).text_size(fz(11)).text_color(t.muted)
       .child(`PO 터미널에 ${hubTag()}, ${NAMES.hubIdLabel}=<id> 라벨을 달면 PO별로 나뉩니다. 지금은 PO가 없어 채팅을 보낼 수 없습니다.`);
   }
 
@@ -3434,21 +3455,21 @@ export default class Inbox extends View {
   // #119: the remote mark of a room, in the accent colour with the "원격 연결 켜짐" tip: null unless the room's PO has remote on (an unknown or never-checked state is off).
   // Text, not a dot, so it is not mistaken for #69's "working" dot. Every room view takes it from here (the wide list shows it as "PO · 원격", the narrow ones as "원격").
   roomRemote(t, x, text) {
-    return x.remote ? div().flex_none().text_size(10).text_color(t.working).tooltip("원격 연결 켜짐").child(text) : null;
+    return x.remote ? div().flex_none().text_size(fz(10)).text_color(t.working).tooltip("원격 연결 켜짐").child(text) : null;
   }
 
   // The small line under a room's name in the wide room list: "PO", and "PO · 원격" while its PO has remote on.
   roomSub(t, x) {
-    if (x.id === PO_OTHER) return div().min_w(0).truncate().text_size(10).text_color(t.dim).child("채팅 없음");
-    return this.roomRemote(t, x, "PO · 원격") ?? div().min_w(0).truncate().text_size(10).text_color(t.dim).child("PO");
+    if (x.id === PO_OTHER) return div().min_w(0).truncate().text_size(fz(10)).text_color(t.dim).child("채팅 없음");
+    return this.roomRemote(t, x, "PO · 원격") ?? div().min_w(0).truncate().text_size(fz(10)).text_color(t.dim).child("PO");
   }
 
   // The count badges of a room: unread (green) and waiting leaders (red).
   roomBadges(t, x) {
     return [
-      x.blocked ? div().flex_none().px(5).h(15).rounded(8).bg(t.blocked + "26").flex().items_center().text_size(10).font_semibold().text_color(t.blocked).child("질문") : null,
-      x.unread > 0 ? div().flex_none().px(5).h(15).rounded(8).bg(t.working).flex().items_center().text_size(10).font_semibold().text_color(t.chrome).child(String(x.unread)) : null,
-      x.n > 0 ? div().flex_none().px(5).h(15).rounded(8).bg(t.blocked + "26").flex().items_center().text_size(10).text_color(t.blocked).child(String(x.n)) : null,
+      x.blocked ? div().flex_none().px(5).h(fz(15)).rounded(8).bg(t.blocked + "26").flex().items_center().text_size(fz(10)).font_semibold().text_color(t.blocked).child("질문") : null,
+      x.unread > 0 ? div().flex_none().px(5).h(fz(15)).rounded(8).bg(t.working).flex().items_center().text_size(fz(10)).font_semibold().text_color(t.chrome).child(String(x.unread)) : null,
+      x.n > 0 ? div().flex_none().px(5).h(fz(15)).rounded(8).bg(t.blocked + "26").flex().items_center().text_size(fz(10)).text_color(t.blocked).child(String(x.n)) : null,
     ].filter(Boolean);
   }
 
@@ -3456,14 +3477,14 @@ export default class Inbox extends View {
   picker(t, v) {
     if (!v.tabs.some((x) => x.id !== PO_OTHER)) return this.poHint(t);
     return h_flex().id("po-picker").flex_none().px(this.compact ? 10 : 14).pb(6).gap(5).flex_wrap().items_center()
-      .child(div().flex_none().text_size(10.5).font_semibold().text_color(t.dim).child("PO"))
+      .child(div().flex_none().text_size(fz(10.5)).font_semibold().text_color(t.dim).child("PO"))
       .children(v.tabs.map((x) => {
         const on = x.id === v.pick;
-        return h_flex().id(`po-${x.id}`).h(24).px(9).gap(5).items_center().rounded(12).cursor_pointer().on_mouse_down("left", stop)
+        return h_flex().id(`po-${x.id}`).h(fz(24)).px(9).gap(5).items_center().rounded(12).cursor_pointer().on_mouse_down("left", stop)
           .bg(on ? t.selected : t.raised).border(1).border_color(on ? t.foreground + "40" : t.border)
           .hover((s) => s.bg(on ? t.selected : t.hover)).on_click((_e, c) => this.pickPo(x.id, c))
           .tooltip(x.id === PO_OTHER ? OTHER_TIP : `po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
-          .child(div().max_w(150).truncate().text_size(11.5).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
+          .child(div().max_w(150).truncate().text_size(fz(11.5)).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
           .child(this.roomDot(t, x))
           .children([this.roomRemote(t, x, "원격"), ...this.roomBadges(t, x)].filter(Boolean));
       }));
@@ -3481,7 +3502,7 @@ export default class Inbox extends View {
           .tooltip(x.id === PO_OTHER ? OTHER_TIP : `${x.label} · po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
           .child(this.circle(t, color, x.id === PO_OTHER ? "?" : initial(x.label)))
           .child(h_flex().w(SLIM_W - 10).gap(3).items_center().justify_center()
-            .child(div().min_w(0).truncate().text_center().text_size(9.5).text_color(on ? t.foreground : t.dim).child(x.label))
+            .child(div().min_w(0).truncate().text_center().text_size(fz(9.5)).text_color(on ? t.foreground : t.dim).child(x.label))
             .child(this.roomDot(t, x)))
           .when(badges.length > 0, (el) => el.child(h_flex().gap(3).items_center().children(badges)));
       }));
@@ -3493,12 +3514,12 @@ export default class Inbox extends View {
       .children(v.tabs.map((x) => {
         const on = x.id === v.pick;
         const color = x.id === PO_OTHER ? t.dim : tint(t, x.id);
-        return h_flex().id(`po-${x.id}`).flex_none().h(44).px(8).gap(8).items_center().rounded(8).cursor_pointer().on_mouse_down("left", stop)
+        return h_flex().id(`po-${x.id}`).flex_none().h(fz(44)).px(8).gap(8).items_center().rounded(8).cursor_pointer().on_mouse_down("left", stop)
           .bg(on ? t.selected : t.chrome).hover((s) => s.bg(on ? t.selected : t.hover)).on_click((_e, c) => this.pickPo(x.id, c))
           .tooltip(x.id === PO_OTHER ? OTHER_TIP : `po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
           .child(this.circle(t, color, x.id === PO_OTHER ? "?" : initial(x.label)))
           .child(v_flex().flex_1().min_w(0)
-            .child(div().min_w(0).truncate().text_size(12.5).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
+            .child(div().min_w(0).truncate().text_size(fz(12.5)).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
             .child(this.roomSub(t, x)))
           .child(this.roomDot(t, x))
           .children(this.roomBadges(t, x));
@@ -3508,17 +3529,17 @@ export default class Inbox extends View {
   // ---- parts
   button(t, id, label, onClick, o = {}) {
     if (o.disabled) {
-      return div().id(id).flex_none().h(24).px(10).rounded(12).flex().items_center().text_size(11.5).on_mouse_down("left", stop)
+      return div().id(id).flex_none().h(fz(24)).px(10).rounded(12).flex().items_center().text_size(fz(11.5)).on_mouse_down("left", stop)
         .bg(t.raised).border(1).border_color(t.border).text_color(t.dim).opacity(0.5).tooltip(o.disabled).child(label);
     }
-    return div().id(id).flex_none().h(24).px(10).rounded(12).flex().items_center().text_size(11.5).cursor_pointer()
+    return div().id(id).flex_none().h(fz(24)).px(10).rounded(12).flex().items_center().text_size(fz(11.5)).cursor_pointer()
       .on_mouse_down("left", stop).bg(o.primary ? t.selected : t.raised).border(1).border_color(o.primary ? t.foreground + "40" : t.border)
       .text_color(o.primary ? t.foreground : t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
       .on_click((_e, cx) => onClick(cx)).when(Boolean(o.tip), (el) => el.tooltip(o.tip)).child(label);
   }
 
   tag(t, text, color) {
-    return div().flex_none().px(6).h(17).rounded(5).bg((t[color] ?? t.dim) + "26").text_size(10.5).text_color(t[color] ?? t.dim).flex().items_center().child(text);
+    return div().flex_none().px(6).h(fz(17)).rounded(5).bg((t[color] ?? t.dim) + "26").text_size(fz(10.5)).text_color(t[color] ?? t.dim).flex().items_center().child(text);
   }
 
   // The kind tag of a report. Red (the kind's own color) only while the leader is still waiting on it; a decision/verify line that is not
@@ -3532,7 +3553,7 @@ export default class Inbox extends View {
 
   // A round initial badge (a leader, the PO or a room): a tint of its color behind the letter.
   circle(t, color, letter) {
-    return div().flex_none().size(28).rounded(14).bg(color + "33").flex().items_center().justify_center().text_size(12).font_semibold().text_color(color).child(letter);
+    return div().flex_none().size(28).rounded(14).bg(color + "33").flex().items_center().justify_center().text_size(fz(12)).font_semibold().text_color(color).child(letter);
   }
 
   avatar(t, leader) { return this.circle(t, tint(t, leader), initial(shortName(leader))); }
@@ -3586,7 +3607,7 @@ export default class Inbox extends View {
 
   // "더 보기 · N자 더" / "접기" under a folded bubble. Only this bubble opens; the 복사 chip copies the whole text either way.
   moreToggle(t, id, lc, open) {
-    return div().id(`${id}-more`).flex_none().text_size(11).cursor_pointer().text_color(t.working).hover((s) => s.text_color(t.foreground))
+    return div().id(`${id}-more`).flex_none().text_size(fz(11)).cursor_pointer().text_color(t.working).hover((s) => s.text_color(t.foreground))
       .on_mouse_down("left", stop)
       .on_click((_e, cx) => {
         if (this.more.has(id)) this.more.delete(id); else this.more.add(id);
@@ -3610,17 +3631,17 @@ export default class Inbox extends View {
     const key = `bc-${id}`;
     const done = this.copied === key;
     return v_flex().flex_none().items_end().gap(2)
-      .child(div().id(key).flex_none().px(6).h(17).rounded(5).flex().items_center().text_size(10).cursor_pointer().text_color(done ? t.working : t.dim)
+      .child(div().id(key).flex_none().px(6).h(fz(17)).rounded(5).flex().items_center().text_size(fz(10)).cursor_pointer().text_color(done ? t.working : t.dim)
         .hover((x) => x.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
         .on_click((_e, cx) => this.copy(key, unwrapTags(text), cx)).tooltip("이 말풍선의 글 전체를 클립보드에 복사합니다").child(done ? "복사됨" : "복사"))
-      .child(div().flex_none().pb(1).text_size(10).text_color(t.dim).child(ms ? clock(ms) : ""));
+      .child(div().flex_none().pb(1).text_size(fz(10)).text_color(t.dim).child(ms ? clock(ms) : ""));
   }
 
   codeBlock(t, text, html, id) {
     const done = this.copied === id;
     return h_flex().min_w(0).gap(6).items_start().px(8).py(5).rounded(6).bg(t.background).border(1).border_color(t.border)
-      .child(div().flex_1().min_w(0).font_family(this.mono()).text_size(11.5).text_color(t.foreground).child(this.text(`${id}-t`, `<p><code>${html}</code></p>`)))
-      .child(div().id(id).flex_none().px(7).h(20).rounded(10).flex().items_center().text_size(10.5).cursor_pointer().bg(t.raised).border(1).border_color(t.border)
+      .child(div().flex_1().min_w(0).font_family(this.mono()).text_size(fz(11.5)).text_color(t.foreground).child(this.text(`${id}-t`, `<p><code>${html}</code></p>`)))
+      .child(div().id(id).flex_none().px(7).h(fz(20)).rounded(10).flex().items_center().text_size(fz(10.5)).cursor_pointer().bg(t.raised).border(1).border_color(t.border)
         .text_color(done ? t.working : t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
         .on_click((_e, cx) => this.copy(id, text, cx)).tooltip("이 명령만 클립보드에 복사합니다(붙여 넣거나 보내지 않습니다)").child(done ? "복사됨" : "복사"));
   }
@@ -3628,7 +3649,7 @@ export default class Inbox extends View {
   // Card title and section headings: the TextView ignores bold tags and the weight of the box around it, so the style goes on the
   // TextView element itself (still selectable).
   heading_text(t, id, html, size = 14) {
-    return this.text(id, `<p>${html}</p>`).font_weight(700).text_size(size).text_color(t.foreground);
+    return this.text(id, `<p>${html}</p>`).font_weight(700).text_size(fz(size)).text_color(t.foreground);
   }
 
   // The body as parts: prose (one selectable text, so a drag can run across headings, lists and lines) and command blocks (own box + 복사).
@@ -3637,7 +3658,7 @@ export default class Inbox extends View {
       const key = `${id}-${i}`;
       if (p.t === "code") return div().min_w(0).pl(p.depth ? p.depth * 14 + 18 : 0).child(this.codeBlock(t, p.text, p.html, `copy-${key}`));
       if (p.t === "h") return div().min_w(0).pt(4).child(this.heading_text(t, key, p.html, 14.5));
-      return div().min_w(0).text_size(12.5).text_color(t.foreground).child(typeof p.md === "string" && p.md ? this.md(key, p.md) : this.text(key, p.html));
+      return div().min_w(0).text_size(fz(12.5)).text_color(t.foreground).child(typeof p.md === "string" && p.md ? this.md(key, p.md) : this.text(key, p.html));
     }));
   }
 
@@ -3645,19 +3666,19 @@ export default class Inbox extends View {
   bubble(t, s, it, accent) {
     const open = it.long && this.isOpen(s, it);
     const id = `b-${s.leader}-${it.ts}`;
-    const toggle = it.long ? div().id(`tg-${s.leader}-${it.ts}`).flex_none().px(8).h(20).rounded(10).flex().items_center().text_size(10.5).cursor_pointer().bg(t.raised)
+    const toggle = it.long ? div().id(`tg-${s.leader}-${it.ts}`).flex_none().px(8).h(fz(20)).rounded(10).flex().items_center().text_size(fz(10.5)).cursor_pointer().bg(t.raised)
       .border(1).border_color(t.border).text_color(t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
       .on_click((_e, c) => { this.toggleOpen(s, it); this.reveal(this.spot(s, it)); c.notify(); }).child(open ? "접기" : "자세히") : null;
     const box = v_flex().min_w(0).px(12).py(9).gap(6).rounded(12).bg(accent ? accent + "1f" : t.raised).border(1).border_color(accent ? accent + "55" : t.border)
-      .text_size(12.5).text_color(t.foreground);
+      .text_size(fz(12.5)).text_color(t.foreground);
     const headline = it.head || it.lead || it.title;
     box.child(div().min_w(0).child(this.heading_text(t, `${id}-h`, it.headHtml, 16)));
     if (!open) {
-      if (it.lead && it.lead !== headline) box.child(div().min_w(0).max_h(34).overflow_hidden().text_size(12).text_color(t.muted).child(this.text(`${id}-lead`, `<p>${it.leadHtml}</p>`)));
+      if (it.lead && it.lead !== headline) box.child(div().min_w(0).max_h(34).overflow_hidden().text_size(fz(12)).text_color(t.muted).child(this.text(`${id}-lead`, `<p>${it.leadHtml}</p>`)));
     } else box.child(this.body(t, it, id));
     if (it.linkLabel || toggle) {
       box.child(h_flex().gap(6).items_center().flex_wrap()
-        .when(Boolean(it.link), (el) => el.child(div().flex_none().px(6).rounded(5).bg(t.hover).text_size(11).text_color(t.ansi4 ?? t.foreground).child(this.text(`${id}-link`, it.linkHtml))))
+        .when(Boolean(it.link), (el) => el.child(div().flex_none().px(6).rounded(5).bg(t.hover).text_size(fz(11)).text_color(t.ansi4 ?? t.foreground).child(this.text(`${id}-link`, it.linkHtml))))
         .child(div().flex_1())
         .when(Boolean(toggle), (el) => el.child(toggle)));
     }
@@ -3667,10 +3688,10 @@ export default class Inbox extends View {
   // A message header: the leader's name (left out when `bare`, a follow-up line), the kind tag and the time.
   nameRow(t, s, it, extra, waiting, bare) {
     return h_flex().gap(6).items_center().min_w(0)
-      .when(!bare, (el) => el.child(div().id(`peek-${s.leader}-${it?.ts ?? ""}`).min_w(0).truncate().text_size(12).font_semibold().text_color(tint(t, s.leader)).cursor_pointer()
+      .when(!bare, (el) => el.child(div().id(`peek-${s.leader}-${it?.ts ?? ""}`).min_w(0).truncate().text_size(fz(12)).font_semibold().text_color(tint(t, s.leader)).cursor_pointer()
         .hover((x) => x.text_color(t.foreground)).on_mouse_down("left", stop).on_click(() => this.peek(s)).tooltip("그 리더 터미널 들여다보기").child(shortName(s.leader))))
-      .when(!bare && Boolean(this.accts?.get(s.leader)?.label), (el) => el.child(div().flex_none().max_w(150).truncate().text_size(10.5).text_color(t.dim).tooltip("이 리더 세션이 쓰는 Claude 계정").child(`이 세션 계정: ${this.accts.get(s.leader).label}`)))
-      .when(!bare && Boolean(it?.linkRef), (el) => el.child(div().min_w(0).max_w(150).truncate().text_size(10.5).text_color(t.dim).child(it.linkRef)))
+      .when(!bare && Boolean(this.accts?.get(s.leader)?.label), (el) => el.child(div().flex_none().max_w(150).truncate().text_size(fz(10.5)).text_color(t.dim).tooltip("이 리더 세션이 쓰는 Claude 계정").child(`이 세션 계정: ${this.accts.get(s.leader).label}`)))
+      .when(!bare && Boolean(it?.linkRef), (el) => el.child(div().min_w(0).max_w(150).truncate().text_size(fz(10.5)).text_color(t.dim).child(it.linkRef)))
       .when(Boolean(it), (el) => el.child(this.kindTag(t, it, it.kind, waiting)))
       .when(!bare, (el) => el.child(div().flex_1()))
       .when(Boolean(extra), (el) => el.child(extra));
@@ -3701,19 +3722,19 @@ export default class Inbox extends View {
     const hint = kind === "decision" && !groups.length && opts.options.length < 2 ? decisionHints(item?.body) : { lines: [], answers: [], recommended: "" };
     const box = v_flex().min_w(0).gap(6)
       .children(groups.map((g, gi) => h_flex().id(`grp-${s.leader}-${gi}`).gap(6).items_center().flex_wrap()
-        .child(div().flex_none().text_size(12).font_semibold().text_color(t.foreground).child(g.label))
+        .child(div().flex_none().text_size(fz(12)).font_semibold().text_color(t.foreground).child(g.label))
         .children(g.options.map((n) => this.button(t, `opt-${s.leader}-${gi}-${n}`, `${n}안${n === g.recommended ? " (추천)" : ""}`, (c) => this.pickGroup(a, groups, g.label, n, c),
           { primary: picks[g.label] === n, disabled: a.po ? "" : NO_PO(), tip: `${g.label}번 질문에 ${n}안을 고릅니다. 모든 질문을 고르면 한 번에 보냅니다` })))))
-      .when(groups.length > 0 && done === "", (el) => el.child(div().text_size(11).text_color(t.dim).child(`질문마다 하나씩 고르면 한 번에 보냅니다(${groups.filter((g) => !picks[g.label]).map((g) => g.label).join("·")} 남음)`)))
-      .children(hint.lines.map((x, i) => div().id(`hint-${s.leader}-${i}`).min_w(0).text_size(12).text_color(t.foreground).child(x)))
+      .when(groups.length > 0 && done === "", (el) => el.child(div().text_size(fz(11)).text_color(t.dim).child(`질문마다 하나씩 고르면 한 번에 보냅니다(${groups.filter((g) => !picks[g.label]).map((g) => g.label).join("·")} 남음)`)))
+      .children(hint.lines.map((x, i) => div().id(`hint-${s.leader}-${i}`).min_w(0).text_size(fz(12)).text_color(t.foreground).child(x)))
       .child(h_flex().gap(6).items_center().flex_wrap()
         .when(Boolean(link) && link !== item?.link, (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", (c) => openUrl(link, c))))
         .children(kind === "decision" ? opts.options.map((n) => this.button(t, `opt-${s.leader}-${n}`, `${n}안 선택${n === opts.recommended ? " (추천)" : ""}`, (c) => this.send(a, `${n}안 선택`, c, "choice"), { primary: n === opts.recommended, disabled: a.po ? "" : NO_PO(), tip: CLIP })) : [])
         .children(hint.answers.map((w, i) => this.button(t, `ans-${s.leader}-${i}`, w, (c) => this.send(a, w, c, "choice"), { primary: w === hint.recommended, disabled: a.po ? "" : NO_PO(), tip: CLIP })))
         .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c, "verify"), { primary: true, disabled: a.po ? "" : NO_PO(), tip: CLIP })))
         .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); this.reveal(this.spot(s, item)); c.notify(); }, { disabled: a.po ? "" : NO_PO() }))
-        .child(div().text_size(11).text_color(done === "sent" ? t.working : done === "held" ? t.blocked : t.dim).child(done === "sent" ? "PO에 보냄 — 리더가 받으면 사라집니다" : done === "held" ? (this.isBlocked(a.po) ? "PO에 넣음 — PO가 질문 중입니다. 방의 질문에 먼저 답하세요" : "PO에 넣음 — 말풍선의 'Enter 누르기'로 보내세요") : "누르면 PO에 바로 보내고, 리더가 받으면 사라집니다")));
-    if (!a.po) box.child(div().text_size(11).text_color(t.dim).child(NO_PO()));
+        .child(div().text_size(fz(11)).text_color(done === "sent" ? t.working : done === "held" ? t.blocked : t.dim).child(done === "sent" ? "PO에 보냄 — 리더가 받으면 사라집니다" : done === "held" ? (this.isBlocked(a.po) ? "PO에 넣음 — PO가 질문 중입니다. 방의 질문에 먼저 답하세요" : "PO에 넣음 — 말풍선의 'Enter 누르기'로 보내세요") : "누르면 PO에 바로 보내고, 리더가 받으면 사라집니다")));
+    if (!a.po) box.child(div().text_size(fz(11)).text_color(t.dim).child(NO_PO()));
     if (writing) {
       const input = this.box(s.leader, cx);
       const row = this.picRow(t, s.leader);
@@ -3722,7 +3743,7 @@ export default class Inbox extends View {
         .on_key_down((e, c) => this.answerKey(s.leader, e, c))
         .on_drop((ev, c) => this.dropPics(ev?.paths, c, s.leader))
         .child(this.button(t, `attach-${s.leader}`, "그림", (c) => { this.pickPics(c, s.leader); }, { tip: "그림 파일을 골라 붙입니다(Cmd+V로 붙여넣거나 파일을 끌어다 놓아도 됩니다). 보내면 PO가 파일을 열어 봅니다" }))
-        .child(div().flex_1().min_w(0).on_mouse_down("left", stop).child(Textarea.new(input).min_h(30).px(10).py(5).rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
+        .child(div().flex_1().min_w(0).on_mouse_down("left", stop).child(Textarea.new(input).min_h(fz(30)).px(10).py(5).rounded(8).border(1).border_color(t.input).bg(t.background).text_size(fz(12.5)).text_color(t.foreground)))
         .child(this.button(t, `send-${s.leader}`, "보내기", (c) => this.send(a, input.value(), c), { primary: true, disabled: a.po ? "" : NO_PO(), tip: CLIP })));
     }
     return box;
@@ -3750,7 +3771,7 @@ export default class Inbox extends View {
     const top = e.head ? 18 : 8; // a new sender gets more air than a follow-up of the same sender
     const id = tlId(e.key);
     // The time sits at the bubble's bottom, on its outer side: left of mine, right of everyone else's.
-    const when = (ms) => div().flex_none().pb(1).text_size(10).text_color(t.dim).child(ms ? clock(ms) : "");
+    const when = (ms) => div().flex_none().pb(1).text_size(fz(10)).text_color(t.dim).child(ms ? clock(ms) : "");
     if (e.who === "me") {
       const blockedNow = Boolean(v.tabs.find((x) => x.id === v.pick)?.blocked);
       const age = Date.now() - (Number(e.at) || Number(e.ms) || 0);
@@ -3773,18 +3794,18 @@ export default class Inbox extends View {
       const lc = clipLong(bp.text), open = lc.cut && this.more.has(id), words = open ? bp.text : lc.text;
       const width = Math.min(Math.max(bubbleWidth(words), pics, 64), cap ?? Infinity);
       return v_flex().id(id).flex_none().px(10).pt(top).gap(2).items_end()
-        .when(Boolean(e.to), (el) => el.child(div().max_w("85%").min_w(0).truncate().text_size(10).text_color(t.dim).child(`→ ${shortName(e.to)}`)))
+        .when(Boolean(e.to), (el) => el.child(div().max_w("85%").min_w(0).truncate().text_size(fz(10)).text_color(t.dim).child(`→ ${shortName(e.to)}`)))
         .child(h_flex().w_full().min_w(0).gap(6).items_end().justify_end() // always the right edge: the chip and the time are left of the bubble
           .child(this.sideTools(t, id, e.text, e.ms))
-          .child(v_flex().flex_none().w(width).max_w(cap ?? "75%").min_w(0).px(12).py(9).gap(6).rounded(12).bg(t.working + "33").border(1).border_color((bad ? t.blocked : t.working) + "66").text_size(12.5).text_color(t.foreground)
+          .child(v_flex().flex_none().w(width).max_w(cap ?? "75%").min_w(0).px(12).py(9).gap(6).rounded(12).bg(t.working + "33").border(1).border_color((bad ? t.blocked : t.working) + "66").text_size(fz(12.5)).text_color(t.foreground)
             .children(bp.imgs.map((p, i) => div().id(`${id}-img${i}`).flex_none().w(sizes[i].w).h(sizes[i].h).rounded(6).overflow_hidden().cursor_pointer().on_mouse_down("left", stop)
               .on_click(() => openFile(p)).tooltip("눌러서 그림 열기")
               .child(image(imgRel(root, p)).w(sizes[i].w).h(sizes[i].h)))) // image() loads only paths under the app folder: data/inbox/img/<file>
-            .when(bp.chips.length > 0, (el) => el.child(h_flex().gap(4).flex_wrap().children(bp.chips.map((n) => div().flex_none().px(6).h(17).rounded(5).flex().items_center().bg(t.raised).text_size(10.5).text_color(t.muted).child(`사진 #${n}`)))))
+            .when(bp.chips.length > 0, (el) => el.child(h_flex().gap(4).flex_wrap().children(bp.chips.map((n) => div().flex_none().px(6).h(fz(17)).rounded(5).flex().items_center().bg(t.raised).text_size(fz(10.5)).text_color(t.muted).child(`사진 #${n}`)))))
             .when(Boolean(bp.text), (el) => el.child(this.md(`${id}-t`, words)))
             .when(lc.cut, (el) => el.child(this.moreToggle(t, id, lc, open)))))
         .when(Boolean(note), (el) => el.child(h_flex().max_w("100%").min_w(0).gap(6).items_center().flex_wrap().justify_end()
-          .child(div().min_w(0).text_size(10.5).text_color(bad ? t.blocked : t.dim).child(note))
+          .child(div().min_w(0).text_size(fz(10.5)).text_color(bad ? t.blocked : t.dim).child(note))
           .children(Boolean(e.id) ? acts.map((k, i) => this.button(t, `ma-${k}-${e.id}`, ACT[k][0], ACT[k][2], { primary: i === 0, tip: ACT[k][1] })) : [])));
     }
     if (e.who === "po") {
@@ -3792,10 +3813,10 @@ export default class Inbox extends View {
         .child(e.head ? this.circle(t, t.working, "P") : div().flex_none().w(28))
         .child(v_flex().flex_1().min_w(0).gap(3)
           .when(e.head, (el) => el.child(h_flex().gap(6).items_center()
-            .child(div().text_size(12).font_semibold().text_color(t.working).child("PO"))
-            .when(Boolean(e.to), (x) => x.child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(`→ ${shortName(e.to)}`)))))
+            .child(div().text_size(fz(12)).font_semibold().text_color(t.working).child("PO"))
+            .when(Boolean(e.to), (x) => x.child(div().min_w(0).truncate().text_size(fz(10.5)).text_color(t.dim).child(`→ ${shortName(e.to)}`)))))
           .child(h_flex().min_w(0).gap(6).items_end()
-            .child(div().flex_1().min_w(0).max_w(this.capOf() ?? "75%").px(12).py(9).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(12.5).text_color(t.foreground)
+            .child(div().flex_1().min_w(0).max_w(this.capOf() ?? "75%").px(12).py(9).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(fz(12.5)).text_color(t.foreground)
               .child(this.mdFolded(id, e.text, t)))
             .child(this.sideTools(t, id, e.text, e.ms))));
     }
@@ -3811,7 +3832,7 @@ export default class Inbox extends View {
         .child(e.it ? h_flex().min_w(0).gap(6).items_end()
           .child(div().flex_1().min_w(0).max_w(this.capOf() ?? "75%").child(this.bubble(t, e.s, wait, e.waiting ? t.blocked : null)))
           .child(when(e.it.ms))
-          : div().text_size(12).text_color(t.dim).child("보고 기록 없이 대기 표시만 있습니다. 링크를 열거나 터미널을 들여다보세요."))
+          : div().text_size(fz(12)).text_color(t.dim).child("보고 기록 없이 대기 표시만 있습니다. 링크를 열거나 터미널을 들여다보세요."))
         .when(Boolean(a), (el) => el.child(this.askActions(t, a, cx))));
   }
 
@@ -3822,16 +3843,17 @@ export default class Inbox extends View {
     return h_flex().id(`typing-${tlId(x.who)}`).flex_none().px(10).pt(18).gap(8).items_start()
       .child(po ? this.circle(t, t.working, "P") : this.avatar(t, x.who.slice(2)))
       .child(v_flex().min_w(0).gap(3)
-        .child(div().min_w(0).truncate().text_size(12).font_semibold().text_color(color).child(po ? "PO" : x.name))
+        .child(div().min_w(0).truncate().text_size(fz(12)).font_semibold().text_color(color).child(po ? "PO" : x.name))
         .child(h_flex().min_w(0).gap(6).items_center()
-          .child(div().px(14).py(5).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(16).text_color(t.dim).child("···"))
-          .child(x.label ? div().flex_none().text_size(11).text_color(x.label === LABEL_BLOCKED ? t.blocked : t.dim).child(x.label) : div())));
+          .child(div().px(14).py(5).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(fz(16)).text_color(t.dim).child("···"))
+          .child(x.label ? div().flex_none().text_size(fz(11)).text_color(x.label === LABEL_BLOCKED ? t.blocked : t.dim).child(x.label) : div())));
   }
 
   render(cx) { return this.full(cx); }
 
   // The messenger view: rooms (one per PO) beside one room's timeline, and the chat box under it. Narrow: the rooms are a strip on top.
   full(cx) {
+    syncFont();
     this.tvN = 0;
     this.noteRedraw(cx);
     this.guardAll();
@@ -3856,11 +3878,11 @@ export default class Inbox extends View {
     });
     if (!blocks.length && v.pick && (v.filter !== "all" || v.who) && v.raw.length) {
       blocks.push(h_flex().flex_none().p(14).gap(8).items_center()
-        .child(div().text_size(12).text_color(t.dim).child("해당 메시지 없음 —"))
+        .child(div().text_size(fz(12)).text_color(t.dim).child("해당 메시지 없음 —"))
         .child(this.button(t, "flt-reset", "전체 보기", (c) => { this.setWho(v.pick, "", c); this.setFilter(v.pick, "all", c); }, { primary: true })));
     }
     if (!blocks.length) {
-      blocks.push(div().flex_none().p(14).text_size(12).text_color(t.dim)
+      blocks.push(div().flex_none().p(14).text_size(fz(12)).text_color(t.dim)
         .child(!this.data ? "불러오는 중…" : v.pick ? "이 방에는 아직 대화가 없습니다." : "PO가 없습니다."));
     }
     // The "···" bubbles of whoever is writing now (the room's PO and leaders whose hc status is working): in EVERY filter (a chip hides
@@ -3916,7 +3938,7 @@ export default class Inbox extends View {
       ? h_flex().id("inbox-jump").absolute().bottom(12).right(18).w(32).h(32).rounded(16).items_center().justify_center().cursor_pointer()
         .bg(t.raised).border(1).border_color(t.border).text_color(t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground))
         .on_mouse_down("left", stop).on_click((_e, c) => this.jumpToEnd(c)).tooltip("가장 아래(최신)로")
-        .child(div().text_size(15).child("↓"))
+        .child(div().text_size(fz(15)).child("↓"))
       : null;
     const listBox = v_flex().id("inbox-listbox").relative().flex_1().min_h(0).child(lines).when(Boolean(jump), (el) => el.child(jump));
     const bar = this.filterBar(t, v);
@@ -3927,9 +3949,9 @@ export default class Inbox extends View {
     const usage = this.usageLine(t, v.pick); // null before the first read (and when there is no cost to show either)
     const panel = this.promptPanel(t, v, cx); // a blocked PO's screen + its keys (null while the room's PO is not waiting on a prompt)
     const room = v_flex().flex_1().min_w(0).min_h(0).when(!strip, (el) => el.h_full()) // beside the rooms the column must fill the row (h_flex centers children)
-      .when(!strip && Boolean(head), (el) => el.child(h_flex().flex_none().h(30).px(14).gap(6).items_center().border_b(1).border_color(t.border)
-        .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(head))
-        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : `리더 ${v.choices?.length ?? 0}명`))
+      .when(!strip && Boolean(head), (el) => el.child(h_flex().flex_none().h(fz(30)).px(14).gap(6).items_center().border_b(1).border_color(t.border)
+        .child(div().min_w(0).truncate().text_size(fz(13)).font_semibold().text_color(t.foreground).child(head))
+        .child(div().flex_none().text_size(fz(10.5)).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : `리더 ${v.choices?.length ?? 0}명`))
         .when(Boolean(rcb), (el) => el.child(rcb))))
       .when(strip && Boolean(rcb), (el) => el.child(h_flex().flex_none().min_w(0).px(14).pb(4).justify_end().child(rcb))) // the picker layout has no room header
       .when(Boolean(usage), (el) => el.child(usage))
@@ -3939,19 +3961,19 @@ export default class Inbox extends View {
       .when(Boolean(panel), (el) => el.child(panel))
       .when(Boolean(rrow), (el) => el.child(rrow))
       .child(this.chatBox(t, v));
-    return v_flex().size_full().min_h(0).relative().bg(t.chrome).text_size(13)
+    return v_flex().size_full().min_h(0).relative().bg(t.chrome).text_size(fz(13))
       .on_window_mouse_move((e, c) => this.pointer(e, c))
       .on_window_mouse_up("left", (e, c) => this.pointerUp(c, e))
       .on_size_change((size, c) => this.onSize(size.width, c))
-      .child(h_flex().h(38).px(this.compact ? 10 : 14).flex_none().items_center().justify_between()
+      .child(h_flex().h(fz(38)).px(this.compact ? 10 : 14).flex_none().items_center().justify_between()
         .child(h_flex().gap(6).items_center()
-          .when(!this.paned || this.mained, (el) => el.child(div().text_size(15).font_semibold().text_color(t.foreground).child("UI 모드"))) // a pane's own header already says it
+          .when(!this.paned || this.mained, (el) => el.child(div().text_size(fz(15)).font_semibold().text_color(t.foreground).child("UI 모드"))) // a pane's own header already says it
           .when(!this.windowed && waiting > 0, (el) => el.child(this.tag(t, `대기 ${waiting}`, "blocked")))
           .child(div().id("inbox-refresh").p(3).rounded(5).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
             .on_mouse_down("left", stop).on_click((_e, c) => { this.gen++; this.busy = false; this.remoteRestore(c, true); this.load(c); }).tooltip("새로고침")
-            .child(this.busy ? svg(ICON("spinner")).size(13).spin(900) : div().text_size(14).child("↻"))))
+            .child(this.busy ? svg(ICON("spinner")).size(13).spin(900) : div().text_size(fz(14)).child("↻"))))
         .child(h_flex().gap(8).items_center()
-          .child(div().text_size(11).text_color(t.dim).child(this.data ? ago(this.data.at) : ""))
+          .child(div().text_size(fz(11)).text_color(t.dim).child(this.data ? ago(this.data.at) : ""))
           .when(!this.paned, (el) => el.child(this.button(t, "inbox-beside", "옆에 열기", (c) => { this.openBeside(); c.notify(); }, { tip: "리더 옆 창(페인)으로 엽니다. 리더가 없으면 지금 터미널 옆, 이 탭에 이미 있으면 그쪽으로 갑니다" })))
           .when(this.mained, (el) => el.child(this.button(t, "inbox-terminal-mode", "터미널 모드", (c) => { this.toTerminalMode(); c.notify(); }, { tip: "터미널 화면으로 돌아갑니다. 터미널은 꺼지지 않고 그대로 있습니다" })))
           .when(!this.windowed && !this.mained, (el) => el.child(this.button(t, "inbox-open", "창 열기", (c) => { this.openWindow(); c.notify(); }, { tip: "UI 모드 창을 엽니다" })))
@@ -3960,11 +3982,11 @@ export default class Inbox extends View {
             .child(svg("mods/pane/close.svg").size(13))))))
       .when(strip, (el) => el.child(this.picker(t, v)))
       .when(!strip && !v.tabs.some((x) => x.id !== PO_OTHER), (el) => el.child(this.poHint(t)))
-      .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
+      .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(fz(11)).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
       .child(strip ? room : h_flex().flex_1().min_h(0).items_stretch().child(this.narrow ? this.slimRooms(t, v) : this.roomList(t, v)).child(room))
       // The notice floats over the top of the room: absolute, so it takes no layout space and the chat never moves when it comes or goes.
       .when(Boolean(this.msg), (el) => el.child(h_flex().id("inbox-msg-layer").absolute().top(NOTICE_TOP).left(0).right(0).px(14).justify_center()
-        .child(div().id("inbox-msg").max_w(NOTICE_MAX_W).px(12).py(5).rounded(6).bg(t.chrome).shadow_md().text_size(11.5).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
+        .child(div().id("inbox-msg").max_w(NOTICE_MAX_W).px(12).py(5).rounded(6).bg(t.chrome).shadow_md().text_size(fz(11.5)).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
           .on_mouse_down("left", stop).on_click((_e, c) => { this.msg = null; c.notify(); }).tooltip("눌러서 닫기").child(this.msg.text))));
   }
 }
