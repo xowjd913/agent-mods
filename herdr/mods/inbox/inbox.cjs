@@ -1284,7 +1284,13 @@ const TL_CUT_MIN = 500;
 const NOTICE_KINDS = new Set(["start", "done", "resume", "stop"]);
 const isNotice = (e) => String(e?.who ?? "").startsWith("l:") && Boolean(e.it) && NOTICE_KINDS.has(e.it.kind) && !e.waiting && !e.wait;
 // "<name> · <kind> · <first line>" ("kind" = the shown kind word); the first line is the report's headline, whitespace squeezed.
-const noticeText = (name, kind, it) => [name, kind, String(it?.head || it?.lead || it?.title || "").replace(/\s+/g, " ").trim()].filter(Boolean).join(" · ");
+// A headline that is only the kind word (a leader report titled "[leader] 재개") says nothing new: the first non-empty body line takes its place.
+const noticeLine = (s) => String(s ?? "").replace(/^\s*\[[^\]]*\]\s*/, "").replace(/\s+/g, " ").trim();
+const noticeText = (name, kind, it) => {
+  let head = noticeLine(it?.head || it?.lead || it?.title);
+  if (!head || head === kind) head = String(it?.body ?? "").replace(/\r/g, "").split("\n").map((l) => l.replace(/\s+/g, " ").trim()).find(Boolean) ?? "";
+  return [name, kind, head].filter(Boolean).join(" · ");
+};
 // A line pasted into the PO terminal that another terminal sent (`<hc from="t137 lead-x">`) is that terminal's words, not the person's. -> the sender's
 // hc name ("lead-x", the last word of `from`), "" when the line is not such a message.
 const hcSender = (text) => { const m = /^\s*<hc\s+from="([^"]*)"/.exec(String(text ?? "")); return m ? (m[1].trim().split(/\s+/).pop() ?? "") : ""; };

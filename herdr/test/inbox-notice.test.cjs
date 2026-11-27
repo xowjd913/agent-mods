@@ -26,6 +26,18 @@ test("noticeText: 이름 · 종류 · 한 줄 요약, 비어 있는 칸은 건�
   assert.equal(I.noticeText("lead-a", "재개", {}), "lead-a · 재개");
 });
 
+test("noticeText: 머리글이 종류 단어뿐이면 첫 본문 줄을 쓰고, 본문이 없으면 이름 · 종류만", () => {
+  for (const w of ["재개", "완료", "멈춤"]) {
+    assert.equal(I.noticeText("x", w, { title: `[x] ${w}`, body: "첫 줄\n둘째 줄" }), `x · ${w} · 첫 줄`);
+    assert.equal(I.noticeText("x", w, { title: `[x] ${w}`, head: w, body: "\n  \n첫  줄\n둘째 줄" }), `x · ${w} · 첫 줄`, "enriched item, blank lines first");
+    assert.equal(I.noticeText("x", w, { title: `[x] ${w}` }), `x · ${w}`);
+    assert.equal(I.noticeText("x", w, { title: `[x] ${w}`, body: " \n\n" }), `x · ${w}`);
+  }
+  assert.equal(I.noticeText("x", "재개", { title: "[x] 재개 — 큐 이어서", body: "첫 줄" }), "x · 재개 · 재개 — 큐 이어서");
+  assert.equal(I.noticeText("x", "완료", { title: "[x] 설치 끝", body: "첫 줄" }), "x · 완료 · 설치 끝");
+  assert.equal(I.noticeText("x", "완료", { title: "재개", body: "첫 줄" }), "x · 완료 · 재개", "a different kind word is a real headline");
+});
+
 test("hcSender: <hc from=\"t1 lead-x\">의 마지막 낱말이 보낸 리더이고 일반 글은 빈 글이다", () => {
   assert.equal(I.hcSender('<hc from="t137 lead-po-inbox">[x] y</hc>'), "lead-po-inbox");
   assert.equal(I.hcSender('<hc from="lead-b">z'), "lead-b");
