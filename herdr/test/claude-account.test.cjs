@@ -20,9 +20,12 @@ const read = (f) => JSON.parse(fs.readFileSync(f, "utf8"));
 
 // ---- store ----
 test("normDir: 절대 경로, 끝 슬래시 없음, 루트는 그대로", () => {
-  assert.equal(ca.normDir("/a/b/"), "/a/b");
-  assert.equal(ca.normDir("/a//b/../c///"), "/a/c");
-  assert.equal(ca.normDir("/"), "/");
+  // 윈도우는 드라이브 글자가 붙고 구분자가 \\ 라서, 같은 입력을 path.resolve 로 푼 값과 비교한다.
+  const R = (p) => path.resolve(p);
+  assert.equal(ca.normDir("/a/b/"), R("/a/b"));
+  assert.equal(ca.normDir("/a//b/../c///"), R("/a/c"));
+  assert.equal(ca.normDir("/"), R("/"));
+  assert.ok(!/[\\/]$/.test(ca.normDir("/a/b/")), "끝 구분자 없음");
 });
 
 test("add: ~/.claude-accounts/<id> 폴더(0700)와 저장 파일을 만들고, 토큰·이메일 같은 값은 저장하지 않는다", () => {
@@ -158,26 +161,27 @@ test("seed: 링크도 복사도 안 되면 failed 에 적고 멈추지 않는다
 test("envArgs/loginArgv: 기본 계정은 변수를 넣지 않고(~/.claude 를 넣지 않는다), 계정은 정규화한 경로를 그대로 넣는다", () => {
   const { ctx } = mk();
   assert.deepEqual(ca.envArgs(null), []);
-  assert.deepEqual(ca.envArgs("/a/b/"), ["CLAUDE_CONFIG_DIR=/a/b"]);
+  assert.deepEqual(ca.envArgs("/a/b/"), [`CLAUDE_CONFIG_DIR=${path.resolve("/a/b")}`]);
   assert.deepEqual(ca.loginArgv(ctx, "/h/.claude-accounts/w"),
-    ["env", "PATH=/bin:/usr/bin", "CLAUDE_CONFIG_DIR=/h/.claude-accounts/w", "claude", "auth", "login", "--claudeai"]);
+    ["env", "PATH=/bin:/usr/bin", `CLAUDE_CONFIG_DIR=${path.resolve("/h/.claude-accounts/w")}`, "claude", "auth", "login", "--claudeai"]);
   assert.ok(!ca.loginArgv(ctx, null).some((t) => t.startsWith("CLAUDE_CONFIG_DIR=")));
 });
 
 test("claudeEnv: 부르는 쪽의 CLAUDE_CONFIG_DIR 를 비우고 계정 폴더로 바꾼다", () => {
   const { ctx } = mk({ env: { HOME: "/h", CLAUDE_CONFIG_DIR: "/other", PATH: "/bin" } });
   assert.equal(ca.claudeEnv(ctx, null).CLAUDE_CONFIG_DIR, undefined);
-  assert.equal(ca.claudeEnv(ctx, "/x/y/").CLAUDE_CONFIG_DIR, "/x/y");
+  assert.equal(ca.claudeEnv(ctx, "/x/y/").CLAUDE_CONFIG_DIR, path.resolve("/x/y"));
   assert.equal(ctx.env.CLAUDE_CONFIG_DIR, "/other", "원래 환경은 바꾸지 않는다");
 });
 
 test("schedules launchArgs: claude 프로그램에만 책상에서 고른 계정을 넣고, 기본 계정이면 넣지 않는다", () => {
   const a = { program: "claude", prompt: "x" };
-  const withDir = sch.launchArgs(a, "n", "/w", {}, "/h/.claude-accounts/w");
+  // 윈도우 실행기에서도 맥·리눅스 분기를 시험하도록 win 을 false 로 못박는다(윈도우 분기는 아래 시험이 따로 본다).
+  const withDir = sch.launchArgs(a, "n", "/w", {}, "/h/.claude-accounts/w", false);
   assert.ok(withDir.includes("CLAUDE_CONFIG_DIR=/h/.claude-accounts/w"));
   assert.ok(withDir.indexOf("CLAUDE_CONFIG_DIR=/h/.claude-accounts/w") < withDir.indexOf("claude"));
-  assert.ok(!sch.launchArgs(a, "n", "/w", {}, null).some((t) => String(t).startsWith("CLAUDE_CONFIG_DIR=")));
-  assert.ok(!sch.launchArgs({ ...a, program: "codex" }, "n", "/w", {}, "/h/.claude-accounts/w").some((t) => String(t).startsWith("CLAUDE_CONFIG_DIR=")));
+  assert.ok(!sch.launchArgs(a, "n", "/w", {}, null, false).some((t) => String(t).startsWith("CLAUDE_CONFIG_DIR=")));
+  assert.ok(!sch.launchArgs({ ...a, program: "codex" }, "n", "/w", {}, "/h/.claude-accounts/w", false).some((t) => String(t).startsWith("CLAUDE_CONFIG_DIR=")));
 });
 
 test("schedules launchArgs: Windows 에서는 적용하지 못하는 계정을 인자에 넣지 않는다(env 도, 변수도 없다)", () => {
