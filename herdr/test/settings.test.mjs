@@ -135,6 +135,18 @@ test("MODS 목록은 install.cjs의 모드·설명·기본 여부와 같다", ()
   assert.ok(h && v);
 });
 
+// 설정 창이 설치기를 읽지 못해 적어 둔 deps와 지울 수 없는 모드가 install.cjs와 어긋나지 않는지 본다.
+const pull = (name) => new Function(`${SRC.settings.match(new RegExp(`const ${name} = \\{[\\s\\S]*?\\n\\};`))[0]}\nreturn ${name};`)();
+test("설정 창의 deps는 install.cjs의 deps와 같고, 지울 수 없는 모드는 설정 창이 기대는 모드뿐이다", () => {
+  const DEPS = pull("DEPS");
+  for (const name of inst.ALL) assert.deepEqual(DEPS[name] ?? [], inst.MODS[name].deps, name);
+  assert.deepEqual(Object.keys(DEPS).filter((n) => !inst.ALL.includes(n)), []);
+  for (const [name, d] of Object.entries(DEPS)) assert.ok(d.length, `${name}: 빈 deps는 적지 않는다`);
+  assert.deepEqual(Object.keys(pull("KEEP")).sort(), ["gh-accounts", "settings", "tabs-mine"]);
+  // 설치기 쪽에서 지울 수 없게 막힌 모드(tabs-mine·settings·gh-accounts)가 서로 이어져 있다
+  assert.ok(inst.MODS["tabs-mine"].deps.includes("settings") && inst.MODS.settings.deps.includes("gh-accounts"));
+});
+
 const files = { "/app/mods/tabs-mine/mod.json": "{}", "/app/mods/work/mod.json": "{}", "/app/mods/inbox/mod.json": "{}" };
 const REMOTE = (ref) => ({ "/app/mods/settings/.source.json": JSON.stringify({ kind: "remote", ref }) });
 const LOCAL = (dir) => ({ "/app/mods/settings/.source.json": JSON.stringify({ kind: "local", dir }), [`${dir}/install.sh`]: "#!/bin/sh", [`${dir}\\install.ps1`]: "param()" });
@@ -152,20 +164,90 @@ async function mods(over = {}, extra = REMOTE("main")) {
 const tick = () => new Promise((r) => setTimeout(r, 5));
 const ask = (h, v, c, id) => { h.clicks[id]({}, c); h.texts.length = 0; v.render(c); };
 
-test("모드 칸: 모드 폴더의 mod.json 유무로 설치 여부를 보여 주고, 기본 모드에는 제거 버튼이 없다", async () => {
+test("모드 칸: 모드 폴더의 mod.json 유무로 설치 여부를 보여 주고, 설정 창이 기대는 모드에만 제거 버튼이 없다", async () => {
   const { h, v } = await mods();
   assert.equal(v.installed["tabs-mine"], true);
   assert.equal(v.installed.usage, undefined);
   assert.equal(v.installed["usage-status"], false);
   assert.ok(h.texts.includes("설치됨") && h.texts.includes("설치 안 됨"));
-  // 설치 안 된 모드는 설치, 설치된 추가 모드는 제거, 설치된 기본 모드(settings 포함)는 제거 불가
+  // 설치 안 된 모드는 설치, 설치된 추가 모드는 제거, 설정 창을 여는 모드(tabs-mine·settings)는 제거 불가, 나머지 기본 모드는 쓰는 모드가 없을 때만 제거
   assert.ok(h.clicks["mod-add-usage-status"]);
   assert.ok(h.clicks["mod-remove-inbox"]);
-  assert.ok(!h.clicks["mod-remove-tabs-mine"] && !h.clicks["mod-remove-work"]);
+  assert.ok(!h.clicks["mod-remove-tabs-mine"]);
   assert.ok(!h.clicks["mod-remove-settings"]);
-  assert.ok(h.texts.includes("기본 모드라 제거하지 않습니다"));
+  assert.ok(h.clicks["mod-remove-work"], "기본 표시여도 쓰는 모드가 없으면 제거할 수 있다");
+  assert.ok(h.texts.some((x) => x.includes("제거할 수 없습니다") && x.includes("설정 창을 다시 열 길이 없습니다")));
+  assert.ok(!h.texts.includes("기본 모드라 제거하지 않습니다"));
   assert.ok(!h.clicks["mod-copy-inbox"], "돌릴 수 있으면 복사 버튼은 실패했을 때만");
   assert.deepEqual(h.execs, []);
+});
+
+test("다른 설치된 모드가 쓰는 모드는 제거 버튼 대신 먼저 지울 모드를 알려 준다", async () => {
+  const extra = { ...REMOTE("main"), "/app/mods/prs/mod.json": "{}", "/app/mods/schedules/mod.json": "{}", "/app/mods/wt-menu/mod.json": "{}" };
+  const { h, v } = await mods({}, extra);
+  assert.ok(!h.clicks["mod-remove-work"] && !h.clicks["mod-remove-wt-menu"], "prs가 남아 있으면 work·wt-menu는 못 지운다");
+  assert.ok(h.texts.some((x) => x.startsWith("prs 모드를 먼저 지우세요")), "work 줄");
+  assert.ok(h.texts.some((x) => x.startsWith("work, prs 모드를 먼저 지우세요")), "wt-menu 줄은 쓰는 모드를 모두 적는다");
+  assert.ok(h.clicks["mod-remove-prs"] && h.clicks["mod-remove-schedules"], "아무도 쓰지 않는 prs·schedules는 지울 수 있다");
+  assert.deepEqual(h.execs, []);
+  // prs를 지우고 나면 work가 풀린다
+  delete h.files["/app/mods/prs/mod.json"];
+  v.load({ notify() {} });
+  await tick();
+  h.texts.length = 0; v.render(cx());
+  assert.ok(h.clicks["mod-remove-work"]);
+  assert.ok(h.texts.some((x) => x.startsWith("work 모드를 먼저 지우세요")), "wt-menu는 work가 남아 있어 아직 막힌다");
+});
+
+test("settings와 gh-accounts도 설치돼 있으면 제거할 수 없고 까닭을 보여 준다", async () => {
+  const extra = { ...REMOTE("main"), "/app/mods/settings/mod.json": "{}", "/app/mods/gh-accounts/mod.json": "{}" };
+  const { h } = await mods({}, extra);
+  assert.ok(!h.clicks["mod-remove-settings"] && !h.clicks["mod-remove-gh-accounts"] && !h.clicks["mod-remove-tabs-mine"]);
+  assert.ok(h.texts.some((x) => x.includes("제거할 수 없습니다") && x.includes("계정 칸")));
+});
+
+test("설치기가 쓰는 모드가 있다고 막으면(종료 코드 2) 원시 실패 대신 먼저 지울 모드를 알려 준다", async () => {
+  const out = "prs 이(가) work, wt-menu 을(를) 씁니다.\n아무것도 지우지 않았습니다. 함께 지우려면 이 이름으로 다시 실행하세요: work,prs";
+  const { h, v, c } = await mods({ execResult: { code: 2, stdout: out, stderr: "" } });
+  v.run(c, "remove", "work");
+  await tick();
+  assert.equal(v.result.work.ok, false);
+  assert.equal(v.result.work.text, "이 모드를 쓰는 모드가 있어 아무것도 지우지 않았습니다. prs 모드를 먼저 지우세요.");
+  assert.ok(!v.result.work.text.includes("실패했습니다(2)"));
+  assert.equal(h.shared["settings.busy"], null);
+});
+
+test("종료 코드가 0이어도(Windows 설치기) 막힌 출력이면 제거했다고 하지 않는다", async () => {
+  const out = "prs 이(가) work 을(를) 씁니다.\n아무것도 지우지 않았습니다.";
+  const { v, c } = await mods({ execResult: { code: 0, stdout: out, stderr: "" } });
+  v.run(c, "remove", "work");
+  await tick();
+  assert.equal(v.result.work.ok, false);
+  assert.match(v.result.work.text, /prs 모드를 먼저 지우세요/);
+});
+
+test("종료 코드 0에 한국어 줄이 깨져도 mod.json이 남아 있으면 제거했다고 하지 않는다", async () => {
+  const { h, v, c } = await mods({ execResult: { code: 0, stdout: "?? ??(?) work ??(?) ?????.", stderr: "" } });
+  assert.ok(h.files["/app/mods/work/mod.json"]);
+  v.run(c, "remove", "work");
+  await tick();
+  assert.equal(v.result.work.ok, false);
+  assert.match(v.result.work.text, /^제거되지 않았습니다/);
+});
+
+test("제거할 수 없는 모드와 다른 모드가 쓰는 모드에는 제거 명령 복사 버튼을 주지 않는다", async () => {
+  const { h } = await mods({}, { "/app/mods/settings/mod.json": "{}", "/app/mods/prs/mod.json": "{}" });
+  assert.ok(!h.clicks["mod-copy-tabs-mine"]); // 제거 불가
+  assert.ok(!h.clicks["mod-copy-settings"]); // 제거 불가
+  assert.ok(!h.clicks["mod-copy-work"]); // prs가 씀
+  assert.ok(h.clicks["mod-copy-prs"] && h.clicks["mod-copy-inbox"]);
+});
+
+test("막힘이 아닌 다른 종료 코드 2(잘못된 인자 등)는 기존처럼 실패로 보여 준다", async () => {
+  const { v, c } = await mods({ execResult: { code: 2, stdout: "알 수 없는 인자: x", stderr: "" } });
+  v.run(c, "remove", "work");
+  await tick();
+  assert.match(v.result.work.text, /^실패했습니다\(2\)/);
 });
 
 test("제거는 확인을 한 번 거친 뒤에야 설치기를 돌리고, 취소하면 아무것도 돌리지 않는다", async () => {
