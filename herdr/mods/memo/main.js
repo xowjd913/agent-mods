@@ -396,6 +396,7 @@ export default class Memo extends View {
     const a = this.ask, e = this.e;
     if (!a || a.kind !== "gh" || !e || this.working) return;
     this.ask = null;
+    if (e.isNew || this.dirty()) { this.say(cx, "확인하는 사이 고친 내용이 있습니다. 먼저 저장한 뒤 다시 올려 주세요.", true); return; }
     this.working = true;
     this.say(cx, "GitHub에 올리는 중…");
     cx.spawn(async (cx) => {
