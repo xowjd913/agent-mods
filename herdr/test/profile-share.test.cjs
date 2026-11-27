@@ -1,4 +1,5 @@
 // 프로필 이름 블록이 모든 모드에 같은 모양으로 들어가 있고, 인박스가 읽은 이름을 다른 모드가 받아 쓰는지: node --test herdr/test/profile-share.test.cjs
+require("./helpers/po-home.cjs"); // a PO machine: a profile without `preset` is "po" (see the helper)
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs");

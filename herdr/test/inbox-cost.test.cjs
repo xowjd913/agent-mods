@@ -1,4 +1,5 @@
 // PO 세션 금액(inbox.cjs 합산·가격표·세션 기록, main.js 배선) 단위 테스트: node --test herdr/test/inbox-cost.test.cjs
+require("./helpers/po-home.cjs"); // a PO machine: a profile without `preset` is "po" (see the helper)
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs");
