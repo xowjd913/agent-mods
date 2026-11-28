@@ -27,15 +27,17 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const CORE = ["tabs-mine", "work", "prs", "wt-menu", "schedules"];
-const EXTRAS = ["usage-status", "agent-groups", "leader-tabs", "path-menu", "gh-accounts", "inbox"];
+const CORE = ["tabs-mine", "settings", "gh-accounts", "work", "prs", "wt-menu", "schedules"];
+const EXTRAS = ["usage-status", "agent-groups", "leader-tabs", "path-menu", "inbox", "memo"];
 const ALL = [...CORE, ...EXTRAS];
 // 모드 설명과 꼭 함께 있어야 하는 모드. deps는 코드에서 확인한 것만 적는다.
 //   work·prs: wt-menu 팝업을 연다(work/main.js, prs/main.js의 openOverlay). 패널 버튼은 tabs-mine에만 있다.
 //   prs: 데이터를 mods/work/collect.cjs로 읽는다. schedules: 30초 tick을 tabs-mine이 부른다.
-//   gh-accounts: 패널 버튼이 tabs-mine에만 있다. gh-account 도구(--gh-account)는 모드가 아니라 따로 설치한다.
+//   tabs-mine: 설정 버튼이 settings 창을 연다(tabs-mine/main.js의 openOverlay). settings: 계정 칸이 gh-accounts 블록을 그대로 쓴다.
+//   gh-accounts: 오른쪽 패널의 계정 버튼은 없어지고 입구는 설정 창뿐이다. gh-account 도구(--gh-account)는 모드가 아니라 따로 설치한다.
 const MODS = {
-  "tabs-mine": { desc: "탭 줄. 오른쪽 패널에 Work·PRs·예약 버튼을 더하고 예약 실행을 맡는다", deps: [] },
+  "tabs-mine": { desc: "탭 줄. 오른쪽 패널 버튼과 설정 버튼을 더하고 예약 실행을 맡는다", deps: ["settings"] },
+  settings: { desc: "설정 창: 계정·규칙·글자 크기·설치된 모드", deps: ["gh-accounts"] },
   work: { desc: "Work 패널: 누가 무엇을 하고 있나", deps: ["tabs-mine", "wt-menu"] },
   prs: { desc: "PRs 패널: 무엇을 손봐야 하나", deps: ["work", "tabs-mine", "wt-menu"] },
   "wt-menu": { desc: "워크트리 메뉴: Work·PRs에서 워크트리 줄을 누르면 뜨는 팝업", deps: [] },
@@ -44,8 +46,9 @@ const MODS = {
   "agent-groups": { desc: "왼쪽 사이드바 에이전트 목록을 작업별로 묶는다", deps: [] },
   "leader-tabs": { desc: "칸 머리줄에 리더 탭을 보여 준다", deps: [] },
   "path-menu": { desc: "터미널 경로를 Cmd·Ctrl+클릭하면 폴더 열기·파일 열기·경로 복사 메뉴를 띄운다", deps: [] },
-  "gh-accounts": { desc: "계정 패널: 스페이스·저장소마다 쓸 GitHub 계정 고르기 (--gh-account 도구 필요)", deps: ["tabs-mine"] },
+  "gh-accounts": { desc: "계정 패널: 스페이스·저장소마다 쓸 GitHub 계정과 Claude 계정 고르기 (설정 창 계정 칸)", deps: [] },
   inbox: { desc: "UI 모드 패널: 리더 결과 보고를 채팅처럼 보고, 결정을 PO에게 답한다", deps: ["tabs-mine"] },
+  memo: { desc: "메모 패널: 폴더 안의 .md 파일로 메모를 쓰고, 눌러서 PO에게 보낸다", deps: ["tabs-mine"] },
 };
 const MARK = ".installed-by-herdr-installer";
 // 예전 설치 스크립트가 남긴 표시. 이 표시가 있는 폴더도 우리 것으로 보고 덮어쓴다.
@@ -57,7 +60,9 @@ const LEGACY_LAYOUT = "agent-groups";
 const LAYOUT_MARK = ".herdr-installer-layout";
 const SRC = path.join(__dirname, "mods");
 // 모드 폴더 밖에 있지만 모드와 함께 복사할 파일. gh-accounts 패널은 설치·확인·계정 추가에 gh-account 도구를 쓴다.
-const BUNDLE = { "gh-accounts": [["gh-account/gh-account.cjs", "gh-account.cjs"]], work: [["mods/inbox/profile.cjs", "profile.cjs"]] }; // work: collect.cjs reads the inbox profile (names, labels)
+const CLAUDE_ACCOUNT = ["claude-account/claude-account.cjs", "claude-account.cjs"]; // 책상에서 고른 Claude 계정(#121)
+const INBOX_PROFILE = ["mods/inbox/profile.cjs", "profile.cjs"]; // work: collect.cjs reads the inbox profile (names, labels); settings: rules.cjs (규칙 칸) validates and writes it
+const BUNDLE = { "gh-accounts": [["gh-account/gh-account.cjs", "gh-account.cjs"], CLAUDE_ACCOUNT], schedules: [CLAUDE_ACCOUNT], inbox: [CLAUDE_ACCOUNT], work: [INBOX_PROFILE], settings: [INBOX_PROFILE] };
 
 function log(msg) { process.stdout.write(msg + "\n"); }
 
@@ -71,10 +76,11 @@ function parseNames(value, flag) {
 }
 
 function parseArgs(argv) {
-  const out = { cmd: argv[0], home: null, extras: false, only: null, add: null, mods: null, created: false, settings: null, remove: false, solo: false, wrap: false, statusline: false };
+  const out = { cmd: argv[0], home: null, ref: null, extras: false, only: null, add: null, mods: null, created: false, settings: null, remove: false, solo: false, wrap: false, statusline: false };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--home") out.home = argv[++i];
+    else if (a === "--ref") { out.ref = argv[++i]; if (!REF_RE.test(out.ref ?? "")) throw new Error("--ref 뒤에는 브랜치 이름(영문·숫자·. _ / -)이 필요합니다."); }
     else if (a === "--extras") out.extras = true;
     else if (a === "--only") out.only = parseNames(argv[++i], a);
     else if (a === "--add") out.add = parseNames(argv[++i], a);
@@ -94,6 +100,11 @@ function parseArgs(argv) {
   return out;
 }
 
+// 내려받은 브랜치로 쓸 수 있는 글자(셸·주소에 그대로 넣어도 안전한 것만)
+const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,99}$/;
+// 설정 창이 모드를 설치·제거할 때 어느 설치기를 돌릴지 알도록, 설치한 출처를 settings 모드 폴더에 남긴다.
+//   원격(curl|sh, irm): { kind: "remote", ref: <브랜치> }  /  저장소 복제본에서 실행: { kind: "local", dir: <그 herdr 폴더> }
+const SOURCE_FILE = ".source.json";
 const modDir = (home, mod) => path.join(home, "mods", mod);
 const ours = (dir) => fs.existsSync(path.join(dir, MARK)) || fs.existsSync(path.join(dir, LEGACY_MARK));
 // 레이아웃에 넣어도 되는 모드: 우리 표시가 있고 main.js가 있는 폴더.
@@ -140,6 +151,10 @@ function installMods(home, opts = {}) {
     fs.cpSync(path.join(SRC, mod), target, { recursive: true, force: true });
     for (const [from, to] of BUNDLE[mod] || []) fs.copyFileSync(path.join(__dirname, from), path.join(target, to));
     fs.writeFileSync(path.join(target, MARK), "");
+    if (mod === "settings") {
+      const source = opts.ref ? { kind: "remote", ref: opts.ref } : { kind: "local", dir: __dirname };
+      fs.writeFileSync(path.join(target, SOURCE_FILE), JSON.stringify(source) + "\n");
+    }
     log(`모드 설치: ${target}`);
     result.installed.push(mod);
   }
@@ -310,11 +325,13 @@ const STEPS = [
     undo: (l) => dropPanel(l, "schedules"),
   },
   {
-    name: "오른쪽 패널 계정(gh-accounts)",
+    // 계정 화면의 입구는 설정 창뿐이라(#126) 패널을 더하지 않고, 예전 설치가 더해 둔 accounts-board 는 갱신할 때 한 번 뺀다.
+    // 기록 이름을 새로 정해 예전 .board-added 기록과 무관하게 한 번 돈다. 제거할 때도 남은 블록을 되돌린다.
+    name: "오른쪽 패널 계정(gh-accounts) 정리",
     needs: ["gh-accounts"],
-    mark: ["gh-accounts", ".board-added"],
-    done: () => false,
-    apply: (l) => addPanel(l, "accounts-board", "gh-accounts"),
+    mark: ["gh-accounts", ".board-dropped"],
+    done: (l) => !(panelBody(l)?.children ?? []).some((k) => k?.content?.mod === "gh-accounts"),
+    apply: (l) => { dropPanel(l, "gh-accounts"); return null; },
     undo: (l) => dropPanel(l, "gh-accounts"),
   },
   {
@@ -324,6 +341,14 @@ const STEPS = [
     done: () => false,
     apply: (l) => addPanel(l, "inbox-board", "inbox"),
     undo: (l) => dropPanel(l, "inbox"),
+  },
+  {
+    name: "오른쪽 패널 메모(memo)",
+    needs: ["memo"],
+    mark: ["memo", ".board-added"],
+    done: () => false,
+    apply: (l) => addPanel(l, "memo-board", "memo"),
+    undo: (l) => dropPanel(l, "memo"),
   },
   {
     name: "칸 머리줄(leader-tabs)",
@@ -716,7 +741,7 @@ function soloSetting(on, dir) {
 }
 
 module.exports = {
-  CORE, EXTRAS, ALL, MODS, MARK, LEGACY_MARK, LAYOUT_NAME,
+  CORE, EXTRAS, ALL, MODS, MARK, LEGACY_MARK, LAYOUT_NAME, SOURCE_FILE,
   parseArgs, installMods, applyLayout, deriveUiLayout, pendingLayout, removeMods, listMods,
   HOOK_EVENTS, HOOK_SCRIPT, isOurHook, settingsPath, hookScript, hookCommand, mergeHook, hookSettings, soloSetting,
   isOurStatusLine, writerScript, writerCommand, statusLineSettings, CHAIN_FILE,

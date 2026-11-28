@@ -19,14 +19,16 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, ScrollHandle } from "gpui-base";
-import { theme, exec, appHome, checking, window, run, hc, terminals, panes, focused, setBadge, shared, layouts, setShared, props, openOverlay, closeOverlay, watchFolder, pickFiles, home, readTextFile } from "herdr";
+import { settings, theme, exec, appHome, checking, window, run, hc, terminals, panes, focused, setBadge, shared, layouts, setShared, props, openOverlay, closeOverlay, watchFolder, pickFiles, home, readTextFile } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
+const ACCT = () => `${appHome()}/mods/inbox/claude-account.cjs`; // which Claude account a session runs on (#121); bundled by the installer
 const ICON = (name) => `mods/workspace-chrome/${name}.svg`;
 const LOAD_TIMEOUT = 20000, LOAD_STALL_MS = 30000, WINDOW_REFRESH_MS = 5000, PANE_REFRESH_MS = 30000, STATUS_POLL_MS = 1500, WATCH_DEBOUNCE_MS = 250;
 const KIND = { done: ["완료", "working"], decision: ["결정", "blocked"], verify: ["확인", "blocked"], stop: ["중단", "idle"], resume: ["재개", "dim"], other: ["알림", "dim"], start: ["시작", "dim"] };
 const WINDOW = { mod: "inbox", kind: "window", key: "inbox", keep: true, width: 720, height: 680, props: { mode: "window" } };
 const SENT_KEY = "inbox.sent";
+const SOLO_PICK_KEY = "inbox.solo"; // #90: the room picked in solo mode (kept apart, so a PO appearing for a moment does not lose the PO pick)
 const PICK_KEY = "inbox.po"; // the PO id the person picked last (shared, so it also holds across window reopens)
 const CHAT_KEY = "inbox.chat"; // the lines the person sent through the chat box [{ts, ms, text, to, po}] (po: the PO id they went to)
 const MAX_CHAT = 100, MAX_ENTRIES = 80; // MAX_ENTRIES: the newest timeline entries drawn (a waiting one is always drawn)
@@ -59,6 +61,7 @@ const DEFAULT_NAMES = Object.freeze({
   hubRole: "po", hubIdLabel: "po", hubId: "^[a-z0-9-]{1,40}$", hubDir: "po", // the hub (PO): its `role` value, id label, id pattern, folder
   labelRole: "role", labelWait: "wait", labelWaitLink: "wait-link", labelSession: "session",
   answerLine: 'Panel answer ({kind}) for {agent}: "{text}".{ Target: {link}}',
+  preset: "po", arrangeScript: "~/.claude/skills/leader/herdr-team.sh", // the profile's preset ("none" = no agent / hub naming rules at all, #124) and the PO arrange script ("" = not there: the features that need it hide)
 });
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // a hub id becomes a file name whatever its pattern says
 function compileNames(n) {
@@ -329,6 +332,23 @@ function leaderMenu(terms, memo, query = "", limit = 8, pick = "") {
     .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0)); // code-unit order: the same on every platform
   return [{ id: "here", label: "here", sub: "" }, ...leaders].filter((x) => !q || x.id.toLowerCase().includes(q) || x.label.toLowerCase().includes(q)).slice(0, limit);
 }
+// #90 solo mode: with NO live PO and NO live lead-* leader, every plain Claude terminal the hook has written lines for is a room of its own (the room id
+// is the terminal's address). One PO or one leader anywhere and the desk is the PO structure again (solo rooms are hidden, nothing else changes).
+const soloMode = (terms) => { const l = terms ?? []; return poList(l).length === 0 && !l.some((t) => isAgentName(t?.name)); };
+// A terminal the solo hook records: no agent name, no parent, no role label (the same test the hook makes).
+const soloTerm = (t) => Boolean(t?.address) && !isAgentName(t.name) && !t.parent && !t.labels?.role;
+// The solo rooms, in terminal order, as poList's rows ({id, address, label, title, n}): a live plain terminal with at least one recorded line
+// (`solo` = the collector's {<terminal id>: [lines]}). The name is the terminal's name, else its title, else its address. A closed terminal has no room (its file stays).
+function soloRooms(terms, solo) {
+  const have = solo ?? {};
+  const out = [];
+  for (const t of terms ?? []) {
+    if (!soloTerm(t) || !Array.isArray(have[t.address]) || !have[t.address].length || out.some((r) => r.id === t.address)) continue;
+    const name = String(t.name ?? "").trim(), title = String(t.title ?? "").trim();
+    out.push({ id: t.address, address: t.address, label: name || (title && title !== t.address ? title : "") || t.address, title: "", n: 0 });
+  }
+  return out;
+}
 // The PO terminal a line is pasted into: the PO of the leaders it names (they must share one), else the picked PO (`pick`, a PO id).
 // {po} or {po:null, why:"orphan"|"many"|"none"}.
 function chatTarget(terms, to = [], pick = "") {
@@ -339,7 +359,9 @@ function chatTarget(terms, to = [], pick = "") {
     return pos.length > 1 ? { po: null, why: "many" } : { po: pos[0] };
   }
   const p = pick && pick !== PO_OTHER ? poList(list).find((x) => x.id === pick) : null;
-  return p ? { po: p.address } : { po: null, why: "none" };
+  if (p) return { po: p.address };
+  const s = pick && pick !== PO_OTHER && soloMode(list) ? list.find((t) => t.address === pick && soloTerm(t)) : null; // #90: a solo room's terminal
+  return s ? { po: s.address } : { po: null, why: "none" };
 }
 // ---- The messenger timeline of one room (= one PO). Everything below is pure.
 // `leaders` [{s, owner}]: s = a leader's summary (s.leader, s.items), owner = its room (a PO id or PO_OTHER). `says`: the PO's own lines
@@ -367,6 +389,53 @@ function tlMemoGet(kind, v, make) {
   return r;
 }
 const TL_CUT_MIN = 500;
+// #80: the UI mode's text follows Herdr's text size. Every size written in the code is for FONT_BASE (13, Herdr's setting when #80 was made) and is
+// multiplied by settings().font_size / FONT_BASE, so 13 looks as before. A missing or odd value is 13; the factor is held within 0.6..2.5.
+// #126: the settings window can fix the UI mode's size instead (shared "settings.uiFontSize", persisted by Herdr): a number of px within 10..24 wins over
+// Herdr's value; anything else (unset, null, text, out of range) is ignored and the UI mode follows Herdr as before.
+const FONT_BASE = 13;
+const FONT_KEY = "settings.uiFontSize", FONT_MIN = 10, FONT_MAX = 24;
+const fontOverride = (v) => { const n = typeof v === "number" ? v : NaN; return Number.isFinite(n) && n >= FONT_MIN && n <= FONT_MAX ? Math.round(n) : null; };
+const fontScale = (st, override) => {
+  const o = fontOverride(override);
+  if (o !== null) return o / FONT_BASE;
+  const n = Number(st?.font_size);
+  return Number.isFinite(n) && n > 0 ? Math.min(2.5, Math.max(0.6, n / FONT_BASE)) : 1;
+};
+// #87: a report that is an announcement (finished / started / resumed / stopped) is drawn as one centered line, not a bubble; the ones that
+// need an answer (decision, verify) stay cards. `start` is not a shown report today (tlShown), so it only matters if that ever changes.
+const NOTICE_KINDS = new Set(["start", "done", "resume", "stop"]);
+const isNotice = (e) => String(e?.who ?? "").startsWith("l:") && Boolean(e.it) && NOTICE_KINDS.has(e.it.kind) && !e.waiting && !e.wait;
+// "<name> · <kind> · <first line>" ("kind" = the shown kind word); the first line is the report's headline, whitespace squeezed.
+// A headline that is only the kind word (a leader report titled "[leader] 재개") says nothing new: the first non-empty body line takes its place.
+const noticeLine = (s) => String(s ?? "").replace(/^\s*\[[^\]]*\]\s*/, "").replace(/\s+/g, " ").trim();
+// The body line that stands in for the headline is shown as plain text: leading markdown markers (#'s, quote >, list - * + 1.) are taken off the start of the
+// line, and a **bold** or `code` pair is unwrapped, so the user never sees "## " or "**". Nothing mid-line is touched on its own (__init__, a ** b, >= 5 stay).
+// A line that is only markers (a "---" rule) or starts a code fence (```) is empty and skipped.
+const noticePlain = (l) => {
+  let s = String(l ?? "").replace(/\s+/g, " ").trim();
+  if (s.startsWith("```")) return ""; // a code fence line says nothing
+  for (let p = null; p !== s;) { p = s; s = s.replace(/^(?:#{1,6}(?=\s|$)|>+(?=\s|$)|[-*+](?=\s|$)|\d{1,3}[.)](?=\s|$)|-{3,}$|\*{3,}$|_{3,}$)\s*/, ""); }
+  return s.replace(/\*\*(\S|\S.*?\S)\*\*/g, "$1").replace(/`(\S|\S[^`]*?\S)`/g, "$1").replace(/\s+/g, " ").trim();
+};
+const noticeText = (name, kind, it) => {
+  let head = noticeLine(it?.head || it?.lead || it?.title);
+  if (!head || head === kind) head = String(it?.body ?? "").replace(/\r/g, "").split("\n").map(noticePlain).find(Boolean) ?? "";
+  return [name, kind, head].filter(Boolean).join(" · ");
+};
+// A line pasted into the PO terminal that another terminal sent (`<hc from="t137 lead-x">`) is that terminal's words, not the person's. -> the sender's
+// hc name ("lead-x", the last word of `from`), "" when the line is not such a message.
+const hcSender = (text) => { const m = /^\s*<hc\s+from="([^"]*)"/.exec(String(text ?? "")); return m ? (m[1].trim().split(/\s+/).pop() ?? "") : ""; };
+const HC_REPORT_MS = 5 * 60 * 1000; // an hc line and the report it carries are written within this gap
+// Is this <hc> line a copy of that report? Its words (wrapper and a leading "[leader]" tag removed, spaces squeezed, case ignored) must overlap the
+// report's title / head / lead (one contains the other, at least 3 characters): the same leader within 5 minutes is not enough, since an unrelated
+// message of that leader (a question, say) must stay on the desk.
+const hcSame = (text, it) => {
+  const sq = (v) => String(v ?? "").replace(/\s+/g, " ").trim().toLowerCase().replace(/^\[[^\]]*\]\s*/, "");
+  const body = sq(unwrapTags(text));
+  if (body.length < 3) return false;
+  return [it?.title, it?.head, it?.lead].map(sq).some((r) => r.length >= 3 && (body.includes(r) || r.includes(body)));
+};
 // The PO hook's copy of a submitted line (kind "me") against a desk record: compared without wrapper tags, whitespace squeezed, and (second chance) by words +
 // pictures; a hook line ending in "…" (the hook keeps 2000 characters, #49) matches a record that starts with what is left. The hook line is the proof that a
 // line really reached the PO's model, whatever the desk's own status says.
@@ -374,7 +443,10 @@ const tlNorm = (v) => cutHead(String(v ?? "").replace(/\s+/g, " ").trim(), 2000)
 const tlFull = (v) => tlMemoGet("f", v, (s) => tlNorm(unwrapTags(s)));
 const tlCore = (v) => tlMemoGet("c", v, (s) => { const sp = splitImgs(s); return `${tlNorm(sp.text)}|${sp.imgs.join(",")}`; });
 // "" when the line is not such a cut (a short line that merely ends in "…" must not hide a longer send).
-const tlCut = (v) => { const s = String(v ?? ""); if (!s.endsWith("…")) return ""; const p = tlFull(s.slice(0, -1)); return p.length >= TL_CUT_MIN ? p : ""; };
+// The hook cuts the wrapped paste at 2000 characters, so the cut often lands inside the closing tag ("…\n</pasted_…"): a half tag at the end is not text the desk
+// record has, so it is dropped before the prefix is compared (unwrapTags only strips whole tags).
+const TL_HALF_TAG = /[ \t\n]*<\\?\/?[A-Za-z_]{0,14}$/;
+const tlCut = (v) => { const s = String(v ?? ""); if (!s.endsWith("…")) return ""; const p = tlFull(s.slice(0, -1).replace(TL_HALF_TAG, "")); return p.length >= TL_CUT_MIN ? p : ""; };
 const hookKey = (v) => ({ t: tlFull(v), c: tlCore(v), p: tlCut(v) });
 const tlMatches = (k, m) => tlFull(m.line) === k.t || tlFull(m.text) === k.t || (k.c.length > 1 && (tlCore(m.line) === k.c || tlCore(m.text) === k.c)) || (k.p && (tlFull(m.line).startsWith(k.p) || tlFull(m.text).startsWith(k.p)));
 // A hook line belongs to a desk record when it came from up to 11 minutes (the Enter button's life) after the record's time to 1 minute before it.
@@ -418,17 +490,25 @@ function timeline(room, leaders, says, mine, waits = [], now = 0) {
   // The PO's reply to a line the desk sent to a leader (#58): the hook gives a prompt and its reply the same pid, and the prompt matched a desk
   // record that has a `to`. Only the 1:1 view reads it (`about`); the bubble does not say "→ leader", since the reply is to the person.
   const about = new Map();
+  const coveredReports = new Set(); // indexes into `out` of the reports an hc copy was matched to
+  const fwdOf = new Map(); // desk record -> the forwards of the hook line it matched (the hook line is not drawn then, so the mark moves onto the desk bubble)
   if (room && room !== PO_OTHER) for (const x of says ?? []) {
     if (x.me) {
+      // #87: the PO hook also records a leader's report that arrived as `<hc from=...>`; the report is already on the desk (card or notice), so that copy is not a bubble of the person. One report covers one such line.
+      const from = hcSender(x.text);
+      if (from) {
+        const r = out.findIndex((e, k) => e.leader === from && e.it && !coveredReports.has(k) && Math.abs(x.ms - e.ms) <= HC_REPORT_MS && hcSame(x.text, e.it));
+        if (r >= 0) { coveredReports.add(r); continue; }
+      }
       const k = hookKey(x.text);
       const i = sentBy.findIndex((m, j) => !taken.has(j) && tlWindow(x.ms, Number(m.ms) || 0) && tlMatches(k, m));
-      if (i >= 0) { taken.add(i); proven.add(sentBy[i]); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); continue; }
-      out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
+      if (i >= 0) { taken.add(i); proven.add(sentBy[i]); if (x.pid && sentBy[i].to) about.set(x.pid, sentBy[i].to); if (x.fwd?.length) fwdOf.set(sentBy[i], x.fwd); continue; }
+      out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: "", at: Number(x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: "", kind: "chat", status: "sent", typed: true, ...(x.imgs?.length ? { imgs: x.imgs } : {}), ...(x.fwd?.length ? { fwd: x.fwd } : {}) });
       continue;
     }
     out.push({ key: `po|${x.ms}|${x.text}`, who: "po", ms: Number(x.ms) || 0, ts: x.ts, text: unwrapTags(x.text), to: x.to || "", ...(!x.to && x.pid && about.get(x.pid) ? { about: about.get(x.pid) } : {}) });
   }
-  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", ...(x.tos?.length ? { tos: x.tos } : {}), kind: x.kind || "chat", status: proven.has(x) ? "sent" : liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}) });
+  for (const x of mine ?? []) if (x.po === room) out.push({ key: `me|${x.ms}|${x.text}`, who: "me", id: x.id || "", at: Number(x.at ?? x.ms) || 0, ms: Number(x.ms) || 0, ts: x.ts, text: x.text, to: x.to || "", ...(x.tos?.length ? { tos: x.tos } : {}), kind: x.kind || "chat", status: proven.has(x) ? "sent" : liveStatus(x.status || "sent", x.at ?? x.ms, now), ...(x.imgs?.length ? { imgs: x.imgs } : {}), ...(fwdOf.get(x)?.length ? { fwd: fwdOf.get(x) } : {}) });
   // Two entries with the same key (the same text at the same ms) would share one element id: the later ones get a #n suffix.
   const used = new Map();
   for (const e of out) {
@@ -597,10 +677,24 @@ function seenNext(seenMap, room, entries) {
 // 전체. The person's own lines are only under 전체; the made-up "waiting" entry (no report) counts by the kind the leader waits on.
 const CHAT_FILTERS = [["all", "전체"], ["unread", "안 읽은 것"], ["decision", "결정 필요"], ["verify", "최종 확인 요청"], ["done", "결과"], ["stop", "멈춤"]];
 const entryKind = (e) => (e?.who === "po" || e?.who === "me" ? "" : e?.waiting || e?.it?.kind || "");
+// #140: a decision report is closed (so it leaves the 결정 필요 chip and its count; it stays under 전체) when (1) its own `it.answered` is set (a later
+// "answered" line of that leader, markAnswered), or (2) a LATER line of the person is addressed to that leader: a chat line (`to` / `tos`) or one the PO
+// forwarded (`fwd`, #82), judged from `entries` (the same set the chips are made from). A later report (done/resume/stop) or a PO line without `fwd`
+// does not close it, and neither does a line to another leader. The made-up "waiting" entry is never closed. Any later line to that leader closes it,
+// even one that is not an answer: a stale count is better than a hidden question only when it is rare, so this stays this narrow.
+function decisionClosed(e, entries) {
+  if (e?.waiting || e?.wait || entryKind(e) !== "decision") return false;
+  if (e.it?.answered) return true;
+  const leader = entryLeader(e);
+  const ms = Number(e.ms) || 0;
+  return Boolean(leader) && (entries ?? []).some((x) => x?.who === "me" && (Number(x.ms) || 0) > ms
+    && (x.to === leader || (x.tos ?? []).includes(leader) || (x.fwd ?? []).some((f) => f.to === leader)));
+}
 function filterEntries(entries, filter, seen) {
   const list = entries ?? [];
   if (!filter || filter === "all" || !CHAT_FILTERS.some((f) => f[0] === filter)) return list;
   if (filter === "unread") return list.filter((e) => e.who !== "me" && !e.wait && e.ms > (Number(seen) || 0));
+  if (filter === "decision") return list.filter((e) => entryKind(e) === "decision" && !decisionClosed(e, list));
   return list.filter((e) => entryKind(e) === filter);
 }
 // What the timeline draws under a filter: the filtered entries, and always the pending "waiting" ones (a leader still waiting on the person must not
@@ -630,9 +724,12 @@ const settleLeader = (choices, leader) => (leader && (choices ?? []).length >= 1
 // terminal carries its hc name, or sits at the address its summary recorded. `sums` = [{leader, terminal}].
 const aliveLeaders = (choices, terms, sums) => (choices ?? []).filter((c) => (terms ?? []).some((t) => t.name === c.id || (t.address && (sums ?? []).some((s) => s.leader === c.id && s.terminal === t.address))));
 // Attributed by a field only, never by guessing from the text: the person's line whose `to` / `tos` names the leader (a chat with @lead-x, an
-// answer button of its card), and the PO's line whose `to` names it or whose `about` does (its reply to a prompt the desk sent to that leader).
+// answer button of its card, or a line the PO forwarded to it: `fwd`, #82), and the PO's line whose `to` names it or whose `about` does (its reply to a prompt the desk sent to that leader).
 const leaderEntries = (entries, leader) => (leader ? (entries ?? []).filter((e) => entryLeader(e) === leader
-  || (e?.who === "me" && (e.to === leader || (e.tos ?? []).includes(leader))) || (e?.who === "po" && (e.to === leader || e.about === leader))) : entries ?? []);
+  || (e?.who === "me" && (e.to === leader || (e.tos ?? []).includes(leader) || (e.fwd ?? []).some((x) => x.to === leader))) || (e?.who === "po" && (e.to === leader || e.about === leader))) : entries ?? []);
+// The small line over a bubble of the person's words that the PO passed on (#82): "→ x 그대로 전달" (the same words) or "→ x 다듬어 전달" (reworded). In
+// one leader's 1:1 view (`leader`) only that leader's mark shows; in 전체 every leader it went to. `label` = the shown name of a leader. [] when none.
+const fwdMarks = (e, leader = "", label = (n) => n) => (e?.who === "me" ? (e.fwd ?? []) : []).filter((x) => !leader || x.to === leader).map((x) => `→ ${label(x.to)} ${x.exact ? "그대로" : "다듬어"} 전달`);
 // The "안 읽은 것" base, shared by every copy of the mod (Dock, window, pane): {<room>: {seen, ts}}. The first copy to draw a room takes the room's
 // last-opened marker before it moves, and the others use that same value for SNAP_TTL_MS after it was last drawn (each draw renews it).
 const SNAP_TTL_MS = 30000;
@@ -704,13 +801,14 @@ function dockTarget(here, f, terms) {
 // "don't recommend" (a negated option is one the report says NOT to pick, so it never gets the "(추천)" mark).
 const REC_MARK = /추천|권장|recommend/i;
 const REC_NEG = /비\s*추천|비\s*권장|(?:추천|권장)\s*(?:하지\s*(?:않|말)|안\s*함|드리지\s*않|할\s*수\s*없)|(?:not|n['’]t|never)\s+(?:be\s+)?recommend|un-?recommend/i;
+const OPT_LINE = /^\s*(?:[-*]\s*)?(?:\*\*)?([1-3])안(?:\*\*)?\s*(?:[(（\[［]([^)）\]］\n]{0,24})[)）\]］])?\s*(?:\*\*)?\s*[:：)]\s*(\S.*)$/; // 1 = number, 2 = marker between number and colon, 3 = the option text
 const recMarked = (txt) => REC_MARK.test(String(txt ?? "")) && !REC_NEG.test(String(txt ?? ""));
 function decisionOptions(body) {
   const nums = new Set();
   let rec = 0;
   for (const line of String(body ?? "").split(/\r?\n/)) {
     // "1안: …", "1안) …", and with a marker between the number and the colon: "1안(추천): …", "1안 (추천): …", "**1안** [권장]: …"
-    let m = line.match(/^\s*(?:[-*]\s*)?(?:\*\*)?([1-3])안(?:\*\*)?\s*(?:[(（\[［]([^)）\]］\n]{0,24})[)）\]］])?\s*(?:\*\*)?\s*[:：)]\s*\S/);
+    let m = line.match(OPT_LINE);
     if (m) {
       const n = Number(m[1]);
       nums.add(n);
@@ -751,6 +849,73 @@ function groupAnswer(groups, picks) {
     parts.push(`${g.label}${n}안`);
   }
   return parts.join(", ");
+}
+// #152: a decision report as a view for the bubble: the question on top, one row per option, the recommended one marked, the "추천: N안" line
+// folded into the row it names. Read with the same rules as decisionOptions / decisionGroups (nothing is guessed): -> null when the body has no
+// options, or when something that is not an option line, a "추천" line or an indented detail sits between the options (then the bubble draws
+// the body as before). A line below the last option that is not its detail stays under the options as "rest".
+// decisionLayout(body) -> { question, options: [{ n, text, detail, recommended }], rest, recommended, reason } | null   (one question)
+// decisionView(body) -> { intro, groups: [{ label, title, question, options, rest, recommended, reason }] } | null   (label "" = a single question)
+const REC_LINE = /^\s*(?:[-*]\s*)?추천\s*[:：]\s*([1-3])안(.*)$/;
+const optText = (s) => String(s ?? "").replace(/\s*[(（\[［][^)）\]］\n]{0,24}[)）\]］]\s*$/, (x) => (recMarked(x.replace(/^\s*[(（\[［]|[)）\]］]\s*$/g, "")) ? "" : x)).replace(/\s*[★⭐]+\s*$/, "").trim();
+const recReason = (s) => {
+  const t = String(s ?? "").trim().replace(/^[\s:：,，.。\-–—~]+/, "").trim();
+  return /^[(（].*[)）]$/.test(t) ? t.slice(1, -1).trim() : t;
+};
+// A text without Markdown marks (bold, `code`, [label](url)) for the option rows, which are drawn as plain text so a press on a row never starts a text selection.
+const mdPlain = (s) => String(s ?? "").replace(/\[([^\]\n]+)\]\([^)\n]*\)/g, "$1").replace(/(\*\*|__|`)/g, "");
+function decisionLayout(body) {
+  const { options, recommended } = decisionOptions(body);
+  if (!options.length) return null;
+  const lines = String(body ?? "").split(/\r?\n/);
+  const found = lines.map((l) => l.match(OPT_LINE));
+  const first = found.findIndex(Boolean);
+  const last = found.length - 1 - [...found].reverse().findIndex(Boolean);
+  const question = [], rest = [], opts = [];
+  let cur = null, gap = false, reason = "";
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const m = found[i];
+    if (m) {
+      const n = Number(m[1]);
+      if (opts.some((o) => o.n === n)) return null; // the same number twice: not clear which is meant
+      cur = { n, text: optText(m[3]) || m[3].trim(), detail: [], recommended: n === recommended };
+      opts.push(cur);
+      gap = false;
+      continue;
+    }
+    const r = line.match(REC_LINE);
+    if (r && Number(r[1]) === recommended) { const t = recReason(r[2]); if (t) reason = reason ? reason + " " + t : t; gap = true; continue; }
+    if (!line.trim()) { if (i < first) question.push(line); else if (i > last) rest.push(line); gap = true; continue; }
+    if (i < first) { question.push(line); continue; }
+    if (cur && !gap && /^(?:\t|\s{2,})\S/.test(line)) { cur.detail.push(line.trim()); continue; }
+    if (i < last) return null;
+    rest.push(line);
+    cur = null;
+  }
+  const join = (a) => a.join("\n").trim();
+  return { question: join(question), options: opts.sort((x, y) => x.n - y.n).map((o) => ({ ...o, detail: o.detail.join("\n") })), rest: join(rest), recommended, reason };
+}
+function decisionView(body) {
+  const groups = decisionGroups(body);
+  if (!groups.length) {
+    const l = decisionLayout(body);
+    return l ? { intro: "", groups: [{ label: "", title: "", ...l }] } : null;
+  }
+  const segs = [{ label: "", head: "", lines: [] }];
+  for (const line of String(body ?? "").split(/\r?\n/)) {
+    const m = line.match(GROUP_HEAD);
+    if (m) segs.push({ label: m[1], head: line, lines: [] });
+    else segs[segs.length - 1].lines.push(line);
+  }
+  const out = [];
+  for (const sg of segs.slice(1)) {
+    const l = decisionLayout(sg.lines.join("\n"));
+    if (!l) return null;
+    const title = sg.head.replace(/^\s*(?:[-*#>]+\s*)?(?:\*\*)?/, "").replace(sg.label, "").replace(/^[\s.:：)]+/, "").replace(/\*\*/g, "").trim();
+    out.push({ label: sg.label, title, ...l });
+  }
+  return { intro: segs[0].lines.join("\n").trim(), groups: out };
 }
 // What a decision report offers when it has no "N안:" lines (#62): its "추천: ..." and "답: ..." lines, shown on the card without opening it,
 // and the quoted answers after "답:" ("둘 다 진행" / "#59만" / "보류", also “…” and 「…」) as answer buttons when there are at least two.
@@ -889,6 +1054,11 @@ function typingNow(terms, room, memo, track = null, now = 0) {
     const po = poList(list).find((p) => p.id === room);
     const term = po ? list.find((t) => t.address === po.address) : null;
     if (term && isWorking(term)) out.push({ who: "po", name: po.label, label: LABEL_WORKING });
+  }
+  if (soloMode(list)) { // #90: the room is one plain Claude terminal: a single "working" line while it works, and nothing about leaders
+    const row = soloRooms(list, { [room]: [""] })[0];
+    const term = row ? list.find((t) => t.address === row.address) : null;
+    return term && isWorking(term) ? [{ who: "po", solo: true, name: row.label, label: LABEL_WORKING }] : [];
   }
   const hot = busyAddrs(list), states = workStates(list);
   const seen = new Set();
@@ -1152,6 +1322,16 @@ function selRangeOf(sel, len) {
 const BUBBLE_SHARE = 0.75, BUBBLE_SIDE = 90, BUBBLE_MIN_CAP = 40;
 // The chat column: the view's width less the room list beside it (none in a strip).
 const chatColW = (winW, strip, narrow, roomW, slimW) => { const w = Number(winW); return Number.isFinite(w) && w > 0 ? Math.max(0, w - (strip ? 0 : narrow ? slimW : roomW)) : null; };
+
+// #68: the room list's width, dragged by the person. Kept inside [ROOM_W_MIN, ROOM_W_MAX] and never wider than half the window, so the chat
+// column keeps room; a missing or broken saved value is the default width.
+const ROOM_W_MIN = 120, ROOM_W_MAX = 360, ROOM_W_KEY = "inbox.roomw";
+const roomWidth = (raw, winW, dflt = 168) => {
+  const w = Number(raw), win = Number(winW);
+  const cap = Number.isFinite(win) && win > 0 ? Math.max(ROOM_W_MIN, Math.min(ROOM_W_MAX, Math.floor(win / 2))) : ROOM_W_MAX;
+  const base = Number.isFinite(w) && raw !== "" && raw !== null ? w : dflt; // a dragged-past-zero value is clamped to the minimum, not replaced
+  return Math.max(ROOM_W_MIN, Math.min(cap, Math.round(base)));
+};
 // The px a bubble may take: 75% of the column, and always leaving BUBBLE_SIDE px (the copy chip, the time, the gutters) on its other side, so
 // the bubble and its chip fit the column down to narrow docks (150px column -> 60, 200 -> 110, 260 -> 170); only a column under ~130px gets the
 // BUBBLE_MIN_CAP floor (a few characters), and the cap is never wider than the column itself. `minInner` is the widest picture (with its padding):
@@ -1292,6 +1472,24 @@ function restartSendBlock(term) {
   if (term.status === "working") return "PO가 일하는 중입니다";
   return "";
 }
+// #133: Esc in the chat box stops the PO's running turn (the way Esc does in its terminal). One Esc only: a second one in a row opens Claude Code's rewind menu,
+// so a press locks the key and the button for STOP_LOCK_MS. Why no Esc goes out now ("" when one can): the terminal must be known, running and working.
+const STOP_LOCK_MS = 2500;
+function stopBlock(term) {
+  if (!term) return "PO 터미널의 상태를 읽지 못해 Esc를 보내지 않았습니다";
+  if (!term.live) return "PO 터미널이 실행 중이 아니라 Esc를 보내지 않았습니다";
+  if (term.status === "blocked") return "PO가 질문 중이라 Esc를 보내지 않았습니다(질문 카드의 Esc를 쓰세요)";
+  if (term.status !== "working") return "PO가 일하는 중이 아니라 Esc를 보내지 않았습니다";
+  return "";
+}
+const stopLocked = (at, now) => Number(at) > 0 && Number(now) - Number(at) >= 0 && Number(now) - Number(at) < STOP_LOCK_MS;
+// Is the Esc key of the chat box a stop? Only with no menu open, an empty box (text is never touched), the room's PO working now and no press just before.
+const stopKey = (key, o) => String(key ?? "").toLowerCase() === "escape" && !o.menu && !String(o.text ?? "").trim() && Boolean(o.working) && !stopLocked(o.at, o.now);
+// The room's PO terminal is working right now (its own hc status), from the live terminals: false for "PO 모름" and for no PO.
+function stopWorking(terms, pick) {
+  const po = pick && pick !== PO_OTHER ? chatTarget(terms, [], pick).po : null;
+  return Boolean(po) && String((terms ?? []).find((t) => t?.address === po)?.status ?? "").trim().toLowerCase() === "working";
+}
 // After `/clear` was sent (`sent` = the turn counter it reported, i.e. from before the command): "wait" while the PO still works or is on a prompt, or the counter
 // has not gone up, "done" once the PO is idle/done and the counter is higher (/clear counts as one turn), "gone" when the terminal is not running any more.
 // `done` counts too: herdr turns a "done" PO "idle" only once someone looks at its pane. That the line sent was really "/clear" is proven by restartClearCheck.
@@ -1326,6 +1524,44 @@ function restartClearCheck(recs, since) {
   return (recs ?? []).some((x) => x && Number(x.ms) >= Number(since)) ? "text" : "clean";
 }
 // chat:end
+// A notice says "터미널(<address>)" for a solo room (there is no PO there); every other notice keeps "PO(<address>)". The same for the few fixed phrases
+// the shared blocks use ("PO 터미널", "이 PO를", "PO가").
+const soloWords = (text) => {
+  let solo = false; try { solo = soloMode(terminals()); } catch {}
+  return solo ? String(text).replace(/PO\(([^)]*)\)/g, "터미널($1)").replace(/PO 터미널/g, "터미널").replace(/이 PO를/g, "이 터미널을").replace(/PO가/g, "터미널이").replace(/PO 입력칸/g, "터미널 입력칸").replace(/이 PO의/g, "이 터미널의").replace(/PO 화면/g, "터미널 화면") : text;
+};
+// What claude-account.cjs needs of a terminal (`hc get <t> --json`): the single CLAUDE_CONFIG_DIR= token of its argv env part (nothing else of
+// the argv) and the pid of its claude. null when unreadable.
+function acctInfo(r) {
+  if (!r || Number(r.code) !== 0) return null;
+  let j = null;
+  try { j = JSON.parse(String(r.stdout ?? "")); } catch { return null; }
+  if (!j || typeof j !== "object" || j.state !== "live") return null;
+  const argv = [];
+  for (const t of Array.isArray(j.argv) ? j.argv : []) {
+    if (typeof t !== "string") continue;
+    if (t === "claude" || t.startsWith("-")) break; // the env part ends at the program
+    if (t.startsWith("CLAUDE_CONFIG_DIR=")) { argv.push(t.slice(0, 600)); break; }
+  }
+  const f = j.foreground, pid = Number(f?.pid);
+  return { argv, pid: Number.isInteger(pid) && pid > 1 ? pid : null };
+}
+const ACCT_TTL_MS = 5 * 60 * 1000, ACCT_RETRY_MS = 60 * 1000;
+
+// #80: the text-size factor (see fontScale). `fz(n)` is a size written for 13 px made right for the setting now. The setting has no change event,
+// so it is read again at each draw (at most once a second) and by a 2-second timer that redraws only when the factor moved. #126: the settings
+// window's fixed size (shared FONT_KEY) is read in the same place, so a change there reaches the open UI mode with no restart.
+const FONT_POLL_MS = 2000;
+let FS = 1, fsAt = 0;
+const fz = (n) => Math.round(n * FS * 10) / 10;
+const syncFont = (force = false) => {
+  const now = Date.now();
+  if (!force && now - fsAt < 1000) return false;
+  fsAt = now;
+  const before = FS;
+  try { FS = fontScale(settings(), shared(FONT_KEY)); } catch { FS = 1; }
+  return FS !== before;
+};
 
 // The pending-question card: the screen lines scroll inside it (all options stay reachable), the buttons stay under them.
 const PROMPT_LINES_H = 240, PROMPT_MAX_H = 340;
@@ -1334,6 +1570,12 @@ const NOTICE_TOP = 44; // just under the 38px header
 const NOTICE_MAX_W = 560;
 const MSG_MS = 5000; // how long a floating notice stays before it hides itself (a click hides it sooner)
 const MSG_TICK_MS = 500; // how often the notice is checked for expiry
+// #138: the chat draft file (see chatDraftWrite in inbox.cjs). A change is written after DRAFT_SAVE_MS of quiet (at most DRAFT_WAIT_MS of typing later);
+// while the box has the keyboard the file is rewritten every DRAFT_BEAT_MS so its "focus" stays fresh; a copy of the desk that starts within DRAFT_FOCUS_MS
+// (inbox.cjs) of the last write gives the keyboard back to the box, once, in the DRAFT_FOCUS_WAIT_MS after its first draw.
+const DRAFT_TICK_MS = 250, DRAFT_SAVE_MS = 600, DRAFT_WAIT_MS = 3000, DRAFT_BEAT_MS = 10000, DRAFT_FOCUS_WAIT_MS = 5000, DRAFT_NOW = 1;
+const DRAFT_TEXT_MAX = 6000, DRAFT_TOTAL_MAX = 20000, DRAFT_PARTS_MAX = 64; // the helper's caps (inbox.cjs): per room and in all, the first rooms listed win
+const DRAFT_ARG_MAX = 3000; // #147: a snapshot longer than this goes to the helper in pieces of this size (Windows: ~32K per command line, each quote can cost 4 characters)
 const PIN_TICK_MS = 250; // how often the timeline checks that it still sits at the newest
 const LOAD_REDRAW_MS = 25000; // an unchanged load still redraws this often (the "5분 전" clocks)
 
@@ -1487,6 +1729,8 @@ export default class Inbox extends View {
     this.busyAt = 0;
     this.gen = 0;
     this.compact = false;
+    this.roomW = roomWidth((() => { try { return shared(ROOM_W_KEY); } catch { return null; } })(), null); // #68: the dragged room list width (saved when the drag ends)
+    this.rdrag = null; // {x, w}: a drag of the room list's edge is going on
     this.narrow = !this.windowed; // narrower than WIDE_MIN (until the first size report: the dock and a pane start narrow, the window wide)
     this.writing = null; // leader whose answer box is open
     this.inputs = new Map(); // leader -> TextareaState (the answer box of a card)
@@ -1517,6 +1761,8 @@ export default class Inbox extends View {
     this.promptChain = 0; // the newest scheduled re-read of the screen; an older one does nothing
     this.who = new Map(); // room -> the leader the room is narrowed to (#58, "특정 리더만"); like `filt`, not saved
     this.rs = new Map(); // room -> the state of its "PO 새로 시작" (see restartOpen)
+    this.ss = new Map(); // #90: solo room (terminal address) -> the state of its "새로 시작" {phase: confirm | run | done | fail, gen, why} (see soloRow)
+    this.soloAsk = false; // #90: the "혼자 모드 켜기" confirm line is open
     this.rcChecked = new Set(); // PO terminal addresses whose screen was read for the on-state (see remoteRestore)
     this.rc = new Map(); // room -> the state of its "원격 연결 켜기" {phase: send | on | already | unknown | fail, at, url, why, note {text, ms, bad}} (see remoteOn)
     this.rgen = 0; // numbers a restart run: a timer of an older run does nothing
@@ -1525,6 +1771,7 @@ export default class Inbox extends View {
     this.nlAt = 0; // the last Shift+Enter handled (ms)
     this.core = ""; // the box text without trailing line breaks, as of the last change
     this.lastValue = ""; // #83: the box text as of the last change (a line break the widget put at the cursor is found against it)
+    this.stopAt = 0; // #133: when the last Esc stop went out (ms), for the lock
     this.enterAt = 0; // #83: the last plain Enter (key or submit event) in the chat box (ms)
     this.brk = null; // #83: {idx, at, core, editAt}: the line break the widget last put in the text, and the edit state before it
     this.editAt = 0; // the last time that text changed (ms); the IME hold reads this, not changedAt
@@ -1544,6 +1791,20 @@ export default class Inbox extends View {
     this.lastIdx = 0; // index of the last child of the list
     this.sigData = ""; // what the last load drew (without its clock)
     this.errSig = "";
+    this.chatFocus = false; // #138: the chat box has the keyboard (focus / blur events of the box)
+    this.draftDue = 0; // #138: when the draft file is to be written (0: nothing to write; DRAFT_NOW: at the next tick)
+    this.draftSince = 0; // the first change not written yet (ms)
+    this.draftSig = ""; // what the file holds now (from this copy)
+    this.draftWroteAt = 0;
+    this.draftBusy = false;
+    this.draftOwn = false; // this copy wrote (or restored) a draft: only then does an empty box remove the file (a copy that never had a draft must not wipe another's)
+    this.draftLoaded = false; // the file was read ...
+    this.draftReady = false; // ... and applied (after the room is known): nothing is written before, or the empty new box would replace the saved draft
+    this.draftSaved = null;
+    this.focusWant = 0; // #138: until when the box is to take the keyboard once (the saved focus was fresh); 0: not wanted
+    try { this.chat.on("focus", () => { this.chatFocus = true; this.draftDirty(); }); } catch {}
+    try { this.chat.on("blur", () => { this.chatFocus = false; this.draftDirty(); }); } catch {}
+    this.chat.on("change", () => this.draftDirty()); // #138: its own listener (the one below returns early in several places)
     this.chat.on("paste_other", (_e, c) => this.pastePic(c)); // Cmd+V found no text: take a picture from the clipboard
     this.chat.on("change", (_e, c) => {
       this.changedAt = Date.now();
@@ -1584,12 +1845,17 @@ export default class Inbox extends View {
     this.sig = null; // statusSig of the terminals at the last status poll
     this.typingAt = new Map(); // leader hc name -> {at, rep, stop, on}: who worked lately (the grace of the "···" bubble), see typingSync
     this.load(cx);
+    this.loadDraft();
+    cx.timer.every(DRAFT_TICK_MS, () => this.draftTick());
     // The Dock owns the slow refresh and (with any pane) the badge; the window and a pane are read on screen, so they refresh faster,
     // a pane only while it is being drawn (a pane in a tab nobody looks at does not poll).
     cx.timer.every(this.refreshMs(), (cx) => { if (!this.paned || this.drawing()) this.load(cx); });
     // The folder watch makes a new report or PO line appear at once; the timer above stays as the fallback (a watch that cannot start or
     // dies). The status poll makes the "···" bubbles, the blocked dots and the names follow the terminals within seconds.
     cx.timer.every(STATUS_POLL_MS, (cx) => this.pollStatus(cx));
+    // #80: Herdr has no event for a changed text size, so the setting is read here and the view is redrawn only when the factor moved.
+    syncFont(true);
+    cx.timer.every(FONT_POLL_MS, (cx) => { if (syncFont(true)) this.softNotify(cx); });
     // The timeline keeps its place at the newest: the handle's numbers are those of the last layout, so content that grew after a draw (a
     // row, the dots, a picture that finished loading) is seen here and the view goes back to the bottom. A held-back redraw is let go
     // once the selection / press is over.
@@ -1601,6 +1867,35 @@ export default class Inbox extends View {
     this.loadUsage(cx);
     cx.timer.every(USAGE_REFRESH_MS, (cx) => this.loadUsage(cx));
     this.diag(`init: ${this.windowed ? "window" : this.mained ? "main" : this.paned ? "pane" : "dock"}`);
+  }
+
+  // "이 세션 계정" (#121): which Claude account each live leader runs on, read from its terminal (`hc get`: the env part of argv, else the process env) and
+  // resolved by claude-account.cjs. Cached by terminal; an unknown answer is asked again sooner. Nothing secret is read: only the one variable.
+  loadAccounts(cx) {
+    let list = [];
+    try { list = terminals() ?? []; } catch {}
+    this.accts ??= new Map();
+    const now = Date.now();
+    for (const t of list) {
+      if (!isAgentName(t?.name) || !t.address) continue;
+      const e = this.accts.get(t.name);
+      if (e && e.busy && now - e.at < 30000) continue;
+      if (e && e.addr === t.address && !e.busy && now - e.at < (e.label === null ? ACCT_RETRY_MS : ACCT_TTL_MS)) continue;
+      this.accts.set(t.name, { addr: t.address, label: e?.addr === t.address ? e.label : null, at: now, busy: true });
+      cx.spawn(async (cx) => {
+        let label = null;
+        try {
+          const info = acctInfo(await hc(["get", t.address, "--json"]));
+          if (info) {
+            const r = await exec("node", [ACCT(), "label", "--info", JSON.stringify(info)], { timeout: 8000 });
+            if (r.code === 0) { const l = JSON.parse(r.stdout).label; label = typeof l === "string" && l ? l : null; }
+          }
+        } catch {}
+        const prev = this.accts.get(t.name);
+        this.accts.set(t.name, { addr: t.address, label, at: Date.now(), busy: false });
+        if (label !== (prev?.label ?? null)) this.softNotify(cx);
+      });
+    }
   }
 
   // Reads the usage file (a file read only) and redraws only when what the line shows (the rows or the tooltip text) changed: a redraw drops a drag-select.
@@ -1625,9 +1920,9 @@ export default class Inbox extends View {
     const c = pick && pick !== PO_OTHER ? this.data?.cost?.[pick] : null;
     const cost = costLabel(c);
     const withCost = (el) => (cost ? el.child(div().flex_none().child("·")).child(div().id("inbox-cost").flex_none().tooltip(costTip(c)).child(`이 세션 ${cost}`)) : el);
-    if (rows === undefined) return cost ? withCost(h_flex().id("inbox-usage").flex_none().h(22).px(this.compact ? 10 : 14).gap(6).items_center().overflow_hidden().text_size(11).text_color(t.dim)) : null;
+    if (rows === undefined) return cost ? withCost(h_flex().id("inbox-usage").flex_none().h(fz(22)).px(this.compact ? 10 : 14).gap(6).items_center().overflow_hidden().text_size(fz(11)).text_color(t.dim)) : null;
     const track = this.narrow ? 28 : USAGE_TRACK_W;
-    const line = h_flex().id("inbox-usage").flex_none().h(22).px(this.compact ? 10 : 14).gap(6).items_center().overflow_hidden().text_size(11).text_color(t.dim)
+    const line = h_flex().id("inbox-usage").flex_none().h(fz(22)).px(this.compact ? 10 : 14).gap(6).items_center().overflow_hidden().text_size(fz(11)).text_color(t.dim)
       .tooltip(usageTip(rows, Date.now())).child(div().flex_none().child("Claude"));
     if (!rows) return withCost(line.child(div().flex_none().text_color(t.muted).child("Unknown")));
     return withCost(rows.reduce((el, u, i) => {
@@ -1707,6 +2002,7 @@ export default class Inbox extends View {
   // desk is a press, so redraws and the bottom pin wait until it is released. The press gate used to live on the list's own mouse-down,
   // which a TextView that handles the press itself never lets through - the pin and redraws then ran under a drag and dropped the selection.
   pointer(e, cx) {
+    if (this.rdrag) { this.roomDrag(e, cx); return; }
     if (e?.pressed_button === "left") { if (!this.ui.press) this.diag("press (left held, window move)", cx); this.ui.press = true; this.ui.pressAt = Date.now(); return; }
     if (this.ui.press) { this.diag("release (move without button)", cx); this.ui.press = false; if (this.dirty) this.softNotify(cx); }
   }
@@ -1785,6 +2081,7 @@ export default class Inbox extends View {
   }
   wipe(key, st) {
     this.mirror.delete(key);
+    if (key === "chat") this.draftDue = 1; // #138 (1 = DRAFT_NOW, a plain number: this method is run on its own in tests): a cleared box (sent, stale) leaves no draft behind, at once: a re-init right after must not bring the sent text back
     try { st.set_value(""); } catch {}
   }
   guard(key, st, value) {
@@ -1798,6 +2095,107 @@ export default class Inbox extends View {
     } catch { try { st.set_value(m.text); } catch {} }
     this.diag(`draft restored in ${key === "chat" ? "chat" : "answer box"} (${m.text.length} chars)`);
     return true;
+  }
+  // #138: the unsent chat text survives a re-init of the mod. The file is the room drafts written down (the box of the room shown + roomDrafts, text and cursor only),
+  // not a second store; it is read once at start (loadDraft), applied at the first look at the room (applyDraft, from syncRoom) and kept up to date by draftTick.
+  draftDirty() {
+    const now = Date.now();
+    if (!this.draftSince) this.draftSince = now;
+    this.draftDue = this.draftDue === DRAFT_NOW ? DRAFT_NOW : Math.min(now + DRAFT_SAVE_MS, this.draftSince + DRAFT_WAIT_MS);
+  }
+  draftTick() {
+    const now = Date.now();
+    this.applyDraft(); // once, as soon as the file is read and the room is known (the first draw sets it)
+    if (this.focusWant) {
+      if (now > this.focusWant) this.focusWant = 0; // the first draw did not come in time: the keyboard is not taken later
+      else if (this.drawnAt && now - this.drawnAt < 2000) { // the box is on screen: once
+        this.focusWant = 0;
+        if (!this.chatFocus) { try { this.chat.focus(); this.diag("draft: the chat box had the keyboard before the restart, given back"); } catch {} }
+      }
+    }
+    if (this.chatFocus && !this.draftDue && now - this.draftWroteAt >= DRAFT_BEAT_MS) this.draftDue = DRAFT_NOW; // keeps "focus" fresh in the file
+    if (!this.draftDue || now < this.draftDue || this.draftBusy) return;
+    this.saveDraft(now);
+  }
+  saveDraft(now = Date.now()) {
+    this.draftDue = 0;
+    this.draftSince = 0;
+    if (!this.draftReady || this.draftRoom == null) return;
+    let text = "", range = null;
+    try { text = this.chat.value(); } catch {}
+    try { range = this.chat.selected_range(); } catch {}
+    const rooms = {};
+    let total = 0;
+    for (const [room, d] of [[this.draftRoom, { text, range }], ...[...this.roomDrafts].reverse()]) { // the room shown first, then the newest others
+      if (typeof d?.text !== "string" || d.text === "" || room in rooms) continue;
+      const t = cutHead(d.text, DRAFT_TEXT_MAX); // #147: the helper's own caps, so a pasted wall of text is not sent just to be cut there
+      if (total + t.length > DRAFT_TOTAL_MAX) continue;
+      total += t.length;
+      rooms[room] = { text: t, range: d.range ?? null };
+    }
+    const snap = { rooms, focus: this.chatFocus };
+    const empty = !snap.focus && !Object.keys(rooms).length;
+    if (empty && !this.draftOwn) return; // nothing of ours to remove
+    const sig = JSON.stringify(snap);
+    if (sig === this.draftSig && !(snap.focus && now - this.draftWroteAt >= DRAFT_BEAT_MS)) return;
+    this.draftSig = sig;
+    this.draftWroteAt = now;
+    this.draftOwn = !empty;
+    this.draftBusy = true;
+    const done = (ok) => { this.draftBusy = false; if (!ok) this.draftSig = ""; }; // a failed write is tried again with the next change
+    try { this.writeDraft(sig).then(done, () => done(false)); } catch { done(false); }
+  }
+  // #147: one `draft-write` for a short snapshot, else `draft-part` calls one after the other (a piece never cuts a surrogate pair). -> true when the helper did not fail.
+  // `draft-write` answers "none" when there was nothing to clear (fine); a missing or unreadable answer, "failed" and, for a piece, "none" are failures.
+  async writeDraft(sig) {
+    const ok = (r, piece) => { if (r?.code !== 0) return false; try { const v = JSON.parse(r.stdout).r; return v !== "failed" && !(piece && v === "none"); } catch { return false; } };
+    if (sig.length <= DRAFT_ARG_MAX) return ok(await exec("node", [HELPER(), "draft-write", sig], { timeout: 5000 }));
+    const parts = [];
+    for (let i = 0; i < sig.length;) { let j = Math.min(sig.length, i + DRAFT_ARG_MAX); if (j < sig.length && /[\uD800-\uDBFF]/.test(sig[j - 1])) j--; parts.push(sig.slice(i, j)); i = j; }
+    if (parts.length > DRAFT_PARTS_MAX) return false;
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    for (let i = 0; i < parts.length; i++) if (!ok(await exec("node", [HELPER(), "draft-part", id, `${i}/${parts.length}`, parts[i]], { timeout: 5000 }), true)) return false;
+    return true;
+  }
+  loadDraft() {
+    const done = (j) => { this.draftSaved = j; this.draftLoaded = true; this.applyDraft(); };
+    try {
+      Promise.resolve(exec("node", [HELPER(), "draft-read"], { timeout: 4000 })).then((r) => {
+        let j = null;
+        try { if (r.code === 0) j = JSON.parse(r.stdout); } catch {}
+        done(j);
+      }, () => done(null));
+    } catch { done(null); }
+  }
+  // Runs (from draftTick) once the file is read and the room is known. A box the person has already typed in keeps its text.
+  applyDraft() {
+    if (!this.draftLoaded || this.draftReady || this.draftRoom == null) return;
+    this.draftReady = true;
+    const s = this.draftSaved;
+    this.draftSaved = null;
+    const rooms = s && typeof s.rooms === "object" && s.rooms ? s.rooms : {};
+    for (const [room, d] of Object.entries(rooms)) { // the other rooms' drafts go where syncRoom looks for them
+      if (room === this.draftRoom || this.roomDrafts.has(room) || typeof d?.text !== "string" || d.text === "") continue;
+      this.roomDrafts.set(room, { text: d.text, content: null, range: d.range ?? null, pics: [] });
+    }
+    const d = rooms[this.draftRoom];
+    let cur = "";
+    try { cur = this.chat.value(); } catch {}
+    if (d && typeof d.text === "string" && d.text !== "" && cur === "") {
+      this.mirror.delete("chat"); // the restore is the mod's own write, not a loss
+      try {
+        this.chat.set_value(d.text);
+        const n = [...d.text].length;
+        if (d.range && d.range.start <= d.text.length && d.range.end <= d.text.length) this.chat.set_selected_range(d.range);
+        else if (n) this.chat.set_selected_range({ start: d.text.length, end: d.text.length });
+      } catch {}
+      try { this.lastValue = this.chat.value(); this.core = editCore(this.lastValue); } catch {}
+      this.keep("chat", this.chat);
+      this.diag(`draft: restored ${d.text.length} chars after a restart`);
+    }
+    this.draftOwn = Object.keys(rooms).length > 0 || Boolean(s?.focus);
+    if (s?.focus) this.focusWant = Date.now() + DRAFT_FOCUS_WAIT_MS;
+    this.draftDirty();
   }
   // Every box is looked at once per draw and once per poll tick, so a loss that raised no change event is mended within a tick.
   guardAll() {
@@ -1825,6 +2223,7 @@ export default class Inbox extends View {
   }
 
   pointerUp(cx, e) {
+    if (this.rdrag) { this.roomDragEnd(cx); return; }
     // A release seen after a settled selection is the clue to what cleared it: a press-and-release a moment after the settle is a second click
     // (the native view clears a selection on any press), not a redraw. Counts and ms only.
     const m = this.selMark, ago = this.ui.selAt ? Date.now() - this.ui.selAt : -1;
@@ -1920,12 +2319,12 @@ export default class Inbox extends View {
     if (!pics.length && !busy) return null;
     const pre = key == null ? "pic" : `rpic-${key}`;
     return h_flex().gap(6).items_center().flex_wrap()
-      .children(pics.map((x, i) => h_flex().id(`${pre}-${i}`).flex_none().h(44).pl(4).pr(6).gap(6).items_center().rounded(8).bg(t.raised).border(1).border_color(t.border)
+      .children(pics.map((x, i) => h_flex().id(`${pre}-${i}`).flex_none().h(fz(44)).pl(4).pr(6).gap(6).items_center().rounded(8).bg(t.raised).border(1).border_color(t.border)
         .child(this.thumb(t, x))
-        .child(div().max_w(110).truncate().text_size(10.5).text_color(t.muted).child(String(x.path).split(/[\\/]/).pop()))
-        .child(div().id(`${pre}-x-${i}`).px(4).rounded(5).text_size(12).text_color(t.dim).cursor_pointer().on_mouse_down("left", stop)
+        .child(div().max_w(110).truncate().text_size(fz(10.5)).text_color(t.muted).child(String(x.path).split(/[\\/]/).pop()))
+        .child(div().id(`${pre}-x-${i}`).px(4).rounded(5).text_size(fz(12)).text_color(t.dim).cursor_pointer().on_mouse_down("left", stop)
           .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, c) => this.removePic(i, c, key)).tooltip("이 그림 빼기").child("✕"))))
-      .when(busy > 0, (x) => x.child(div().text_size(10.5).text_color(t.dim).child("그림을 읽는 중…")));
+      .when(busy > 0, (x) => x.child(div().text_size(fz(10.5)).text_color(t.dim).child("그림을 읽는 중…")));
   }
 
   // The watch runs only while this copy is drawn; a copy nobody looks at releases it (a closed copy is released by the runtime).
@@ -2117,6 +2516,7 @@ export default class Inbox extends View {
         this.data = d;
         this.error = err;
         rememberLeaders();
+        this.loadAccounts(cx);
         this.markSeen();
         this.remoteRestore(cx);
         if (this.drawing()) this.startWatch(cx);
@@ -2177,36 +2577,40 @@ export default class Inbox extends View {
   // `raw` = all of it, before the cut to MAX_ENTRIES.
   view() {
     const terms = this.liveTerms();
-    const pos = poList(terms);
+    const solo = soloMode(terms); // #90: no PO and no leader anywhere: the rooms are the plain Claude terminals (no leader parts at all)
+    const soloData = solo ? this.data?.solo ?? {} : {};
+    const pos = solo ? soloRooms(terms, soloData) : poList(terms);
     const all = this.asks();
     this.pruneReply(all);
-    const reps = this.reports(all);
-    const hasOther = all.some((a) => a.owner === PO_OTHER) || reps.some((r) => r.owner === PO_OTHER);
+    const asks = solo ? [] : all; // (a solo room has no leader asks or reports)
+    const reps = solo ? [] : this.reports(all);
+    const hasOther = asks.some((a) => a.owner === PO_OTHER) || reps.some((r) => r.owner === PO_OTHER);
     let last = "";
     try { last = shared(PICK_KEY) ?? ""; } catch {}
+    if (solo) { try { last = shared(SOLO_PICK_KEY) ?? ""; } catch {} }
     const now = Date.now();
     const settled = settlePick(pos, last, hasOther, this.pickLive.id === last ? this.pickLive.at : 0, now);
     const pick = settled.pick;
     if (!settled.ghost) {
       if (last && (pos.some((p) => p.id === last) || (last === PO_OTHER && hasOther))) this.pickLive = { id: last, at: now, label: last === PO_OTHER ? OTHER_LABEL : pos.find((p) => p.id === last)?.label ?? last };
-      if (pick && pick !== last) { try { setShared(PICK_KEY, pick); } catch {} } // the room shown is the room kept: an automatic pick no longer floats with the leader counts
+      if (pick && pick !== last) { try { setShared(solo ? SOLO_PICK_KEY : PICK_KEY, pick); } catch {} } // the room shown is the room kept: an automatic pick no longer floats with the leader counts
     }
     let mine = [], seen = {};
     try { mine = shared(CHAT_KEY) ?? []; } catch {}
     try { seen = shared(SEEN_KEY) ?? {}; } catch {}
-    const leaders = (this.data?.leaders ?? []).map((s) => ({ s, owner: leaderOwner(terms, s.leader, s.terminal, s.po) }));
-    const waits = (id) => all.filter((a) => a.owner === id).map((a) => ({ leader: a.s.leader, ts: a.item?.ts ?? "", kind: a.kind }));
-    const room = (id) => timeline(id, leaders, id === PO_OTHER ? [] : this.data?.po?.[id] ?? [], mine, waits(id), now);
-    const busy = roomWorking(terms); // #69: the rooms with work going on (a dot beside the name)
+    const leaders = solo ? [] : (this.data?.leaders ?? []).map((s) => ({ s, owner: leaderOwner(terms, s.leader, s.terminal, s.po) }));
+    const waits = (id) => asks.filter((a) => a.owner === id).map((a) => ({ leader: a.s.leader, ts: a.item?.ts ?? "", kind: a.kind }));
+    const room = (id) => timeline(id, leaders, id === PO_OTHER ? [] : (solo ? soloData[id] : this.data?.po?.[id]) ?? [], mine, waits(id), now);
+    const busy = solo ? new Set(pos.filter((p) => isWorking(terms.find((x) => x.address === p.address))).map((p) => p.id)) : roomWorking(terms); // #69: the rooms with work going on (a dot beside the name)
     const remote = remoteRooms(this.rc); // #119: the rooms whose PO has remote on (the subtitle under the name)
-    const rooms = pos.map((p) => ({ id: p.id, label: p.label, title: p.title, blocked: this.isBlocked(p.address), working: busy.has(p.id), remote: remote.has(p.id) }));
+    const rooms = pos.map((p) => ({ id: p.id, label: p.label, title: p.title, blocked: this.isBlocked(p.address), working: busy.has(p.id), remote: remote.has(p.id), solo }));
     if (hasOther) rooms.push({ id: PO_OTHER, label: OTHER_LABEL, title: "", blocked: false, working: busy.has(PO_OTHER) });
     if (settled.ghost && !rooms.some((r) => r.id === pick)) rooms.push({ id: pick, label: this.pickLive.label, title: "", blocked: false, ghost: true }); // held for a moment: the room list does not lose it
     let raw = [];
     const tabs = rooms.map((r) => {
       const entries = room(r.id);
       if (r.id === pick) raw = entries;
-      return { ...r, n: all.filter((a) => a.owner === r.id).length, unread: r.id === pick ? 0 : unreadCount(entries, seen[r.id]) };
+      return { ...r, n: asks.filter((a) => a.owner === r.id).length, unread: r.id === pick ? 0 : unreadCount(entries, seen[r.id]) };
     });
     const filter = pick ? this.filt.get(pick) ?? "all" : "all";
     const choices = aliveLeaders(roomLeaders(raw, (n) => shortName(n)), terms, this.data?.leaders); // #58: the live leaders of the picked room (follows the room; a closed session is dropped, its history stays under 전체)
@@ -2218,7 +2622,7 @@ export default class Inbox extends View {
     const shown = filterEntries(scope, filter, base);
     const keep = keepWaiting(scope, shown); // a leader still waiting on the person stays visible under any chip
     const entries = groupTimeline(keep.filter((e, i) => i >= keep.length - MAX_ENTRIES || e.waiting));
-    return { terms, tabs, pick, raw, shown, filter, who, choices, counts: filterCounts(scope, base), entries, asks: all.filter((a) => a.owner === pick), reports: reps.filter((r) => r.owner === pick) };
+    return { terms, solo, tabs, pick, raw, shown, filter, who, choices, counts: filterCounts(scope, base), entries, asks: asks.filter((a) => a.owner === pick), reports: reps.filter((r) => r.owner === pick) };
   }
 
   // Remembers that the person has the picked room's newest message on screen. Both the window and the dock show a room, so both
@@ -2241,11 +2645,11 @@ export default class Inbox extends View {
   }
   // The chips above a room's timeline: 전체 | 안 읽은 것 | 결정 필요 | 최종 확인 요청 | 결과 | 멈춤, each with its count (0 = dim, still pressable).
   filterBar(t, v) {
-    if (!v.pick || !v.raw.length) return null;
+    if (v.solo || !v.pick || !v.raw.length) return null; // #90: no kind chips in a solo room
     return h_flex().flex_none().min_w(0).px(10).py(5).gap(5).items_center().flex_wrap().border_b(1).border_color(t.border)
       .children(CHAT_FILTERS.map(([k, label]) => {
         const on = v.filter === k, n = v.counts?.[k] ?? 0;
-        return div().id(`flt-${k}`).flex_none().h(22).px(8).rounded(11).flex().items_center().cursor_pointer().text_size(11).on_mouse_down("left", stop)
+        return div().id(`flt-${k}`).flex_none().h(fz(22)).px(8).rounded(11).flex().items_center().cursor_pointer().text_size(fz(11)).on_mouse_down("left", stop)
           .bg(on ? t.selected : t.raised).border(1).border_color(on ? t.foreground + "40" : t.border).text_color(on ? t.foreground : n ? t.muted : t.dim)
           .when(!on && !n, (el) => el.opacity(0.6)).hover((x) => x.bg(t.hover).text_color(t.foreground))
           .on_click((_e, c) => this.setFilter(v.pick, k, c)).tooltip(k === "unread" ? "이 방을 열 때 아직 읽지 않았던 글만" : k === "all" ? "모든 글" : `${label}만 보기`).child(`${label} ${n}`);
@@ -2255,7 +2659,7 @@ export default class Inbox extends View {
   pickPo(id, c) {
     this.heldAt = 0;
     this.syncRoom(id);
-    try { setShared(PICK_KEY, id); } catch {}
+    try { if (soloMode(this.liveTerms())) setShared(SOLO_PICK_KEY, id); else setShared(PICK_KEY, id); } catch {}
     this.menu = null;
     this.markSeen();
     c.notify();
@@ -2272,11 +2676,11 @@ export default class Inbox extends View {
   // waits on the person is marked.
   leaderBar(t, v) {
     if (!v.pick || (v.choices?.length ?? 0) < 1) return null;
-    const chip = (id, label, on, mark, tip) => div().id(`who-${id || "all"}`).flex_none().h(22).px(8).rounded(11).flex().items_center().cursor_pointer().text_size(11).on_mouse_down("left", stop)
+    const chip = (id, label, on, mark, tip) => div().id(`who-${id || "all"}`).flex_none().h(fz(22)).px(8).rounded(11).flex().items_center().cursor_pointer().text_size(fz(11)).on_mouse_down("left", stop)
       .bg(on ? t.selected : t.raised).border(1).border_color(on ? t.foreground + "40" : t.border).text_color(on ? t.foreground : t.muted)
       .hover((x) => x.bg(t.hover).text_color(t.foreground)).on_click((_e, c) => this.setWho(v.pick, id, c)).tooltip(tip).child(mark ? `${label} ●` : label);
     return h_flex().flex_none().min_w(0).px(10).py(5).gap(5).items_center().flex_wrap().border_b(1).border_color(t.border)
-      .child(div().flex_none().text_size(10.5).text_color(t.dim).child("리더"))
+      .child(div().flex_none().text_size(fz(10.5)).text_color(t.dim).child("리더"))
       .child(chip("", "전체", !v.who, false, "이 방의 모든 리더"))
       .children(v.choices.map((x) => chip(x.id, x.label, v.who === x.id, x.waiting, `${x.label}와 주고받은 글만(● = 나의 답을 기다림)`)));
   }
@@ -2597,7 +3001,7 @@ export default class Inbox extends View {
     }).catch(() => say(`PO(${po})에 ${key}를 누르지 못했습니다.`));
   }
   promptPanel(t, v, cx) {
-    const po = v.pick && v.pick !== PO_OTHER ? chatTarget(v.terms, [], v.pick).po : "";
+    const po = v.pick && v.pick !== PO_OTHER ? chatTarget(v.terms, [], v.pick).po : ""; // #90: a solo room works too (the room is its terminal); the same re-read check before every key
     if (!po || !this.isBlocked(po)) { this.prompt = null; return null; }
     try { this.readPrompt(po, cx); } catch { this.promptBusy = false; this.prompt = { po, at: Date.now(), text: "", failed: true }; }
     const shown = this.prompt?.po === po ? this.prompt : null;
@@ -2610,17 +3014,17 @@ export default class Inbox extends View {
       : !lines.length ? "화면을 읽지 못했습니다. '다시 읽기'를 누르거나 '터미널 열기'로 직접 답하세요."
       : !opts.length ? "선택지를 찾지 못했습니다. 아래 화면 그대로를 보고 '터미널 열기'로 직접 답하세요." : "";
     return v_flex().id("po-prompt").flex_none().min_w(0).max_h(PROMPT_MAX_H).mx(10).mb(6).p(10).gap(8).rounded(8).bg(t.blocked + "14").border(1).border_color(t.blocked + "55").on_mouse_down("left", stop)
-      .child(div().min_w(0).truncate().text_size(11).font_semibold().text_color(t.blocked).child("PO가 질문 중입니다 — 화면 끝"))
-      .when(Boolean(note), (el) => el.child(div().min_w(0).text_size(11).text_color(t.dim).child(note)))
+      .child(div().min_w(0).truncate().text_size(fz(11)).font_semibold().text_color(t.blocked).child(soloWords("PO가 질문 중입니다 — 화면 끝")))
+      .when(Boolean(note), (el) => el.child(div().min_w(0).text_size(fz(11)).text_color(t.dim).child(note)))
       .child(v_flex().id("po-prompt-lines").min_w(0).min_h(0).max_h(PROMPT_LINES_H).overflow_y_scrollbar().gap(2)
-        .children(lines.map((l, i) => div().min_w(0).text_size(11).text_color(t.muted).child(this.text(`pp-l${i}`, chatHtml(l))))))
+        .children(lines.map((l, i) => div().min_w(0).text_size(fz(11)).text_color(t.muted).child(this.text(`pp-l${i}`, chatHtml(l))))))
       .child(h_flex().min_w(0).gap(6).items_center().flex_wrap()
         .children(opts.map((o) => this.button(t, `pp-${o.key}`, `${o.key}. ${o.label.length > 32 ? `${cutHead(o.label, 31)}…` : o.label}`, (c) => this.pressPrompt(po, o.key, c), { primary: o.on, tip: o.label })))
         .when(Boolean(parsed.tabs), (el) => el.child(key("left", "← 이전 질문", `질문 탭을 앞으로(${parsed.tabs})`)).child(key("right", "다음 질문 →", `질문 탭을 뒤로(${parsed.tabs})`)))
-        .child(key("enter", "Enter", "화면에서 강조된 선택지를 확정합니다(PO가 질문 중일 때만)"))
-        .child(key("esc", "Esc", "질문을 취소합니다(PO가 질문 중일 때만)"))
-        .child(this.button(t, "pp-term", "터미널 열기", (c) => { try { run("terminal.peek", { terminal: po }); } catch (e) { this.say(`터미널을 열지 못했습니다: ${cutHead(String(e?.message ?? e), 120)}`, true); } c.notify(); }, { tip: "이 PO의 터미널 화면을 엽니다(키는 누르지 않습니다)" }))
-        .child(this.button(t, "pp-reread", "다시 읽기", (c) => { this.prompt = null; this.promptBusy = false; c.notify(); }, { tip: "PO 화면을 다시 읽습니다" })));
+        .child(key("enter", "Enter", soloWords("화면에서 강조된 선택지를 확정합니다(PO가 질문 중일 때만)")))
+        .child(key("esc", "Esc", soloWords("질문을 취소합니다(PO가 질문 중일 때만)")))
+        .child(this.button(t, "pp-term", "터미널 열기", (c) => { try { run("terminal.peek", { terminal: po }); } catch (e) { this.say(`터미널을 열지 못했습니다: ${cutHead(String(e?.message ?? e), 120)}`, true); } c.notify(); }, { tip: soloWords("이 PO의 화면을 엽니다(키는 누르지 않습니다)") }))
+        .child(this.button(t, "pp-reread", "다시 읽기", (c) => { this.prompt = null; this.promptBusy = false; c.notify(); }, { tip: soloWords("PO 화면을 다시 읽습니다") })));
   }
 
   // ---- "PO 새로 시작" (per room): ask the PO for a handoff note, wait for it, /clear, /PO. State per room in this.rs[room] =
@@ -2770,6 +3174,7 @@ export default class Inbox extends View {
   }
   // The strip above the chat box: the button (idle), the confirm line, or the four steps of the run.
   restartRow(t, v, cx) {
+    if (v.solo) return v.pick ? this.soloRow(t, v) : null; // #90: a solo room has its own, shorter "새로 시작" (just /clear)
     if (!v.pick || v.pick === PO_OTHER) return null;
     const room = v.pick;
     const po = chatTarget(v.terms, [], room).po ?? "";
@@ -2782,30 +3187,122 @@ export default class Inbox extends View {
     const box = () => v_flex().id("po-restart").flex_none().min_w(0).mx(10).mb(6).px(10).py(8).gap(6).rounded(8).bg(t.raised).border(1).border_color(t.border).on_mouse_down("left", stop);
     if (!r) {
       return h_flex().id("po-restart").flex_none().min_w(0).mx(10).mb(4).gap(8).items_center().justify_end()
-        .when(Boolean(why), (el) => el.child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(why)))
+        .when(Boolean(why), (el) => el.child(div().min_w(0).truncate().text_size(fz(10.5)).text_color(t.dim).child(why)))
         .child(this.button(t, "rs-open", "PO 새로 시작", (c) => this.restartOpen(room, c), { disabled: why, tip: "PO에게 인수인계 노트를 쓰게 한 뒤 /clear 하고 /PO로 다시 시작합니다" }));
     }
     if (r.phase === "confirm") {
       return box()
-        .child(div().min_w(0).text_size(11.5).text_color(t.foreground).child(restartConfirm(waiting("decision"), waiting("verify"))))
+        .child(div().min_w(0).text_size(fz(11.5)).text_color(t.foreground).child(restartConfirm(waiting("decision"), waiting("verify"))))
         .child(h_flex().min_w(0).gap(6).items_center().flex_wrap()
           .child(this.button(t, "rs-go", "새로 시작", (c) => this.restartRun(room, po, room, c), { primary: true, disabled: why, tip: "노트를 요청하고, 노트가 생기면 /clear 와 /PO 를 차례로 보냅니다" }))
           .child(this.button(t, "rs-cancel", "취소", (c) => this.restartClose(room, c)))
-          .when(Boolean(why), (el) => el.child(div().min_w(0).text_size(10.5).text_color(t.blocked).child(why))));
+          .when(Boolean(why), (el) => el.child(div().min_w(0).text_size(fz(10.5)).text_color(t.blocked).child(why))));
     }
     const failed = r.phase === "timeout" || r.phase === "fail";
     const color = (s) => (s === "done" ? t.working : s === "fail" ? t.blocked : s === "active" ? t.foreground : t.dim);
     const mark = (s) => (s === "done" ? "✓" : s === "fail" ? "✕" : s === "active" ? "…" : "·");
     return box()
       .child(h_flex().min_w(0).gap(10).items_center().flex_wrap()
-        .children(restartSteps(r.n, failed).map((s, i) => div().id(`rs-step-${i}`).flex_none().text_size(11).text_color(color(s.state)).child(`${mark(s.state)} ${s.label}`))))
-      .when(r.phase === "timeout", (el) => el.child(div().min_w(0).text_size(11).text_color(t.blocked).child("노트가 제때 만들어지지 않았습니다. 아무것도 비우지 않았습니다.")))
-      .when(r.phase === "fail", (el) => el.child(div().min_w(0).text_size(11).text_color(t.blocked).child(r.why)))
-      .when(r.phase === "done", (el) => el.child(div().min_w(0).text_size(11).text_color(t.working).child("PO를 새로 시작했습니다. 노트는 위에 남겨 두었습니다.")))
-      .when(r.phase === "run" || r.phase === "clear", (el) => el.child(div().min_w(0).text_size(10.5).text_color(t.dim).child(r.n < 2 ? "노트가 생길 때까지 기다리는 중입니다(최대 5분)…" : "PO가 끝나기를 기다린 뒤 대화를 비웁니다…")))
+        .children(restartSteps(r.n, failed).map((s, i) => div().id(`rs-step-${i}`).flex_none().text_size(fz(11)).text_color(color(s.state)).child(`${mark(s.state)} ${s.label}`))))
+      .when(r.phase === "timeout", (el) => el.child(div().min_w(0).text_size(fz(11)).text_color(t.blocked).child("노트가 제때 만들어지지 않았습니다. 아무것도 비우지 않았습니다.")))
+      .when(r.phase === "fail", (el) => el.child(div().min_w(0).text_size(fz(11)).text_color(t.blocked).child(r.why)))
+      .when(r.phase === "done", (el) => el.child(div().min_w(0).text_size(fz(11)).text_color(t.working).child("PO를 새로 시작했습니다. 노트는 위에 남겨 두었습니다.")))
+      .when(r.phase === "run" || r.phase === "clear", (el) => el.child(div().min_w(0).text_size(fz(10.5)).text_color(t.dim).child(r.n < 2 ? "노트가 생길 때까지 기다리는 중입니다(최대 5분)…" : "PO가 끝나기를 기다린 뒤 대화를 비웁니다…")))
       .child(h_flex().min_w(0).gap(6).items_center().flex_wrap()
         .when(r.phase === "timeout", (el) => el.child(this.button(t, "rs-retry", "다시", (c) => this.restartRun(room, po, room, c), { primary: true, disabled: why && !running ? why : "", tip: "노트를 다시 요청합니다" })))
         .child(this.button(t, "rs-close", r.phase === "run" || r.phase === "clear" || r.phase === "timeout" ? "취소" : "닫기", (c) => this.restartClose(room, c), { tip: r.phase === "run" || r.phase === "clear" ? "기다리기를 멈춥니다(이미 보낸 요청은 그대로입니다)" : "" })));
+  }
+  // "혼자 모드 켜기": the same flag file as `install.cjs hook --solo` (written by the helper: the desk cannot write files). It does not install the hook itself.
+  soloEnable(c) {
+    this.soloAsk = false;
+    try { c.notify(); } catch {}
+    c.spawn(async (cx) => {
+      let r = { on: false, error: "" };
+      try { const o = await exec("node", [HELPER(), "solo-on"], { timeout: 5000 }); if (o.code === 0) r = JSON.parse(o.stdout); else r.error = "도우미를 실행하지 못했습니다"; } catch (e) { r.error = cutHead(String(e?.message ?? e), 100); }
+      if (r.on) { this.say("혼자 모드 기록을 켰습니다. 터미널에서 프롬프트를 보내면 방으로 나타납니다(PO 훅이 들어 있어야 합니다)."); try { this.load(cx); } catch {} }
+      else this.say(`혼자 모드를 켜지 못했습니다${r.error ? `: ${r.error}` : ""}`, true);
+      try { cx.notify(); } catch {}
+    });
+  }
+  // ---- #90 solo "새로 시작": a solo room's terminal has no handoff note and no /PO, so a new start is the confirm and then ONE line, `/clear`. State in this.ss[room]
+  // (room = the terminal's address). Same safeguards as the PO's /clear: the terminal must be idle (not working, not on a prompt), no held chat line may sit in its input
+  // box, the turn counter must go up, and a fresh "me" record of the terminal's hook (/clear fires none) means it was sent as text, not as the command.
+  soloAlive(room, g) { const r = this.ss.get(room); return Boolean(r) && r.gen === g && r.phase === "run"; }
+  soloEnd(room, g, patch, c) {
+    const r = this.ss.get(room);
+    if (!r || r.gen !== g) return;
+    this.ss.set(room, { ...r, ...patch });
+    try { c.notify(); } catch {}
+    if (patch.phase === "fail") this.say(`새로 시작을 멈췄습니다: ${patch.why}`, true);
+    else if (patch.phase === "done") this.say("대화를 비웠습니다. 방의 기록은 그대로입니다.");
+  }
+  async soloMe(id) {
+    try {
+      const r = await exec("node", [HELPER(), "solo-me", id], { timeout: 5000 });
+      if (r.code === 0) { const j = JSON.parse(r.stdout); if (Array.isArray(j)) return j; }
+    } catch {}
+    return [];
+  }
+  soloClear(room, po, c) {
+    const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "");
+    const why = soloWords(restartBlock({ po, status: st, running: this.ss.get(room)?.phase === "run" }));
+    if (why) { this.ss.set(room, { phase: "fail", gen: ++this.rgen, why }); try { c.notify(); } catch {} return; }
+    const g = ++this.rgen;
+    this.ss.set(room, { phase: "run", gen: g, why: "" });
+    try { c.notify(); } catch {}
+    c.spawn(async (cx) => {
+      try { await this.soloFlow(room, g, po, cx); }
+      catch (e) { this.soloEnd(room, g, { phase: "fail", why: cutHead(String(e?.message ?? e), 100) }, cx); }
+    });
+  }
+  async soloFlow(room, g, po, cx) {
+    const alive = () => this.soloAlive(room, g);
+    const clr = await this.sendLine(po, "/clear", alive, room);
+    if (!alive()) return;
+    if (!clr.ok) { this.soloEnd(room, g, { phase: "fail", why: soloWords(`/clear를 보내지 못했습니다(${clr.why})`) }, cx); return; }
+    const t0 = Date.now();
+    for (;;) {
+      await this.sleepOn(cx, 800);
+      if (!alive()) return;
+      const term = await this.poTerm(po);
+      if (!alive()) return;
+      const stt = restartClearState(clr.turn, term);
+      if (stt === "done") break;
+      if (stt === "gone") { this.soloEnd(room, g, { phase: "fail", why: "/clear를 보낸 뒤 터미널이 실행 중이 아닙니다" }, cx); return; }
+      if (Date.now() - t0 >= RESTART_CLEAR_MS) { this.diag(`solo /clear not confirmed: sent turn ${clr.turn}, now ${JSON.stringify(term)}`); this.soloEnd(room, g, { phase: "fail", why: "/clear가 끝났는지 확인하지 못했습니다" }, cx); return; }
+    }
+    if (restartClearCheck(await this.soloMe(room), clr.at) === "text") { this.diag(`solo: /clear reached the model as text (terminal ${po})`); this.soloEnd(room, g, { phase: "fail", why: "/clear가 명령이 아니라 글로 들어간 것 같습니다. 터미널 입력칸을 비운 뒤 다시 눌러 주세요" }, cx); return; }
+    this.soloEnd(room, g, { phase: "done" }, cx);
+  }
+  soloOpen(room, c) { if (!this.ss.get(room)) this.ss.set(room, { phase: "confirm", gen: ++this.rgen, why: "" }); try { c.notify(); } catch {} }
+  soloClose(room, c) { this.ss.delete(room); this.rgen++; try { c.notify(); } catch {} } // a run in progress stops asking: its checks see the room's state gone
+  // The strip above a solo room's chat box: the button, its confirm line, or the running / result line.
+  soloRow(t, v) {
+    const room = v.pick;
+    const po = chatTarget(v.terms, [], room).po ?? "";
+    if (!po) return null;
+    const r = this.ss.get(room);
+    const st = String(v.terms.find((x) => x.address === po)?.status ?? "");
+    let mineNow = []; try { mineNow = shared(CHAT_KEY) ?? []; } catch {}
+    const why = soloWords(restartBlock({ po, status: st, running: r?.phase === "run" }) || (r?.phase === "confirm" || !r ? restartDraft(mineNow, room, Date.now()) : ""));
+    const box = () => v_flex().id("po-restart").flex_none().min_w(0).mx(10).mb(6).px(10).py(8).gap(6).rounded(8).bg(t.raised).border(1).border_color(t.border).on_mouse_down("left", stop);
+    if (!r) {
+      return h_flex().id("po-restart").flex_none().min_w(0).mx(10).mb(4).gap(8).items_center().justify_end()
+        .when(Boolean(why), (el) => el.child(div().min_w(0).truncate().text_size(fz(10.5)).text_color(t.dim).child(why)))
+        .child(this.button(t, "ss-open", "새로 시작", (c) => this.soloOpen(room, c), { disabled: why, tip: "이 터미널에 /clear를 보내 Claude의 대화를 비웁니다(방의 기록은 남습니다)" }));
+    }
+    if (r.phase === "confirm") {
+      return box()
+        .child(div().min_w(0).text_size(fz(11.5)).text_color(t.foreground).child("이 터미널에 /clear를 보내 Claude가 지금까지의 대화를 잊게 합니다. 이 방의 기록은 그대로 남습니다."))
+        .child(h_flex().min_w(0).gap(6).items_center().flex_wrap()
+          .child(this.button(t, "ss-go", "비우기", (c) => this.soloClear(room, po, c), { primary: true, disabled: why, tip: "/clear 한 줄만 보냅니다" }))
+          .child(this.button(t, "ss-cancel", "취소", (c) => this.soloClose(room, c)))
+          .when(Boolean(why), (el) => el.child(div().min_w(0).text_size(fz(10.5)).text_color(t.blocked).child(why))));
+    }
+    return box()
+      .child(div().min_w(0).text_size(fz(11)).text_color(r.phase === "fail" ? t.blocked : r.phase === "done" ? t.working : t.dim)
+        .child(r.phase === "run" ? "/clear를 보내고 끝나기를 기다리는 중입니다…" : r.phase === "done" ? "대화를 비웠습니다. 방의 기록은 그대로입니다." : r.why))
+      .child(h_flex().min_w(0).gap(6).items_center().child(this.button(t, "ss-close", r.phase === "run" ? "취소" : "닫기", (c) => this.soloClose(room, c), { tip: r.phase === "run" ? "기다리기를 멈춥니다(이미 보낸 /clear는 그대로입니다)" : "" })));
   }
 
   // ---- "원격 연결 켜기" (#79), per terminal: `room` = the key of the state, `po` = the terminal address, `status` = its hc status. A room of any kind can use it (PO room
@@ -2844,7 +3341,7 @@ export default class Inbox extends View {
     const st = String(this.liveTerms().find((t) => t.address === po)?.status ?? "");
     const r0 = this.rc.get(room);
     const rs = this.rs.get(room);
-    const why = remoteBlock({ po, status: st, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")), sending: r0?.phase === "send" });
+    const why = soloWords(remoteBlock({ po, status: st, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")) || this.ss?.get(room)?.phase === "run", sending: r0?.phase === "send" }));
     if (why) { this.remoteSet(room, { phase: "fail", kind: "fail", why }, c); return; }
     this.remoteSet(room, { phase: "send", why: "" }, c);
     c.spawn(async (cx) => {
@@ -2859,7 +3356,7 @@ export default class Inbox extends View {
           return;
         }
         const res = await this.sendLine(po, REMOTE_CMD, () => true, room);
-        if (!res.ok) { done("fail", "fail", { why: res.why }); return; }
+        if (!res.ok) { done("fail", "fail", { why: soloWords(res.why) }); return; }
         if (pre === null) { done("unknown", "unknown"); return; }
         for (let i = 0; i < REMOTE_POLLS; i++) {
           await this.sleepOn(cx, REMOTE_POLL_MS);
@@ -2881,11 +3378,11 @@ export default class Inbox extends View {
   remoteButton(t, room, po, status) {
     const r = this.rc.get(room);
     const rs = this.rs.get(room);
-    const why = remoteBlock({ po, status, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")), sending: r?.phase === "send" });
+    const why = soloWords(remoteBlock({ po, status, running: Boolean(rs && (rs.phase === "run" || rs.phase === "clear")) || this.ss?.get(room)?.phase === "run", sending: r?.phase === "send" }));
     const on = r && (r.phase === "on" || r.phase === "already");
     const at = on ? new Date(r.at).toTimeString().slice(0, 5) : "";
     return h_flex().id(`rc-${room}`).flex_none().min_w(0).gap(6).items_center()
-      .when(r?.phase === "send", (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child("확인 중…")))
+      .when(r?.phase === "send", (el) => el.child(div().flex_none().text_size(fz(10.5)).text_color(t.dim).child("확인 중…")))
       .child(this.button(t, on ? "rc-on-done" : "rc-on", on ? h_flex().items_center().gap(6).child(div().flex_none().w(8).h(8).rounded(4).bg(t.working)).child("원격 연결 켜짐") : "원격 연결 켜기", (c) => this.remoteOn(room, po, c), { disabled: why, tip: why || (on ? `${at}에 화면으로 확인한 상태입니다. 그 뒤 터미널에서 끊었는지는 보지 않습니다. 누르면 화면을 다시 확인하고, 꺼져 있을 때만 /remote-control을 보냅니다` : "이 PO 터미널에 /remote-control을 보내 원격 연결(Remote Control)을 켭니다. Herdr를 다시 켜도 이 데스크가 켜짐을 본 적이 있으면 켜짐으로 이어서 보여 줍니다. 본 적이 없거나 확인할 수 없는 경우(예: Windows)에는 이미 켜져 있어도 이 글자로 보일 수 있습니다. 눌러도 안전합니다: 화면을 먼저 확인하고, 이미 켜져 있으면 연결 메뉴를 Esc로 닫기만 합니다") }));
   }
   // The system note of the last 원격 연결 try, as a quiet line at the end of the room's chat.
@@ -2893,7 +3390,7 @@ export default class Inbox extends View {
     const n = this.rc.get(room)?.note;
     if (!n) return null;
     return h_flex().id(`rc-note-${room}`).flex_none().min_w(0).px(14).py(4).gap(6).justify_center().items_center()
-      .child(div().min_w(0).text_size(11).text_color(n.bad ? t.blocked : t.dim).child(this.text(`rc-note-t-${room}`, chatHtml(`원격 연결 · ${new Date(n.ms).toTimeString().slice(0, 5)} · ${n.text}`))));
+      .child(div().min_w(0).text_size(fz(11)).text_color(n.bad ? t.blocked : t.dim).child(this.text(`rc-note-t-${room}`, chatHtml(`원격 연결 · ${new Date(n.ms).toTimeString().slice(0, 5)} · ${n.text}`))));
   }
 
   // After a start or a reload of the desk the in-memory state is gone, so every PO terminal is checked ONCE (read only, nothing is sent or pressed). Two sources, the screen first:
@@ -2904,7 +3401,8 @@ export default class Inbox extends View {
   // A state is only ever set here, never cleared. `force` (the refresh button) checks again.
   remoteRestore(cx, force = false) {
     if (force) this.rcChecked.clear();
-    const pos = poList(this.liveTerms()).filter((p) => !this.rcChecked.has(p.address));
+    const terms = this.liveTerms();
+    const pos = (soloMode(terms) ? soloRooms(terms, this.data?.solo) : poList(terms)).filter((p) => !this.rcChecked.has(p.address)); // #90: a solo room is its terminal
     for (const p of pos) {
       this.rcChecked.add(p.address);
       cx.spawn(async (c) => {
@@ -3077,7 +3575,7 @@ export default class Inbox extends View {
     try {
       const content = this.chat.content();
       const q = mentionQuery(content.text, this.chat.selected_range().end, content.tokens);
-      const items = q ? leaderMenu(this.liveTerms(), namesMemo(), q.query, 8, this.view().pick) : [];
+      const items = q && !soloMode(this.liveTerms()) ? leaderMenu(this.liveTerms(), namesMemo(), q.query, 8, this.view().pick) : []; // #90: no "@" menu in solo mode (no leaders)
       if (q && items.length) next = { ...q, items, sel: Math.min(this.menu?.sel ?? 0, items.length - 1) };
     } catch {}
     this.menu = next;
@@ -3183,10 +3681,35 @@ export default class Inbox extends View {
   inputKey(e, c) {
     this.keyAt = Date.now();
     if (this.menu) { this.menuKey(e, c); return; }
+    if (String(e?.key ?? "").toLowerCase() === "escape") { // #133: Esc with an empty box stops the PO's running turn
+      const v = this.view();
+      let text = ""; try { text = this.chat.value(); } catch {}
+      if (stopKey(e?.key, { menu: false, text, working: stopWorking(v.terms, v.pick), at: this.stopAt, now: Date.now() })) { try { c.stop_propagation(); } catch {} this.stopPo(c); }
+      return;
+    }
     const intent = enterIntent(e?.key, Boolean(e?.modifiers?.shift));
     if (!intent) return;
     if (intent === "send") { try { c.stop_propagation(); } catch {} }
     this.enterBox(intent, c);
+  }
+
+  // #133: one Esc to the room's PO terminal, only after its status is read again and is "working" (never when it cannot be read, is not working or is on a prompt: a short
+  // note says why). The lock is taken before the first await, so a double press or a click on top of a key press sends one Esc; a refusal gives it back.
+  async stopPo(c) {
+    const now = Date.now();
+    if (stopLocked(this.stopAt, now)) return;
+    const v = this.view();
+    const po = v.pick === PO_OTHER ? null : chatTarget(v.terms, [], v.pick).po;
+    const say = (text, bad = false) => { this.say(text, bad); try { c.notify(); } catch {} };
+    if (!po) { say("멈출 PO를 찾지 못했습니다.", true); return; }
+    this.stopAt = now;
+    const term = await this.poTerm(po);
+    const why = stopBlock(term);
+    if (why) { this.stopAt = 0; say(why, true); return; }
+    let k = null; try { k = await hc(["keys", po, "esc"]); } catch {}
+    const ok = Boolean(k && k.code === 0);
+    if (!ok) this.stopAt = 0;
+    say(ok ? `PO(${po})에 Esc를 보냈습니다. 멈추는 데 잠시 걸릴 수 있습니다.` : `PO(${po})에 Esc를 보내지 못했습니다.`, !ok);
   }
 
   // Keys the open menu handles stop here, so they do not also move the cursor, the focus or close the window.
@@ -3348,31 +3871,46 @@ export default class Inbox extends View {
     // its parts, so a room switch, a refresh or a hint line coming and going never rebuilds the input the person is typing in.
     const none = v.pick === PO_OTHER;
     const menu = this.menu && v_flex().id("chat-menu").flex_none().p(4).gap(2).rounded(8).bg(t.raised).border(1).border_color(t.border)
-      .children(this.menu.items.map((it, i) => h_flex().id(`mn-${it.id}`).h(26).px(8).gap(8).items_center().rounded(6).cursor_pointer()
+      .children(this.menu.items.map((it, i) => h_flex().id(`mn-${it.id}`).h(fz(26)).px(8).gap(8).items_center().rounded(6).cursor_pointer()
         .bg(i === this.menu.sel ? t.selected : t.raised).hover((x) => x.bg(t.hover))
         .on_mouse_down("left", stop).on_click((_e, c) => this.pickMenu(i, c))
-        .child(div().text_size(12.5).font_semibold().text_color(it.id === "here" ? t.muted : tint(t, it.id)).child(`@${it.label}`))
-        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(it.id === "here" ? "PO에게 그냥 보내기" : it.sub))));
+        .child(div().text_size(fz(12.5)).font_semibold().text_color(it.id === "here" ? t.muted : tint(t, it.id)).child(`@${it.label}`))
+        .child(div().flex_1().min_w(0).truncate().text_size(fz(11)).text_color(t.dim).child(it.id === "here" ? "PO에게 그냥 보내기" : it.sub))));
     const ghost = v.tabs.some((x) => x.id === v.pick && x.ghost);
     const target = v.tabs.find((x) => x.id === v.pick && x.id !== PO_OTHER && !x.ghost);
-    const chip = (ctx) => div().h(ctx.line_height).px(5).rounded(5).flex().items_center().bg(t.working + "26").text_color(t.working).text_size(12.5).font_semibold()
+    const chip = (ctx) => div().h(ctx.line_height).px(5).rounded(5).flex().items_center().bg(t.working + "26").text_color(t.working).text_size(fz(12.5)).font_semibold()
       .child(ctx.token.label ?? ctx.token.text.trim());
     return v_flex().id("chat-box").flex_none().px(10).pb(10).pt(6).gap(6).border_t(1).border_color(t.border)
       .on_key_down((e, c) => this.inputKey(e, c))
       .when(Boolean(menu), (el) => el.child(menu))
-      .when(holdShown(this.changedAt, this.heldAt), (el) => el.child(div().text_size(11).text_color(t.working).child("한 번 더 Enter로 보냅니다")))
-      .child(div().id("chat-target").truncate().text_size(10.5).text_color(t.dim).child(none ? "PO를 알 수 없는 방이라 여기서는 보낼 곳이 없습니다 — 왼쪽에서 PO 방을 고르세요(쓰던 글은 그대로 있습니다)" : target ? `받는 PO: ${target.label}` : ghost ? "PO 터미널을 다시 찾는 중입니다 — 쓰던 글은 그대로 있습니다" : "받는 PO가 없습니다 — PO를 고르세요"))
+      .when(holdShown(this.changedAt, this.heldAt), (el) => el.child(div().text_size(fz(11)).text_color(t.working).child("한 번 더 Enter로 보냅니다")))
+      .child(h_flex().id("chat-head").min_w(0).gap(8).items_center()
+        .child(div().id("chat-target").flex_1().min_w(0).truncate().text_size(fz(10.5)).text_color(t.dim).child(none ? "PO를 알 수 없는 방이라 여기서는 보낼 곳이 없습니다 — 왼쪽에서 PO 방을 고르세요(쓰던 글은 그대로 있습니다)" : target ? `${v.solo ? "받는 터미널" : "받는 PO"}: ${target.label}` : ghost ? "PO 터미널을 다시 찾는 중입니다 — 쓰던 글은 그대로 있습니다" : v.solo ? "받는 터미널이 없습니다 — 왼쪽에서 방을 고르세요" : "받는 PO가 없습니다 — PO를 고르세요"))
+        .when(stopWorking(v.terms, v.pick), (el) => el.child(this.button(t, "chat-stop", "멈추기", (c) => this.stopPo(c), { tip: "PO의 지금 작업을 멈춥니다(터미널에서 Esc를 누르는 것과 같습니다). 입력칸이 비어 있을 때 Esc 키로도 됩니다" }))))
       .when(this.pics.length > 0 || this.picBusy > 0, (el) => el.child(this.picRow(t, null)))
       .child(h_flex().id("chat-row").gap(6).items_center()
         .on_drop((ev, c) => this.dropPics(ev?.paths, c))
         .child(this.button(t, "chat-attach", "그림", (c) => { this.pickPics(c); }, { tip: "그림 파일을 골라 붙입니다(Cmd+V로 붙여넣거나 파일을 끌어다 놓아도 됩니다). 보내면 PO가 파일을 열어 봅니다" }))
         .child(div().id("chat-input").flex_1().min_w(0).on_mouse_down("left", stop)
-          .child(Textarea.new(this.chat).token((ctx) => chip(ctx)).min_h(30).px(10).py(5).rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
-        .child(this.button(t, "chat-send", "PO에 보내기", (c) => this.sendChat(c), { primary: true, tip: "고른 PO 터미널에 글을 붙여 넣고 Enter까지 눌러 보냅니다(글은 클립보드를 거칩니다). Shift+Enter는 줄바꿈" })));
+          .child(Textarea.new(this.chat).token((ctx) => chip(ctx)).min_h(fz(30)).px(10).py(5).rounded(8).border(1).border_color(t.input).bg(t.background).text_size(fz(12.5)).text_color(t.foreground)))
+        .child(this.button(t, "chat-send", v.solo ? "보내기" : "PO에 보내기", (c) => this.sendChat(c), { primary: true, tip: "고른 PO 터미널에 글을 붙여 넣고 Enter까지 눌러 보냅니다(글은 클립보드를 거칩니다). Shift+Enter는 줄바꿈" })));
   }
 
-  poHint(t) {
-    return div().id("po-hint").flex_none().px(this.compact ? 10 : 14).pb(6).text_size(11).text_color(t.muted)
+  poHint(t, v = null) {
+    if (v?.solo) {
+      const on = Boolean(this.data?.soloOn);
+      const box = v_flex().id("po-hint").flex_none().min_w(0).px(this.compact ? 10 : 14).pb(6).gap(6);
+      if (on) return box.child(div().min_w(0).text_size(fz(11)).text_color(t.muted).child("아직 기록된 Claude 터미널 대화가 없습니다. 터미널에서 프롬프트를 보내면 여기에 방으로 나타납니다(이미 열려 있던 터미널은 다시 시작해야 기록됩니다)."));
+      return box
+        .child(div().min_w(0).text_size(fz(11)).text_color(t.muted).child("혼자 모드가 꺼져 있어 Claude 터미널 대화를 기록하지 않습니다."))
+        .when(!this.soloAsk, (el) => el.child(h_flex().child(this.button(t, "solo-ask", "혼자 모드 켜기", (c) => { this.soloAsk = true; try { c.notify(); } catch {} }, { tip: "터미널의 Claude 대화를 이 컴퓨터에 기록해 방으로 보여 줍니다" }))))
+        .when(this.soloAsk, (el) => el
+          .child(div().min_w(0).text_size(fz(11.5)).text_color(t.foreground).child("모든 Claude 터미널의 프롬프트가 이 컴퓨터에 저장됩니다. 켤까요?"))
+          .child(h_flex().gap(6).items_center()
+            .child(this.button(t, "solo-go", "켜기", (c) => this.soloEnable(c), { primary: true, tip: "혼자 모드 기록 표시를 켭니다(install.cjs hook --solo 와 같은 표시)" }))
+            .child(this.button(t, "solo-no", "취소", (c) => { this.soloAsk = false; try { c.notify(); } catch {} }))));
+    }
+    return div().id("po-hint").flex_none().px(this.compact ? 10 : 14).pb(6).text_size(fz(11)).text_color(t.muted)
       .child(`PO 터미널에 ${hubTag()}, ${NAMES.hubIdLabel}=<id> 라벨을 달면 PO별로 나뉩니다. 지금은 PO가 없어 채팅을 보낼 수 없습니다.`);
   }
 
@@ -3385,36 +3923,37 @@ export default class Inbox extends View {
   // #119: the remote mark of a room, in the accent colour with the "원격 연결 켜짐" tip: null unless the room's PO has remote on (an unknown or never-checked state is off).
   // Text, not a dot, so it is not mistaken for #69's "working" dot. Every room view takes it from here (the wide list shows it as "PO · 원격", the narrow ones as "원격").
   roomRemote(t, x, text) {
-    return x.remote ? div().flex_none().text_size(10).text_color(t.working).tooltip("원격 연결 켜짐").child(text) : null;
+    return x.remote ? div().flex_none().text_size(fz(10)).text_color(t.working).tooltip("원격 연결 켜짐").child(text) : null;
   }
 
   // The small line under a room's name in the wide room list: "PO", and "PO · 원격" while its PO has remote on.
   roomSub(t, x) {
-    if (x.id === PO_OTHER) return div().min_w(0).truncate().text_size(10).text_color(t.dim).child("채팅 없음");
-    return this.roomRemote(t, x, "PO · 원격") ?? div().min_w(0).truncate().text_size(10).text_color(t.dim).child("PO");
+    if (x.id === PO_OTHER) return div().min_w(0).truncate().text_size(fz(10)).text_color(t.dim).child("채팅 없음");
+    if (x.solo) return this.roomRemote(t, x, "터미널 · 원격") ?? div().min_w(0).truncate().text_size(fz(10)).text_color(t.dim).child("터미널");
+    return this.roomRemote(t, x, "PO · 원격") ?? div().min_w(0).truncate().text_size(fz(10)).text_color(t.dim).child("PO");
   }
 
   // The count badges of a room: unread (green) and waiting leaders (red).
   roomBadges(t, x) {
     return [
-      x.blocked ? div().flex_none().px(5).h(15).rounded(8).bg(t.blocked + "26").flex().items_center().text_size(10).font_semibold().text_color(t.blocked).child("질문") : null,
-      x.unread > 0 ? div().flex_none().px(5).h(15).rounded(8).bg(t.working).flex().items_center().text_size(10).font_semibold().text_color(t.chrome).child(String(x.unread)) : null,
-      x.n > 0 ? div().flex_none().px(5).h(15).rounded(8).bg(t.blocked + "26").flex().items_center().text_size(10).text_color(t.blocked).child(String(x.n)) : null,
+      x.blocked ? div().flex_none().px(5).h(fz(15)).rounded(8).bg(t.blocked + "26").flex().items_center().text_size(fz(10)).font_semibold().text_color(t.blocked).child("질문") : null,
+      x.unread > 0 ? div().flex_none().px(5).h(fz(15)).rounded(8).bg(t.working).flex().items_center().text_size(fz(10)).font_semibold().text_color(t.chrome).child(String(x.unread)) : null,
+      x.n > 0 ? div().flex_none().px(5).h(fz(15)).rounded(8).bg(t.blocked + "26").flex().items_center().text_size(fz(10)).text_color(t.blocked).child(String(x.n)) : null,
     ].filter(Boolean);
   }
 
   // The room strip (the dock, and the window when narrow): one chip per room — the live POs by project, and "PO 모름" while something belongs to none.
   picker(t, v) {
-    if (!v.tabs.some((x) => x.id !== PO_OTHER)) return this.poHint(t);
+    if (!v.tabs.some((x) => x.id !== PO_OTHER)) return this.poHint(t, v);
     return h_flex().id("po-picker").flex_none().px(this.compact ? 10 : 14).pb(6).gap(5).flex_wrap().items_center()
-      .child(div().flex_none().text_size(10.5).font_semibold().text_color(t.dim).child("PO"))
+      .child(div().flex_none().text_size(fz(10.5)).font_semibold().text_color(t.dim).child(v.solo ? "터미널" : "PO"))
       .children(v.tabs.map((x) => {
         const on = x.id === v.pick;
-        return h_flex().id(`po-${x.id}`).h(24).px(9).gap(5).items_center().rounded(12).cursor_pointer().on_mouse_down("left", stop)
+        return h_flex().id(`po-${x.id}`).h(fz(24)).px(9).gap(5).items_center().rounded(12).cursor_pointer().on_mouse_down("left", stop)
           .bg(on ? t.selected : t.raised).border(1).border_color(on ? t.foreground + "40" : t.border)
           .hover((s) => s.bg(on ? t.selected : t.hover)).on_click((_e, c) => this.pickPo(x.id, c))
           .tooltip(x.id === PO_OTHER ? OTHER_TIP : `po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
-          .child(div().max_w(150).truncate().text_size(11.5).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
+          .child(div().max_w(150).truncate().text_size(fz(11.5)).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
           .child(this.roomDot(t, x))
           .children([this.roomRemote(t, x, "원격"), ...this.roomBadges(t, x)].filter(Boolean));
       }));
@@ -3432,7 +3971,7 @@ export default class Inbox extends View {
           .tooltip(x.id === PO_OTHER ? OTHER_TIP : `${x.label} · po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
           .child(this.circle(t, color, x.id === PO_OTHER ? "?" : initial(x.label)))
           .child(h_flex().w(SLIM_W - 10).gap(3).items_center().justify_center()
-            .child(div().min_w(0).truncate().text_center().text_size(9.5).text_color(on ? t.foreground : t.dim).child(x.label))
+            .child(div().min_w(0).truncate().text_center().text_size(fz(9.5)).text_color(on ? t.foreground : t.dim).child(x.label))
             .child(this.roomDot(t, x)))
           .when(badges.length > 0, (el) => el.child(h_flex().gap(3).items_center().children(badges)));
       }));
@@ -3440,16 +3979,16 @@ export default class Inbox extends View {
 
   // The room list (the wide window): one row per room — a colored initial circle, the project, its badges.
   roomList(t, v) {
-    return v_flex().id("po-rooms").flex_none().w(ROOM_W).h_full().min_h(0).p(6).gap(3).border_r(1).border_color(t.border).overflow_y_scrollbar()
+    return v_flex().id("po-rooms").flex_none().w(this.roomWidthNow()).h_full().min_h(0).p(6).gap(3).border_r(1).border_color(t.border).overflow_y_scrollbar()
       .children(v.tabs.map((x) => {
         const on = x.id === v.pick;
         const color = x.id === PO_OTHER ? t.dim : tint(t, x.id);
-        return h_flex().id(`po-${x.id}`).flex_none().h(44).px(8).gap(8).items_center().rounded(8).cursor_pointer().on_mouse_down("left", stop)
+        return h_flex().id(`po-${x.id}`).flex_none().h(fz(44)).px(8).gap(8).items_center().rounded(8).cursor_pointer().on_mouse_down("left", stop)
           .bg(on ? t.selected : t.chrome).hover((s) => s.bg(on ? t.selected : t.hover)).on_click((_e, c) => this.pickPo(x.id, c))
-          .tooltip(x.id === PO_OTHER ? OTHER_TIP : `po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
+          .tooltip(x.id === PO_OTHER ? OTHER_TIP : `${x.label} · po=${x.id}${x.title ? ` · 세션: ${x.title}` : ""}`)
           .child(this.circle(t, color, x.id === PO_OTHER ? "?" : initial(x.label)))
           .child(v_flex().flex_1().min_w(0)
-            .child(div().min_w(0).truncate().text_size(12.5).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
+            .child(div().min_w(0).truncate().text_size(fz(12.5)).font_semibold().text_color(on ? t.foreground : t.muted).child(x.label))
             .child(this.roomSub(t, x)))
           .child(this.roomDot(t, x))
           .children(this.roomBadges(t, x));
@@ -3459,17 +3998,17 @@ export default class Inbox extends View {
   // ---- parts
   button(t, id, label, onClick, o = {}) {
     if (o.disabled) {
-      return div().id(id).flex_none().h(24).px(10).rounded(12).flex().items_center().text_size(11.5).on_mouse_down("left", stop)
+      return div().id(id).flex_none().h(fz(24)).px(10).rounded(12).flex().items_center().text_size(fz(11.5)).on_mouse_down("left", stop)
         .bg(t.raised).border(1).border_color(t.border).text_color(t.dim).opacity(0.5).tooltip(o.disabled).child(label);
     }
-    return div().id(id).flex_none().h(24).px(10).rounded(12).flex().items_center().text_size(11.5).cursor_pointer()
+    return div().id(id).flex_none().h(fz(24)).px(10).rounded(12).flex().items_center().text_size(fz(11.5)).cursor_pointer()
       .on_mouse_down("left", stop).bg(o.primary ? t.selected : t.raised).border(1).border_color(o.primary ? t.foreground + "40" : t.border)
       .text_color(o.primary ? t.foreground : t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
       .on_click((_e, cx) => onClick(cx)).when(Boolean(o.tip), (el) => el.tooltip(o.tip)).child(label);
   }
 
   tag(t, text, color) {
-    return div().flex_none().px(6).h(17).rounded(5).bg((t[color] ?? t.dim) + "26").text_size(10.5).text_color(t[color] ?? t.dim).flex().items_center().child(text);
+    return div().flex_none().px(6).h(fz(17)).rounded(5).bg((t[color] ?? t.dim) + "26").text_size(fz(10.5)).text_color(t[color] ?? t.dim).flex().items_center().child(text);
   }
 
   // The kind tag of a report. Red (the kind's own color) only while the leader is still waiting on it; a decision/verify line that is not
@@ -3483,7 +4022,7 @@ export default class Inbox extends View {
 
   // A round initial badge (a leader, the PO or a room): a tint of its color behind the letter.
   circle(t, color, letter) {
-    return div().flex_none().size(28).rounded(14).bg(color + "33").flex().items_center().justify_center().text_size(12).font_semibold().text_color(color).child(letter);
+    return div().flex_none().size(28).rounded(14).bg(color + "33").flex().items_center().justify_center().text_size(fz(12)).font_semibold().text_color(color).child(letter);
   }
 
   avatar(t, leader) { return this.circle(t, tint(t, leader), initial(shortName(leader))); }
@@ -3537,7 +4076,7 @@ export default class Inbox extends View {
 
   // "더 보기 · N자 더" / "접기" under a folded bubble. Only this bubble opens; the 복사 chip copies the whole text either way.
   moreToggle(t, id, lc, open) {
-    return div().id(`${id}-more`).flex_none().text_size(11).cursor_pointer().text_color(t.working).hover((s) => s.text_color(t.foreground))
+    return div().id(`${id}-more`).flex_none().text_size(fz(11)).cursor_pointer().text_color(t.working).hover((s) => s.text_color(t.foreground))
       .on_mouse_down("left", stop)
       .on_click((_e, cx) => {
         if (this.more.has(id)) this.more.delete(id); else this.more.add(id);
@@ -3561,17 +4100,17 @@ export default class Inbox extends View {
     const key = `bc-${id}`;
     const done = this.copied === key;
     return v_flex().flex_none().items_end().gap(2)
-      .child(div().id(key).flex_none().px(6).h(17).rounded(5).flex().items_center().text_size(10).cursor_pointer().text_color(done ? t.working : t.dim)
+      .child(div().id(key).flex_none().px(6).h(fz(17)).rounded(5).flex().items_center().text_size(fz(10)).cursor_pointer().text_color(done ? t.working : t.dim)
         .hover((x) => x.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
         .on_click((_e, cx) => this.copy(key, unwrapTags(text), cx)).tooltip("이 말풍선의 글 전체를 클립보드에 복사합니다").child(done ? "복사됨" : "복사"))
-      .child(div().flex_none().pb(1).text_size(10).text_color(t.dim).child(ms ? clock(ms) : ""));
+      .child(div().flex_none().pb(1).text_size(fz(10)).text_color(t.dim).child(ms ? clock(ms) : ""));
   }
 
   codeBlock(t, text, html, id) {
     const done = this.copied === id;
     return h_flex().min_w(0).gap(6).items_start().px(8).py(5).rounded(6).bg(t.background).border(1).border_color(t.border)
-      .child(div().flex_1().min_w(0).font_family(this.mono()).text_size(11.5).text_color(t.foreground).child(this.text(`${id}-t`, `<p><code>${html}</code></p>`)))
-      .child(div().id(id).flex_none().px(7).h(20).rounded(10).flex().items_center().text_size(10.5).cursor_pointer().bg(t.raised).border(1).border_color(t.border)
+      .child(div().flex_1().min_w(0).font_family(this.mono()).text_size(fz(11.5)).text_color(t.foreground).child(this.text(`${id}-t`, `<p><code>${html}</code></p>`)))
+      .child(div().id(id).flex_none().px(7).h(fz(20)).rounded(10).flex().items_center().text_size(fz(10.5)).cursor_pointer().bg(t.raised).border(1).border_color(t.border)
         .text_color(done ? t.working : t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
         .on_click((_e, cx) => this.copy(id, text, cx)).tooltip("이 명령만 클립보드에 복사합니다(붙여 넣거나 보내지 않습니다)").child(done ? "복사됨" : "복사"));
   }
@@ -3579,7 +4118,7 @@ export default class Inbox extends View {
   // Card title and section headings: the TextView ignores bold tags and the weight of the box around it, so the style goes on the
   // TextView element itself (still selectable).
   heading_text(t, id, html, size = 14) {
-    return this.text(id, `<p>${html}</p>`).font_weight(700).text_size(size).text_color(t.foreground);
+    return this.text(id, `<p>${html}</p>`).font_weight(700).text_size(fz(size)).text_color(t.foreground);
   }
 
   // The body as parts: prose (one selectable text, so a drag can run across headings, lists and lines) and command blocks (own box + 복사).
@@ -3588,39 +4127,90 @@ export default class Inbox extends View {
       const key = `${id}-${i}`;
       if (p.t === "code") return div().min_w(0).pl(p.depth ? p.depth * 14 + 18 : 0).child(this.codeBlock(t, p.text, p.html, `copy-${key}`));
       if (p.t === "h") return div().min_w(0).pt(4).child(this.heading_text(t, key, p.html, 14.5));
-      return div().min_w(0).text_size(12.5).text_color(t.foreground).child(typeof p.md === "string" && p.md ? this.md(key, p.md) : this.text(key, p.html));
+      return div().min_w(0).text_size(fz(12.5)).text_color(t.foreground).child(typeof p.md === "string" && p.md ? this.md(key, p.md) : this.text(key, p.html));
     }));
   }
 
   // A speech bubble. Reports with more than a line start collapsed; "자세히" / "접기" flips it (kept per card in shared state).
-  bubble(t, s, it, accent) {
-    const open = it.long && this.isOpen(s, it);
+  bubble(t, s, it, accent, a) {
+    const view = it.kind === "decision" ? decisionView(it.body) : null; // options found (#152): drawn as rows, never collapsed
+    const open = it.long && !view && this.isOpen(s, it);
     const id = `b-${s.leader}-${it.ts}`;
-    const toggle = it.long ? div().id(`tg-${s.leader}-${it.ts}`).flex_none().px(8).h(20).rounded(10).flex().items_center().text_size(10.5).cursor_pointer().bg(t.raised)
+    const toggle = it.long && !view ? div().id(`tg-${s.leader}-${it.ts}`).flex_none().px(8).h(fz(20)).rounded(10).flex().items_center().text_size(fz(10.5)).cursor_pointer().bg(t.raised)
       .border(1).border_color(t.border).text_color(t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
       .on_click((_e, c) => { this.toggleOpen(s, it); this.reveal(this.spot(s, it)); c.notify(); }).child(open ? "접기" : "자세히") : null;
     const box = v_flex().min_w(0).px(12).py(9).gap(6).rounded(12).bg(accent ? accent + "1f" : t.raised).border(1).border_color(accent ? accent + "55" : t.border)
-      .text_size(12.5).text_color(t.foreground);
+      .text_size(fz(12.5)).text_color(t.foreground);
     const headline = it.head || it.lead || it.title;
     box.child(div().min_w(0).child(this.heading_text(t, `${id}-h`, it.headHtml, 16)));
-    if (!open) {
-      if (it.lead && it.lead !== headline) box.child(div().min_w(0).max_h(34).overflow_hidden().text_size(12).text_color(t.muted).child(this.text(`${id}-lead`, `<p>${it.leadHtml}</p>`)));
+    if (view) box.child(this.decisionBody(t, s, it, view, id, a));
+    else if (!open) {
+      if (it.lead && it.lead !== headline) box.child(div().min_w(0).max_h(34).overflow_hidden().text_size(fz(12)).text_color(t.muted).child(this.text(`${id}-lead`, `<p>${it.leadHtml}</p>`)));
     } else box.child(this.body(t, it, id));
     if (it.linkLabel || toggle) {
       box.child(h_flex().gap(6).items_center().flex_wrap()
-        .when(Boolean(it.link), (el) => el.child(div().flex_none().px(6).rounded(5).bg(t.hover).text_size(11).text_color(t.ansi4 ?? t.foreground).child(this.text(`${id}-link`, it.linkHtml))))
+        .when(Boolean(it.link), (el) => el.child(div().flex_none().px(6).rounded(5).bg(t.hover).text_size(fz(11)).text_color(t.ansi4 ?? t.foreground).child(this.text(`${id}-link`, it.linkHtml))))
         .child(div().flex_1())
         .when(Boolean(toggle), (el) => el.child(toggle)));
     }
     return box;
   }
 
+  // A decision report with options (#152): the question on top, then one card per option (the "N안" badge, the text, its detail, a 추천 tag and
+  // accent on the recommended one). While the ask is open (`a`) a press on a card sends "N안 선택" (several questions: picks it, see pickGroup).
+  decisionBody(t, s, it, view, id, a) {
+    const head = mdPlain(it.head || "").trim();
+    const dropHead = (q) => { const ls = String(q ?? "").split("\n"); return head && mdPlain(ls[0]).replace(/^[#>\s*-]+/, "").trim() === head ? ls.slice(1).join("\n").trim() : String(q ?? "").trim(); };
+    const multi = view.groups.length > 0 && view.groups[0].label !== "";
+    const groups = multi ? decisionGroups(it.body) : [];
+    const key = a ? this.askKey(a) : "";
+    const picks = a && multi && this.gpick?.get(s.leader)?.key === key ? this.gpick.get(s.leader).picks : {};
+    const done = a ? this.sentOf(a) : "";
+    const live = Boolean(a) && done === ""; // a card only answers while the ask is open and not yet sent
+    const accent = t.working;
+    const row = (g, gi, o) => {
+      const rid = `dopt-${s.leader}-${it.ts}-${gi}-${o.n}`;
+      const picked = multi && picks[g.label] === o.n;
+      const mark = o.recommended || picked;
+      const body = v_flex().flex_1().min_w(0).gap(2)
+        .child(div().min_w(0).text_size(fz(12.5)).text_color(t.foreground).child(mdPlain(o.text)))
+        .children(String(o.detail || "").split("\n").filter(Boolean).map((d, di) => div().id(`${rid}-d${di}`).min_w(0).text_size(fz(11.5)).text_color(t.muted).child(mdPlain(d))))
+        .when(o.recommended && Boolean(g.reason), (el) => el.child(div().min_w(0).text_size(fz(11.5)).text_color(accent).child(`추천 이유: ${mdPlain(g.reason)}`)));
+      let el = h_flex().id(rid).min_w(0).gap(8).items_start().px(10).py(7).rounded(9)
+        .bg(mark ? accent + "1a" : t.background).border(1).border_color(mark ? accent + "88" : t.border)
+        .child(div().flex_none().px(7).h(fz(18)).rounded(5).flex().items_center().text_size(fz(11)).font_semibold().bg(mark ? accent + "33" : t.hover).text_color(mark ? accent : t.muted).child(`${o.n}안`))
+        .child(body)
+        .when(o.recommended, (x) => x.child(this.tag(t, "추천", "working")));
+      if (!a) return el;
+      if (!a.po) return el.opacity(0.5).tooltip(NO_PO()).on_mouse_down("left", stop);
+      if (!live) return el;
+      return el.cursor_pointer().on_mouse_down("left", stop).hover((x) => x.bg(accent + "26"))
+        .tooltip(multi ? `${g.label}번 질문에 ${o.n}안을 고릅니다. 모든 질문을 고르면 한 번에 보냅니다` : `누르면 "${o.n}안 선택"을 PO에 보냅니다`)
+        .on_click((_e, c) => (multi ? this.pickGroup(a, groups, g.label, o.n, c) : this.send(a, `${o.n}안 선택`, c, "choice")));
+    };
+    const out = v_flex().min_w(0).gap(8);
+    const intro = dropHead(view.intro);
+    if (intro) out.child(div().min_w(0).text_size(fz(12.5)).text_color(t.foreground).child(this.md(`${id}-intro`, intro)));
+    view.groups.forEach((g, gi) => {
+      const q = gi === 0 && !multi ? dropHead(g.question) : String(g.question ?? "").trim();
+      out.child(v_flex().min_w(0).gap(5)
+        .when(multi, (el) => el.child(h_flex().min_w(0).gap(6).items_center()
+          .child(div().flex_none().text_size(fz(12.5)).font_semibold().text_color(t.foreground).child(g.label))
+          .child(div().min_w(0).text_size(fz(12.5)).font_semibold().text_color(t.foreground).child(mdPlain(g.title)))))
+        .when(Boolean(q), (el) => el.child(div().min_w(0).text_size(fz(12.5)).text_color(t.foreground).child(this.md(`${id}-q${gi}`, q))))
+        .children(g.options.map((o) => row(g, gi, o)))
+        .when(Boolean(g.rest), (el) => el.child(div().min_w(0).text_size(fz(12)).text_color(t.muted).child(this.md(`${id}-r${gi}`, g.rest)))));
+    });
+    return out;
+  }
+
   // A message header: the leader's name (left out when `bare`, a follow-up line), the kind tag and the time.
   nameRow(t, s, it, extra, waiting, bare) {
     return h_flex().gap(6).items_center().min_w(0)
-      .when(!bare, (el) => el.child(div().id(`peek-${s.leader}-${it?.ts ?? ""}`).min_w(0).truncate().text_size(12).font_semibold().text_color(tint(t, s.leader)).cursor_pointer()
+      .when(!bare, (el) => el.child(div().id(`peek-${s.leader}-${it?.ts ?? ""}`).min_w(0).truncate().text_size(fz(12)).font_semibold().text_color(tint(t, s.leader)).cursor_pointer()
         .hover((x) => x.text_color(t.foreground)).on_mouse_down("left", stop).on_click(() => this.peek(s)).tooltip("그 리더 터미널 들여다보기").child(shortName(s.leader))))
-      .when(!bare && Boolean(it?.linkRef), (el) => el.child(div().min_w(0).max_w(150).truncate().text_size(10.5).text_color(t.dim).child(it.linkRef)))
+      .when(!bare && Boolean(this.accts?.get(s.leader)?.label), (el) => el.child(div().flex_none().max_w(150).truncate().text_size(fz(10.5)).text_color(t.dim).tooltip("이 리더 세션이 쓰는 Claude 계정").child(`이 세션 계정: ${this.accts.get(s.leader).label}`)))
+      .when(!bare && Boolean(it?.linkRef), (el) => el.child(div().min_w(0).max_w(150).truncate().text_size(fz(10.5)).text_color(t.dim).child(it.linkRef)))
       .when(Boolean(it), (el) => el.child(this.kindTag(t, it, it.kind, waiting)))
       .when(!bare, (el) => el.child(div().flex_1()))
       .when(Boolean(extra), (el) => el.child(extra));
@@ -3643,6 +4233,7 @@ export default class Inbox extends View {
     const { s, kind, item, link } = a;
     const writing = this.writing === s.leader;
     const done = this.sentOf(a);
+    const view = kind === "decision" ? decisionView(item?.body) : null; // #152: the bubble's option cards take the buttons' place
     const groups = kind === "decision" ? decisionGroups(item?.body) : []; // several questions (#76): one button row per question
     const opts = kind === "decision" && !groups.length ? decisionOptions(item?.body) : { options: [], recommended: 0 }; // once: the chips and the recommended one read the same list
     const key = this.askKey(a);
@@ -3650,20 +4241,20 @@ export default class Inbox extends View {
     // Without "N안:" lines the card still shows what the report offers (#62): its 추천 / 답 lines and the quoted answers as buttons.
     const hint = kind === "decision" && !groups.length && opts.options.length < 2 ? decisionHints(item?.body) : { lines: [], answers: [], recommended: "" };
     const box = v_flex().min_w(0).gap(6)
-      .children(groups.map((g, gi) => h_flex().id(`grp-${s.leader}-${gi}`).gap(6).items_center().flex_wrap()
-        .child(div().flex_none().text_size(12).font_semibold().text_color(t.foreground).child(g.label))
+      .children((view ? [] : groups).map((g, gi) => h_flex().id(`grp-${s.leader}-${gi}`).gap(6).items_center().flex_wrap()
+        .child(div().flex_none().text_size(fz(12)).font_semibold().text_color(t.foreground).child(g.label))
         .children(g.options.map((n) => this.button(t, `opt-${s.leader}-${gi}-${n}`, `${n}안${n === g.recommended ? " (추천)" : ""}`, (c) => this.pickGroup(a, groups, g.label, n, c),
           { primary: picks[g.label] === n, disabled: a.po ? "" : NO_PO(), tip: `${g.label}번 질문에 ${n}안을 고릅니다. 모든 질문을 고르면 한 번에 보냅니다` })))))
-      .when(groups.length > 0 && done === "", (el) => el.child(div().text_size(11).text_color(t.dim).child(`질문마다 하나씩 고르면 한 번에 보냅니다(${groups.filter((g) => !picks[g.label]).map((g) => g.label).join("·")} 남음)`)))
-      .children(hint.lines.map((x, i) => div().id(`hint-${s.leader}-${i}`).min_w(0).text_size(12).text_color(t.foreground).child(x)))
+      .when(groups.length > 0 && done === "", (el) => el.child(div().text_size(fz(11)).text_color(t.dim).child(`질문마다 하나씩 고르면 한 번에 보냅니다(${groups.filter((g) => !picks[g.label]).map((g) => g.label).join("·")} 남음)`)))
+      .children(hint.lines.map((x, i) => div().id(`hint-${s.leader}-${i}`).min_w(0).text_size(fz(12)).text_color(t.foreground).child(x)))
       .child(h_flex().gap(6).items_center().flex_wrap()
         .when(Boolean(link) && link !== item?.link, (el) => el.child(this.button(t, `link-${s.leader}`, "링크 열기", (c) => openUrl(link, c))))
-        .children(kind === "decision" ? opts.options.map((n) => this.button(t, `opt-${s.leader}-${n}`, `${n}안 선택${n === opts.recommended ? " (추천)" : ""}`, (c) => this.send(a, `${n}안 선택`, c, "choice"), { primary: n === opts.recommended, disabled: a.po ? "" : NO_PO(), tip: CLIP })) : [])
+        .children(kind === "decision" && !view ? opts.options.map((n) => this.button(t, `opt-${s.leader}-${n}`, `${n}안 선택${n === opts.recommended ? " (추천)" : ""}`, (c) => this.send(a, `${n}안 선택`, c, "choice"), { primary: n === opts.recommended, disabled: a.po ? "" : NO_PO(), tip: CLIP })) : [])
         .children(hint.answers.map((w, i) => this.button(t, `ans-${s.leader}-${i}`, w, (c) => this.send(a, w, c, "choice"), { primary: w === hint.recommended, disabled: a.po ? "" : NO_PO(), tip: CLIP })))
         .when(kind === "verify", (el) => el.child(this.button(t, `ok-${s.leader}`, "확인 완료", (c) => this.send(a, "확인 완료", c, "verify"), { primary: true, disabled: a.po ? "" : NO_PO(), tip: CLIP })))
         .child(this.button(t, `write-${s.leader}`, writing ? "닫기" : "답 쓰기", (c) => { this.writing = writing ? null : s.leader; if (!writing) this.box(s.leader, c); this.reveal(this.spot(s, item)); c.notify(); }, { disabled: a.po ? "" : NO_PO() }))
-        .child(div().text_size(11).text_color(done === "sent" ? t.working : done === "held" ? t.blocked : t.dim).child(done === "sent" ? "PO에 보냄 — 리더가 받으면 사라집니다" : done === "held" ? (this.isBlocked(a.po) ? "PO에 넣음 — PO가 질문 중입니다. 방의 질문에 먼저 답하세요" : "PO에 넣음 — 말풍선의 'Enter 누르기'로 보내세요") : "누르면 PO에 바로 보내고, 리더가 받으면 사라집니다")));
-    if (!a.po) box.child(div().text_size(11).text_color(t.dim).child(NO_PO()));
+        .child(div().text_size(fz(11)).text_color(done === "sent" ? t.working : done === "held" ? t.blocked : t.dim).child(done === "sent" ? "PO에 보냄 — 리더가 받으면 사라집니다" : done === "held" ? (this.isBlocked(a.po) ? "PO에 넣음 — PO가 질문 중입니다. 방의 질문에 먼저 답하세요" : "PO에 넣음 — 말풍선의 'Enter 누르기'로 보내세요") : "누르면 PO에 바로 보내고, 리더가 받으면 사라집니다")));
+    if (!a.po) box.child(div().text_size(fz(11)).text_color(t.dim).child(NO_PO()));
     if (writing) {
       const input = this.box(s.leader, cx);
       const row = this.picRow(t, s.leader);
@@ -3672,7 +4263,7 @@ export default class Inbox extends View {
         .on_key_down((e, c) => this.answerKey(s.leader, e, c))
         .on_drop((ev, c) => this.dropPics(ev?.paths, c, s.leader))
         .child(this.button(t, `attach-${s.leader}`, "그림", (c) => { this.pickPics(c, s.leader); }, { tip: "그림 파일을 골라 붙입니다(Cmd+V로 붙여넣거나 파일을 끌어다 놓아도 됩니다). 보내면 PO가 파일을 열어 봅니다" }))
-        .child(div().flex_1().min_w(0).on_mouse_down("left", stop).child(Textarea.new(input).min_h(30).px(10).py(5).rounded(8).border(1).border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)))
+        .child(div().flex_1().min_w(0).on_mouse_down("left", stop).child(Textarea.new(input).min_h(fz(30)).px(10).py(5).rounded(8).border(1).border_color(t.input).bg(t.background).text_size(fz(12.5)).text_color(t.foreground)))
         .child(this.button(t, `send-${s.leader}`, "보내기", (c) => this.send(a, input.value(), c), { primary: true, disabled: a.po ? "" : NO_PO(), tip: CLIP })));
     }
     return box;
@@ -3688,10 +4279,37 @@ export default class Inbox extends View {
     if (x !== this.compact || n !== this.narrow || grew) { this.compact = x; this.narrow = n; this.softNotify(cx); }
   }
 
+  // #68: the room list's width now (the dragged one, kept within the window), and the grip on its right edge. A press on the grip starts a
+  // drag; the window's mouse move resizes the list while the left button is held, and the release saves the width (setShared).
+  roomWidthNow() { return roomWidth(this.roomW, this.winW); }
+  roomGrip(t) {
+    return div().id("po-rooms-grip").flex_none().w(5).h_full().cursor_col_resize().hover((s) => s.bg(t.border))
+      .tooltip("끌어서 방 목록 너비 조절")
+      .on_mouse_down("left", (e, c) => { this.rdrag = { x: Number(e?.position?.x) || 0, w: this.roomWidthNow() }; this.ui.press = true; this.ui.pressAt = Date.now(); c.stop_propagation(); });
+  }
+  roomDrag(e, cx) {
+    const d = this.rdrag;
+    if (!d) return;
+    if (e?.pressed_button !== "left") { this.roomDragEnd(cx); return; }
+    const x = Number(e?.position?.x);
+    if (!Number.isFinite(x)) return;
+    const w = roomWidth(d.w + (x - d.x), this.winW);
+    if (w === this.roomW) return;
+    this.roomW = w;
+    try { cx.notify(); } catch {}
+  }
+  roomDragEnd(cx) {
+    this.rdrag = null;
+    this.ui.press = false;
+    try { setShared(ROOM_W_KEY, this.roomW); } catch {}
+    if (this.dirty && !this.ui.sel) this.softNotify(cx);
+    try { cx.notify(); } catch {}
+  }
+
   // The most px a message bubble may take (see bubbleCap). null before the first size report: the bubbles then use a percentage.
   capOf(minInner = 0) {
     const strip = this.windowed && this.narrow;
-    return bubbleCap(chatColW(this.winW, strip, this.narrow, ROOM_W, SLIM_W), minInner);
+    return bubbleCap(chatColW(this.winW, strip, this.narrow, this.roomWidthNow(), SLIM_W), minInner);
   }
 
   // One timeline entry (a grouped entry: `head` says whether the sender's name line is drawn). Leaders and the PO are on the left with a
@@ -3700,7 +4318,7 @@ export default class Inbox extends View {
     const top = e.head ? 18 : 8; // a new sender gets more air than a follow-up of the same sender
     const id = tlId(e.key);
     // The time sits at the bubble's bottom, on its outer side: left of mine, right of everyone else's.
-    const when = (ms) => div().flex_none().pb(1).text_size(10).text_color(t.dim).child(ms ? clock(ms) : "");
+    const when = (ms) => div().flex_none().pb(1).text_size(fz(10)).text_color(t.dim).child(ms ? clock(ms) : "");
     if (e.who === "me") {
       const blockedNow = Boolean(v.tabs.find((x) => x.id === v.pick)?.blocked);
       const age = Date.now() - (Number(e.at) || Number(e.ms) || 0);
@@ -3723,18 +4341,19 @@ export default class Inbox extends View {
       const lc = clipLong(bp.text), open = lc.cut && this.more.has(id), words = open ? bp.text : lc.text;
       const width = Math.min(Math.max(bubbleWidth(words), pics, 64), cap ?? Infinity);
       return v_flex().id(id).flex_none().px(10).pt(top).gap(2).items_end()
-        .when(Boolean(e.to), (el) => el.child(div().max_w("85%").min_w(0).truncate().text_size(10).text_color(t.dim).child(`→ ${shortName(e.to)}`)))
+        .when(Boolean(e.to), (el) => el.child(div().max_w("85%").min_w(0).truncate().text_size(fz(10)).text_color(t.dim).child(`→ ${shortName(e.to)}`)))
+        .children(fwdMarks(e, v.who, (n) => shortName(n)).map((x, i) => div().id(`${id}-fwd${i}`).max_w("85%").min_w(0).truncate().text_size(fz(10)).text_color(t.dim).child(x))) // #82: the PO passed these words on (only the picked leader's mark in its 1:1 view)
         .child(h_flex().w_full().min_w(0).gap(6).items_end().justify_end() // always the right edge: the chip and the time are left of the bubble
           .child(this.sideTools(t, id, e.text, e.ms))
-          .child(v_flex().flex_none().w(width).max_w(cap ?? "75%").min_w(0).px(12).py(9).gap(6).rounded(12).bg(t.working + "33").border(1).border_color((bad ? t.blocked : t.working) + "66").text_size(12.5).text_color(t.foreground)
+          .child(v_flex().flex_none().w(width).max_w(cap ?? "75%").min_w(0).px(12).py(9).gap(6).rounded(12).bg(t.working + "33").border(1).border_color((bad ? t.blocked : t.working) + "66").text_size(fz(12.5)).text_color(t.foreground)
             .children(bp.imgs.map((p, i) => div().id(`${id}-img${i}`).flex_none().w(sizes[i].w).h(sizes[i].h).rounded(6).overflow_hidden().cursor_pointer().on_mouse_down("left", stop)
               .on_click(() => openFile(p)).tooltip("눌러서 그림 열기")
               .child(image(imgRel(root, p)).w(sizes[i].w).h(sizes[i].h)))) // image() loads only paths under the app folder: data/inbox/img/<file>
-            .when(bp.chips.length > 0, (el) => el.child(h_flex().gap(4).flex_wrap().children(bp.chips.map((n) => div().flex_none().px(6).h(17).rounded(5).flex().items_center().bg(t.raised).text_size(10.5).text_color(t.muted).child(`사진 #${n}`)))))
+            .when(bp.chips.length > 0, (el) => el.child(h_flex().gap(4).flex_wrap().children(bp.chips.map((n) => div().flex_none().px(6).h(fz(17)).rounded(5).flex().items_center().bg(t.raised).text_size(fz(10.5)).text_color(t.muted).child(`사진 #${n}`)))))
             .when(Boolean(bp.text), (el) => el.child(this.md(`${id}-t`, words)))
             .when(lc.cut, (el) => el.child(this.moreToggle(t, id, lc, open)))))
         .when(Boolean(note), (el) => el.child(h_flex().max_w("100%").min_w(0).gap(6).items_center().flex_wrap().justify_end()
-          .child(div().min_w(0).text_size(10.5).text_color(bad ? t.blocked : t.dim).child(note))
+          .child(div().min_w(0).text_size(fz(10.5)).text_color(bad ? t.blocked : t.dim).child(note))
           .children(Boolean(e.id) ? acts.map((k, i) => this.button(t, `ma-${k}-${e.id}`, ACT[k][0], ACT[k][2], { primary: i === 0, tip: ACT[k][1] })) : [])));
     }
     if (e.who === "po") {
@@ -3742,12 +4361,27 @@ export default class Inbox extends View {
         .child(e.head ? this.circle(t, t.working, "P") : div().flex_none().w(28))
         .child(v_flex().flex_1().min_w(0).gap(3)
           .when(e.head, (el) => el.child(h_flex().gap(6).items_center()
-            .child(div().text_size(12).font_semibold().text_color(t.working).child("PO"))
-            .when(Boolean(e.to), (x) => x.child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(`→ ${shortName(e.to)}`)))))
+            .child(div().text_size(fz(12)).font_semibold().text_color(t.working).child("PO"))
+            .when(Boolean(e.to), (x) => x.child(div().min_w(0).truncate().text_size(fz(10.5)).text_color(t.dim).child(`→ ${shortName(e.to)}`)))))
           .child(h_flex().min_w(0).gap(6).items_end()
-            .child(div().flex_1().min_w(0).max_w(this.capOf() ?? "75%").px(12).py(9).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(12.5).text_color(t.foreground)
+            .child(div().flex_1().min_w(0).max_w(this.capOf() ?? "75%").px(12).py(9).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(fz(12.5)).text_color(t.foreground)
               .child(this.mdFolded(id, e.text, t)))
             .child(this.sideTools(t, id, e.text, e.ms))));
+    }
+    if (isNotice(e)) {
+      // #87: an announcement (완료·재개·중단·시작) is one centered red line, not a bubble. A click opens the whole report under it. The slide-in
+      // (the kit's transition() only animates a later change of a target) is not drawn: a line that is already on screen would not move.
+      const open = this.isOpen(e.s, e.it);
+      const red = t.blocked;
+      const word = (KIND[e.it.kind] ?? KIND.other)[0];
+      const flip = (_e, c) => { this.toggleOpen(e.s, e.it); this.reveal(this.spot(e.s, e.it)); c.notify(); };
+      return v_flex().id(this.spot(e.s, e.it)).flex_none().w_full().px(10).pt(top).gap(4).items_center()
+        .child(h_flex().w_full().min_w(0).items_center().justify_center()
+          .child(div().id(`nt-${id}`).max_w("92%").min_w(0).truncate().px(12).py(4).rounded(10).bg(red + "1f").border(1).border_color(red + "55").text_size(fz(12)).text_color(red).cursor_pointer()
+            .hover((x) => x.bg(red + "33")).on_mouse_down("left", stop).on_click(flip).tooltip(open ? "눌러서 접기" : "눌러서 전체 내용 보기")
+            .child(noticeText(shortName(e.leader), word, e.it))))
+        .when(open, (el) => el.child(v_flex().w_full().max_w(this.capOf() ?? "75%").min_w(0).px(12).py(9).rounded(12).bg(red + "14").border(1).border_color(red + "44").text_size(fz(12.5)).text_color(t.foreground)
+          .child(this.body(t, e.it, id))));
     }
     const a = e.waiting ? v.asks.find((x) => x.s.leader === e.leader) : null;
     const wait = e.it ? { ...e.it, kind: e.waiting || e.it.kind } : null;
@@ -3759,9 +4393,9 @@ export default class Inbox extends View {
       .child(v_flex().flex_1().min_w(0).gap(4)
         .child(hdr)
         .child(e.it ? h_flex().min_w(0).gap(6).items_end()
-          .child(div().flex_1().min_w(0).max_w(this.capOf() ?? "75%").child(this.bubble(t, e.s, wait, e.waiting ? t.blocked : null)))
+          .child(div().flex_1().min_w(0).max_w(this.capOf() ?? "75%").child(this.bubble(t, e.s, wait, e.waiting ? t.blocked : null, a)))
           .child(when(e.it.ms))
-          : div().text_size(12).text_color(t.dim).child("보고 기록 없이 대기 표시만 있습니다. 링크를 열거나 터미널을 들여다보세요."))
+          : div().text_size(fz(12)).text_color(t.dim).child("보고 기록 없이 대기 표시만 있습니다. 링크를 열거나 터미널을 들여다보세요."))
         .when(Boolean(a), (el) => el.child(this.askActions(t, a, cx))));
   }
 
@@ -3770,18 +4404,19 @@ export default class Inbox extends View {
     const po = x.who === "po";
     const color = po ? t.working : tint(t, x.who.slice(2));
     return h_flex().id(`typing-${tlId(x.who)}`).flex_none().px(10).pt(18).gap(8).items_start()
-      .child(po ? this.circle(t, t.working, "P") : this.avatar(t, x.who.slice(2)))
+      .child(po ? this.circle(t, t.working, x.solo ? String(x.name).slice(0, 1).toUpperCase() : "P") : this.avatar(t, x.who.slice(2)))
       .child(v_flex().min_w(0).gap(3)
-        .child(div().min_w(0).truncate().text_size(12).font_semibold().text_color(color).child(po ? "PO" : x.name))
+        .child(div().min_w(0).truncate().text_size(fz(12)).font_semibold().text_color(color).child(po && !x.solo ? "PO" : x.name))
         .child(h_flex().min_w(0).gap(6).items_center()
-          .child(div().px(14).py(5).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(16).text_color(t.dim).child("···"))
-          .child(x.label ? div().flex_none().text_size(11).text_color(x.label === LABEL_BLOCKED ? t.blocked : t.dim).child(x.label) : div())));
+          .child(div().px(14).py(5).rounded(12).bg(t.raised).border(1).border_color(t.border).text_size(fz(16)).text_color(t.dim).child("···"))
+          .child(x.label ? div().flex_none().text_size(fz(11)).text_color(x.label === LABEL_BLOCKED ? t.blocked : t.dim).child(x.label) : div())));
   }
 
   render(cx) { return this.full(cx); }
 
   // The messenger view: rooms (one per PO) beside one room's timeline, and the chat box under it. Narrow: the rooms are a strip on top.
   full(cx) {
+    syncFont();
     this.tvN = 0;
     this.noteRedraw(cx);
     this.guardAll();
@@ -3806,12 +4441,12 @@ export default class Inbox extends View {
     });
     if (!blocks.length && v.pick && (v.filter !== "all" || v.who) && v.raw.length) {
       blocks.push(h_flex().flex_none().p(14).gap(8).items_center()
-        .child(div().text_size(12).text_color(t.dim).child("해당 메시지 없음 —"))
+        .child(div().text_size(fz(12)).text_color(t.dim).child("해당 메시지 없음 —"))
         .child(this.button(t, "flt-reset", "전체 보기", (c) => { this.setWho(v.pick, "", c); this.setFilter(v.pick, "all", c); }, { primary: true })));
     }
     if (!blocks.length) {
-      blocks.push(div().flex_none().p(14).text_size(12).text_color(t.dim)
-        .child(!this.data ? "불러오는 중…" : v.pick ? "이 방에는 아직 대화가 없습니다." : "PO가 없습니다."));
+      blocks.push(div().flex_none().p(14).text_size(fz(12)).text_color(t.dim)
+        .child(!this.data ? "불러오는 중…" : v.pick ? "이 방에는 아직 대화가 없습니다." : v.solo ? "기록된 Claude 터미널 대화가 없습니다." : "PO가 없습니다."));
     }
     // The "···" bubbles of whoever is writing now (the room's PO and leaders whose hc status is working): in EVERY filter (a chip hides
     // messages, not what is happening), after the last message, and nothing else reads them (not the unread counts, not `seenNext`, not the
@@ -3866,20 +4501,20 @@ export default class Inbox extends View {
       ? h_flex().id("inbox-jump").absolute().bottom(12).right(18).w(32).h(32).rounded(16).items_center().justify_center().cursor_pointer()
         .bg(t.raised).border(1).border_color(t.border).text_color(t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground))
         .on_mouse_down("left", stop).on_click((_e, c) => this.jumpToEnd(c)).tooltip("가장 아래(최신)로")
-        .child(div().text_size(15).child("↓"))
+        .child(div().text_size(fz(15)).child("↓"))
       : null;
     const listBox = v_flex().id("inbox-listbox").relative().flex_1().min_h(0).child(lines).when(Boolean(jump), (el) => el.child(jump));
     const bar = this.filterBar(t, v);
     const lbar = this.leaderBar(t, v);
     const rrow = this.restartRow(t, v, cx); // "PO 새로 시작": the button, its confirm line or its steps (null in the other-PO room)
-    const rpo = v.pick && v.pick !== PO_OTHER ? chatTarget(v.terms, [], v.pick).po ?? "" : "";
+    const rpo = v.pick && v.pick !== PO_OTHER ? chatTarget(v.terms, [], v.pick).po ?? "" : ""; // (a solo room's terminal too)
     const rcb = rpo ? this.remoteButton(t, v.pick, rpo, String(v.terms.find((x) => x.address === rpo)?.status ?? "")) : null; // "원격 연결 켜기" (#79): in the room header
     const usage = this.usageLine(t, v.pick); // null before the first read (and when there is no cost to show either)
     const panel = this.promptPanel(t, v, cx); // a blocked PO's screen + its keys (null while the room's PO is not waiting on a prompt)
     const room = v_flex().flex_1().min_w(0).min_h(0).when(!strip, (el) => el.h_full()) // beside the rooms the column must fill the row (h_flex centers children)
-      .when(!strip && Boolean(head), (el) => el.child(h_flex().flex_none().h(30).px(14).gap(6).items_center().border_b(1).border_color(t.border)
-        .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(head))
-        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : `리더 ${v.choices?.length ?? 0}명`))
+      .when(!strip && Boolean(head), (el) => el.child(h_flex().flex_none().h(fz(30)).px(14).gap(6).items_center().border_b(1).border_color(t.border)
+        .child(div().min_w(0).truncate().text_size(fz(13)).font_semibold().text_color(t.foreground).child(head))
+        .child(div().flex_none().text_size(fz(10.5)).text_color(t.dim).child(v.pick === PO_OTHER ? "채팅 없음" : v.solo ? "터미널" : `리더 ${v.choices?.length ?? 0}명`))
         .when(Boolean(rcb), (el) => el.child(rcb))))
       .when(strip && Boolean(rcb), (el) => el.child(h_flex().flex_none().min_w(0).px(14).pb(4).justify_end().child(rcb))) // the picker layout has no room header
       .when(Boolean(usage), (el) => el.child(usage))
@@ -3889,19 +4524,19 @@ export default class Inbox extends View {
       .when(Boolean(panel), (el) => el.child(panel))
       .when(Boolean(rrow), (el) => el.child(rrow))
       .child(this.chatBox(t, v));
-    return v_flex().size_full().min_h(0).relative().bg(t.chrome).text_size(13)
+    return v_flex().size_full().min_h(0).relative().bg(t.chrome).text_size(fz(13))
       .on_window_mouse_move((e, c) => this.pointer(e, c))
       .on_window_mouse_up("left", (e, c) => this.pointerUp(c, e))
       .on_size_change((size, c) => this.onSize(size.width, c))
-      .child(h_flex().h(38).px(this.compact ? 10 : 14).flex_none().items_center().justify_between()
+      .child(h_flex().h(fz(38)).px(this.compact ? 10 : 14).flex_none().items_center().justify_between()
         .child(h_flex().gap(6).items_center()
-          .when(!this.paned || this.mained, (el) => el.child(div().text_size(15).font_semibold().text_color(t.foreground).child("UI 모드"))) // a pane's own header already says it
+          .when(!this.paned || this.mained, (el) => el.child(div().text_size(fz(15)).font_semibold().text_color(t.foreground).child("UI 모드"))) // a pane's own header already says it
           .when(!this.windowed && waiting > 0, (el) => el.child(this.tag(t, `대기 ${waiting}`, "blocked")))
           .child(div().id("inbox-refresh").p(3).rounded(5).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
             .on_mouse_down("left", stop).on_click((_e, c) => { this.gen++; this.busy = false; this.remoteRestore(c, true); this.load(c); }).tooltip("새로고침")
-            .child(this.busy ? svg(ICON("spinner")).size(13).spin(900) : div().text_size(14).child("↻"))))
+            .child(this.busy ? svg(ICON("spinner")).size(13).spin(900) : div().text_size(fz(14)).child("↻"))))
         .child(h_flex().gap(8).items_center()
-          .child(div().text_size(11).text_color(t.dim).child(this.data ? ago(this.data.at) : ""))
+          .child(div().text_size(fz(11)).text_color(t.dim).child(this.data ? ago(this.data.at) : ""))
           .when(!this.paned, (el) => el.child(this.button(t, "inbox-beside", "옆에 열기", (c) => { this.openBeside(); c.notify(); }, { tip: "리더 옆 창(페인)으로 엽니다. 리더가 없으면 지금 터미널 옆, 이 탭에 이미 있으면 그쪽으로 갑니다" })))
           .when(this.mained, (el) => el.child(this.button(t, "inbox-terminal-mode", "터미널 모드", (c) => { this.toTerminalMode(); c.notify(); }, { tip: "터미널 화면으로 돌아갑니다. 터미널은 꺼지지 않고 그대로 있습니다" })))
           .when(!this.windowed && !this.mained, (el) => el.child(this.button(t, "inbox-open", "창 열기", (c) => { this.openWindow(); c.notify(); }, { tip: "UI 모드 창을 엽니다" })))
@@ -3909,12 +4544,12 @@ export default class Inbox extends View {
             .on_mouse_down("left", stop).on_click((_e, c) => { try { closeOverlay(safeProps().overlay); } catch {} c.notify(); }).tooltip("닫기")
             .child(svg("mods/pane/close.svg").size(13))))))
       .when(strip, (el) => el.child(this.picker(t, v)))
-      .when(!strip && !v.tabs.some((x) => x.id !== PO_OTHER), (el) => el.child(this.poHint(t)))
-      .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(11).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
-      .child(strip ? room : h_flex().flex_1().min_h(0).items_stretch().child(this.narrow ? this.slimRooms(t, v) : this.roomList(t, v)).child(room))
+      .when(!strip && !v.tabs.some((x) => x.id !== PO_OTHER), (el) => el.child(this.poHint(t, v)))
+      .when(Boolean(this.error), (el) => el.child(div().px(14).pb(6).text_size(fz(11)).text_color(t.blocked).max_h(48).overflow_hidden().child(this.error)))
+      .child(strip ? room : h_flex().flex_1().min_h(0).items_stretch().child(this.narrow ? this.slimRooms(t, v) : this.roomList(t, v)).when(!this.narrow, (el) => el.child(this.roomGrip(t))).child(room))
       // The notice floats over the top of the room: absolute, so it takes no layout space and the chat never moves when it comes or goes.
       .when(Boolean(this.msg), (el) => el.child(h_flex().id("inbox-msg-layer").absolute().top(NOTICE_TOP).left(0).right(0).px(14).justify_center()
-        .child(div().id("inbox-msg").max_w(NOTICE_MAX_W).px(12).py(5).rounded(6).bg(t.chrome).shadow_md().text_size(11.5).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
-          .on_mouse_down("left", stop).on_click((_e, c) => { this.msg = null; c.notify(); }).tooltip("눌러서 닫기").child(this.msg.text))));
+        .child(div().id("inbox-msg").max_w(NOTICE_MAX_W).px(12).py(5).rounded(6).bg(t.chrome).shadow_md().text_size(fz(11.5)).cursor_pointer().text_color(this.msg.bad ? t.blocked : t.working)
+          .on_mouse_down("left", stop).on_click((_e, c) => { this.msg = null; c.notify(); }).tooltip("눌러서 닫기").child(soloWords(this.msg.text)))));
   }
 }

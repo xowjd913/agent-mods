@@ -43,7 +43,7 @@ test("#110 소스: 카드 답 상자는 PO 채팅과 같은 Textarea(여러 줄,
   assert.match(box, /s\.on\("change", \(\) => this\.cardChange\(leader, s\)\)/);
   assert.match(box, /s\.on\("paste_other"/);
   const ask = cut("  askActions(t, a, cx) {", "  // One timeline entry");
-  assert.match(ask, /Textarea\.new\(input\)\.min_h\(30\)/);
+  assert.match(ask, /Textarea\.new\(input\)\.min_h\(fz\(30\)\)/);
   assert.doesNotMatch(ask, /Input\.new\(/);
   assert.match(ask, /\.on_key_down\(\(e, c\) => this\.answerKey\(s\.leader, e, c\)\)/);
 });

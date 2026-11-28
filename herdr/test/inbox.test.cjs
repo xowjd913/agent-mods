@@ -1,4 +1,5 @@
 // inbox.cjs 단위 테스트: node --test herdr/test/inbox.test.cjs
+require("./helpers/po-home.cjs"); // a PO machine: a profile without `preset` is "po" (see the helper)
 const test = require("node:test");
 const POSIX = process.platform !== "win32"; // Windows has no POSIX file modes: only the mode asserts are skipped there
 const assert = require("node:assert/strict");
@@ -326,7 +327,7 @@ test("main.js: 카드는 접힌 채 시작하고, 펼침은 공유 상태에 두
   assert.match(src, /shared\(OPEN_KEY\)/);
   assert.match(src, /setShared\(OPEN_KEY/);
   assert.match(src, /"접기" : "자세히"/);
-  assert.match(src, /const open = it\.long && this\.isOpen/); // 기본은 접힘
+  assert.match(src, /const open = it\.long && !view && this\.isOpen/); // 기본은 접힘
   // 복사: 클립보드에만 쓰고 붙여 넣기·PO 이동·hc send 경로는 없다
   const copy = src.slice(src.indexOf("  copy(key, text, cx)"), src.indexOf("  // \"옆에 열기\":"));
   assert.match(copy, /cx\.write_to_clipboard\(String\(text\)\)/);
@@ -359,8 +360,8 @@ test("main.js: 카드 글자는 모두 선택 가능한 TextView이고, 눌러�
   assert.ok(src.includes("this.heading_text(t, `${id}-h`") && src.includes("this.heading_text(t, key, p.html")); // 제목·소제목: TextView 자체에 굵기를 준 선택 가능한 글
   assert.ok(!src.includes("<strong>"));
   assert.match(src, /it\.parts/); // 펼친 본문
-  // 카드 전체에는 클릭 처리가 없다: toggleOpen은 버튼 한 곳에서만 부른다
-  assert.equal((src.match(/toggleOpen\(/g) ?? []).length, 2); // 정의 1 + 버튼 1
+  // 카드 전체에는 클릭 처리가 없다: toggleOpen은 버튼 한 곳과, 말풍선이 아닌 가운데 알림 줄(#87) 한 곳에서만 부른다
+  assert.equal((src.match(/toggleOpen\(/g) ?? []).length, 3); // 정의 1 + 버튼 1 + 알림 줄 1
   assert.ok(!/linkChip|codeSpan/.test(src));
 });
 
@@ -427,7 +428,7 @@ test("main.js: 페인 모드: 같은 메신저 화면, 자기 제목줄을 쓰�
   assert.match(open, /if \(this\.windowed\) \{ try \{ closeOverlay/); // 창에서 열면 창을 닫는다
   assert.ok(!/hc send|hc\(/.test(open));
   // 머리줄: 페인은 제목·옆에 열기가 없고(페인 머리줄·이미 페인), 닫기 버튼도 만들지 않는다
-  assert.match(src, /\.when\(!this\.paned \|\| this\.mained, \(el\) => el\.child\(div\(\)\.text_size\(15\)[^\n]*UI 모드/); // 페인은 자기 제목줄이 있고, UI 모드 main 칸은 없어서 제목을 그린다
+  assert.match(src, /\.when\(!this\.paned \|\| this\.mained, \(el\) => el\.child\(div\(\)\.text_size\(fz\(15\)\)[^\n]*UI 모드/); // 페인은 자기 제목줄이 있고, UI 모드 main 칸은 없어서 제목을 그린다
   assert.match(src, /\.when\(!this\.paned, \(el\) => el\.child\(this\.button\(t, "inbox-beside", "옆에 열기"/);
   assert.match(src, /\.when\(this\.windowed, \(el\) => el\.child\(div\(\)\.id\("inbox-close"\)/);
   // 갱신·뱃지: 창과 페인은 5초(페인은 그려지는 동안만), Dock만 30초, 뱃지는 창만 건너뛴다
@@ -451,7 +452,7 @@ test("main.js: 방 목록과 방 칸이 행의 전체 높이를 채운다(타임
   const src = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /h_flex\(\)\.flex_1\(\)\.min_h\(0\)\.items_stretch\(\)/);
   assert.match(src, /const room = v_flex\(\)\.flex_1\(\)\.min_w\(0\)\.min_h\(0\)\.when\(!strip, \(el\) => el\.h_full\(\)\)/);
-  assert.match(src, /id\("po-rooms"\)\.flex_none\(\)\.w\(ROOM_W\)\.h_full\(\)/);
+  assert.match(src, /id\("po-rooms"\)\.flex_none\(\)\.w\(this\.roomWidthNow\(\)\)\.h_full\(\)/);
   assert.match(src, /id\("po-rooms"\)\.flex_none\(\)\.w\(SLIM_W\)\.h_full\(\)/);
   // the timeline itself keeps taking the rest of the column above the pinned chat box
   assert.match(src, /id\("inbox-list"\)[^\n]*\.flex_1\(\)\.min_h\(0\)/);
@@ -748,7 +749,7 @@ test("poProject·poList: 칩 이름은 탭 이름 'PO · <프로젝트>'의 프�
 test("main.js: 칩 줄에 PO 머리말, 이름 'PO 모름', 세션 제목은 툴팁", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "mods", "inbox", "main.js"), "utf8").replace(/\r\n/g, "\n");
   assert.match(src, /const OTHER_LABEL = "PO 모름"/);
-  assert.match(src, /child\("PO"\)\)\n\s+\.children\(v\.tabs/);
+  assert.match(src, /child\(v\.solo \? "터미널" : "PO"\)\)\n\s+\.children\(v\.tabs/); // #90: "터미널" in solo mode
   assert.match(src, /세션: \$\{x\.title\}/);
   assert.doesNotMatch(src, /label: "기타"|OTHER_LABEL = "기타"/);
 });
@@ -813,7 +814,7 @@ test("#57 재현: 답변 상자 초안은 리더가 한 번 빠졌다고 지워�
 test("#57: view()는 settlePick으로 고른 방을 붙들고, 자동으로 고른 방도 저장해 리더 수에 따라 떠다니지 않게 한다", () => {
   const MAIN = fs.readFileSync(path.join(__dirname, "../mods/inbox/main.js"), "utf8");
   assert.match(MAIN, /settlePick\(pos, last, hasOther, this\.pickLive\.id === last \? this\.pickLive\.at : 0, now\)/);
-  assert.match(MAIN, /if \(pick && pick !== last\) \{ try \{ setShared\(PICK_KEY, pick\); \} catch \{\} \}/);
+  assert.match(MAIN, /if \(pick && pick !== last\) \{ try \{ setShared\(solo \? SOLO_PICK_KEY : PICK_KEY, pick\); \} catch \{\} \}/);
   assert.match(MAIN, /settled\.ghost && !rooms\.some/); // 붙든 방은 방 목록에도 남는다
   assert.match(MAIN, /staleDrafts\(this\.inputs\.keys\(\), live, this\.inputSeen, now\)/);
   const chat = (src) => src.slice(src.indexOf("// chat:begin"), src.indexOf("// chat:end"));
@@ -877,7 +878,12 @@ test("collect: po/<id>.jsonl을 PO별로 읽고, 옛 po.jsonl과 잘못된 파�
   assert.deepEqual(d.po.devnotes.map((x) => [x.text, x.to]), [["안녕하세요", "here"]]);
   assert.deepEqual(d.po.mascoz.map((x) => x.text), ["마스코즈"]);
   assert.deepEqual(I.readPo(dir), d.po);
-  assert.deepEqual(I.collect(path.join(dir, "none")), { at: I.collect(path.join(dir, "none")).at, dir: path.join(dir, "none"), root: I.appRoot(), leaders: [], po: {}, imgd: {}, cost: {}, names: I.plainNames(), profileError: "" });
+  // `at` is the clock at the call (collect has no injected clock): it is checked as a valid ISO time near now, never compared with a second call (1 ms apart failed Windows CI, #147).
+  const none = I.collect(path.join(dir, "none"));
+  const { at, ...rest } = none;
+  assert.match(at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  assert.ok(Math.abs(Date.parse(at) - Date.now()) < 60 * 1000, "at is the current time");
+  assert.deepEqual(rest, { dir: path.join(dir, "none"), root: I.appRoot(), leaders: [], po: {}, solo: {}, soloOn: false, imgd: {}, cost: {}, names: I.plainNames(), profileError: "" });
 });
 
 test("chat 블록: main.js가 inbox.cjs와 한 글자도 다르지 않은 같은 블록을 쓴다", () => {
@@ -1148,7 +1154,7 @@ test("main.js: 칩은 대기 중인 결정(decision) 말풍선에만, 같은 sen
   const a = src.indexOf("  askActions(t, a, cx) {");
   const body = src.slice(a, src.indexOf("    if (!a.po) box.child", a));
   assert.match(body, /const opts = kind === "decision" && !groups\.length \? decisionOptions\(item\?\.body\)/); // 한 번만 계산
-  assert.match(body, /kind === "decision" \? opts\.options\.map/);
+  assert.match(body, /kind === "decision" && !view \? opts\.options\.map/);
   assert.match(body, /`\$\{n\}안 선택`/);
   assert.match(body, /this\.send\(a, `\$\{n\}안 선택`, c, "choice"\)/);
   assert.match(body, /primary: n === opts\.recommended/);
@@ -2187,7 +2193,7 @@ function fakeDiv() {
 
 test("main.js: 방 목록 원격 표시(#119) — 켜짐일 때만 강조색 글자와 툴팁을 내고, 꺼짐·모름은 평소 'PO'", () => {
   const src = mainSrc();
-  const g = { div: fakeDiv, PO_OTHER: I.PO_OTHER };
+  const g = { div: fakeDiv, PO_OTHER: I.PO_OTHER, fz: (n) => n };
   const make = (head, next) => runMethod(src, head, next, g);
   const { roomRemote } = make("  roomRemote(t, x, text) {", "  // The small line under a room's name");
   const { roomSub } = make("  roomSub(t, x) {", "  // The count badges of a room");
@@ -2633,8 +2639,8 @@ const restartWorld = ({ clearWorks = true, cols = 2, glue = "", noRecs = false, 
     restartDraft: I.restartDraft, restartSubmitCheck: I.restartSubmitCheck, restartClearCheck: I.restartClearCheck, RESTART_MARK: I.RESTART_MARK,
     restartBlock: I.restartBlock, restartPoll: I.restartPoll, restartNoteFresh: I.restartNoteFresh,
     restartSendResult: I.restartSendResult, restartTerm: I.restartTerm, restartSendBlock: I.restartSendBlock, restartClearState: I.restartClearState,
-    handoffAsk: I.handoffAsk, HELPER: () => "h.cjs",
-    exec: async (c, a) => a[1] === "po-me" ? { code: 0, stdout: JSON.stringify(po.recs) } : ({ code: 0, stdout: JSON.stringify({ path: "/n.md", exists: po.noteMs > 0, ms: po.noteMs, size: po.noteMs ? 20 : 0, text: po.noteMs ? "note" : "" }) }),
+    handoffAsk: I.handoffAsk, HELPER: () => "h.cjs", soloWords: (x) => x,
+    exec: async (c, a) => a[1] === "po-me" || a[1] === "solo-me" ? { code: 0, stdout: JSON.stringify(po.recs) } : ({ code: 0, stdout: JSON.stringify({ path: "/n.md", exists: po.noteMs > 0, ms: po.noteMs, size: po.noteMs ? 20 : 0, text: po.noteMs ? "note" : "" }) }),
     hc: async (a) => {
       if (a[0] === "get") {
         if (po.clearPoll >= 0 && ++po.clearPoll >= 3 && clearWorks) { po.status = "idle"; po.turn++; po.clearPoll = -1; }
@@ -2658,7 +2664,7 @@ const restartWorld = ({ clearWorks = true, cols = 2, glue = "", noRecs = false, 
     },
   });
   const self = {
-    rs: new Map(), rgen: 0,
+    rs: new Map(), ss: new Map(), rgen: 0,
     liveTerms: () => [{ address: "t9", status: po.status }], isBlocked: () => po.status === "blocked",
     say: (m) => log.says.push(m), diag: (m) => log.diag.push(m),
   };
@@ -2675,9 +2681,17 @@ const restartWorld = ({ clearWorks = true, cols = 2, glue = "", noRecs = false, 
   grab("  async sendLine(po, text, still", "  // 새로 시작 / 다시");
   grab("  restartRun(room, po, id, c) {", "  // Steps 1-4.");
   grab("  async restartFlow(", "  // The strip above the chat box");
+  grab("  soloAlive(room, g)", "  soloEnd(");
+  grab("  soloEnd(room, g, patch, c)", "  async soloMe(");
+  grab("  async soloMe(id)", "  soloClear(");
+  grab("  soloClear(room, po, c)", "  async soloFlow(");
+  grab("  async soloFlow(", "  soloOpen(");
+  grab("  soloClose(room, c)", "  // The strip above a solo room's chat box");
   const click = () => { const c = strictCx(log); try { self.restartRun("r", "t9", "r", c); } finally { c.valid = false; } };
   const settle = async (ms = 4000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { await tick(); const r = self.rs.get("r"); if (r && (r.phase === "done" || r.phase === "fail" || r.phase === "timeout")) break; } };
-  return { self, po, log, click, settle };
+  const soloClick = (room = "t9") => { const c = strictCx(log); try { self.soloClear(room, "t9", c); } finally { c.valid = false; } };
+  const soloSettle = async (ms = 8000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { await tick(); const r = self.ss.get("t9"); if (r && (r.phase === "done" || r.phase === "fail")) break; } };
+  return { self, po, log, click, settle, soloClick, soloSettle };
 };
 test("새로 시작 전체 흐름(PO 칸 2열): 노트 요청 → 노트 → /clear → /PO가 hc send로만 끝까지 가고, 화면·붙여넣기·키 입력은 한 번도 쓰이지 않는다", async () => {
   const w = restartWorld({ cols: 2 });
@@ -2692,6 +2706,54 @@ test("새로 시작 전체 흐름(PO 칸 2열): 노트 요청 → 노트 → /cl
   assert.deepEqual(w.log.sends.slice(1), ["/clear", "/PO"]);
   assert.deepEqual(w.log.other, [], "only hc get / hc send: no read, no keys");
   assert.equal(w.log.spawned, 1);
+});
+test("혼자 모드 새로 시작: /clear 한 줄만 보내고(노트·/PO 없음) turn이 오르면 끝난다", async () => {
+  const w = restartWorld({ cols: 2 });
+  w.soloClick();
+  assert.equal(w.self.ss.get("t9").phase, "run");
+  await w.soloSettle();
+  assert.deepEqual(w.log.stale, [], "stale cx used");
+  assert.equal(w.self.ss.get("t9").phase, "done", JSON.stringify(w.self.ss.get("t9")) + w.log.diag.join("|"));
+  assert.deepEqual(w.log.sends, ["/clear"]);
+  assert.deepEqual(w.log.other, []);
+  assert.ok(w.log.says.some((m) => /대화를 비웠습니다/.test(m)));
+});
+test("혼자 모드 새로 시작: /clear가 글로 들어갔다는 훅 기록이 있으면 실패로 끝난다", async () => {
+  const w = restartWorld({ clearAsText: true });
+  w.soloClick();
+  await w.soloSettle();
+  const r = w.self.ss.get("t9");
+  assert.equal(r.phase, "fail");
+  assert.match(r.why, /글로 들어간/);
+  assert.ok(w.log.diag.some((d) => /reached the model as text/.test(d)));
+});
+test("혼자 모드 새로 시작: 끝나는 신호(turn)가 없으면 실패로 끝나고 이유를 diag에 남긴다", async () => {
+  const w = restartWorld({ clearWorks: false });
+  w.soloClick();
+  await w.soloSettle(20000);
+  assert.equal(w.self.ss.get("t9").phase, "fail");
+  assert.match(w.self.ss.get("t9").why, /끝났는지 확인하지 못했습니다/);
+  assert.ok(w.log.diag.some((d) => /solo \/clear not confirmed/.test(d)));
+});
+test("혼자 모드 새로 시작: 터미널이 작업 중이거나 질문 중이면 아무것도 보내지 않고 이유를 보인다", async () => {
+  for (const status of ["working", "blocked"]) {
+    const w = restartWorld();
+    w.po.status = status;
+    w.soloClick();
+    const r = w.self.ss.get("t9");
+    assert.equal(r.phase, "fail", status);
+    assert.ok(r.why.length > 0, status);
+    assert.deepEqual(w.log.sends, [], status);
+  }
+});
+test("혼자 모드 새로 시작: 실행 중에 취소(닫기)하면 이어서 아무것도 하지 않는다", async () => {
+  const w = restartWorld();
+  w.soloClick();
+  const c = strictCx(w.log); w.self.soloClose("t9", c); c.valid = false;
+  assert.equal(w.self.ss.get("t9"), undefined);
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal(w.self.ss.get("t9"), undefined, "no state comes back");
+  assert.ok(w.log.sends.length <= 1);
 });
 test("새로 시작: /clear가 끝났다는 신호(turn 증가)가 없으면 /PO를 보내지 않고 멈추며, 이유를 diag에 남긴다", async () => {
   const w = restartWorld({ clearWorks: false });
@@ -3154,7 +3216,7 @@ const rcRun = async ({ pre, afterSend = [], status = "idle", statusAfterSend = s
     if (a[0] === "keys") { log.keys.push(a[2]); if (esc !== null) queue = [esc]; return { code: 0, stdout: "" }; }
     return { code: 1, stdout: "" };
   };
-  const g = { hc, PROMPT_LINES: 40, REMOTE_CMD: "/remote-control", REMOTE_POLLS: 3, REMOTE_POLL_MS: 0, remoteScreen: I.remoteScreen, remoteNote: I.remoteNote, remoteBlock: I.remoteBlock };
+  const g = { hc, PROMPT_LINES: 40, REMOTE_CMD: "/remote-control", REMOTE_POLLS: 3, REMOTE_POLL_MS: 0, remoteScreen: I.remoteScreen, remoteNote: I.remoteNote, remoteBlock: I.remoteBlock, soloWords: (x) => x };
   const self = {
     rc: new Map(), rs: new Map(), st: status, liveTerms() { return [{ address: "t9", status: this.st }]; }, poTerm: async function () { return { live: true, status: self.st }; }, say: (m, bad) => log.says.push({ m, bad: Boolean(bad) }),
     sleepOn: async () => {}, remoteMark: async () => {}, remoteHelper: async () => null, sendLine: async function (po, text) { log.sends.push(text); self.st = statusAfterSend; queue = afterSend.length ? afterSend : [pre]; return send; },
@@ -3239,7 +3301,7 @@ test("remoteRestore: 시작·새로고침 때 PO마다 화면을 한 번만 읽�
   const screens = { t1: `${RC_LINE}\n${RC_BASE}`, t2: RC_BASE, t3: null };
   const g = { hc: async (a) => { if (a[0] === "read") { reads.push(a[1]); return screens[a[1]] === null ? { code: 1, stdout: "" } : { code: 0, stdout: screens[a[1]] }; } if (a[0] !== "get") other.push(a); return { code: 0, stdout: "" }; },
     exec: async () => ({ code: 1, stdout: "" }), HELPER: () => "inbox.cjs", termPid: I.termPid,
-    PROMPT_LINES: 40, remoteScreen: I.remoteScreen, poList: (terms) => terms.map((t) => ({ id: t.id, address: t.address })) };
+    PROMPT_LINES: 40, remoteScreen: I.remoteScreen, soloMode: () => false, soloRooms: () => [], poList: (terms) => terms.map((t) => ({ id: t.id, address: t.address })) };
   const self = { rc: new Map(), rcChecked: new Set(), say: () => { throw new Error("no toast"); }, liveTerms: () => [{ id: "a", address: "t1" }, { id: "b", address: "t2" }, { id: "c", address: "t3" }] };
   Object.assign(self, restoreMethods(src, g));
   let notified = 0; const spawned = [];
@@ -3369,7 +3431,7 @@ test("remoteRestore #109: 화면에서 줄이 밀려나도 저장된 기록이 �
   const hc = async (a) => a[0] === "read" ? { code: 0, stdout: screens[a[1]] }
     : a[0] === "get" ? { code: 0, stdout: JSON.stringify({ foreground: pids[a[1]] ? { pid: pids[a[1]], name: "claude.exe" } : { pid: 5, name: "zsh" } }) } : { code: 0, stdout: "" };
   const sent = [];
-  const g = { hc: async (a) => { if (a[0] === "keys" || a[0] === "send") sent.push(a); return hc(a); }, exec, HELPER: () => "inbox.cjs", termPid: I.termPid, PROMPT_LINES: 40, remoteScreen: I.remoteScreen, poList: (terms) => terms.map((t) => ({ id: t.id, address: t.address })) };
+  const g = { hc: async (a) => { if (a[0] === "keys" || a[0] === "send") sent.push(a); return hc(a); }, exec, HELPER: () => "inbox.cjs", termPid: I.termPid, soloMode: () => false, soloRooms: () => [], PROMPT_LINES: 40, remoteScreen: I.remoteScreen, poList: (terms) => terms.map((t) => ({ id: t.id, address: t.address })) };
   const self = { rc: new Map(), rcChecked: new Set(), say: () => { throw new Error("no toast"); }, liveTerms: () => ["a", "b", "c", "d", "e"].map((id, i) => ({ id, address: `t${i + 1}` })) };
   Object.assign(self, restoreMethods(src, g));
   const spawned = [];

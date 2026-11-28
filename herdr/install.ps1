@@ -1,6 +1,6 @@
 ﻿# Herdr 모드를 설치·갱신한다(Windows). 다시 실행해도 된다. install.sh의 Windows 버전이다.
-#   기본 모드: tabs-mine, work, prs, wt-menu, schedules
-#   추가 모드(-Extras): usage-status, agent-groups, leader-tabs, path-menu, gh-accounts, inbox
+#   기본 모드: tabs-mine, settings, gh-accounts, work, prs, wt-menu, schedules
+#   추가 모드(-Extras): usage-status, agent-groups, leader-tabs, path-menu, inbox, memo
 #   인자 없이 실행하면 설치된 모드만 갱신한다(처음이면 기본 모드를 설치한다).
 #   -Only work,prs / -Add usage-status / -Remove leader-tabs / -List 로 모드를 고를 수 있다.
 #   -StatusLine / -StatusLineWrap 은 usage-status 의 사용률 기록기(usage-writer)를 Claude Code 상태 줄(statusLine)에 등록한다(켜겠다고 한 때만, 다른 상태 줄은 -StatusLineWrap 없이는 바꾸지 않는다).
@@ -14,7 +14,12 @@
 param([switch]$Extras, [string[]]$Only, [string[]]$Add, [string[]]$Remove, [switch]$List, [switch]$StatusLine, [switch]$StatusLineWrap, [switch]$StatusLineRemove)
 $ErrorActionPreference = 'Stop'
 $RepoUrl = 'https://github.com/xowjd913/agent-mods'
-$Branch = 'main'
+# 받을 브랜치. 설정 창이 설치한 출처와 같은 브랜치로 다시 돌리도록 AGENT_MODS_REF로 바꿀 수 있다(기본 main).
+$Branch = if ($env:AGENT_MODS_REF) { $env:AGENT_MODS_REF } else { 'main' }
+if ($Branch -notmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*$') {
+  Write-Host "AGENT_MODS_REF($Branch)는 브랜치 이름(영문·숫자·. _ / -)이어야 합니다."
+  return
+}
 $AppHome = if ($env:HERDR_APP_HOME) { $env:HERDR_APP_HOME } else { Join-Path $HOME '.config\herdr-app' }
 
 # 고르는 옵션은 하나만 받는다.
@@ -36,7 +41,9 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 # 저장소 안에서 실행했으면 그 파일을 쓰고, 아니면(irm) 압축 파일을 받아 임시 폴더에 푼다.
 $Dir = $PSScriptRoot
 $Tmp = $null
+$Remote = $false
 if (-not $Dir -or -not (Test-Path (Join-Path $Dir 'install.cjs'))) {
+  $Remote = $true
   $Tmp = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
   New-Item -ItemType Directory -Force -Path $Tmp | Out-Null
   Write-Host "내려받는 중: $RepoUrl ($Branch)"
@@ -113,6 +120,8 @@ try {
   # 사용률 기록기 등록은 usage-status 를 복사한 뒤 같은 도우미가 한다(켜겠다고 한 때만).
   if ($StatusLine -or $StatusLineWrap) { $ModArgs += '--statusline' }
   if ($StatusLineWrap) { $ModArgs += '--wrap' }
+  # 받아서 돌린 경우에만 브랜치를 넘긴다(복제본에서 돌렸으면 그 폴더가 기록된다).
+  if ($Remote) { $ModArgs += @('--ref', $Branch) }
   $R = Invoke-Helper $ModArgs
   Write-Host -NoNewline $R.Out
   if ($R.Code -eq 2) { return }

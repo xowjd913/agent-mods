@@ -3,6 +3,9 @@
 // installer copies it. No dependencies.
 // The built-in default profile is today's behavior (lead-* agents, role=po hubs). A profile file overrides single keys; a missing
 // default file is the default profile, a broken one is an error (never a silent fallback to other names).
+// A profile starts from a PRESET (`preset`: "po" = today's names, "none" = no agent names, hub or prefix rules at all) and the file's own keys
+// override it. With no `preset` key: no profile file picks "po" when the PO arrange script exists on this PC and "none" otherwise; a profile
+// file without a `preset` keeps "po" (what it always meant).
 "use strict";
 const fs = require("fs");
 const os = require("os");
@@ -23,7 +26,39 @@ const DEFAULT_PROFILE = Object.freeze({
   kinds: Object.freeze({}), // alias -> contract kind, e.g. {"question": "decision"}
 });
 
+// The "none" preset: nothing is a reporting agent or a hub (patterns that never match, empty role values), so the mods fall back to what they can
+// know without anyone's naming rules (parent links, the wait label). The hook for a solo mode (#90) is here: a solo profile starts from "none".
+const NONE_PROFILE = Object.freeze({
+  v: 1,
+  agent: Object.freeze({ name: "(?!)", role: "", titlePrefix: "", strip: "" }),
+  hub: Object.freeze({ role: "", idLabel: "po", id: "(?!)", dir: "po" }),
+  labels: DEFAULT_PROFILE.labels,
+  answerLine: DEFAULT_PROFILE.answerLine,
+  kinds: Object.freeze({}),
+});
+const PRESETS = Object.freeze({ po: DEFAULT_PROFILE, none: NONE_PROFILE });
+const PRESET_NAMES = Object.keys(PRESETS);
+// The script the PO arrange feature runs (leader-tabs reseats the PO panes with it, prs writes the pane list it reads). `~` is this user's home.
+const PO_ARRANGE_SCRIPT = "~/.claude/skills/leader/herdr-team.sh";
+
 class ProfileError extends Error {}
+
+const homeOf = (env = process.env) => env.HOME || env.USERPROFILE || os.homedir();
+const expandHome = (p, env = process.env) => (/^~(?=$|[\\/])/.test(p) ? homeOf(env) + p.slice(1) : p);
+const fileExists = (p) => { try { return fs.statSync(p).isFile(); } catch { return false; } };
+
+// Which preset a profile starts from and why: the file's `preset` ("file"), a file without one ("file-default": "po", what it always meant), else (no file
+// at all) "po" when the arrange script exists here ("script") and "none" otherwise ("no-script").
+function explainPreset(raw, hasFile, env = process.env) {
+  if (raw && raw.preset !== undefined) {
+    const name = String(raw.preset);
+    if (!PRESETS[name]) throw new ProfileError(`profile: preset must be one of ${PRESET_NAMES.join(", ")} (got ${JSON.stringify(raw.preset)})`);
+    return { preset: name, why: "file" };
+  }
+  if (hasFile) return { preset: "po", why: "file-default" };
+  return fileExists(expandHome(PO_ARRANGE_SCRIPT, env)) ? { preset: "po", why: "script" } : { preset: "none", why: "no-script" };
+}
+const resolvePreset = (raw, hasFile, env = process.env) => explainPreset(raw, hasFile, env).preset;
 
 function inboxDir(env = process.env) { return env.HERDR_INBOX_DIR || path.join(os.homedir(), ".herdr-inbox"); }
 
@@ -43,21 +78,44 @@ function prefixRegex(prefix) {
   return words.length ? new RegExp(`^\\s*${words.join("\\s*")}\\s*`) : null;
 }
 
-// Reads the profile (see DEFAULT_PROFILE) and returns it ready to use: patterns compiled, names checked. Unknown keys are ignored.
-// A missing file is the default; an unreadable or invalid one is an error so a typo never silently falls back to other names.
-function loadProfile(env = process.env) {
-  const file = env.HERDR_INBOX_PROFILE || path.join(inboxDir(env), "profile.json");
+// The arrange script path as configured (`~` kept, the shell and the mods expand it), or "" when none is configured or the file is missing:
+// a feature whose script is not there is hidden rather than failing.
+function arrangeScript(configured, env) {
+  const c = String(configured ?? "").trim();
+  return c && fileExists(expandHome(c, env)) ? c : "";
+}
+
+// The profile file: HERDR_INBOX_PROFILE, else profile.json in the inbox folder.
+const profilePath = (env = process.env) => env.HERDR_INBOX_PROFILE || path.join(inboxDir(env), "profile.json");
+
+// Reads the profile file as `{ file, text, raw }`: raw is the parsed object ({} when the default file is absent, text null then). Throws ProfileError for an
+// unreadable or invalid one. Unknown keys stay in raw.
+function readProfileFile(env = process.env) {
+  const file = profilePath(env);
   let raw = {};
   let text = null;
   try { text = fs.readFileSync(file, "utf8"); } catch (e) {
     if (!(e.code === "ENOENT" || e.code === "ENOTDIR") || env.HERDR_INBOX_PROFILE) throw new ProfileError(`cannot read profile ${file}: ${e.code || e.message}`); // only the default location may be absent
   }
   if (text !== null) {
-    try { raw = JSON.parse(text.replace(/^﻿/, "")); } catch { throw new ProfileError(`profile ${file} is not valid JSON`); }
+    try { raw = JSON.parse(text.replace(/^\ufeff/, "")); } catch { throw new ProfileError(`profile ${file} is not valid JSON`); }
     if (!plain(raw)) throw new ProfileError(`profile ${file} must be a JSON object`);
     if (raw.v !== undefined && raw.v !== 1) throw new ProfileError(`profile ${file}: only v 1 is known (got ${JSON.stringify(raw.v)})`);
   }
-  const d = DEFAULT_PROFILE;
+  return { file, text, raw };
+}
+
+// Reads the profile (see DEFAULT_PROFILE) and returns it ready to use: patterns compiled, names checked. Unknown keys are ignored.
+// A missing file is the default; an unreadable or invalid one is an error so a typo never silently falls back to other names.
+function loadProfile(env = process.env) {
+  const { text, raw } = readProfileFile(env);
+  return compileProfile(raw, text !== null, env);
+}
+
+// Validates `raw` (a parsed profile object) the way loadProfile does and compiles it. The profile writer (settings mod) validates with this BEFORE it writes.
+function compileProfile(raw, hasFile, env = process.env) {
+  const preset = resolvePreset(raw, hasFile, env);
+  const d = PRESETS[preset];
   const pick = (key) => ({ ...d[key], ...(plain(raw[key]) ? raw[key] : {}) });
   const agent = pick("agent"), hub = pick("hub"), labels = pick("labels");
   const aliases = plain(raw.kinds) ? raw.kinds : {};
@@ -73,9 +131,11 @@ function loadProfile(env = process.env) {
   return {
     agentName: regexOf(agent.name, "agent.name"),
     agentRole: String(agent.role ?? "").trim(),
+    preset,
+    arrangeScript: arrangeScript(raw.arrangeScript === undefined ? (preset === "po" ? PO_ARRANGE_SCRIPT : "") : raw.arrangeScript, env),
     agentTitlePrefix: String(agent.titlePrefix ?? ""),
     agentStrip: strip ? regexOf(strip, "agent.strip") : null,
-    hubRole: text1(hub.role, "hub.role"),
+    hubRole: preset === "none" && !String(hub.role ?? "").trim() ? "" : text1(hub.role, "hub.role"), // only "none" has no hub; the others need a role value
     hubIdLabel: text1(hub.idLabel, "hub.idLabel", SAFE_NAME),
     hubId: regexOf(hub.id, "hub.id"),
     hubDir: text1(hub.dir, "hub.dir", SAFE_DIR),
@@ -95,7 +155,8 @@ function namesOf(p) {
     agentName: p.agentName.source, agentRole: p.agentRole, titlePrefix: (prefixRegex(p.agentTitlePrefix) ?? { source: "" }).source, titlePrefixText: p.agentTitlePrefix, strip: p.agentStrip ? p.agentStrip.source : "",
     hubRole: p.hubRole, hubIdLabel: p.hubIdLabel, hubId: p.hubId.source, hubDir: p.hubDir,
     labelRole: p.labelRole, labelWait: p.labelWait, labelWaitLink: p.labelWaitLink, labelSession: p.labelSession, answerLine: p.answerLine,
+    preset: p.preset, arrangeScript: p.arrangeScript,
   };
 }
 
-module.exports = { loadProfile, namesOf, prefixRegex, inboxDir, ProfileError, DEFAULT_PROFILE, KINDS, REPORT_KINDS, SAFE_NAME, SAFE_DIR };
+module.exports = { loadProfile, compileProfile, readProfileFile, profilePath, namesOf, prefixRegex, inboxDir, resolvePreset, explainPreset, ProfileError, DEFAULT_PROFILE, NONE_PROFILE, PRESETS, PO_ARRANGE_SCRIPT, KINDS, REPORT_KINDS, SAFE_NAME, SAFE_DIR };

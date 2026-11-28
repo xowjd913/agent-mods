@@ -1,7 +1,7 @@
 #!/bin/sh
 # Herdr 모드를 설치·갱신한다(macOS·Linux). 다시 실행해도 된다.
-#   기본 모드: tabs-mine, work, prs, wt-menu, schedules
-#   추가 모드(--extras): usage-status, agent-groups, leader-tabs, path-menu, gh-accounts, inbox
+#   기본 모드: tabs-mine, settings, gh-accounts, work, prs, wt-menu, schedules
+#   추가 모드(--extras): usage-status, agent-groups, leader-tabs, path-menu, inbox, memo
 #   인자 없이 실행하면 설치된 모드만 갱신한다(처음이면 기본 모드를 설치한다).
 #   --only work,prs / --add usage-status / --remove leader-tabs / --list 로 모드를 고를 수 있다.
 #   --statusline / --statusline-wrap 은 usage-status 의 사용률 기록기(usage-writer)를 Claude Code 상태 줄(statusLine)에 등록한다(켜겠다고 한 때만, 다른 상태 줄은 --wrap 없이는 바꾸지 않는다).
@@ -10,11 +10,16 @@
 # 저장소를 받지 않고 바로 실행할 수도 있다.
 #   curl -fsSL <저장소 raw 주소>/main/herdr/install.sh | sh
 #   curl -fsSL <저장소 raw 주소>/main/herdr/install.sh | sh -s -- --extras
+# 다른 브랜치에서 받으려면 AGENT_MODS_REF=<브랜치> 를 줄 수 있다(설정 창이 설치한 출처 그대로 돌릴 때 쓴다).
 # Herdr 설정 폴더는 HERDR_APP_HOME, 없으면 ~/.config/herdr-app 이다.
 # Herdr가 없거나 실행 중이 아니거나 레이아웃 단계가 실패해도 안내만 출력하고 0으로 끝난다.
 set -e
 REPO_URL="https://github.com/xowjd913/agent-mods"
-BRANCH="main"
+# 받을 브랜치. 설정 창이 설치한 출처와 같은 브랜치로 다시 돌리도록 AGENT_MODS_REF로 바꿀 수 있다(기본 main).
+BRANCH="${AGENT_MODS_REF:-main}"
+case "$BRANCH" in
+  ""|-*|*[!A-Za-z0-9._/-]*) echo "AGENT_MODS_REF($BRANCH)는 브랜치 이름(영문·숫자·. _ / -)이어야 합니다."; exit 2 ;;
+esac
 HOME_DIR="${HERDR_APP_HOME:-$HOME/.config/herdr-app}"
 OPT=""
 VAL=""
@@ -38,7 +43,7 @@ while [ $# -gt 0 ]; do
     -h|--help)
       echo "사용법: sh install.sh [--extras | --only 모드,.. | --add 모드,.. | --remove 모드,.. | --list | --gh-account | --gh-account-uninstall] [--statusline | --statusline-wrap | --statusline-remove]"
       echo "  (인자 없음)  설치된 모드만 갱신한다. 처음이면 기본 모드를 설치한다."
-      echo "  --extras     모든 모드(추가 모드 usage-status, agent-groups, leader-tabs, path-menu, gh-accounts, inbox 포함)를 설치한다."
+      echo "  --extras     모든 모드(추가 모드 usage-status, agent-groups, leader-tabs, path-menu, inbox 포함)를 설치한다."
       echo "  --only       고른 모드만 설치·갱신한다. 다른 설치된 모드는 그대로 둔다."
       echo "  --add        설치된 모드에 고른 모드를 더한다."
       echo "  --remove     고른 모드를 지우고 그 모드가 바꾼 레이아웃 블록을 되돌린다."
@@ -66,10 +71,12 @@ fi
 
 # 저장소 안에서 실행했으면 그 파일을 쓰고, 아니면(curl | sh) 압축 파일을 받아 임시 폴더에 푼다.
 DIR=""
+REMOTE=""
 case "$0" in
   */install.sh|install.sh) DIR="$(cd "$(dirname "$0")" && pwd)" ;;
 esac
 if [ -z "$DIR" ] || [ ! -f "$DIR/install.cjs" ]; then
+  REMOTE=1
   TMP="$(mktemp -d)"
   trap 'rm -rf "$TMP"' EXIT
   echo "내려받는 중: $REPO_URL ($BRANCH)"
@@ -135,6 +142,8 @@ case "$SL" in
   --statusline) set -- "$@" --statusline ;;
   --statusline-wrap) set -- "$@" --statusline --wrap ;;
 esac
+# 받아서 돌린 경우에만 브랜치를 넘긴다. 설정 창이 이 기록으로 같은 출처의 설치기를 다시 돌린다(복제본에서 돌렸으면 그 폴더가 기록된다).
+[ -n "$REMOTE" ] && set -- "$@" --ref "$BRANCH"
 node "$DIR/install.cjs" "$@" || {
   CODE=$?
   [ "$CODE" -eq 2 ] && exit 2
