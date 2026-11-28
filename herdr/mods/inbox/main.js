@@ -824,6 +824,25 @@ function decisionOptions(body) {
   if (options.length < 2) return { options: [], recommended: 0 };
   return { options, recommended: options.includes(rec) ? rec : 0 };
 }
+// #157: the option the PO recommends for a decision card, read from the PO's own chat lines (the PO's timeline entries, `who: "po"`) that
+// came after the report: only lines meant for this leader (`to` / `about` names it, or neither is set: the room's own talk). Per sentence: it names
+// exactly one "N안" (an offered one) and carries a recommendation mark (not negated, same rule as the leader's) -> that option. The newest such
+// line wins. 0 when there is none (nothing is guessed). `entries` = timeline entries, `leader` = the report's leader, `ms` = the report's time,
+// `options` = the offered numbers. -> 1..3 | 0
+function poRecommend(entries, leader, ms, options) {
+  const offered = new Set(options ?? []);
+  const rows = (entries ?? []).filter((e) => e?.who === "po" && Number(e.ms) > Number(ms) && (e.to ? e.to === leader : e.about ? e.about === leader : true));
+  for (const e of rows.sort((x, y) => y.ms - x.ms)) {
+    const hits = [];
+    for (const seg of String(e.text ?? "").split(/[\n.。!?！？]+/)) {
+      const ns = new Set([...seg.matchAll(/([1-3])\s*안/g)].map((m) => Number(m[1])));
+      if (ns.size === 1 && recMarked(seg)) hits.push([...ns][0]);
+    }
+    const n = hits.filter((x) => offered.has(x)).pop();
+    if (n) return n;
+  }
+  return 0;
+}
 // A decision report that asks several questions (#76): a header line starting with a circled digit ("① 병합 시점", "**② 순서**", "- ③ …") opens a
 // question, and the "N안:" lines below it (until the next header) are that question's options. Only when at least two questions each have
 // at least two options; otherwise [] and the card reads the whole body as one question (decisionOptions). Options above the first header
@@ -4157,7 +4176,7 @@ export default class Inbox extends View {
   }
 
   // A speech bubble. Reports with more than a line start collapsed; "자세히" / "접기" flips it (kept per card in shared state).
-  bubble(t, s, it, accent, a) {
+  bubble(t, s, it, accent, a, poRec = 0) {
     const view = it.kind === "decision" ? decisionView(it.body) : null; // options found (#152): drawn as rows, never collapsed
     const open = it.long && !view && this.isOpen(s, it);
     const id = `b-${s.leader}-${it.ts}`;
@@ -4168,7 +4187,7 @@ export default class Inbox extends View {
       .text_size(fz(12.5)).text_color(t.foreground);
     const headline = it.head || it.lead || it.title;
     box.child(div().min_w(0).child(this.heading_text(t, `${id}-h`, it.headHtml, 16)));
-    if (view) box.child(this.decisionBody(t, s, it, view, id, a));
+    if (view) box.child(this.decisionBody(t, s, it, view, id, a, poRec));
     else if (!open) {
       if (it.lead && it.lead !== headline) box.child(div().min_w(0).max_h(34).overflow_hidden().text_size(fz(12)).text_color(t.muted).child(this.text(`${id}-lead`, `<p>${it.leadHtml}</p>`)));
     } else box.child(this.body(t, it, id));
@@ -4181,9 +4200,18 @@ export default class Inbox extends View {
     return box;
   }
 
+  // #157: the option the PO recommended in its chat after this open decision report (one question only; several questions pick per group).
+  poReco(v, e, it) {
+    try {
+      const view = decisionView(it.body);
+      if (!view || view.groups.length !== 1 || view.groups[0].label !== "") return 0;
+      return poRecommend(v.raw, e.leader, Number(it.ms) || 0, view.groups[0].options.map((o) => o.n));
+    } catch { return 0; }
+  }
+
   // A decision report with options (#152): the question on top, then one card per option (the "N안" badge, the text, its detail, a 추천 tag and
   // accent on the recommended one). While the ask is open (`a`) a press on a card sends "N안 선택" (several questions: picks it, see pickGroup).
-  decisionBody(t, s, it, view, id, a) {
+  decisionBody(t, s, it, view, id, a, poRec = 0) {
     const head = mdPlain(it.head || "").trim();
     const dropHead = (q) => { const ls = String(q ?? "").split("\n"); return head && mdPlain(ls[0]).replace(/^[#>\s*-]+/, "").trim() === head ? ls.slice(1).join("\n").trim() : String(q ?? "").trim(); };
     const multi = view.groups.length > 0 && view.groups[0].label !== "";
@@ -4205,7 +4233,8 @@ export default class Inbox extends View {
         .bg(mark ? accent + "1a" : t.background).border(1).border_color(mark ? accent + "88" : t.border)
         .child(div().flex_none().px(7).h(fz(18)).rounded(5).flex().items_center().text_size(fz(11)).font_semibold().bg(mark ? accent + "33" : t.hover).text_color(mark ? accent : t.muted).child(`${o.n}안`))
         .child(body)
-        .when(o.recommended, (x) => x.child(this.tag(t, "추천", "working")));
+        .when(o.recommended, (x) => x.child(this.tag(t, "추천", "working")))
+        .when(!multi && poRec === o.n, (x) => x.child(this.tag(t, "PO 추천", "blocked")));
       if (!a) return el;
       if (!a.po) return el.opacity(0.5).tooltip(NO_PO()).on_mouse_down("left", stop);
       if (!live) return el;
@@ -4410,6 +4439,7 @@ export default class Inbox extends View {
     }
     const a = e.waiting ? v.asks.find((x) => x.s.leader === e.leader) : null;
     const wait = e.it ? { ...e.it, kind: e.waiting || e.it.kind } : null;
+    const poRec = a && wait?.kind === "decision" ? this.poReco(v, e, wait) : 0; // #157: the PO's own pick, shown beside the leader's 추천
     const hdr = e.it
       ? this.nameRow(t, e.s, e.it, null, Boolean(e.waiting), !e.head)
       : this.nameRow(t, e.s, e.waiting ? { kind: e.waiting, ms: 0 } : null, null, true, !e.head);
@@ -4418,7 +4448,7 @@ export default class Inbox extends View {
       .child(v_flex().flex_1().min_w(0).gap(4)
         .child(hdr)
         .child(e.it ? h_flex().min_w(0).gap(6).items_end()
-          .child(div().flex_1().min_w(0).max_w(this.capOf() ?? "75%").child(this.bubble(t, e.s, wait, e.waiting ? t.blocked : null, a)))
+          .child(div().flex_1().min_w(0).max_w(this.capOf() ?? "75%").child(this.bubble(t, e.s, wait, e.waiting ? t.blocked : null, a, poRec)))
           .child(when(e.it.ms))
           : div().text_size(fz(12)).text_color(t.dim).child("보고 기록 없이 대기 표시만 있습니다. 링크를 열거나 터미널을 들여다보세요."))
         .when(Boolean(a), (el) => el.child(this.askActions(t, a, cx))));
