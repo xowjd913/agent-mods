@@ -118,7 +118,7 @@ test("paneless: 터미널 제목 없는 리더 행은 기억한 이름으로 '�
 });
 
 test("newSpaceArgs: 고른 폴더 이름으로 space.new 인자를 만든다", () => {
-  assert.deepEqual(newSpaceArgs({ code: 0, stdout: "/Users/me/code/my repo/\n" }), { name: "my repo", folder: "/Users/me/code/my repo", tab: "PO · my repo", argv: ["claude"], task: "/po" });
+  assert.deepEqual(newSpaceArgs({ code: 0, stdout: "/Users/me/code/my repo/\n" }), { name: "my repo", folder: "/Users/me/code/my repo", tab: "PO · my repo", argv: ["claude", "--remote-control", "PO"], task: "/PO" });
 });
 test("newSpaceArgs: 취소·빈 출력·루트는 null", () => {
   assert.equal(newSpaceArgs({ code: 1, stdout: "", stderr: "User canceled. (-128)" }), null);

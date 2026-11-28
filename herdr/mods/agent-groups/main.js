@@ -21,14 +21,18 @@ export function newSpaceArgs(r) {
   const path = String(r.stdout ?? "").trim().replace(/\/+$/, "");
   const name = path.split("/").filter(Boolean).pop();
   if (!path.startsWith("/") || !name) return null;
-  return { name, folder: path, tab: `PO · ${name}`, argv: ["claude"], task: "/po" };
+  return { name, folder: path, tab: `PO · ${name}`, argv: ["claude", "--remote-control", "PO"], task: "/PO" };
 }
 const canPickFolder = () => window()?.platform === "macos";
+let picking = false; // 선택창이 떠 있는 동안 다시 눌러도 하나만 띄운다
 async function openNewSpace() {
+  if (picking) return;
+  picking = true;
   try {
     const args = newSpaceArgs(await exec("osascript", PICK_FOLDER, { timeout: 600000 }));
     if (args) run("space.new", args);
   } catch (e) { console.log(`new space: ${e?.message ?? e}`); }
+  finally { picking = false; }
 }
 
 function find(node, id) {
