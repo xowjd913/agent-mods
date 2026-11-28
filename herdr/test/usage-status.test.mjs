@@ -13,7 +13,7 @@ export async function resolve(s, c, n) { return ["gpui-kit","gpui-base","herdr"]
 export async function load(u, c, n) { return u.startsWith("stub:") ? { format: "module", source: ${JSON.stringify(stub)}, shortCircuit: true } : n(u, c); }
 `)}`;
 register(hooks);
-const { parseUsage, fillWidth } = await import("../mods/usage-status/main.js");
+const { parseUsage, usageState, unknownHint, fillWidth } = await import("../mods/usage-status/main.js");
 
 const NOW = Date.parse("2026-11-17T05:10:00Z");
 const file = (limits, updatedAt = "2026-11-17T05:05:00Z") => JSON.stringify({ updatedAt, limits });
@@ -55,4 +55,21 @@ test("parseUsage: 받은편지함 복사본과 같은 행을 돌려준다", () =
     file([]), file([{ kind: "five_hour", percentUsed: "x" }]), "{oops", null, "",
   ];
   for (const raw of cases) assert.deepEqual(strip(inbox.parseUsage(raw, NOW)), parseUsage(raw, NOW));
+});
+
+test("usageState: Unknown의 이유를 missing·invalid·stale로 가른다", () => {
+  assert.deepEqual(usageState(null, NOW), { state: "missing" });
+  assert.deepEqual(usageState("", NOW), { state: "missing" });
+  assert.deepEqual(usageState("{oops", NOW), { state: "invalid" });
+  assert.deepEqual(usageState(file([]), NOW), { state: "invalid" });
+  assert.deepEqual(usageState(JSON.stringify({ limits: [] }), NOW), { state: "invalid" });
+  assert.deepEqual(usageState(file([{ kind: "five_hour", percentUsed: 7 }], "2026-11-17T04:50:00Z"), NOW), { state: "stale", staleMin: 20 });
+  assert.deepEqual(usageState(file([{ kind: "five_hour", percentUsed: 7.4 }]), NOW), { rows: [{ label: "5h", percent: 7 }] });
+});
+
+test("unknownHint: 파일이 없으면 기록기를 켜는 법을, 오래됐으면 지난 분을 알려 주고, 나머지는 비워 둔다", () => {
+  assert.match(unknownHint({ state: "missing" }), /--statusline/);
+  assert.equal(unknownHint({ state: "stale", staleMin: 20 }), "stale 20m");
+  assert.equal(unknownHint({ state: "invalid" }), "");
+  assert.equal(unknownHint({ rows: [] }), "");
 });

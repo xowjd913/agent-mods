@@ -327,7 +327,7 @@ test("main.js: 카드는 접힌 채 시작하고, 펼침은 공유 상태에 두
   assert.match(src, /shared\(OPEN_KEY\)/);
   assert.match(src, /setShared\(OPEN_KEY/);
   assert.match(src, /"접기" : "자세히"/);
-  assert.match(src, /const open = it\.long && this\.isOpen/); // 기본은 접힘
+  assert.match(src, /const open = it\.long && !view && this\.isOpen/); // 기본은 접힘
   // 복사: 클립보드에만 쓰고 붙여 넣기·PO 이동·hc send 경로는 없다
   const copy = src.slice(src.indexOf("  copy(key, text, cx)"), src.indexOf("  // \"옆에 열기\":"));
   assert.match(copy, /cx\.write_to_clipboard\(String\(text\)\)/);
@@ -1154,7 +1154,7 @@ test("main.js: 칩은 대기 중인 결정(decision) 말풍선에만, 같은 sen
   const a = src.indexOf("  askActions(t, a, cx) {");
   const body = src.slice(a, src.indexOf("    if (!a.po) box.child", a));
   assert.match(body, /const opts = kind === "decision" && !groups\.length \? decisionOptions\(item\?\.body\)/); // 한 번만 계산
-  assert.match(body, /kind === "decision" \? opts\.options\.map/);
+  assert.match(body, /kind === "decision" && !view \? opts\.options\.map/);
   assert.match(body, /`\$\{n\}안 선택`/);
   assert.match(body, /this\.send\(a, `\$\{n\}안 선택`, c, "choice"\)/);
   assert.match(body, /primary: n === opts\.recommended/);
