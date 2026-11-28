@@ -245,6 +245,7 @@ function mentionQuery(text, cursor, tokens = []) {
 }
 // ---- The PO picker. A PO terminal carries the labels role=po and po=<id>; the id is lowercase [a-z0-9-], 1-40 long (never the terminal
 // address, which changes on a restart). Everything in the window is for the one picked PO.
+const NEW_SPACE_OK = () => window()?.platform === "macos"; // the folder picker is osascript, so the "새 스페이스" button exists only on macOS
 const PO_OTHER = "~"; // the pick that holds leaders and reports no live PO owns ("PO 모름"); not a valid id, so it never clashes
 // The project a PO terminal is for: its tab's name "PO · <project>" (`where` is "<space> / <tab>"), else "" (the caller falls back to the id).
 const poProject = (t) => {
@@ -3963,7 +3964,7 @@ export default class Inbox extends View {
   // The dock's room column: one slim cell per room — the initial circle with its badges under it. The project is the tooltip.
   slimRooms(t, v) {
     return v_flex().id("po-rooms").flex_none().w(SLIM_W).h_full().min_h(0).py(6).px(4).gap(3).border_r(1).border_color(t.border).overflow_y_scrollbar()
-      .child(this.newSpaceButton(t, true))
+      .when(NEW_SPACE_OK(), (el) => el.child(this.newSpaceButton(t, true)))
       .children(v.tabs.map((x) => {
         const on = x.id === v.pick;
         const color = x.id === PO_OTHER ? t.dim : tint(t, x.id);
@@ -3992,7 +3993,6 @@ export default class Inbox extends View {
 
   // The button at the top of the room list (macOS only: the folder picker is osascript). `slim` = the dock's round cell.
   newSpaceButton(t, slim) {
-    if (window()?.platform !== "macos") return null;
     const el = h_flex().id("po-new-space").flex_none().items_center().justify_center().rounded(8).cursor_pointer().on_mouse_down("left", stop)
       .border(1).border_color(t.border).hover((s) => s.bg(t.hover)).on_click(() => { this.newSpace(); })
       .tooltip("저장소 폴더를 골라 새 스페이스를 열고 PO를 시작합니다");
@@ -4004,7 +4004,7 @@ export default class Inbox extends View {
   // The room list (the wide window): one row per room — a colored initial circle, the project, its badges.
   roomList(t, v) {
     return v_flex().id("po-rooms").flex_none().w(this.roomWidthNow()).h_full().min_h(0).p(6).gap(3).border_r(1).border_color(t.border).overflow_y_scrollbar()
-      .child(this.newSpaceButton(t, false))
+      .when(NEW_SPACE_OK(), (el) => el.child(this.newSpaceButton(t, false)))
       .children(v.tabs.map((x) => {
         const on = x.id === v.pick;
         const color = x.id === PO_OTHER ? t.dim : tint(t, x.id);
