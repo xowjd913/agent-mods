@@ -828,18 +828,24 @@ function decisionOptions(body) {
 // came after the report: only lines meant for this leader (`to` / `about` names it, or neither is set: the room's own talk). Per sentence: it names
 // exactly one "N안" (an offered one) and carries a recommendation mark (not negated, same rule as the leader's) -> that option. The newest such
 // line wins. 0 when there is none (nothing is guessed). `entries` = timeline entries, `leader` = the report's leader, `ms` = the report's time,
-// `options` = the offered numbers. -> 1..3 | 0
-function poRecommend(entries, leader, ms, options) {
+// `options` = the offered numbers, `only` = this is the room's only open decision (a line with no recipient then belongs to it). -> 1..3 | 0
+function poRecommend(entries, leader, ms, options, only = false) {
   const offered = new Set(options ?? []);
-  const rows = (entries ?? []).filter((e) => e?.who === "po" && Number(e.ms) > Number(ms) && (e.to ? e.to === leader : e.about ? e.about === leader : true));
+  const rows = (entries ?? []).filter((e) => e?.who === "po" && Number(e.ms) > Number(ms) && (e.to ? e.to === leader : e.about ? e.about === leader : only));
   for (const e of rows.sort((x, y) => y.ms - x.ms)) {
+    const text = String(e.text ?? "");
+    if (text.split(/\r?\n/).filter((l) => OPT_LINE.test(l)).length > 1) continue; // the PO passing the leader's options on, not its own pick
     const hits = [];
-    for (const seg of String(e.text ?? "").split(/[\n.。!?！？]+/)) {
+    let neg = false;
+    for (const seg of text.match(/[^\n.。!?！？]+[.。!?！？]*/g) ?? []) {
       const ns = new Set([...seg.matchAll(/([1-3])\s*안/g)].map((m) => Number(m[1])));
-      if (ns.size === 1 && recMarked(seg)) hits.push([...ns][0]);
+      if (ns.size !== 1 || !REC_MARK.test(seg) || /리더|보고/.test(seg) || /[?？]\s*$/.test(seg)) continue;
+      if (!recMarked(seg) || /추천\s*(?:이|은|는)?\s*아[니닙]|취소|철회/.test(seg)) neg = true;
+      else hits.push([...ns][0]);
     }
     const n = hits.filter((x) => offered.has(x)).pop();
     if (n) return n;
+    if (neg) return 0; // the newest word is a retraction: an older recommendation no longer stands
   }
   return 0;
 }
@@ -4205,7 +4211,7 @@ export default class Inbox extends View {
     try {
       const view = decisionView(it.body);
       if (!view || view.groups.length !== 1 || view.groups[0].label !== "") return 0;
-      return poRecommend(v.raw, e.leader, Number(it.ms) || 0, view.groups[0].options.map((o) => o.n));
+      return poRecommend(v.raw, e.leader, Number(it.ms) || 0, view.groups[0].options.map((o) => o.n), v.asks.filter((x) => x.kind === "decision").length === 1);
     } catch { return 0; }
   }
 
