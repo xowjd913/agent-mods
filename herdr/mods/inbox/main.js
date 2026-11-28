@@ -245,7 +245,6 @@ function mentionQuery(text, cursor, tokens = []) {
 }
 // ---- The PO picker. A PO terminal carries the labels role=po and po=<id>; the id is lowercase [a-z0-9-], 1-40 long (never the terminal
 // address, which changes on a restart). Everything in the window is for the one picked PO.
-const NEW_SPACE_OK = () => window()?.platform === "macos"; // the folder picker is osascript, so the "새 스페이스" button exists only on macOS
 const PO_OTHER = "~"; // the pick that holds leaders and reports no live PO owns ("PO 모름"); not a valid id, so it never clashes
 // The project a PO terminal is for: its tab's name "PO · <project>" (`where` is "<space> / <tab>"), else "" (the caller falls back to the id).
 const poProject = (t) => {
@@ -1526,6 +1525,7 @@ function restartClearCheck(recs, since) {
   return (recs ?? []).some((x) => x && Number(x.ms) >= Number(since)) ? "text" : "clean";
 }
 // chat:end
+const NEW_SPACE_OK = () => window()?.platform === "macos"; // the folder picker is osascript, so the "새 스페이스" button exists only on macOS
 // A notice says "터미널(<address>)" for a solo room (there is no PO there); every other notice keeps "PO(<address>)". The same for the few fixed phrases
 // the shared blocks use ("PO 터미널", "이 PO를", "PO가").
 const soloWords = (text) => {
