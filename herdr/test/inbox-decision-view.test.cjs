@@ -87,12 +87,12 @@ test("main.js와 inbox.cjs의 새 글 규칙은 한 글자도 다르지 않다",
 });
 
 test("말풍선: 선택지가 읽히는 결정 보고만 구조로 그리고 접지 않으며, 읽히지 않으면 지금 그림 그대로", () => {
-  const b = MAIN.slice(MAIN.indexOf("  bubble(t, s, it, accent, a) {"), MAIN.indexOf("  decisionBody("));
+  const b = MAIN.slice(MAIN.indexOf("  bubble(t, s, it, accent, a, poRec = 0) {"), MAIN.indexOf("  decisionBody("));
   assert.match(b, /const view = it\.kind === "decision" \? decisionView\(it\.body\) : null/);
   assert.match(b, /const open = it\.long && !view && this\.isOpen/);
   assert.match(b, /const toggle = it\.long && !view/);
-  assert.match(b, /if \(view\) box\.child\(this\.decisionBody\(t, s, it, view, id, a\)\);\s*\n\s*else if \(!open\)/);
-  assert.match(MAIN, /this\.bubble\(t, e\.s, wait, e\.waiting \? t\.blocked : null, a\)/);
+  assert.match(b, /if \(view\) box\.child\(this\.decisionBody\(t, s, it, view, id, a, poRec\)\);\s*\n\s*else if \(!open\)/);
+  assert.match(MAIN, /this\.bubble\(t, e\.s, wait, e\.waiting \? t\.blocked : null, a, poRec\)/);
 });
 
 test("선택지 카드: 열린 질문에서만 눌리고, 한 질문은 '선택' 한 길로, 여러 질문은 pickGroup으로 보내며 PO가 없으면 막는다", () => {
@@ -119,4 +119,43 @@ test("decisionLayout: 추천과 같은 번호의 추천 줄이 여러 번 와도
   const v = I.decisionLayout("질문?\n1안: A\n2안: B\n추천: 2안 — 이유1\n추천: 2안 — 이유2");
   assert.ok(v);
   assert.ok(v.reason.includes("이유1") && v.reason.includes("이유2"), v.reason);
+});
+
+// #157: PO 추천 배지 — PO 채팅 글에서 추천한 안을 읽는다(없으면 0, 추측하지 않는다).
+const po = (ms, text, extra = {}) => ({ who: "po", ms, text, ...extra });
+test("poRecommend: 보고 뒤 PO 글에서 한 안만 말한 추천 문장을 읽는다", () => {
+  const L = "l1";
+  assert.equal(I.poRecommend([po(20, "저는 2안을 추천합니다.")], L, 10, [1, 2], true), 2);
+  assert.equal(I.poRecommend([po(20, "추천: 1안 — 빠릅니다")], L, 10, [1, 2], true), 1);
+  assert.equal(I.poRecommend([po(20, "1안 추천\n그래도 2안도 괜찮습니다")], L, 10, [1, 2], true), 1);
+});
+test("poRecommend: 부정·여러 안이 섞인 문장·없는 안·보고 이전 글은 0", () => {
+  const L = "l1";
+  assert.equal(I.poRecommend([po(20, "2안은 비추천입니다")], L, 10, [1, 2], true), 0);
+  assert.equal(I.poRecommend([po(20, "1안보다 2안을 추천합니다")], L, 10, [1, 2], true), 0);
+  assert.equal(I.poRecommend([po(20, "3안을 추천합니다")], L, 10, [1, 2], true), 0);
+  assert.equal(I.poRecommend([po(5, "2안을 추천합니다")], L, 10, [1, 2], true), 0);
+  assert.equal(I.poRecommend([{ who: "me", ms: 20, text: "2안 추천" }], L, 10, [1, 2], true), 0);
+  assert.equal(I.poRecommend([], L, 10, [1, 2], true), 0);
+});
+test("poRecommend: 다른 리더에게 간 글은 제외하고, 가장 최근 글을 쓴다", () => {
+  assert.equal(I.poRecommend([po(20, "2안 추천", { to: "l2" })], "l1", 10, [1, 2], true), 0);
+  assert.equal(I.poRecommend([po(20, "2안 추천", { about: "l1" })], "l1", 10, [1, 2], true), 2);
+  assert.equal(I.poRecommend([po(20, "1안 추천"), po(30, "생각해 보니 2안을 추천합니다")], "l1", 10, [1, 2], true), 1 + 1);
+});
+test("poRecommend: main.js의 사본이 inbox.cjs와 같고, 카드가 배지를 그린다", () => {
+  assert.equal(cut(MAIN, "poRecommend"), cut(CJS, "poRecommend"));
+  assert.match(MAIN, /"PO 추천"/);
+  assert.match(MAIN, /poRec === o\.n/);
+});
+
+test("poRecommend(R1): 리더 보고 전달·수신자 없는 글·부정/질문/철회", () => {
+  const O = [1, 2];
+  for (const t of ["리더 보고:\n1안: 병합 (추천)\n2안: 대기", "리더는 1안을 추천했습니다. 선택해 주세요.", "리더 보고:\n1안: 가\n2안: 나\n추천: 1안", "1안은 추천이 아닙니다", "1안을 추천해 드릴까요?"]) assert.equal(I.poRecommend([po(20, t)], "l1", 10, O, true), 0, t);
+  assert.equal(I.poRecommend([po(20, "2안 추천")], "l1", 10, O), 0); // no recipient, not the only open decision
+  assert.equal(I.poRecommend([po(20, "2안 추천")], "l1", 10, O, true), 2);
+  assert.equal(I.poRecommend([po(20, "1안 추천"), po(30, "추천 취소합니다, 1안은 보류")], "l1", 10, O, true), 0);
+  assert.equal(I.poRecommend([po(20, "1안 추천"), po(30, "추천 취소합니다, 1안은 보류"), po(40, "다시 보니 2안을 추천합니다")], "l1", 10, O, true), 2);
+  assert.equal(I.poRecommend([po(20, "저는 2안을 추천합니다.")], "l1", 10, O), 0);
+  assert.equal(I.poRecommend([po(20, "저는 2안을 추천합니다.", { to: "l1" })], "l1", 10, O), 2);
 });
