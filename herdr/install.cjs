@@ -697,13 +697,15 @@ function statusLineSettings(home, file, opts = {}, now = Date.now()) {
   const chain = path.join(path.dirname(read.real), CHAIN_FILE);
   if (remove) {
     if (!isOurStatusLine(sl)) return { status: "absent", file };
+    // Only a wrapped entry (--chain) restores the kept status line; a plain entry ignores a leftover chain file from an older wrap.
+    const wasWrapped = / --chain "/.test(sl.command);
     let restored = null;
-    try { restored = JSON.parse(fs.readFileSync(chain, "utf8"))?.original; } catch {}
+    if (wasWrapped) try { restored = JSON.parse(fs.readFileSync(chain, "utf8"))?.original; } catch {}
     if (restored && typeof restored === "object" && !Array.isArray(restored) && !isOurStatusLine(restored)) cur.statusLine = restored;
     else delete cur.statusLine;
     const backup = writeSettings(read, cur, now);
     try { fs.rmSync(chain, { force: true }); } catch {}
-    return { status: "removed", file, restored: cur.statusLine !== undefined, wasWrapped: / --chain /.test(sl.command), ...(backup ? { backup } : {}) };
+    return { status: "removed", file, restored: cur.statusLine !== undefined, wasWrapped, ...(backup ? { backup } : {}) };
   }
   if (isOurStatusLine(sl)) {
     const want = writerCommand(script, / --chain "/.test(sl.command) ? chain : null);
@@ -716,6 +718,7 @@ function statusLineSettings(home, file, opts = {}, now = Date.now()) {
     delete cur.statusLine;
     cur.statusLine = { type: "command", command: writerCommand(script, null) };
     const backup = writeSettings(read, cur, now);
+    try { fs.rmSync(chain, { force: true }); } catch {} // a leftover from an older wrap must not come back on a later remove
     return { status: "installed", file, ...(backup ? { backup } : {}) };
   }
   const wrappable = typeof sl === "object" && !Array.isArray(sl) && sl.type === "command" && typeof sl.command === "string" && sl.command.trim();

@@ -237,6 +237,27 @@ test("statusLine --remove: 감싼 상태 줄을 되돌리고 체인 파일을 �
   assert.equal(fs.existsSync(path.join(dir, inst.CHAIN_FILE)), false);
 });
 
+test("statusLine --remove: 감쌌다가 사용자가 상태 줄을 지운 뒤 다시 넣고 빼면 예전 상태 줄을 되살리지 않는다", () => {
+  const { home, dir, file } = slEnv();
+  fs.writeFileSync(file, JSON.stringify({ statusLine: { type: "command", command: "old-line.sh" } }) + "\n");
+  inst.statusLineSettings(home, file, { wrap: true });
+  fs.writeFileSync(file, JSON.stringify({}) + "\n"); // 사용자가 statusLine을 직접 지웠다
+  assert.equal(inst.statusLineSettings(home, file).status, "installed");
+  assert.equal(fs.existsSync(path.join(dir, inst.CHAIN_FILE)), false); // 감싸지 않은 등록은 남은 감싸기 기록을 지운다
+  const r = inst.statusLineSettings(home, file, { remove: true });
+  assert.equal(r.status, "removed");
+  assert.equal(r.restored, false);
+  assert.deepEqual(readJson(file), {});
+});
+
+test("statusLine --remove: 감싸지 않은 등록이면 남아 있는 체인 파일이 있어도 쓰지 않는다", () => {
+  const { home, dir, file } = slEnv();
+  inst.statusLineSettings(home, file);
+  fs.writeFileSync(path.join(dir, inst.CHAIN_FILE), JSON.stringify({ original: { type: "command", command: "stale.sh" } }));
+  assert.equal(inst.statusLineSettings(home, file, { remove: true }).status, "removed");
+  assert.deepEqual(readJson(file), {});
+});
+
 test("statusLine --remove: 우리가 넣기만 했으면 키를 지우고, 우리 것이 아니면 그대로 둔다", () => {
   const { home, file } = slEnv();
   inst.statusLineSettings(home, file);
