@@ -19,6 +19,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, ScrollHandle } from "gpui-base";
+import { newSpaceArgs, PICK_FOLDER } from "./newspace.js";
 import { settings, theme, exec, appHome, checking, window, run, hc, terminals, panes, focused, setBadge, shared, layouts, setShared, props, openOverlay, closeOverlay, watchFolder, pickFiles, home, readTextFile } from "herdr";
 
 const HELPER = () => `${appHome()}/mods/inbox/inbox.cjs`;
@@ -3962,6 +3963,7 @@ export default class Inbox extends View {
   // The dock's room column: one slim cell per room — the initial circle with its badges under it. The project is the tooltip.
   slimRooms(t, v) {
     return v_flex().id("po-rooms").flex_none().w(SLIM_W).h_full().min_h(0).py(6).px(4).gap(3).border_r(1).border_color(t.border).overflow_y_scrollbar()
+      .child(this.newSpaceButton(t, true))
       .children(v.tabs.map((x) => {
         const on = x.id === v.pick;
         const color = x.id === PO_OTHER ? t.dim : tint(t, x.id);
@@ -3977,9 +3979,32 @@ export default class Inbox extends View {
       }));
   }
 
+  // "새 스페이스": 폴더 선택창(macOS) -> 그 이름의 새 스페이스에서 PO를 띄운다. 취소하면 아무 일도 하지 않는다. 선택창이 떠 있는 동안 다시 눌러도 하나만 뜬다.
+  async newSpace() {
+    if (this.pickingSpace) return;
+    this.pickingSpace = true;
+    try {
+      const args = newSpaceArgs(await exec("osascript", PICK_FOLDER, { timeout: 600000 }));
+      if (args) run("space.new", args);
+    } catch (e) { this.diag(`new space failed: ${cutHead(String(e?.message ?? e), 160)}`); }
+    finally { this.pickingSpace = false; }
+  }
+
+  // The button at the top of the room list (macOS only: the folder picker is osascript). `slim` = the dock's round cell.
+  newSpaceButton(t, slim) {
+    if (window()?.platform !== "macos") return null;
+    const el = h_flex().id("po-new-space").flex_none().items_center().justify_center().rounded(8).cursor_pointer().on_mouse_down("left", stop)
+      .border(1).border_color(t.border).hover((s) => s.bg(t.hover)).on_click(() => { this.newSpace(); })
+      .tooltip("저장소 폴더를 골라 새 스페이스를 열고 PO를 시작합니다");
+    return slim
+      ? el.h(fz(28)).child(div().text_size(fz(14)).text_color(t.dim).child("+"))
+      : el.h(fz(34)).px(8).gap(6).child(div().text_size(fz(12.5)).font_semibold().text_color(t.muted).child("+ 새 스페이스"));
+  }
+
   // The room list (the wide window): one row per room — a colored initial circle, the project, its badges.
   roomList(t, v) {
     return v_flex().id("po-rooms").flex_none().w(this.roomWidthNow()).h_full().min_h(0).p(6).gap(3).border_r(1).border_color(t.border).overflow_y_scrollbar()
+      .child(this.newSpaceButton(t, false))
       .children(v.tabs.map((x) => {
         const on = x.id === v.pick;
         const color = x.id === PO_OTHER ? t.dim : tint(t, x.id);

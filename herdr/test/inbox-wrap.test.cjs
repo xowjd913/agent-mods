@@ -443,6 +443,7 @@ function loadInbox(over = {}) {
   class View {}
   const mods = {
     "gpui-kit": { View, div: chain, svg: chain, image: chain },
+    "./newspace.js": { newSpaceArgs: () => null, PICK_FOLDER: [] },
     "gpui-base": { v_flex: chain, h_flex: chain, InputState: chain, Input: chain, TextareaState: chain, Textarea: chain, TextView: chain, ScrollHandle: chain, ...over.base },
     herdr: { theme: () => ({}), exec: () => Promise.resolve({ code: 0, stdout: "" }), appHome: () => "/nonexistent-app-home", checking: () => false, window: chain, run: chain, hc: () => Promise.resolve({}),
       terminals: () => [], panes: () => [], focused: () => null, setBadge: () => {}, shared: () => undefined, setShared: () => {}, props: () => ({ mode: "window" }),

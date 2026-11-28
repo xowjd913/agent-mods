@@ -10,30 +10,7 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, exec } from "herdr";
-
-// "새 스페이스" 버튼: 저장소 폴더를 고르면 그 이름의 스페이스를 새로 열고 PO 터미널에서 /po를 보낸다.
-// 폴더 선택창은 macOS의 osascript만 쓴다(다른 OS에는 버튼을 보이지 않는다). 취소하면 osascript가 0이 아닌 코드로 끝나므로 아무것도 하지 않는다.
-export const PICK_FOLDER = ["-e", 'POSIX path of (choose folder with prompt "새 스페이스로 열 저장소 폴더를 고르세요")'];
-// osascript 결과(exec 결과)에서 space.new 인자를 만든다. 취소·빈 출력이면 null.
-export function newSpaceArgs(r) {
-  if (!r || r.code !== 0) return null;
-  const path = String(r.stdout ?? "").trim().replace(/\/+$/, "");
-  const name = path.split("/").filter(Boolean).pop();
-  if (!path.startsWith("/") || !name) return null;
-  return { name, folder: path, tab: `PO · ${name}`, argv: ["claude", "--remote-control", "PO"], task: "/PO" };
-}
-const canPickFolder = () => window()?.platform === "macos";
-let picking = false; // 선택창이 떠 있는 동안 다시 눌러도 하나만 띄운다
-async function openNewSpace() {
-  if (picking) return;
-  picking = true;
-  try {
-    const args = newSpaceArgs(await exec("osascript", PICK_FOLDER, { timeout: 600000 }));
-    if (args) run("space.new", args);
-  } catch (e) { console.log(`new space: ${e?.message ?? e}`); }
-  finally { picking = false; }
-}
+import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -823,33 +800,6 @@ export default class Agents extends View {
                 .on_click(() => openOverlay({ mod: "agent-groups", kind: "popup", width: 200, height: 170, props: { sortMenu: true } }))
                 .tooltip(`Sort agents: ${sort.label}`)
                 .child(svg(`mods/workspace-chrome/${sort.icon}.svg`).size(14)),
-            ),
-        ),
-      )
-      .when(!collapsed && canPickFolder(), (el) =>
-        el.child(
-          h_flex()
-            .px(8)
-            .pb(4)
-            .flex_none()
-            .child(
-              h_flex()
-                .id("ag-new-space")
-                .flex_1()
-                .h(26)
-                .px(8)
-                .gap(6)
-                .items_center()
-                .rounded(5)
-                .border(1)
-                .border_color(t.border)
-                .text_size(12)
-                .text_color(t.dim)
-                .cursor_pointer()
-                .hover((s) => s.bg(t.hover).text_color(t.foreground))
-                .on_click(() => { openNewSpace(); })
-                .tooltip("저장소 폴더를 골라 새 스페이스를 열고 PO를 시작합니다")
-                .child("+ 새 스페이스"),
             ),
         ),
       )
