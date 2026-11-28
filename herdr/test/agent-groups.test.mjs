@@ -7,13 +7,13 @@ import assert from "node:assert/strict";
 const stub = "export const View = class {}; export const div = () => ({}); export const svg = div; export const image = div; export const h_flex = div; export const v_flex = div;" +
   "export const agents = () => []; export const terminals = () => []; export const panes = () => []; export const focused = () => null; export const spaces = () => [];" +
   "export const run = () => {}; export const theme = () => ({}); export const shared = () => null; export const setShared = () => {}; export const setAgentOrder = () => {};" +
-  "export const openOverlay = () => {}; export const closeOverlay = () => {}; export const props = () => ({}); export const window = () => ({}); export const layout = () => ({});";
+  "export const openOverlay = () => {}; export const closeOverlay = () => {}; export const props = () => ({}); export const window = () => ({}); export const layout = () => ({}); export const exec = async () => ({});";
 const hooks = `data:text/javascript,${encodeURIComponent(`
 export async function resolve(s, c, n) { return ["gpui-kit","gpui-base","herdr"].includes(s) ? { url: "stub:" + s, shortCircuit: true } : n(s, c); }
 export async function load(u, c, n) { return u.startsWith("stub:") ? { format: "module", source: ${JSON.stringify(stub)}, shortCircuit: true } : n(u, c); }
 `)}`;
 register(hooks);
-const { taskPlan, paneless } = await import("../mods/agent-groups/main.js");
+const { taskPlan, paneless, newSpaceArgs, PICK_FOLDER } = await import("../mods/agent-groups/main.js");
 
 const term = (address, name, parent, labels = {}) => ({ address, name, parent, state: "live", labels });
 const agent = (address, seq, tab, tab_name) => ({ address, seq, space: "s1", space_name: "repo", tab, tab_name, pane: address });
@@ -116,3 +116,14 @@ test("paneless: 터미널 제목 없는 리더 행은 기억한 이름으로 '�
   assert.equal(paneless(real, all3, new Map(), {})[0].title, "리더 · po inbox");
   assert.equal(paneless(real, [all3[0], { ...all3[1], title: "리더 · 받은편지함 패널" }], new Map(), {})[0].title, "리더 · 받은편지함 패널");
 });
+
+test("newSpaceArgs: 고른 폴더 이름으로 space.new 인자를 만든다", () => {
+  assert.deepEqual(newSpaceArgs({ code: 0, stdout: "/Users/me/code/my repo/\n" }), { name: "my repo", folder: "/Users/me/code/my repo", tab: "PO · my repo", argv: ["claude"], task: "/po" });
+});
+test("newSpaceArgs: 취소·빈 출력·루트는 null", () => {
+  assert.equal(newSpaceArgs({ code: 1, stdout: "", stderr: "User canceled. (-128)" }), null);
+  assert.equal(newSpaceArgs({ code: 0, stdout: "\n" }), null);
+  assert.equal(newSpaceArgs({ code: 0, stdout: "/\n" }), null);
+  assert.equal(newSpaceArgs(null), null);
+});
+test("PICK_FOLDER는 폴더 선택 AppleScript다", () => assert.match(PICK_FOLDER[1], /choose folder/));
